@@ -270,7 +270,8 @@
         var el = $("appGrid").querySelector('[data-key="pick-' + cssEsc(id) + '"]');
         if (el) setFocus(el);
       });
-      return tileHtml(id, "pick-" + id, on ? '<span class="check">&#10003;</span>' : "", !on);
+      var extra = (on ? '<span class="check">&#10003;</span>' : "") + '<span class="appid">' + esc(id) + '</span>';
+      return tileHtml(id, "pick-" + id, extra, !on);
     }).join("");
     keepFocus();
   }
