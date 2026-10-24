@@ -193,3 +193,10 @@ img { -webkit-user-drag: none; }
 #toast.hidden { display: none; }
 
 #build { position: absolute; right: 16px; bottom: 12px; z-index: 30; font-size: 14px; color: rgba(255,255,255,.4); }
+
+/* ---- Télécommande (QR) ---- */
+.panel.center { text-align: center; }
+.panel.center .panelHead { text-align: center; }
+#qrCanvas { margin: 40px auto 24px; display: block; background: #fff; border-radius: 16px; padding: 16px; width: 340px; height: 340px; }
+#phone .url { font-size: 30px; font-weight: 600; color: #fff; letter-spacing: .5px; }
+#phone .lede { margin: 18px auto 0; max-width: 760px; text-align: center; }

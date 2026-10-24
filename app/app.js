@@ -24,7 +24,8 @@
     input: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 21h8"/></svg>',
     web: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>',
     app: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg>',
-    tv: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
+    tv: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/></svg>',
+    phone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18h2"/></svg>'
   };
   var IMG_TINT = { white: "brightness(0) invert(1)", black: "brightness(0)", none: "none" };
 
@@ -210,6 +211,7 @@
     if (name === "home") renderHome();
     else if (name === "apps") renderApps();
     else if (name === "designs") renderDesigns();
+    else if (name === "phone") renderPhone();
   }
 
   // ---- accueil ----
@@ -217,7 +219,8 @@
     var h = new Date().getHours();
     $("heroEyebrow").textContent = h < 12 ? "Bonjour" : h < 18 ? "Bon après-midi" : "Bonsoir";
     // raccourcis
-    var q = '<button class="qbtn focusable" data-key="q-look">' + ICONS.look + '</button>';
+    var q = '<button class="qbtn focusable" data-key="q-phone" data-tip="Télécommande">' + ICONS.phone + '</button>';
+    q += '<button class="qbtn focusable" data-key="q-look" data-tip="Apparence">' + ICONS.look + '</button>';
     for (var a = 0; a < ACTIONS.length; a++) {
       (function (act) { bind("q-act-" + act.app, function () { launch(act.app); }); })(ACTIONS[a]);
       q += '<button class="qbtn focusable" data-key="q-act-' + ACTIONS[a].app + '" data-tip="' + esc(ACTIONS[a].label) + '">' +
@@ -225,6 +228,7 @@
     }
     $("quick").innerHTML = q;
     bind("q-look", openLook);
+    bind("q-phone", function () { open("phone"); });
     // tuiles
     var ids = shownApps();
     $("tiles").innerHTML = '<div class="grid">' + ids.map(function (id) {
@@ -325,6 +329,41 @@
     keepFocus();
   }
   function cssEsc(s) { return String(s).replace(/([^a-zA-Z0-9_-])/g, "\\$1"); }
+
+  // ---- télécommande téléphone ----
+  var REMOTE_URL = "";
+  function drawQR(text) {
+    var c = $("qrCanvas");
+    if (!c || typeof qrcode !== "function") return;
+    var q = qrcode(0, "M");
+    q.addData(text); q.make();
+    var n = q.getModuleCount(), size = Number(c.getAttribute("data-size") || 340), cell = Math.max(2, Math.floor(size / n));
+    c.width = c.height = cell * n;
+    var g = c.getContext("2d");
+    g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+    g.fillStyle = "#111";
+    for (var r = 0; r < n; r++) for (var col = 0; col < n; col++) if (q.isDark(r, col)) g.fillRect(col * cell, r * cell, cell, cell);
+  }
+  function renderPhone() {
+    $("remoteUrl").textContent = "…";
+    xhr("GET", SERVICE + "/info", function (ok, data) {
+      if (ok && data && data.ip && data.ip !== "127.0.0.1") {
+        REMOTE_URL = "http://" + data.ip + ":" + data.port + "/remote";
+        $("remoteUrl").textContent = REMOTE_URL.replace("http://", "");
+        drawQR(REMOTE_URL);
+      } else {
+        $("remoteUrl").textContent = "Télécommande indisponible (TV non connectée au Wi-Fi ?)";
+      }
+    });
+  }
+  var lastPollN = null;
+  function pollRemote() {
+    xhr("GET", SERVICE + "/poll", function (ok, data) {
+      if (!ok || !data) return;
+      if (lastPollN === null) { lastPollN = data.n; return; }
+      if (data.n !== lastPollN) { lastPollN = data.n; if (data.cmd) command(data.cmd); }
+    });
+  }
 
   // ---- moteur de focus ----
   function layer() { return lookOpen ? $("look") : $(current()); }
@@ -448,8 +487,9 @@
         for (var b = 0; b < BRANDS.length; b++) INSTALLED["demo." + BRANDS[b].key] = BRANDS[b].name;
       }
       var el = $("build");
-      if (el) el.textContent = "OpenTV v4 · " + (haveService ? (installedIds().length + " applis") : "aperçu");
+      if (el) el.textContent = "OpenTV v5 · " + (haveService ? (installedIds().length + " applis") : "aperçu");
       goHome();
+      if (haveService) { pollRemote(); setInterval(pollRemote, 400); }   // écoute la télécommande téléphone
     });
     // filet de sécurité : si le service tarde, afficher quand même l'accueil
     setTimeout(function () { if (!focusEl) goHome(); }, 3500);

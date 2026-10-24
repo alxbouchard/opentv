@@ -65,6 +65,16 @@
     </div>
   </section>
 
+  <!-- TÉLÉCOMMANDE TÉLÉPHONE -->
+  <section id="phone" class="screen">
+    <div class="panel center">
+      <div class="panelHead"><div class="eyebrow">Télécommande</div><h2>Scanne avec ton téléphone</h2></div>
+      <canvas id="qrCanvas" data-size="340"></canvas>
+      <div class="url" id="remoteUrl"></div>
+      <p class="lede">Ton téléphone devient une télécommande pour OpenTV : flèches, OK, Retour, Accueil. Il doit être sur le même Wi-Fi que la TV.</p>
+    </div>
+  </section>
+
   <!-- BARRE RETOUR + ACCUEIL -->
   <nav id="nav">
     <button class="nbtn focusable" data-key="nav-back"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>Retour</button>
@@ -81,6 +91,7 @@
   <div id="build"></div>
 </div>
 
+<script src="qrcode.js"></script>
 <script src="config.js"></script>
 <script src="app.js"></script>
 </body>
