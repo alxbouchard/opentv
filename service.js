@@ -12,7 +12,7 @@ var url = require('url');
 var os = require('os');
 
 var PORT = 8096;
-var VERSION = 4;                // bump => remplace l'ancien service en mémoire
+var VERSION = 5;                // bump => remplace l'ancien service
 var REMOTE = { n: 0, cmd: '' }; // dernière touche reçue du téléphone
 
 function reply(res, status, body) {
@@ -102,6 +102,28 @@ var server = http.createServer(function (req, res) {
     reply(res, 200, { ok: true });
   } else if (p === '/poll') {
     reply(res, 200, { n: REMOTE.n, cmd: REMOTE.cmd });
+  } else if (p === '/systest') {
+    // Test de faisabilité du relais : le service peut-il joindre l'API Samsung (8002) ?
+    var out = { node: process.version, ip: lanIp(), tcp8002: 'pending', tls8002: 'pending' };
+    try { require('tls'); out.tls = true; } catch (e) { out.tls = false; }
+    try { require('crypto'); out.crypto = true; } catch (e) { out.crypto = false; }
+    var net2 = require('net');
+    var host = lanIp(), replied = false, finished = 0;
+    function maybeDone() { if (++finished >= 2 && !replied) { replied = true; reply(res, 200, out); } }
+    setTimeout(function () { if (!replied) { replied = true; reply(res, 200, out); } }, 8000);
+    var s = net2.connect(8002, host);
+    s.setTimeout(5000);
+    s.on('connect', function () { out.tcp8002 = 'ok'; try { s.destroy(); } catch (e) {} maybeDone(); });
+    s.on('timeout', function () { out.tcp8002 = 'timeout'; try { s.destroy(); } catch (e) {} maybeDone(); });
+    s.on('error', function (e) { out.tcp8002 = 'err:' + (e.code || e.message); maybeDone(); });
+    try {
+      var tls2 = require('tls');
+      var t = tls2.connect({ host: host, port: 8002, rejectUnauthorized: false }, function () { out.tls8002 = 'ok'; try { t.destroy(); } catch (e) {} maybeDone(); });
+      t.setTimeout(6000);
+      t.on('timeout', function () { out.tls8002 = 'timeout'; try { t.destroy(); } catch (e) {} maybeDone(); });
+      t.on('error', function (e) { out.tls8002 = 'err:' + (e.code || e.message); maybeDone(); });
+    } catch (e) { out.tls8002 = 'noTLS'; maybeDone(); }
+    return;
   } else if (p === '/status') {
     reply(res, 200, { ok: true, version: VERSION });
   } else if (p === '/version') {
