@@ -1,21 +1,28 @@
 /* OpenTV — catalogue et apparence.
-   BRANDS : habillage d'une appli, par identifiant Tizen. Les applis installées sur la TV mais
-   absentes d'ici s'affichent quand même, avec leur nom réel et une tuile neutre.
-   Pour connaître l'id exact d'une appli : il apparaît dans « Choisir les applis ».
+   BRANDS : habillage d'une appli. Le reconnaissance se fait par le NOM de l'appli (champ "match",
+   en minuscules) — ou par identifiant exact (champ "ids") si besoin. Comme ça les logos se collent
+   quelle que soit la TV, sans connaître l'identifiant interne. Les applis non reconnues s'affichent
+   avec leur nom réel et une tuile neutre.
 
-   Un logo « mono » est une forme d'une seule couleur, teintée en blanc ou en couleur de marque.
+   Un logo "mono" est une forme d'une seule couleur, teintée en blanc ou en couleur de marque.
    bg = dégradé de la tuile [début, fin] ; fg = couleur du logo mono ; glow = halo quand sélectionné. */
-window.NOVA_BRANDS = {
-  "org.tizen.netflix-app":   { name: "Netflix",      logo: "netflix",      mono: true, fg: "#E50914", bg: ["#242424", "#050505"], glow: "#E50914", tag: "Films, séries et jeux" },
-  "111299001912.YouTube":    { name: "YouTube",      logo: "youtube",      mono: true, fg: "#FFFFFF", bg: ["#FF2A2A", "#D90000"], glow: "#FF0000", tag: "Des vidéos de tout le monde" },
-  "org.tizen.primevideo":    { name: "Prime Video",  logo: "primevideo",   wide: true, img: "white",  bg: ["#1FA8FF", "#0A6FD6"], glow: "#1A98FF", tag: "Films, séries et sport en direct" },
-  "MCmYXNxgcu.DisneyPlus":   { name: "Disney+",      logo: "disneyplus",   wide: true, img: "white",  bg: ["#1C3F9E", "#071447"], glow: "#2A9DD8", tag: "Disney, Pixar, Marvel et Star Wars" },
-  "3201807016597.AppleTV":   { name: "Apple TV",     logo: "appletv",      mono: true, wide: true, fg: "#FFFFFF", bg: ["#3A3A3E", "#0B0B0C"], glow: "#DDDDDD", tag: "Apple Originals" },
-  "3202301029760.HBOMax":    { name: "Max",          logo: "hbomax",       mono: true, wide: true, fg: "#FFFFFF", bg: ["#3D4BF5", "#1A1499"], glow: "#3D4BF5", tag: "HBO, films et plus" },
-  "rJeHak5zRg.Spotify":      { name: "Spotify",      logo: "spotify",      mono: true, fg: "#1ED760", bg: ["#262626", "#0B0B0B"], glow: "#1DB954", tag: "Musique et balados" },
-  "kIciSQlYEM.plex":         { name: "Plex",         logo: "plex",         mono: true, fg: "#EBAF00", bg: ["#2B2B2B", "#111111"], glow: "#EBAF00", tag: "Ta propre médiathèque" },
-  "org.tizen.browser":       { name: "Internet",     logo: null,           icon: "web", bg: ["#33415C", "#141B2B"], glow: "#5B8DEF", tag: "Le navigateur de la TV" }
-};
+window.NOVA_BRANDS = [
+  { key: "netflix",    name: "Netflix",      match: ["netflix"],                      logo: "netflix",    mono: true, fg: "#E50914", bg: ["#242424", "#050505"], glow: "#E50914", tag: "Films, séries et jeux" },
+  { key: "youtube",    name: "YouTube",      match: ["youtubetv", "youtube tv", "youtube"], logo: "youtube", mono: true, fg: "#FFFFFF", bg: ["#FF2A2A", "#D90000"], glow: "#FF0000", tag: "Des vidéos de tout le monde" },
+  { key: "primevideo", name: "Prime Video",  match: ["prime video", "primevideo", "prime"], logo: "primevideo", wide: true, img: "white", bg: ["#1FA8FF", "#0A6FD6"], glow: "#1A98FF", tag: "Films, séries et sport en direct" },
+  { key: "disney",     name: "Disney+",      match: ["disney"],                       logo: "disneyplus", wide: true, img: "white", bg: ["#1C3F9E", "#071447"], glow: "#2A9DD8", tag: "Disney, Pixar, Marvel et Star Wars" },
+  { key: "appletv",    name: "Apple TV",     match: ["apple tv", "appletv"],          logo: "appletv",    mono: true, wide: true, fg: "#FFFFFF", bg: ["#3A3A3E", "#0B0B0C"], glow: "#DDDDDD", tag: "Apple Originals" },
+  { key: "hbomax",     name: "Max",          match: ["hbo max", "hbomax", "hbo"],     logo: "hbomax",     mono: true, wide: true, fg: "#FFFFFF", bg: ["#3D4BF5", "#1A1499"], glow: "#3D4BF5", tag: "HBO, films et plus" },
+  { key: "spotify",    name: "Spotify",      match: ["spotify"],                      logo: "spotify",    mono: true, fg: "#1ED760", bg: ["#262626", "#0B0B0B"], glow: "#1DB954", tag: "Musique et balados" },
+  { key: "plex",       name: "Plex",         match: ["plex"],                         logo: "plex",       mono: true, fg: "#EBAF00", bg: ["#2B2B2B", "#111111"], glow: "#EBAF00", tag: "Ta propre médiathèque" },
+  { key: "tubi",       name: "Tubi",         match: ["tubi"],                         logo: "tubi",       mono: true, wide: true, fg: "#7408FF", bg: ["#8A2BFF", "#5200CC"], glow: "#7408FF", tag: "Films et séries gratuits" },
+  { key: "crunchyroll",name: "Crunchyroll",  match: ["crunchyroll"],                  logo: "crunchyroll",mono: true, fg: "#FF5E00", bg: ["#FF7A26", "#E84E00"], glow: "#FF5E00", tag: "Anime" },
+  { key: "paramount",  name: "Paramount+",   match: ["paramount"],                    logo: "paramountplus", mono: true, fg: "#0064FF", bg: ["#1A7BFF", "#0040B8"], glow: "#0064FF", tag: "Films et séries" },
+  { key: "samsungtvplus", name: "Samsung TV Plus", match: ["tv plus", "samsung tv plus"], logo: null, icon: "tv", bg: ["#5B5BF0", "#1A1A8A"], glow: "#6B6BFF", tag: "Chaînes gratuites" },
+  { key: "livetv",     name: "Live TV",      match: ["live tv", "livetv", "channel"], logo: null, icon: "tv", bg: ["#2B6CB0", "#143A6B"], glow: "#3B8DEF", tag: "Télé en direct" },
+  { key: "browser",    name: "Internet",     match: ["internet", "browser"],          logo: null, icon: "web", bg: ["#33415C", "#141B2B"], glow: "#5B8DEF", tag: "Le navigateur de la TV" },
+  { key: "appletv2",   name: "Apple Music",  match: ["apple music"],                  logo: "applemusic", mono: true, fg: "#FA243C", bg: ["#FF6B81", "#F0243C"], glow: "#FA243C", tag: "Musique" }
+];
 
 /* Applis système Samsung, pour les raccourcis en haut à droite. */
 window.NOVA_ACTIONS = [

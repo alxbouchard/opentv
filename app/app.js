@@ -23,7 +23,8 @@
     look: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3a9 9 0 0 0 0 18c1.1 0 1.8-.8 1.8-1.8 0-.5-.2-.9-.5-1.2-.3-.3-.5-.8-.5-1.2 0-1 .8-1.8 1.8-1.8H17a4 4 0 0 0 4-4C21 6.6 17 3 12 3z"/><circle cx="7.5" cy="11" r="1.2"/><circle cx="10" cy="7" r="1.2"/><circle cx="14.5" cy="7" r="1.2"/><circle cx="17" cy="11" r="1.2"/></svg>',
     input: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 21h8"/></svg>',
     web: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>',
-    app: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg>'
+    app: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg>',
+    tv: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
   };
   var IMG_TINT = { white: "brightness(0) invert(1)", black: "brightness(0)", none: "none" };
 
@@ -82,29 +83,38 @@
   }
 
   // ---- catalogue d'applis ----
+  // Reconnaît une appli par son NOM (ou par un id exact listé dans brand.ids).
+  function brandFor(id) {
+    var name = (INSTALLED[id] || id || "").toLowerCase();
+    for (var i = 0; i < BRANDS.length; i++) {
+      var b = BRANDS[i];
+      if (b.ids && indexOf(b.ids, id) >= 0) return b;
+      if (b.match) for (var m = 0; m < b.match.length; m++) if (name.indexOf(b.match[m]) >= 0) return b;
+    }
+    return null;
+  }
   function appInfo(id) {
-    var b = BRANDS[id];
+    var b = brandFor(id);
     if (b) return b;
     return { name: INSTALLED[id] || id, icon: "app", bg: ["#2A2F3A", "#141820"], glow: "#5B8DEF", generic: true };
   }
+  function brandOrder(id) { var b = brandFor(id); return b ? indexOf(BRANDS, b) : 999; }
+  function installedIds() { var a = []; for (var id in INSTALLED) a.push(id); return a; }
   function defaultApps() {
     // applis reconnues ET installées, dans l'ordre du catalogue
-    var out = [];
-    for (var id in BRANDS) if (!haveService || INSTALLED[id]) out.push(id);
-    if (!out.length) for (var k in BRANDS) out.push(k);   // aperçu hors TV
+    var out = installedIds().filter(function (id) { return brandFor(id); });
+    out.sort(function (a, b) { return brandOrder(a) - brandOrder(b); });
     return out;
   }
   function shownApps() {
     var list = (P.apps && P.apps.length) ? P.apps.slice() : defaultApps();
-    // ne garder que les installées (si le service répond)
     if (haveService) list = list.filter(function (id) { return INSTALLED[id]; });
     return list;
   }
   function allSelectableApps() {
-    // reconnues + installées, pour l'écran « choisir les applis »
-    var ids = [], seen = {};
-    for (var id in BRANDS) { if (!haveService || INSTALLED[id]) { ids.push(id); seen[id] = 1; } }
-    if (haveService) for (var i in INSTALLED) if (!seen[i]) ids.push(i);
+    // toutes les applis installées, les reconnues d'abord
+    var ids = installedIds();
+    ids.sort(function (a, b) { return brandOrder(a) - brandOrder(b); });
     return ids;
   }
 
@@ -394,7 +404,12 @@
       if (ok && data && data.length) {
         haveService = true;
         for (var i = 0; i < data.length; i++) INSTALLED[data[i].id] = data[i].name;
+      } else {
+        // aperçu hors TV : fabriquer des applis fictives à partir du catalogue
+        for (var b = 0; b < BRANDS.length; b++) INSTALLED["demo." + BRANDS[b].key] = BRANDS[b].name;
       }
+      var el = $("build");
+      if (el) el.textContent = "OpenTV v3 · " + (haveService ? (installedIds().length + " applis") : "aperçu");
       goHome();
     });
     // filet de sécurité : si le service tarde, afficher quand même l'accueil

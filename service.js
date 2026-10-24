@@ -9,7 +9,7 @@ var url = require('url');
 var os = require('os');
 
 var PORT = 8096;
-var VERSION = 1;    // à augmenter à chaque changement du service
+var VERSION = 3;    // à augmenter à chaque changement du service (remplace l'ancien service en cours)
 
 function reply(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
