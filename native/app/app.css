@@ -208,5 +208,14 @@ html.live, html.live body { background: transparent !important; }
 #stage.live #bg, #stage.live #build { opacity: 0; }
 #stage.live #home { -webkit-transform: translateY(1080px); transform: translateY(1080px); }
 #stage.live.peek #home { -webkit-transform: none; transform: none;
-  background: -webkit-linear-gradient(top, rgba(0,0,0,.25), rgba(0,0,0,.35) 35%, rgba(0,0,0,.8));
-  background: linear-gradient(to bottom, rgba(0,0,0,.25), rgba(0,0,0,.35) 35%, rgba(0,0,0,.8)); }
+  background: -webkit-linear-gradient(top, rgba(0,0,0,0) 58%, rgba(0,0,0,.55) 75%, rgba(0,0,0,.88));
+  background: linear-gradient(to bottom, rgba(0,0,0,0) 58%, rgba(0,0,0,.55) 75%, rgba(0,0,0,.88)); }
+/* en direct : une seule rangée en bas (tuiles à gauche, boutons ronds à droite), rien d'autre */
+#stage.live #clockBox, #stage.live #hero, #stage.live #tip { display: none; }
+#stage.live #tiles { top: auto; bottom: 50px; left: 80px; right: 450px; height: 150px; overflow: hidden; }
+#stage.live #tiles .grid { white-space: nowrap; overflow: hidden; padding: 14px 0 0 10px; height: 150px; }
+#stage.live #tiles .tile { width: 200px; height: 112px; margin: 0 16px 0 0; border-radius: 18px; }
+#stage.live #tiles .tile.focused, #stage.live #tiles .tile.focused.glow { box-shadow: 0 0 0 3px rgba(255,255,255,.25); }
+#stage.live #tiles .tile img.logo { max-width: 120px; max-height: 40px; }
+#stage.live #tiles .tile .name { font-size: 17px; bottom: 10px; }
+#stage.live #quick { top: auto; bottom: 85px; right: 80px; white-space: nowrap; }

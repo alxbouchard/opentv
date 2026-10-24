@@ -394,6 +394,7 @@
     if (!el) return;
     if (focusEl) focusEl.classList.remove("focused");
     focusEl = el; el.classList.add("focused");
+    if (LIVE) keepInRow(el);
     report();
     var tip = el.getAttribute("data-tip");
     $("tip").textContent = tip || ""; $("tip").className = tip ? "on" : "";
@@ -458,6 +459,7 @@
     stage.classList.toggle("live", !!LIVE);
     stage.classList.toggle("peek", LIVE === "peek");
     document.documentElement.classList.toggle("live", !!LIVE);
+    if (!LIVE) { var g = $("tiles").firstChild; if (g) g.scrollLeft = 0; }
     report();
   }
   function pickHdmi(cb) {
@@ -492,6 +494,14 @@
   }
   function liveFail() {          // pas de vidéo : on revient au menu et à l'horloge pour ne pas laisser un écran noir
     LIVE = ""; setLiveClass(); showSaver();
+  }
+  // rangée du bas en direct : faire défiler pour garder la tuile sélectionnée visible
+  function keepInRow(el) {
+    var grid = el.parentNode;
+    if (!grid || !$("tiles").contains(el)) return;
+    var l = el.offsetLeft, r = l + el.offsetWidth + 24;
+    if (r > grid.scrollLeft + grid.clientWidth) grid.scrollLeft = r - grid.clientWidth;
+    else if (l < grid.scrollLeft + 6) grid.scrollLeft = Math.max(0, l - 6);
   }
   function livePeek() { LIVE = "peek"; setLiveClass(); restoreFocus("home"); }
   function liveDown() { LIVE = "full"; setLiveClass(); }
@@ -577,7 +587,7 @@
     report();
   }
   // état de l'écran -> service (diagnostic à distance : GET /status)
-  var BUILD = "OpenTV v17 native";
+  var BUILD = "OpenTV v18 native";
   var SVC_VERSION = 16;   // doit égaler VERSION dans service/index.js
   function report() {
     if (!remoteOn) return;
