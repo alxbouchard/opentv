@@ -200,3 +200,13 @@ img { -webkit-user-drag: none; }
 #qrCanvas { margin: 40px auto 24px; display: block; background: #fff; border-radius: 16px; padding: 16px; width: 340px; height: 340px; }
 #phone .url { font-size: 30px; font-weight: 600; color: #fff; letter-spacing: .5px; }
 #phone .lede { margin: 18px auto 0; max-width: 760px; text-align: center; }
+
+/* ---- HDMI 1 en direct derrière le menu ---- */
+html.live, html.live body { background: transparent !important; }
+#home { -webkit-transition: -webkit-transform .55s ease; transition: transform .55s ease; }
+#bg, #build { -webkit-transition: opacity .5s ease; transition: opacity .5s ease; }
+#stage.live #bg, #stage.live #build { opacity: 0; }
+#stage.live #home { -webkit-transform: translateY(1080px); transform: translateY(1080px); }
+#stage.live.peek #home { -webkit-transform: none; transform: none;
+  background: -webkit-linear-gradient(top, rgba(0,0,0,.25), rgba(0,0,0,.35) 35%, rgba(0,0,0,.8));
+  background: linear-gradient(to bottom, rgba(0,0,0,.25), rgba(0,0,0,.35) 35%, rgba(0,0,0,.8)); }

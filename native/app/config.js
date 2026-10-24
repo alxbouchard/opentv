@@ -53,5 +53,6 @@ window.NOVA_LOOK = [
   ["labels", "Libellés",        [["both", "Logo et nom"], ["logo", "Logo seul"], ["name", "Nom seul"]]],
   ["logo",   "Couleur du logo", [["white", "Blanc"], ["brand", "Couleurs de marque"]]],
   ["font",   "Police",          [["modern", "Moderne"], ["elegant", "Élégante"], ["rounded", "Arrondie"], ["grotesk", "Grotesk"]]],
-  ["clock",  "Horloge",         [["show", "Afficher"], ["hide", "Masquer"]]]
+  ["clock",  "Horloge",         [["show", "Afficher"], ["hide", "Masquer"]]],
+  ["saver",  "Veille",          [["hdmi", "HDMI 1 en direct"], ["clock", "Horloge"]]]
 ];

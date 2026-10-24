@@ -16,7 +16,7 @@ var url = require('url');
 var os = require('os');
 
 var PORT = 8096;
-var VERSION = 15;
+var VERSION = 16;
 var REMOTE = { n: 0, cmd: '' };
 var CLIENT = null; // dernier état rapporté par l'écran OpenTV
 
@@ -111,7 +111,7 @@ var server = http.createServer(function (req, res) {
     reply(res, 200, { n: REMOTE.n, cmd: REMOTE.cmd });
   } else if (p === '/report') {
     var q = request.query;
-    CLIENT = { build: String(q.build || '').slice(0, 40), screen: String(q.screen || '').slice(0, 20), apps: Number(q.apps) || 0, focus: String(q.focus || '').slice(0, 80), at: Date.now() };
+    CLIENT = { build: String(q.build || '').slice(0, 40), screen: String(q.screen || '').slice(0, 20), apps: Number(q.apps) || 0, focus: String(q.focus || '').slice(0, 80), live: String(q.live || '').slice(0, 8), tvw: String(q.tvw || '').slice(0, 120), at: Date.now() };
     reply(res, 200, { ok: true });
   } else if (p === '/status') {
     reply(res, 200, { ok: true, version: VERSION, remote: REMOTE, client: CLIENT, clientAgeMs: CLIENT ? Date.now() - CLIENT.at : null });

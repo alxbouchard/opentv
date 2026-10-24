@@ -4,6 +4,8 @@
   "use strict";
   var SERVICE = "http://127.0.0.1:8096";
   var HAS_TIZEN = typeof tizen !== "undefined" && tizen.application && typeof tizen.application.getAppsInfo === "function";
+  var HAS_TVW = HAS_TIZEN && tizen.tvwindow && typeof tizen.tvwindow.show === "function";
+  var LIVE = "", TVW = "";
   var $ = function (id) { return document.getElementById(id); };
   var stage = $("stage");
 
@@ -15,7 +17,7 @@
 
   var DEFAULT_PREFS = {
     bg: { type: "preset", id: "misty-coast" },
-    tiles: "glass", labels: "both", logo: "white", font: "modern", clock: "show",
+    tiles: "glass", labels: "both", logo: "white", font: "modern", clock: "show", saver: "hdmi",
     apps: null   // null => calculé au premier démarrage (applis reconnues installées)
   };
 
@@ -81,7 +83,11 @@
     var days = ["dimanche","lundi","mardi","mercredi","jeudi","vendredi","samedi"];
     var mon = ["janvier","février","mars","avril","mai","juin","juillet","août","septembre","octobre","novembre","décembre"];
     $("date").textContent = days[d.getDay()] + " " + d.getDate() + " " + mon[d.getMonth()];
-    if (current() === "home" && !lookOpen && !isSaving() && Date.now() - idleAt > 180000) showSaver();
+    var idle = Date.now() - idleAt;
+    if (LIVE === "peek" && idle > 10000 && current() === "home" && !lookOpen) liveDown();
+    else if (!LIVE && current() === "home" && !lookOpen && !isSaving() && idle > 180000) {
+      if (P.saver === "hdmi" && HAS_TVW) liveOn(); else showSaver();
+    }
   }
 
   // ---- catalogue d'applis ----
@@ -181,6 +187,7 @@
 
   // ---- lancement ----
   function launch(id) {
+    liveOff();   // la vidéo HDMI ne doit pas rester derrière l'appli lancée
     // appli native : lancement direct par l'API Tizen de la page
     if (HAS_TIZEN) {
       try {
@@ -207,6 +214,7 @@
     stage.classList.toggle("inside", name !== "home");
   }
   function open(name) {
+    liveOff();
     closeLook(true);
     if (current() !== name) stack.push(name);
     show(name); renderScreen(name); restoreFocus(name);
@@ -248,7 +256,7 @@
   }
 
   // ---- apparence ----
-  function openLook() { lookOpen = true; $("look").classList.remove("hidden"); renderLook();
+  function openLook() { liveOff(); lookOpen = true; $("look").classList.remove("hidden"); renderLook();
     setFocus($("look").querySelector(".focusable")); }
   function closeLook(silent) { if (!lookOpen) return; lookOpen = false; $("look").classList.add("hidden");
     if (!silent) restoreFocus(current()); }
@@ -444,10 +452,63 @@
   function showSaver() { $("saver").classList.remove("hidden"); }
   function hideSaver() { if (isSaving()) { $("saver").classList.add("hidden"); return true; } return false; }
 
+  // ---- HDMI 1 en direct derrière le menu (comme le Home Samsung) ----
+  // LIVE : "" (normal), "full" (menu descendu, HDMI plein écran), "peek" (menu remonté par-dessus HDMI)
+  function setLiveClass() {
+    stage.classList.toggle("live", !!LIVE);
+    stage.classList.toggle("peek", LIVE === "peek");
+    document.documentElement.classList.toggle("live", !!LIVE);
+    report();
+  }
+  function pickHdmi(cb) {
+    var fallback = { type: "HDMI", number: 1 };
+    try {
+      tizen.systeminfo.getPropertyValue("VIDEOSOURCE", function (info) {
+        var all = (info.connected || []).concat(info.disconnected || []), hdmi1 = null, firstOn = null;
+        for (var i = 0; i < all.length; i++) {
+          if (all[i].type !== "HDMI") continue;
+          if (all[i].number === 1 && !hdmi1) hdmi1 = all[i];
+          if (!firstOn && i < (info.connected || []).length) firstOn = all[i];
+        }
+        cb(hdmi1 || firstOn || fallback);
+      }, function () { cb(fallback); });
+    } catch (e) { cb(fallback); }
+  }
+  function liveOn() {
+    if (!HAS_TVW) { showSaver(); return; }
+    if (lookOpen) closeLook(true);
+    if (current() !== "home") goHome();
+    LIVE = "full"; TVW = "…"; setLiveClass();       // le menu descend tout de suite
+    pickHdmi(function (src) {
+      try {
+        tizen.tvwindow.setSource(src, function (s) {
+          TVW = "src " + s.type + s.number;
+          tizen.tvwindow.show(function () { TVW += " show ok"; report(); },
+            function (e) { TVW += " show " + e.name; liveFail(); },
+            ["0px", "0px", "1920px", "1080px"], "MAIN", "BEHIND");
+        }, function (e) { TVW = "setSource " + e.name + " " + e.message; liveFail(); });
+      } catch (e) { TVW = "exc " + e.message; liveFail(); }
+    });
+  }
+  function liveFail() {          // pas de vidéo : on revient au menu et à l'horloge pour ne pas laisser un écran noir
+    LIVE = ""; setLiveClass(); showSaver();
+  }
+  function livePeek() { LIVE = "peek"; setLiveClass(); restoreFocus("home"); }
+  function liveDown() { LIVE = "full"; setLiveClass(); }
+  function liveOff() {
+    if (!LIVE) return;
+    LIVE = ""; setLiveClass();
+    try { tizen.tvwindow.hide(function () {}, function () {}, "MAIN"); } catch (e) {}
+  }
+
   // ---- entrées clavier / télécommande ----
   function command(cmd) {
     idleAt = Date.now();
     if (hideSaver()) return;
+    if (cmd === "live") { if (LIVE === "full") return; return liveOn(); }
+    if (LIVE === "full") return livePeek();           // 1re touche : le menu remonte par-dessus HDMI 1
+    var atHome = current() === "home" && !lookOpen;
+    if (cmd === "back" && atHome && P.saver === "hdmi" && HAS_TVW) return LIVE ? liveDown() : liveOn();
     if (cmd === "up" || cmd === "down" || cmd === "left" || cmd === "right") return move(cmd);
     if (cmd === "ok") return select();
     if (cmd === "back") return back();
@@ -516,13 +577,13 @@
     report();
   }
   // état de l'écran -> service (diagnostic à distance : GET /status)
-  var BUILD = "OpenTV v16 native";
-  var SVC_VERSION = 15;   // doit égaler VERSION dans service/index.js
+  var BUILD = "OpenTV v17 native";
+  var SVC_VERSION = 16;   // doit égaler VERSION dans service/index.js
   function report() {
     if (!remoteOn) return;
     var k = focusEl ? (focusEl.getAttribute("data-key") || "") : "";
     xhr("GET", SERVICE + "/report?build=" + encodeURIComponent(BUILD) + "&screen=" + encodeURIComponent(lookOpen ? "look" : current()) +
-      "&apps=" + installedIds().length + "&focus=" + encodeURIComponent(k), function () {});
+      "&apps=" + installedIds().length + "&focus=" + encodeURIComponent(k) + "&live=" + LIVE + "&tvw=" + encodeURIComponent(TVW), function () {});
   }
   // liste des applis : API Tizen directe (appli native), sinon le service
   function listApps(cb) {
@@ -560,7 +621,7 @@
     setTimeout(function () { if (!focusEl) goHome(); }, 3500);
     // retour au premier plan (retour d'une appli, instance préchargée) : accueil, première tuile
     document.addEventListener("visibilitychange", function () {
-      if (document.hidden) return;
+      if (document.hidden) { liveOff(); return; }
       lastKeyByScreen = {};
       goHome();
     });

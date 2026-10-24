@@ -30,14 +30,14 @@ const results = []; const ok = (name, cond, extra='') => { results.push((cond ? 
   // 1. démarrage du service
   const ctrl = await p.evaluate(() => window.__lastCtrl);
   ok('service démarré via launchAppControl', ctrl && ctrl.id === 'OpnTV00001.OpenTVService' && ctrl.op === 'http://tizen.org/appcontrol/operation/service', JSON.stringify(ctrl));
-  const ver = await get('http://127.0.0.1:8096/version'); ok('service répond /version', ver && /"version":15/.test(ver), ver);
+  const ver = await get('http://127.0.0.1:8096/version'); ok('service répond /version', ver && /"version":16/.test(ver), ver);
   // 2. tuiles
   const tiles = await p.$$eval('#tiles .tile, #tiles [id^="app-"]', els => els.map(e => e.textContent.trim()));
   const names = tiles.join(' | ');
   ok('Netflix présent', /Netflix/.test(names)); ok('YouTube présent une seule fois', (names.match(/YouTube/g) || []).length === 1, names);
   ok('applis système cachées absentes', !/Paramètres|Apps\b/.test(names));
   ok('OpenTV/TizenBrew pas dans les tuiles', !/OpenTV|TizenBrew/.test(names));
-  const build = await p.textContent('#build'); ok('build tag natif', /v16 native/.test(build) && !/aperçu/.test(build), build);
+  const build = await p.textContent('#build'); ok('build tag natif', /v17 native/.test(build) && !/aperçu/.test(build), build);
   // 3. télécommande iPhone -> focus
   const before = await p.evaluate(() => (document.querySelector('.focused')||{}).id || (document.querySelector('.focused')||{}).textContent);
   await get('http://127.0.0.1:8096/cmd?cmd=right'); await p.waitForTimeout(1200);
@@ -51,7 +51,7 @@ const results = []; const ok = (name, cond, extra='') => { results.push((cond ? 
   // 6. page /remote servie
   const remote = await get('http://127.0.0.1:8096/remote'); ok('page télécommande servie', remote && /TÉLÉCOMMANDE OPENTV/.test(remote));
   const st = JSON.parse(await get('http://127.0.0.1:8096/status'));
-  ok('/status rapporte l\'écran', st.client && /v16 native/.test(st.client.build) && st.client.screen === 'home' && st.client.apps === 8 && /^app-/.test(st.client.focus), JSON.stringify(st.client));
+  ok('/status rapporte l\'écran', st.client && /v17 native/.test(st.client.build) && st.client.screen === 'home' && st.client.apps === 8 && /^app-/.test(st.client.focus), JSON.stringify(st.client));
   await get('http://127.0.0.1:8096/cmd?cmd=right'); await get('http://127.0.0.1:8096/cmd?cmd=up'); await p.waitForTimeout(1200);
   const moved = await p.evaluate(() => (document.querySelector('.focused')||{}).textContent);
   await p.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => false }); document.dispatchEvent(new Event('visibilitychange')); });
