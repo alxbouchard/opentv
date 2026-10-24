@@ -14,7 +14,7 @@ var crypto = require('crypto');
 var fs = require('fs');
 
 var PORT = 8096;
-var VERSION = 7;
+var VERSION = 8;
 var REMOTE = { n: 0, cmd: '' };
 
 function reply(res, status, body) {
@@ -134,6 +134,7 @@ var REMOTE_HTML = [
 '</style></head><body>',
 '<div id="flash"></div>',
 '<h1>TÉLÉCOMMANDE OPENTV</h1>',
+'<div id="st" style="font-size:13px;margin-top:-10px;min-height:18px"></div>',
 '<div class="top">',
 '<button class="circle pw" data-k="KEY_POWER">⏻ Power</button>',
 '<button class="circle" data-k="KEY_MUTE">🔇 Muet</button>',
@@ -150,8 +151,12 @@ var REMOTE_HTML = [
 '<div class="rock"><button data-k="KEY_CHDOWN">CH −</button><div class="sep"></div><button data-k="KEY_CHUP">CH +</button></div>',
 '</div>',
 '<script>',
-'var f=document.getElementById("flash"),ft;',
+'var f=document.getElementById("flash"),ft,stEl=document.getElementById("st");',
 'function flash(t){f.textContent=t;f.style.opacity=1;clearTimeout(ft);ft=setTimeout(function(){f.style.opacity=0;},600);}',
+'function poll(){try{var x=new XMLHttpRequest();x.open("GET","rcstatus",true);x.onreadystatechange=function(){if(x.readyState===4){var r={};try{r=JSON.parse(x.responseText);}catch(e){}',
+'if(r.ready){stEl.textContent="● TV connectée";stEl.style.color="#34d399";}',
+'else{stEl.textContent="○ Autorise OpenTV sur ta TV (popup à l\'écran)";stEl.style.color="#fbbf24";}}};x.send();}catch(e){}}',
+'poll();setInterval(poll,2500);',
 'function send(k){try{var x=new XMLHttpRequest();x.open("GET","sys?key="+k,true);x.send();}catch(e){}}',
 'var LB={KEY_ENTER:"OK",KEY_UP:"▲",KEY_DOWN:"▼",KEY_LEFT:"◀",KEY_RIGHT:"▶",KEY_RETURN:"Retour",KEY_HOME:"Accueil",KEY_PLAY:"Lecture",KEY_POWER:"Power",KEY_MUTE:"Muet",KEY_SOURCE:"Source",KEY_VOLUP:"Vol +",KEY_VOLDOWN:"Vol −",KEY_CHUP:"Ch +",KEY_CHDOWN:"Ch −"};',
 'function tap(k){send(k);flash(LB[k]||k);}',
