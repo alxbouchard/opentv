@@ -14,7 +14,7 @@ var crypto = require('crypto');
 var fs = require('fs');
 
 var PORT = 8096;
-var VERSION = 9;
+var VERSION = 10;
 var REMOTE = { n: 0, cmd: '' };
 
 function reply(res, status, body) {
@@ -49,23 +49,24 @@ function rcFrame(opcode, payload) {
 function rcText(str) { return rcFrame(0x1, new Buffer(str, 'utf8')); }
 function rcDown() { rcReady = false; rcConnecting = false; rcHandshook = false; try { if (rcSock) rcSock.destroy(); } catch (e) {} rcSock = null; }
 
-var rcTries = 0, rcHost = '';
+var rcTries = 0, rcHost = '', rcLastErr = '', rcStage = 'idle';
 function rcConnect() {
   if (rcConnecting || rcReady) return;
   rcConnecting = true; rcHandshook = false; rcBuf = new Buffer(0);
   // Alterne localhost / IP LAN : une connexion locale (depuis la TV elle-même) peut être
   // auto-autorisée par le mode dev (host 127.0.0.1), ce qui éviterait le popup « Autoriser ».
-  var host = (rcTries++ % 2 === 0) ? '127.0.0.1' : lanIp(); rcHost = host;
+  var host = (rcTries++ % 2 === 0) ? '127.0.0.1' : lanIp(); rcHost = host; rcStage = 'connecting ' + host;
   try {
     rcSock = tls.connect({ host: host, port: 8002, rejectUnauthorized: false }, function () {
+      rcStage = 'tls_ok ' + host;
       var k = crypto.randomBytes(16).toString('base64');
       var path = '/api/v2/channels/samsung.remote.control?name=' + RC_NAME + (rcToken ? '&token=' + rcToken : '');
       rcSock.write('GET ' + path + ' HTTP/1.1\r\nHost: ' + host + ':8002\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n' +
         'Sec-WebSocket-Key: ' + k + '\r\nSec-WebSocket-Version: 13\r\n\r\n');
     });
     rcSock.on('data', rcData);
-    rcSock.on('error', rcDown);
-    rcSock.on('close', rcDown);
+    rcSock.on('error', function (e) { rcLastErr = (e && (e.code || e.message)) || 'err'; rcStage = 'error:' + rcLastErr; rcDown(); });
+    rcSock.on('close', function () { if (rcStage.indexOf('error') < 0 && !rcReady) rcStage = 'closed_early'; rcDown(); });
   } catch (e) { rcDown(); }
 }
 function rcData(chunk) {
@@ -73,9 +74,9 @@ function rcData(chunk) {
   if (!rcHandshook) {
     var s = rcBuf.toString('binary'), idx = s.indexOf('\r\n\r\n');
     if (idx < 0) return;
-    if (s.slice(0, idx).indexOf('101') < 0) { rcDown(); return; }
+    if (s.slice(0, idx).indexOf('101') < 0) { rcStage = 'no101'; rcDown(); return; }
     rcBuf = rcBuf.slice(idx + 4);
-    rcHandshook = true; rcReady = true; rcConnecting = false;
+    rcHandshook = true; rcReady = true; rcConnecting = false; rcStage = 'handshook(101)';
     while (rcQueue.length) { try { rcSock.write(rcText(rcQueue.shift())); } catch (e) {} }
   }
   while (rcBuf.length >= 2) {
@@ -94,7 +95,7 @@ function rcData(chunk) {
 function rcMsg(str) {
   var m; try { m = JSON.parse(str); } catch (e) { return; }
   if (m.event === 'ms.channel.connect' && m.data && m.data.token && String(m.data.token) !== rcToken) {
-    rcToken = String(m.data.token); try { fs.writeFileSync(TOKEN_FILE, rcToken); } catch (e) {}
+    rcToken = String(m.data.token); rcStage = 'authorized'; try { fs.writeFileSync(TOKEN_FILE, rcToken); } catch (e) {}
   }
   if (m.event === 'ms.channel.unauthorized') { rcToken = ''; try { fs.unlinkSync(TOKEN_FILE); } catch (e) {} rcDown(); }
 }
@@ -216,7 +217,7 @@ var server = http.createServer(function (req, res) {
     var sent = rcSend(key);
     reply(res, 200, { ok: true, live: sent, ready: rcReady });
   } else if (p === '/rcstatus') {
-    reply(res, 200, { ready: rcReady, connecting: rcConnecting, hasToken: !!rcToken, host: rcHost, tries: rcTries });
+    reply(res, 200, { ready: rcReady, connecting: rcConnecting, hasToken: !!rcToken, host: rcHost, tries: rcTries, stage: rcStage, err: rcLastErr });
   } else if (p === '/cmd') {
     var cmd = request.query.cmd || '';
     REMOTE.n++; REMOTE.cmd = String(cmd).slice(0, 20);

@@ -487,7 +487,7 @@
         for (var b = 0; b < BRANDS.length; b++) INSTALLED["demo." + BRANDS[b].key] = BRANDS[b].name;
       }
       var el = $("build");
-      if (el) el.textContent = "OpenTV v9 · " + (haveService ? (installedIds().length + " applis") : "aperçu");
+      if (el) el.textContent = "OpenTV v10 · " + (haveService ? (installedIds().length + " applis") : "aperçu");
       goHome();
       if (haveService) { pollRemote(); setInterval(pollRemote, 400); }   // écoute la télécommande téléphone
     });
