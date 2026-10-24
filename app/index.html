@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenTV</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Instrument+Serif&family=Nunito:wght@600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="stage" class="font-modern tiles-glass labels-both logo-white clock-show">
+
+  <!-- Fond : une photo -->
+  <div id="bg">
+    <img id="bgImg" alt="">
+    <div id="bgShade"></div>
+  </div>
+
+  <!-- ACCUEIL -->
+  <section id="home" class="screen active">
+    <div id="clockBox">
+      <div id="time"></div>
+      <div id="date"></div>
+    </div>
+    <div id="quick"></div>
+    <div id="hero">
+      <div class="eyebrow" id="heroEyebrow">Bonsoir</div>
+      <h1 id="heroTitle">Qu'est-ce qu'on regarde&nbsp;?</h1>
+    </div>
+    <div id="tiles"></div>
+    <div id="tip"></div>
+  </section>
+
+  <!-- APPARENCE (panneau superposé) -->
+  <aside id="look" class="hidden">
+    <div class="sheetHead">
+      <div class="eyebrow">Apparence</div>
+      <h2>Rends-la à ton goût</h2>
+    </div>
+    <div id="lookRows"></div>
+    <div class="sheetFoot">Gauche et droite changent un réglage. Tout se sauvegarde au fur et à mesure.</div>
+  </aside>
+
+  <!-- CHOISIR LES APPLIS -->
+  <section id="apps" class="screen">
+    <div class="panel">
+      <div class="panelHead">
+        <div class="eyebrow">Écran d'accueil</div>
+        <h2>Choisis tes applis</h2>
+        <p class="lede">Sélectionne une appli pour l'ajouter ou la retirer. Elles s'affichent dans l'ordre choisi.</p>
+      </div>
+      <div id="appGrid"></div>
+    </div>
+  </section>
+
+  <!-- DESIGNS -->
+  <section id="designs" class="screen">
+    <div class="panel">
+      <div class="panelHead">
+        <div class="eyebrow">Apparence</div>
+        <h2>Choisis un design</h2>
+        <p class="lede">Chacun est un point de départ. Tu peux ensuite modifier chaque détail.</p>
+      </div>
+      <div id="designGrid"></div>
+    </div>
+  </section>
+
+  <!-- BARRE RETOUR + ACCUEIL -->
+  <nav id="nav">
+    <button class="nbtn focusable" data-key="nav-back"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>Retour</button>
+    <button class="nbtn focusable" data-key="nav-home"><svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7"/><path d="M6 9.5V20h4.5v-6h3v6H18V9.5"/></svg>Accueil</button>
+  </nav>
+
+  <!-- ÉCONOMISEUR -->
+  <div id="saver" class="hidden"><div class="saverClock" id="saverClock"></div></div>
+
+  <!-- MESSAGE (erreur lancement, etc.) -->
+  <div id="toast" class="hidden"></div>
+</div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

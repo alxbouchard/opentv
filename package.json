@@ -1,0 +1,14 @@
+{
+  "name": "opentv",
+  "appName": "OpenTV",
+  "version": "1.0.0",
+  "description": "OpenTV : un écran d'accueil à toi pour ta TV Samsung. Tes applis avec leurs vrais logos, des fonds photo et une apparence personnalisable.",
+  "packageType": "app",
+  "appPath": "app/index.html",
+  "serviceFile": "service.js",
+  "keys": [
+    "ColorF0Red", "ColorF1Green", "ColorF2Yellow", "ColorF3Blue",
+    "MediaPlayPause", "Info"
+  ],
+  "license": "MIT"
+}
