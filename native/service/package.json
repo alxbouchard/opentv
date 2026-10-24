@@ -1,0 +1,6 @@
+{
+  "name": "opentv-service",
+  "version": "1.0.0",
+  "description": "OpenTV launcher background service",
+  "main": "index.js"
+}

@@ -1,0 +1,202 @@
+/* OpenTV pour TV Samsung (Tizen 4.0 / Chromium 56).
+   Contraintes M56 : pas de CSS grid, pas de `gap` en flex, pas de `inset`, pas de `backdrop-filter`.
+   On s'en tient à flexbox + marges, positionnement absolu explicite, et fonds translucides. */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --ui: "Inter", "Helvetica Neue", Arial, sans-serif;
+  --text-1: #FFFFFF;
+  --text-2: rgba(255,255,255,.82);
+  --text-3: rgba(255,255,255,.55);
+}
+html, body { width: 100%; height: 100%; overflow: hidden; background: #05070B; }
+body { font-family: var(--ui); -webkit-user-select: none; user-select: none; cursor: none; }
+img { -webkit-user-drag: none; }
+
+/* La scène est pensée en 1920x1080 puis mise à l'échelle. */
+#stage {
+  position: absolute; top: 0; left: 0;
+  width: 1920px; height: 1080px;
+  -webkit-transform-origin: top left; transform-origin: top left;
+  color: var(--text-1);
+}
+.font-modern  { --ui: "Inter", sans-serif; }
+.font-elegant { --ui: "Instrument Serif", Georgia, serif; }
+.font-rounded { --ui: "Nunito", sans-serif; }
+.font-grotesk { --ui: "Space Grotesk", sans-serif; }
+#stage { font-family: var(--ui); }
+
+/* ---- Fond ---- */
+#bg { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
+#bgImg { position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  object-fit: cover; opacity: 0; -webkit-transition: opacity .9s ease; transition: opacity .9s ease; }
+#bgImg.on { opacity: 1; }
+#bgShade { position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+  background: -webkit-linear-gradient(top, rgba(0,0,0,.35), rgba(0,0,0,.15) 40%, rgba(0,0,0,.6));
+  background: linear-gradient(to bottom, rgba(0,0,0,.35), rgba(0,0,0,.15) 40%, rgba(0,0,0,.6)); }
+
+/* ---- Écrans ---- */
+.screen { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: none; z-index: 2; }
+.screen.active { display: block; }
+
+/* ---- Accueil ---- */
+#clockBox { position: absolute; left: 110px; top: 70px; }
+#time { font-size: 92px; font-weight: 300; line-height: 1; letter-spacing: -2px; }
+#date { font-size: 27px; color: var(--text-2); margin-top: 10px; text-transform: capitalize; }
+.clock-hide #clockBox { display: none; }
+
+#quick { position: absolute; right: 110px; top: 84px; }
+.qbtn {
+  display: inline-block; vertical-align: middle; width: 70px; height: 70px; margin-left: 18px;
+  border: none; border-radius: 50%; background: rgba(255,255,255,.14);
+  color: #fff; cursor: pointer; -webkit-transition: all .18s ease; transition: all .18s ease;
+}
+.qbtn svg, .qbtn img { width: 32px; height: 32px; vertical-align: middle; fill: currentColor; stroke: currentColor; }
+.qbtn img { stroke: none; }
+.qbtn.focused { background: #fff; color: #111; -webkit-transform: scale(1.08); transform: scale(1.08); }
+
+#hero { position: absolute; left: 110px; top: 300px; }
+#hero .eyebrow { font-size: 24px; color: var(--text-2); font-weight: 500; letter-spacing: .3px; }
+#hero h1 { font-size: 58px; font-weight: 600; margin-top: 8px; letter-spacing: -1px; }
+
+#tiles { position: absolute; left: 110px; right: 110px; top: 450px; }
+
+/* grille de tuiles : flexbox + marges (pas de CSS grid, pas de gap) */
+.grid { font-size: 0; }
+.tile {
+  display: inline-block; vertical-align: top; position: relative;
+  width: 288px; height: 162px; margin: 0 26px 26px 0;
+  border-radius: 22px; overflow: hidden; cursor: pointer;
+  border: 2px solid rgba(255,255,255,.14);
+  background: rgba(22,26,34,.55);
+  -webkit-transition: -webkit-transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+}
+.tile .inner { position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+  display: block; text-align: center; }
+.tile .logoWrap { position: absolute; top: 0; left: 0; right: 0; bottom: 34px;
+  display: -webkit-box; -webkit-box-pack: center; -webkit-box-align: center;
+  display: flex; -webkit-align-items: center; align-items: center; -webkit-justify-content: center; justify-content: center; }
+.tile .name { position: absolute; left: 0; right: 0; bottom: 14px; font-size: 20px; font-weight: 600;
+  color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 12px; }
+
+/* logo mono (masque) ou image */
+.mask { display: inline-block; background-color: #fff;
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+  -webkit-mask-position: center; mask-position: center;
+  -webkit-mask-size: contain; mask-size: contain; }
+.mask.sq { width: 56px; height: 56px; }
+.mask.wd { width: 128px; height: 44px; }
+.logo-brand .mask { background-color: var(--brand); }
+.tile img.logo { max-width: 150px; max-height: 52px; }
+.tile img.logo.sq { max-width: 60px; }
+
+/* styles de tuiles */
+.tiles-glass .tile { background: rgba(26,30,40,.5); }
+.tiles-dark  .tile { background: rgba(8,10,14,.72); }
+.tiles-frost .tile { background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.3); }
+.tiles-clear .tile { background: transparent; border-color: transparent; }
+.tiles-brand .tile { background: -webkit-linear-gradient(135deg, var(--c1), var(--c2));
+                     background: linear-gradient(135deg, var(--c1), var(--c2)); border-color: rgba(255,255,255,.12); }
+.tiles-brand .mask { background-color: var(--tfg); }
+
+/* libellés */
+.labels-logo .tile .name { display: none; }
+.labels-logo .tile .logoWrap { bottom: 0; }
+.labels-name .tile .logoWrap { display: none; }
+.labels-name .tile .name { font-size: 26px; bottom: 50%; -webkit-transform: translateY(50%); transform: translateY(50%); }
+
+/* focus */
+.tile.focused {
+  border-color: #fff;
+  -webkit-transform: scale(1.06); transform: scale(1.06);
+  box-shadow: 0 18px 50px rgba(0,0,0,.55), 0 0 0 4px rgba(255,255,255,.1);
+  z-index: 3;
+}
+.tile.focused.glow { box-shadow: 0 18px 60px var(--glow), 0 0 0 4px rgba(255,255,255,.12); }
+.tile.off { opacity: .4; }
+.tile .check { position: absolute; top: 10px; right: 12px; font-size: 22px; color: #fff;
+  background: rgba(0,0,0,.4); border-radius: 50%; width: 32px; height: 32px; line-height: 32px; }
+
+#tip { position: absolute; left: 110px; bottom: 54px; font-size: 22px; color: var(--text-2); opacity: 0; -webkit-transition: opacity .2s; transition: opacity .2s; }
+#tip.on { opacity: 1; }
+
+/* ---- Panneau Apparence ---- */
+#look {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 620px; z-index: 20;
+  background: rgba(10,12,18,.9);
+  border-left: 1px solid rgba(255,255,255,.12);
+  padding: 60px 50px; display: block;
+}
+#look.hidden { display: none; }
+.sheetHead .eyebrow { font-size: 22px; color: var(--text-2); }
+.sheetHead h2 { font-size: 40px; font-weight: 600; margin-top: 6px; }
+#lookRows { margin-top: 30px; }
+.lrow {
+  display: block; width: 100%; height: 72px; margin-bottom: 10px; padding: 0 24px;
+  border: none; border-radius: 16px; background: rgba(255,255,255,.07); color: #fff;
+  text-align: left; font: inherit; font-size: 23px; cursor: pointer; position: relative;
+  -webkit-transition: background .15s; transition: background .15s;
+}
+.lrow .lname { line-height: 72px; }
+.lrow .lval { position: absolute; right: 22px; top: 0; line-height: 72px; color: var(--text-2); font-size: 22px; }
+.lrow .lval .thumb { display: inline-block; width: 44px; height: 26px; border-radius: 5px; vertical-align: middle;
+  margin-right: 10px; background-size: cover; background-position: center; }
+.lrow .arrow { color: var(--text-3); padding: 0 10px; }
+.lrow.focused { background: #fff; color: #111; }
+.lrow.focused .lval, .lrow.focused .arrow { color: #333; }
+.lrow.action { color: #fff; }
+.lrow.action .ic { display: inline-block; width: 26px; height: 26px; vertical-align: middle; margin-right: 14px; }
+.lrow.action.focused { color: #111; }
+
+/* ---- Panneaux (choisir applis, designs) ---- */
+.panel { position: absolute; top: 90px; left: 110px; right: 110px; bottom: 90px;
+  background: rgba(10,12,18,.82); border-radius: 28px; padding: 54px 60px; overflow: hidden; }
+.panelHead .eyebrow { font-size: 22px; color: var(--text-2); }
+.panelHead h2 { font-size: 44px; font-weight: 600; margin-top: 6px; }
+.panelHead .lede { font-size: 23px; color: var(--text-2); margin-top: 12px; max-width: 900px; }
+#appGrid { margin-top: 40px; font-size: 0; max-height: 760px; overflow: hidden; }
+#appGrid .tile { width: 240px; height: 140px; margin: 0 20px 34px 0; }
+#appGrid .appid { position: absolute; left: 0; right: 0; bottom: -26px; font-size: 14px; color: rgba(255,255,255,.65);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; padding: 0 4px; }
+
+#designGrid { margin-top: 44px; font-size: 0; }
+.dcard { display: inline-block; vertical-align: top; width: 440px; margin: 0 30px 30px 0; cursor: pointer; }
+.dthumb { position: relative; width: 440px; height: 248px; border-radius: 18px; overflow: hidden;
+  background-size: cover; background-position: center; border: 2px solid rgba(255,255,255,.14); }
+.dcard.focused .dthumb { border-color: #fff; -webkit-transform: scale(1.03); transform: scale(1.03); }
+.dname { font-size: 27px; font-weight: 600; margin-top: 16px; }
+.ddesc { font-size: 20px; color: var(--text-2); margin-top: 4px; }
+.badge { position: absolute; top: 14px; left: 14px; background: rgba(0,0,0,.6); color: #fff;
+  font-size: 16px; padding: 5px 12px; border-radius: 20px; }
+
+/* ---- Barre nav ---- */
+#nav { position: absolute; left: 90px; top: 34px; z-index: 25; display: none; }
+.screen#home ~ #nav { display: none; }
+#stage.inside #nav { display: block; }
+.nbtn { display: inline-block; vertical-align: middle; margin-right: 14px; height: 56px; padding: 0 24px;
+  border: none; border-radius: 28px; background: rgba(255,255,255,.14); color: #fff;
+  font: 600 22px var(--ui); cursor: pointer; }
+.nbtn svg { width: 22px; height: 22px; vertical-align: middle; margin-right: 8px; fill: none; stroke: currentColor; stroke-width: 2; }
+.nbtn.focused { background: #fff; color: #111; }
+
+/* ---- Économiseur ---- */
+#saver { position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 40; background: #000;
+  display: -webkit-box; -webkit-box-pack: center; -webkit-box-align: center;
+  display: flex; -webkit-align-items: center; align-items: center; -webkit-justify-content: center; justify-content: center; }
+#saver.hidden { display: none; }
+.saverClock { font-size: 140px; font-weight: 200; color: rgba(255,255,255,.85); }
+
+/* ---- Toast ---- */
+#toast { position: absolute; left: 50%; bottom: 70px; -webkit-transform: translateX(-50%); transform: translateX(-50%);
+  z-index: 50; background: rgba(0,0,0,.82); color: #fff; font-size: 22px; padding: 16px 28px; border-radius: 16px; }
+#toast.hidden { display: none; }
+
+#build { position: absolute; right: 16px; bottom: 12px; z-index: 30; font-size: 14px; color: rgba(255,255,255,.4); }
+
+/* ---- Télécommande (QR) ---- */
+.panel.center { text-align: center; }
+.panel.center .panelHead { text-align: center; }
+#qrCanvas { margin: 40px auto 24px; display: block; background: #fff; border-radius: 16px; padding: 16px; width: 340px; height: 340px; }
+#phone .url { font-size: 30px; font-weight: 600; color: #fff; letter-spacing: .5px; }
+#phone .lede { margin: 18px auto 0; max-width: 760px; text-align: center; }
