@@ -1,38 +1,26 @@
-# OpenTV — application native Tizen (icône OpenTV)
+# OpenTV natif — build, signature, installation
 
-Ce dossier est l'app OpenTV complète, autonome (aucune dépendance jsDelivr/GitHub au
-lancement). Une fois installée, la TV affiche l'icône **OpenTV** et l'ouvre direct.
+App Tizen autonome « OpenTV » (icône OpenTV). Ne dépend ni de TizenBrew ni de jsDelivr :
+elle liste/lance les applis via l'API Tizen et démarre seule son service (télécommande téléphone, port 8096).
 
-## Pourquoi une étape de signature
-Samsung n'accepte que les `.wgt` signés avec **ton** certificat Samsung, lié au DUID de
-ta TV. C'est exactement l'étape que tu as déjà faite pour installer TizenBrew. Elle se
-fait sur ton Mac (compte Samsung), pas depuis le cloud.
+## Signature (même méthode que TizenBrew pour les TV 2017-2018)
+- auteur : `opentv-author.p12` (gardé hors GitHub — le même pour chaque mise à jour, sinon la TV refuse)
+- distributeur : certificat Tizen public du SDK (`sdk-public/tizen-distributor-signer.p12`, mot de passe `tizenpkcs12passfordsigner`)
+- aucun compte Samsung, aucun DUID
 
-DUID de ta TV : `uuid:abc7fc91-3509-47c5-99b6-c69d9c3113b8`
-
-## Installation (3 commandes)
-Pré-requis : Tizen Studio + un profil de certificat Samsung (Tools > Certificate Manager),
-TV en mode développeur avec l'IP de ce Mac en « Host PC IP ».
-
+Build (Tizen Studio CLI, Linux) :
 ```sh
-cd /chemin/vers/OpenTV-native
-TZ=~/tizen-studio/tools/ide/bin           # adapte si installé ailleurs
-
-# 1) construire
-$TZ/tizen build-web -- .
-
-# 2) empaqueter + signer avec TON profil (remplace MONPROFIL ; liste-les avec
-#    $TZ/tizen security-profiles list )
-$TZ/tizen package -t wgt -s MONPROFIL -o ./dist -- ./.buildResult
-
-# 3) connecter la TV et installer
-~/tizen-studio/tools/sdb connect <IP_DE_LA_TV>
-~/tizen-studio/tools/sdb devices
-$TZ/tizen install -n OpenTV.wgt -- ./dist
+tizen build-web -e '.*' -- native
+tizen package -t wgt -s OpenTV-Old -o ./release -- native/.buildResult   # demande le mot de passe auteur
 ```
 
-Puis sur la TV : l'icône **OpenTV** apparaît dans la liste des applis. Lance-la.
+## Installation sur la TV (sans Tizen Studio)
+Pré-requis : TV en mode développeur, « Host PC IP » = IP de la machine qui installe (ici le Mac, 192.168.2.13).
 
-## Mise à jour plus tard
-Change les fichiers dans `app/`, refais les 3 commandes. (Pas de reboot, pas de cache
-jsDelivr : tout est embarqué dans le `.wgt`.)
+```sh
+node scripts/install.mjs <IP_TV> OpenTV.wgt /home/owner/share/tmp/sdk_tools/OpenTV.wgt OpnTV00001
+# = push sdb du .wgt puis « 0 vd_appinstall OpnTV00001 <chemin> » (méthode de TizenBrewInstaller)
+```
+Lancer à distance : commande sdb `0 was_execute OpnTV00001.OpenTV`.
+
+Note : avec Host PC IP ≠ 127.0.0.1, TizenBrew ne peut plus lancer ses modules. OpenTV natif n'en a pas besoin.

@@ -110,8 +110,9 @@
     "add_channels", "acr", "heremaps", "smsource", "photo player", "avcontrol", "registerav", "ignition",
     "mycontents", "ttx", "music tv"];
   function isSystemApp(id) {
+    if (/^OpnTV00001\./.test(id)) return true;     // OpenTV lui-même
     if (brandFor(id)) return false;                 // reconnue = jamais système
-    if (/^(org\.tizen\.|com\.samsung\.|com\.webos\.)/.test(id)) return true;
+    if (/^(org\.tizen\.|com\.samsung\.|com\.webos\.|org\.volt\.)/.test(id)) return true;
     var n = (INSTALLED[id] || "").toLowerCase();
     if (!n) return true;
     for (var i = 0; i < SYS_WORDS.length; i++) if (n.indexOf(SYS_WORDS[i]) >= 0) return true;
@@ -466,7 +467,9 @@
   });
 
   // ---- XHR simple ----
-  function xhr(method, url, done) {
+  function xhr(method, url, cb) {
+    var fired = false;   // une seule réponse par requête (readyState 4 + onerror arrivent tous les deux en cas d'échec)
+    function done(ok, data) { if (fired) return; fired = true; cb(ok, data); }
     try {
       var r = new XMLHttpRequest();
       r.open(method, url, true); r.timeout = 6000;
@@ -536,7 +539,7 @@
         for (var b = 0; b < BRANDS.length; b++) INSTALLED["demo." + BRANDS[b].key] = BRANDS[b].name;
       }
       var el = $("build");
-      if (el) el.textContent = "OpenTV v13 native · " + (haveService ? (installedIds().length + " applis") : "aperçu");
+      if (el) el.textContent = "OpenTV v14 native · " + (haveService ? (installedIds().length + " applis") : "aperçu");
       goHome();
       if (!HAS_TIZEN && haveService) remoteReady();   // mode module : le service tourne déjà
     });
