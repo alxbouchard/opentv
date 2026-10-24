@@ -43,9 +43,13 @@ var server = http.createServer(function (req, res) {
   if (request.pathname === '/apps') {
     try {
       tizen.application.getAppsInfo(function (apps) {
-        reply(res, 200, apps.map(function (app) {
-          return { id: app.id, name: app.name || app.id };
-        }));
+        // On ne garde que les applis visibles dans le menu (app.show), pas les services système.
+        var out = [];
+        apps.forEach(function (app) {
+          if (app.show === false) return;
+          out.push({ id: app.id, name: app.name || app.id });
+        });
+        reply(res, 200, out);
       }, function (e) { reply(res, 500, { error: e.message }); });
     } catch (e) { reply(res, 500, { error: String(e) }); }
   } else if (request.pathname === '/launch' && request.query.id) {
