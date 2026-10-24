@@ -100,22 +100,61 @@
   }
   function brandOrder(id) { var b = brandFor(id); return b ? indexOf(BRANDS, b) : 999; }
   function installedIds() { var a = []; for (var id in INSTALLED) a.push(id); return a; }
-  function defaultApps() {
-    // applis reconnues ET installées, dans l'ordre du catalogue
-    var out = installedIds().filter(function (id) { return brandFor(id); });
-    out.sort(function (a, b) { return brandOrder(a) - brandOrder(b); });
+
+  // Masque les composants système (non reconnus) : vrais tiers = id à hash aléatoire,
+  // les services Samsung commencent par org.tizen./com.samsung./com.webos. ou portent un nom de service.
+  var SYS_WORDS = ["app", "service", "daemon", "bridge", "running", "automation", "hdmicec", "hbbtv", "sso",
+    "btaudio", "aging", "dynamichint", "channel-list", "picture-test", "easysetup", "ui-application",
+    "add_channels", "acr", "heremaps", "smsource", "photo player", "avcontrol", "registerav", "ignition",
+    "mycontents", "ttx", "music tv"];
+  function isSystemApp(id) {
+    if (brandFor(id)) return false;                 // reconnue = jamais système
+    if (/^(org\.tizen\.|com\.samsung\.|com\.webos\.)/.test(id)) return true;
+    var n = (INSTALLED[id] || "").toLowerCase();
+    if (!n) return true;
+    for (var i = 0; i < SYS_WORDS.length; i++) if (n.indexOf(SYS_WORDS[i]) >= 0) return true;
+    return false;
+  }
+
+  // Parmi plusieurs applis qui collent à la même marque, en choisir UNE (nom exact, sinon le plus court).
+  function pickForBrand(brand) {
+    var cands = installedIds().filter(function (id) { return brandFor(id) === brand; });
+    if (!cands.length) return null;
+    cands.sort(function (a, b) {
+      var na = (INSTALLED[a] || "").toLowerCase(), nb = (INSTALLED[b] || "").toLowerCase();
+      var ea = na === brand.name.toLowerCase() ? 0 : 1, eb = nb === brand.name.toLowerCase() ? 0 : 1;
+      if (ea !== eb) return ea - eb;
+      return na.length - nb.length;
+    });
+    return cands[0];
+  }
+
+  // Une appli par marque reconnue (dédoublonnée), dans l'ordre du catalogue.
+  function recognizedApps() {
+    var out = [];
+    for (var i = 0; i < BRANDS.length; i++) { var id = pickForBrand(BRANDS[i]); if (id) out.push(id); }
+    return out;
+  }
+  function defaultApps() { return recognizedApps(); }
+
+  function dedupeByBrand(ids) {
+    var out = [], seen = {};
+    for (var i = 0; i < ids.length; i++) {
+      var b = brandFor(ids[i]), key = b ? b.key : ids[i];
+      if (seen[key]) continue; seen[key] = 1; out.push(ids[i]);
+    }
     return out;
   }
   function shownApps() {
     var list = (P.apps && P.apps.length) ? P.apps.slice() : defaultApps();
     if (haveService) list = list.filter(function (id) { return INSTALLED[id]; });
-    return list;
+    return dedupeByBrand(list);
   }
   function allSelectableApps() {
-    // toutes les applis installées, les reconnues d'abord
-    var ids = installedIds();
-    ids.sort(function (a, b) { return brandOrder(a) - brandOrder(b); });
-    return ids;
+    // marques reconnues (une par marque) + vraies applis tierces non reconnues ; services système masqués
+    var others = installedIds().filter(function (id) { return !brandFor(id) && !isSystemApp(id); });
+    others.sort(function (a, b) { return (INSTALLED[a] || "").localeCompare(INSTALLED[b] || ""); });
+    return recognizedApps().concat(others);
   }
 
   // ---- rendu d'une tuile ----
@@ -409,7 +448,7 @@
         for (var b = 0; b < BRANDS.length; b++) INSTALLED["demo." + BRANDS[b].key] = BRANDS[b].name;
       }
       var el = $("build");
-      if (el) el.textContent = "OpenTV v3 · " + (haveService ? (installedIds().length + " applis") : "aperçu");
+      if (el) el.textContent = "OpenTV v4 · " + (haveService ? (installedIds().length + " applis") : "aperçu");
       goHome();
     });
     // filet de sécurité : si le service tarde, afficher quand même l'accueil
