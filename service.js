@@ -14,7 +14,7 @@ var crypto = require('crypto');
 var fs = require('fs');
 
 var PORT = 8096;
-var VERSION = 10;
+var VERSION = 11;
 var REMOTE = { n: 0, cmd: '' };
 
 function reply(res, status, body) {
@@ -47,15 +47,17 @@ function rcFrame(opcode, payload) {
   return Buffer.concat([header, mask, out]);
 }
 function rcText(str) { return rcFrame(0x1, new Buffer(str, 'utf8')); }
-function rcDown() { rcReady = false; rcConnecting = false; rcHandshook = false; try { if (rcSock) rcSock.destroy(); } catch (e) {} rcSock = null; }
+function rcReset() { rcReady = false; rcConnecting = false; rcHandshook = false; try { if (rcSock) rcSock.destroy(); } catch (e) {} rcSock = null; }
 
-var rcTries = 0, rcHost = '', rcLastErr = '', rcStage = 'idle';
+var rcTries = 0, rcHost = '', rcLastErr = '', rcStage = 'idle', rcGoodHost = null;
+function pickHost() {
+  if (rcGoodHost) return rcGoodHost;                       // colle a l'hote qui a atteint le handshake
+  return (rcTries++ % 2 === 0) ? '127.0.0.1' : lanIp();    // sinon alterne localhost / LAN
+}
 function rcConnect() {
-  if (rcConnecting || rcReady) return;
-  rcConnecting = true; rcHandshook = false; rcBuf = new Buffer(0);
-  // Alterne localhost / IP LAN : une connexion locale (depuis la TV elle-même) peut être
-  // auto-autorisée par le mode dev (host 127.0.0.1), ce qui éviterait le popup « Autoriser ».
-  var host = (rcTries++ % 2 === 0) ? '127.0.0.1' : lanIp(); rcHost = host; rcStage = 'connecting ' + host;
+  if (rcConnecting || rcReady || rcHandshook) return;      // pas de reconnexion pendant l'attente d'autorisation
+  rcConnecting = true; rcBuf = new Buffer(0);
+  var host = pickHost(); rcHost = host; rcStage = 'connecting ' + host;
   try {
     rcSock = tls.connect({ host: host, port: 8002, rejectUnauthorized: false }, function () {
       rcStage = 'tls_ok ' + host;
@@ -64,20 +66,22 @@ function rcConnect() {
       rcSock.write('GET ' + path + ' HTTP/1.1\r\nHost: ' + host + ':8002\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n' +
         'Sec-WebSocket-Key: ' + k + '\r\nSec-WebSocket-Version: 13\r\n\r\n');
     });
+    rcSock.setTimeout(8000);
+    rcSock.on('timeout', function () { if (!rcReady) { rcStage = 'timeout'; rcReset(); } });
     rcSock.on('data', rcData);
-    rcSock.on('error', function (e) { rcLastErr = (e && (e.code || e.message)) || 'err'; rcStage = 'error:' + rcLastErr; rcDown(); });
-    rcSock.on('close', function () { if (rcStage.indexOf('error') < 0 && !rcReady) rcStage = 'closed_early'; rcDown(); });
-  } catch (e) { rcDown(); }
+    rcSock.on('error', function (e) { rcLastErr = (e && (e.code || e.message)) || 'err'; rcStage = 'error:' + rcLastErr; rcReset(); });
+    rcSock.on('close', function () { if (!rcHandshook && !rcReady && rcStage.indexOf('error') < 0) rcStage = 'closed_early'; rcReset(); });
+  } catch (e) { rcLastErr = String(e).slice(0, 60); rcStage = 'throw'; rcReset(); }
 }
 function rcData(chunk) {
   rcBuf = Buffer.concat([rcBuf, chunk]);
   if (!rcHandshook) {
     var s = rcBuf.toString('binary'), idx = s.indexOf('\r\n\r\n');
     if (idx < 0) return;
-    if (s.slice(0, idx).indexOf('101') < 0) { rcStage = 'no101'; rcDown(); return; }
+    if (s.slice(0, idx).indexOf('101') < 0) { rcStage = 'no101'; rcReset(); return; }
     rcBuf = rcBuf.slice(idx + 4);
-    rcHandshook = true; rcReady = true; rcConnecting = false; rcStage = 'handshook(101)';
-    while (rcQueue.length) { try { rcSock.write(rcText(rcQueue.shift())); } catch (e) {} }
+    rcHandshook = true; rcConnecting = false; rcGoodHost = rcHost; rcStage = 'handshook(attente autorisation)';
+    // on NE marque PAS pret ici : on attend ms.channel.connect (le popup). Les touches avant auth sont ignorees.
   }
   while (rcBuf.length >= 2) {
     var b1 = rcBuf[1], op = rcBuf[0] & 0x0f, masked = b1 & 0x80, len = b1 & 0x7f, off = 2;
@@ -87,26 +91,30 @@ function rcData(chunk) {
     if (rcBuf.length < off + len) break;
     var payload = rcBuf.slice(off, off + len);
     rcBuf = rcBuf.slice(off + len);
-    if (op === 0x8) { rcDown(); return; }
+    if (op === 0x8) { rcReset(); return; }
     if (op === 0x9) { try { rcSock.write(rcFrame(0xA, payload)); } catch (e) {} continue; }
     if (op === 0x1) rcMsg(payload.toString('utf8'));
   }
 }
 function rcMsg(str) {
   var m; try { m = JSON.parse(str); } catch (e) { return; }
-  if (m.event === 'ms.channel.connect' && m.data && m.data.token && String(m.data.token) !== rcToken) {
-    rcToken = String(m.data.token); rcStage = 'authorized'; try { fs.writeFileSync(TOKEN_FILE, rcToken); } catch (e) {}
+  if (m.event === 'ms.channel.connect') {
+    rcReady = true; rcStage = 'authorized';
+    if (m.data && m.data.token && String(m.data.token) !== rcToken) { rcToken = String(m.data.token); try { fs.writeFileSync(TOKEN_FILE, rcToken); } catch (e) {} }
+    while (rcQueue.length) { try { rcSock.write(rcText(rcQueue.shift())); } catch (e) {} }   // flush APRES autorisation
   }
-  if (m.event === 'ms.channel.unauthorized') { rcToken = ''; try { fs.unlinkSync(TOKEN_FILE); } catch (e) {} rcDown(); }
+  if (m.event === 'ms.channel.unauthorized') { rcToken = ''; rcStage = 'unauthorized'; try { fs.unlinkSync(TOKEN_FILE); } catch (e) {} rcReset(); }
 }
 function rcSend(key) {
   var msg = JSON.stringify({ method: 'ms.remote.control', params: { Cmd: 'Click', DataOfCmd: key, Option: 'false', TypeOfRemote: 'SendRemoteKey' } });
-  if (rcReady && rcSock) { try { rcSock.write(rcText(msg)); return true; } catch (e) { rcDown(); } }
+  if (rcReady && rcSock) { try { rcSock.write(rcText(msg)); return true; } catch (e) { rcReset(); } }
   rcQueue.push(msg); if (rcQueue.length > 30) rcQueue.shift();
   rcConnect();
   return false;
 }
-rcConnect();   // établit la liaison dès le démarrage (et persiste le token)
+// Connexion proactive + reconnexion auto : le popup apparait tout seul au demarrage.
+rcConnect();
+setInterval(function () { if (!rcReady && !rcHandshook && !rcConnecting) rcConnect(); }, 4000);
 
 // ---------------------------------------------------------------- page télécommande (téléphone)
 var REMOTE_HTML = [
