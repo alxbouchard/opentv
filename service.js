@@ -14,7 +14,7 @@ var crypto = require('crypto');
 var fs = require('fs');
 
 var PORT = 8096;
-var VERSION = 8;
+var VERSION = 9;
 var REMOTE = { n: 0, cmd: '' };
 
 function reply(res, status, body) {
@@ -49,10 +49,13 @@ function rcFrame(opcode, payload) {
 function rcText(str) { return rcFrame(0x1, new Buffer(str, 'utf8')); }
 function rcDown() { rcReady = false; rcConnecting = false; rcHandshook = false; try { if (rcSock) rcSock.destroy(); } catch (e) {} rcSock = null; }
 
+var rcTries = 0, rcHost = '';
 function rcConnect() {
   if (rcConnecting || rcReady) return;
   rcConnecting = true; rcHandshook = false; rcBuf = new Buffer(0);
-  var host = lanIp();
+  // Alterne localhost / IP LAN : une connexion locale (depuis la TV elle-même) peut être
+  // auto-autorisée par le mode dev (host 127.0.0.1), ce qui éviterait le popup « Autoriser ».
+  var host = (rcTries++ % 2 === 0) ? '127.0.0.1' : lanIp(); rcHost = host;
   try {
     rcSock = tls.connect({ host: host, port: 8002, rejectUnauthorized: false }, function () {
       var k = crypto.randomBytes(16).toString('base64');
@@ -213,7 +216,7 @@ var server = http.createServer(function (req, res) {
     var sent = rcSend(key);
     reply(res, 200, { ok: true, live: sent, ready: rcReady });
   } else if (p === '/rcstatus') {
-    reply(res, 200, { ready: rcReady, connecting: rcConnecting, hasToken: !!rcToken });
+    reply(res, 200, { ready: rcReady, connecting: rcConnecting, hasToken: !!rcToken, host: rcHost, tries: rcTries });
   } else if (p === '/cmd') {
     var cmd = request.query.cmd || '';
     REMOTE.n++; REMOTE.cmd = String(cmd).slice(0, 20);
