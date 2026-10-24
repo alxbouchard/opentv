@@ -401,8 +401,23 @@
     var k = el.getAttribute("data-key");
     if (lookOpen) lastKeyByScreen["look"] = k;
     else lastKeyByScreen[current()] = k;
-    // faire défiler si besoin
-    if (el.scrollIntoView) try { el.scrollIntoView({ block: "nearest", inline: "nearest" }); } catch (e) {}
+    // faire défiler si besoin (pas en direct : la rangée du bas défile elle-même, et le menu peut être
+    // encore sous l'écran pendant qu'il remonte -> le navigateur ferait défiler toute la page = saut visible)
+    if (!LIVE) {
+      try {
+        // Chromium 56 (TV) ne connaît pas scrollIntoView({block:"nearest"}) et alignerait en HAUT :
+        // scrollIntoViewIfNeeded(false) = défilement minimal, supporté par Chromium 56.
+        if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(false);
+        else if (el.scrollIntoView) el.scrollIntoView({ block: "nearest", inline: "nearest" });
+      } catch (e) {}
+    }
+    resetPageScroll();
+  }
+  // la scène fait exactement la taille de l'écran : la page elle-même ne doit jamais défiler
+  function resetPageScroll() {
+    var d = document.documentElement, b = document.body;
+    if (d.scrollTop || d.scrollLeft) { d.scrollTop = 0; d.scrollLeft = 0; }
+    if (b.scrollTop || b.scrollLeft) { b.scrollTop = 0; b.scrollLeft = 0; }
   }
   function restoreFocus(screen) {
     var key = lastKeyByScreen[lookOpen ? "look" : screen], list = focusables(), el = null;
@@ -587,8 +602,8 @@
     report();
   }
   // état de l'écran -> service (diagnostic à distance : GET /status)
-  var BUILD = "OpenTV v18 native";
-  var SVC_VERSION = 16;   // doit égaler VERSION dans service/index.js
+  var BUILD = "OpenTV v20 native";
+  var SVC_VERSION = 17;   // doit égaler VERSION dans service/index.js
   function report() {
     if (!remoteOn) return;
     var k = focusEl ? (focusEl.getAttribute("data-key") || "") : "";
@@ -630,6 +645,7 @@
     // filet de sécurité : si le service tarde, afficher quand même l'accueil
     setTimeout(function () { if (!focusEl) goHome(); }, 3500);
     // retour au premier plan (retour d'une appli, instance préchargée) : accueil, première tuile
+    window.addEventListener("scroll", resetPageScroll);
     document.addEventListener("visibilitychange", function () {
       if (document.hidden) { liveOff(); return; }
       lastKeyByScreen = {};
