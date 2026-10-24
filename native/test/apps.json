@@ -1,0 +1,10 @@
+[{"id":"org.tizen.netflix-app","name":"Netflix","show":true},
+ {"id":"111299001912","name":"YouTube","show":true},
+ {"id":"9Ur5IzDKqV.TizenYouTube","name":"YouTube","show":true},
+ {"id":"3201512006785","name":"Prime Video","show":true},
+ {"id":"3201901017640","name":"Disney+","show":true},
+ {"id":"org.tizen.browser","name":"Internet","show":true},
+ {"id":"com.samsung.tv.store","name":"Apps","show":false},
+ {"id":"org.tizen.settings","name":"Paramètres","show":false},
+ {"id":"OpnTV00001.OpenTV","name":"OpenTV","show":true},
+ {"id":"xvvl3S1bvH.TizenBrewStandalone","name":"TizenBrew","show":true}]

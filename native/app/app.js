@@ -386,6 +386,7 @@
     if (!el) return;
     if (focusEl) focusEl.classList.remove("focused");
     focusEl = el; el.classList.add("focused");
+    report();
     var tip = el.getAttribute("data-tip");
     $("tip").textContent = tip || ""; $("tip").className = tip ? "on" : "";
     var k = el.getAttribute("data-key");
@@ -489,8 +490,10 @@
   // démarre le service de fond (télécommande téléphone) s'il ne tourne pas déjà
   function startService() {
     if (!HAS_TIZEN) return;
-    xhr("GET", SERVICE + "/version", function (ok) {
-      if (ok) { remoteReady(); return; }
+    // exige la version du service livrée avec CETTE appli : après une mise à jour, l'ancien service
+    // tourne encore ; on lance le nouveau, qui demande à l'ancien de s'arrêter (/shutdown) et prend le port.
+    xhr("GET", SERVICE + "/version", function (ok, v) {
+      if (ok && v && v.version >= SVC_VERSION) { remoteReady(); return; }
       try {
         var pkg = tizen.application.getCurrentApplication().appInfo.packageId;
         tizen.application.launchAppControl(
@@ -499,8 +502,8 @@
       } catch (e) {}
       var tries = 0;
       (function wait() {
-        xhr("GET", SERVICE + "/version", function (up) {
-          if (up) { remoteReady(); return; }
+        xhr("GET", SERVICE + "/version", function (up, v) {
+          if (up && v && v.version >= SVC_VERSION) { remoteReady(); return; }
           if (++tries < 20) setTimeout(wait, 500);
         });
       })();
@@ -510,6 +513,16 @@
   function remoteReady() {
     if (remoteOn) return; remoteOn = true; haveService = true;
     pollRemote(); setInterval(pollRemote, 400);
+    report();
+  }
+  // état de l'écran -> service (diagnostic à distance : GET /status)
+  var BUILD = "OpenTV v16 native";
+  var SVC_VERSION = 15;   // doit égaler VERSION dans service/index.js
+  function report() {
+    if (!remoteOn) return;
+    var k = focusEl ? (focusEl.getAttribute("data-key") || "") : "";
+    xhr("GET", SERVICE + "/report?build=" + encodeURIComponent(BUILD) + "&screen=" + encodeURIComponent(lookOpen ? "look" : current()) +
+      "&apps=" + installedIds().length + "&focus=" + encodeURIComponent(k), function () {});
   }
   // liste des applis : API Tizen directe (appli native), sinon le service
   function listApps(cb) {
@@ -539,12 +552,18 @@
         for (var b = 0; b < BRANDS.length; b++) INSTALLED["demo." + BRANDS[b].key] = BRANDS[b].name;
       }
       var el = $("build");
-      if (el) el.textContent = "OpenTV v14 native · " + (haveService ? (installedIds().length + " applis") : "aperçu");
+      if (el) el.textContent = BUILD + " · " + (haveService ? (installedIds().length + " applis") : "aperçu");
       goHome();
       if (!HAS_TIZEN && haveService) remoteReady();   // mode module : le service tourne déjà
     });
     // filet de sécurité : si le service tarde, afficher quand même l'accueil
     setTimeout(function () { if (!focusEl) goHome(); }, 3500);
+    // retour au premier plan (retour d'une appli, instance préchargée) : accueil, première tuile
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) return;
+      lastKeyByScreen = {};
+      goHome();
+    });
   }
   boot();
 })();

@@ -18,9 +18,21 @@ tizen package -t wgt -s OpenTV-Old -o ./release -- native/.buildResult   # deman
 Pré-requis : TV en mode développeur, « Host PC IP » = IP de la machine qui installe (ici le Mac, 192.168.2.13).
 
 ```sh
-node scripts/install.mjs <IP_TV> OpenTV.wgt /home/owner/share/tmp/sdk_tools/OpenTV.wgt OpnTV00001
-# = push sdb du .wgt puis « 0 vd_appinstall OpnTV00001 <chemin> » (méthode de TizenBrewInstaller)
+scripts/deploy.sh <IP_TV> OpenTV.wgt
+# 1. push sdb du .wgt (scripts/install.mjs)
+# 2. « 0 vd_appinstall OpnTV00001 <chemin> » (méthode de TizenBrewInstaller)
+# 3. « 0 debug OpnTV00001.OpenTV » : relance à neuf (sinon l'instance préchargée garde l'ancienne version)
+# 4. lit GET http://<IP_TV>:8096/status pour vérifier
 ```
-Lancer à distance : commande sdb `0 was_execute OpnTV00001.OpenTV`.
+
+## Diagnostic à distance
+`GET http://<IP_TV>:8096/status` renvoie la version du service et l'état rapporté par l'écran :
+`{"version":15,"client":{"build":"OpenTV v16 native","screen":"home","apps":103,"focus":"app-…"}}`.
+`GET /cmd?cmd=up|down|left|right|ok|back|home` pilote l'écran (même chemin que la télécommande iPhone).
+
+## Versions
+- `BUILD` (app.js) : affiché en bas à droite. Changer aussi `?b=` dans index.html à chaque version (cache).
+- `SVC_VERSION` (app.js) = `VERSION` (service/index.js) : si le service change, monter les deux ;
+  l'appli lance alors le nouveau service, qui arrête l'ancien.
 
 Note : avec Host PC IP ≠ 127.0.0.1, TizenBrew ne peut plus lancer ses modules. OpenTV natif n'en a pas besoin.

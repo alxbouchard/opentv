@@ -47,7 +47,7 @@ s.on("data", d => {
         syncReply = Buffer.concat([syncReply, p]);
         if (syncReply.length >= 8) {
           const id = syncReply.slice(0,4).toString("ascii");
-          if (id === "OKAY") { log("PUSH OK ->", REMOTE); s.write(msg("WRTE", local, remote, Buffer.concat([Buffer.from("QUIT"), u32(0)]))); s.write(msg("CLSE", local, remote)); startShell(); }
+          if (id === "OKAY") { log("PUSH OK ->", REMOTE); s.write(msg("WRTE", local, remote, Buffer.concat([Buffer.from("QUIT"), u32(0)]))); s.write(msg("CLSE", local, remote)); process.exit(0); }
           else { log("PUSH FAIL:", syncReply.slice(8).toString("latin1")); process.exit(3); }
         }
       } else { shellOut += p.toString("latin1"); process.stdout.write(p.toString("latin1")); }
