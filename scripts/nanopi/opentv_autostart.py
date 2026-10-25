@@ -128,6 +128,7 @@ def load_config(env=None):
         "state_file": env.get("STATE_FILE", os.path.expanduser("~/.local/state/opentv-autostart/state.json")),
         "dry_run": env.get("DRY_RUN", "0") == "1",
         "cec_cmd": env.get("CEC_CMD", ""),
+        "cec_stdin": env.get("CEC_STDIN", ""),
         "disabled_file": env.get("DISABLED_FILE", os.path.expanduser("~/.local/state/opentv-autostart/disabled")),
         "suppress_until_file": env.get("SUPPRESS_UNTIL_FILE", os.path.expanduser("~/.local/state/opentv-autostart/suppress-until")),
     }
@@ -214,7 +215,8 @@ class Watcher:
         if not self.cfg["cec_cmd"]:
             return None
         try:
-            r = subprocess.run(shlex.split(self.cfg["cec_cmd"]), capture_output=True, text=True, timeout=8)
+            r = subprocess.run(shlex.split(self.cfg["cec_cmd"]), input=self.cfg["cec_stdin"],
+                               capture_output=True, text=True, timeout=8)
             return parse_cec_power(r.stdout + r.stderr)
         except (subprocess.TimeoutExpired, OSError):
             return None

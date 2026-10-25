@@ -10,7 +10,7 @@ mkdir -p "$APPDIR" "$UNITDIR"
 [ -f "$APPDIR/opentv_autostart.py" ] && cp -p "$APPDIR/opentv_autostart.py" "$APPDIR/opentv_autostart.py.prev"
 install -m 0644 "$SRC/opentv_autostart.py" "$APPDIR/opentv_autostart.py"
 install -m 0644 "$SRC/opentv-autostart.service" "$UNITDIR/opentv-autostart.service"
-[ -f "$CONF" ] || printf 'TV_HOST=192.168.2.14\nLAUNCH_ON_START=0\nDRY_RUN=1\nCEC_CMD=cec-client -s -d 1\nOFF_DEBOUNCE_S=15\n' > "$CONF"
+[ -f "$CONF" ] || printf 'TV_HOST=192.168.2.14\nLAUNCH_ON_START=0\nDRY_RUN=1\nCEC_CMD=cec-client -s -d 1\nCEC_STDIN=pow 0\nOFF_DEBOUNCE_S=15\n' > "$CONF"
 if command -v systemd-analyze >/dev/null; then systemd-analyze --user verify "$UNITDIR/opentv-autostart.service"; fi
 systemctl --user daemon-reload
 systemctl --user enable --now opentv-autostart.service
