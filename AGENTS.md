@@ -51,6 +51,7 @@ native/              ← L'APPLI ACTUELLE
   INSTALL.md         notes de build/installation
   test/              tests Playwright + fausse TV (voir §9)
 scripts/
+  build.py           construit + signe + vérifie dist/OpenTV.wgt (une commande, voir §7)
   deploy.sh          envoi + install + relance + vérification (à lancer là où sdb atteint la TV)
   install.mjs        envoi du .wgt sur la TV (protocole sync de sdb, en JS pur)
   sdb.mjs            exécute des commandes « shell: » sdb (en JS pur)
@@ -170,7 +171,13 @@ distributeur Tizen public du SDK**. Aucun compte Samsung, aucun DUID.
 - **La clé d'auteur n'est pas dans Git.** Elle est sur le Mac d'Alexandre :
   `~/Downloads/Nova-TV-Free/opentv-signing/` (`opentv-author.p12` + `opentv-author.password.txt`).
   **Toutes les mises à jour doivent être signées avec elle**, sinon la TV refuse de remplacer l'appli.
-- Commandes :
+- **En une commande** (fait tout ce qui suit et vérifie le résultat) :
+  ```sh
+  OPENTV_KEY=/chemin/opentv-author.p12 OPENTV_KEY_PASSWORD_FILE=/chemin/opentv-author.password.txt \
+      python3 scripts/build.py          # -> dist/OpenTV.wgt
+  ```
+  Testé depuis une copie neuve du dépôt : produit exactement le paquet installé sur la TV.
+- Commandes équivalentes à la main :
   ```sh
   tizen build-web -e '.*' -- native            # produit native/.buildResult
   tizen package -t wgt -s OpenTV-Old -o release -- native/.buildResult
@@ -181,7 +188,7 @@ distributeur Tizen public du SDK**. Aucun compte Samsung, aucun DUID.
   clair avant chaque signature**. Ne jamais supprimer `/dev/null` dans la machine de build (le script
   `tizen.sh` en dépend).
 - Contrôle : le `.wgt` doit contenir `author-signature.xml` et `signature1.xml` ; la chaîne doit être
-  « Tizen Developer CA » (auteur) et « Tizen Test CA » (distributeur), comme le TizenBrew officiel.
+  « Tizen Developers CA » (auteur) et « Tizen Public Distributor CA » (distributeur), comme le TizenBrew officiel.
 
 ## 8. Installer sur la TV
 
@@ -226,6 +233,34 @@ curl "http://192.168.2.14:8096/cmd?cmd=live"   # forcer le mode HDMI 1 en direct
 ```
 `status.client.tvw` = `src HDMI1 show ok` quand la vidéo est affichée. `status.uptime` = secondes
 depuis le démarrage de la TV (petit = la TV a redémarré à froid).
+
+## 10 bis. Le NanoPi (source HDMI 1, passerelle de Muse)
+
+Information transmise par Muse (agent d'Alexandre), état au 24 oct. 2026 — non vérifié depuis le dépôt :
+
+- **NanoPi M4B** (FriendlyELEC, RK3399, 2 Go), Debian 13, branché en HDMI sur la TV : **c'est la source
+  HDMI 1**. LAN `192.168.2.28`, Tailscale `100.101.68.113`. Le tableau de bord qu'on voit derrière
+  OpenTV en mode direct, c'est lui (`muse-display.service`, `/home/alex/muse-tv-ui/`, `dash.json`).
+- **Muse** (l'assistant IA) y est relié par le Muse Gadget SDK Linux (`/opt/musegadget`,
+  `musegadget.service`, gadget « NanoPi-M4B »). Muse n'a pas de SSH : il agit uniquement par la
+  commande `system.run` du SDK (utilisateur `alex`).
+- **Hermes** (autre agent d'Alexandre) a l'accès SSH (utilisateur `alex`, par Tailscale) pour le travail
+  de fond. Les décisions sensibles restent à Alexandre.
+- **HDMI-CEC** fonctionne depuis le NanoPi (`/dev/cec0`) : veille, réveil, lecture de l'état
+  d'alimentation de la TV. Les touches relayées par CEC (volume, chaînes) sont ignorées par la TV.
+- **Décision d'Alexandre (24 oct.)** : l'intégration Muse ↔ OpenTV passe par le NanoPi. Muse appelle
+  le service d'OpenTV en HTTP sur le LAN (`http://192.168.2.14:8096/status`, `/cmd?cmd=…`), ce qui ne
+  marche que lorsqu'OpenTV est ouvert.
+- **Pistes ouvertes, en attente du feu vert d'Alexandre** :
+  1. API agent dans OpenTV (`/show` pour afficher n'importe quoi, `/open?app=`, `/live`, `/home`) ;
+  2. démarrage auto d'OpenTV depuis le NanoPi (CEC détecte l'allumage → `scripts/autostart.mjs`).
+     Exige que la « Host PC IP » de la TV passe du Mac au NanoPi (`192.168.2.28`) ; les mises à jour
+     passeraient alors par le NanoPi ;
+  3. navigateur moderne : Chromium sur le NanoPi (sortie HDMI 1), piloté par Muse, au lieu d'un
+     navigateur dans OpenTV (qui aurait le Chromium 56 de la TV).
+- Pièges `system.run` : un processus d'arrière-plan meurt à l'expiration de l'appel (utiliser
+  `setsid nohup … < /dev/null &`), `pkill -f` peut se tuer lui-même. Ne pas toucher au rendu du
+  tableau de bord, au réseau, au SDK ni aux services sans l'accord d'Alexandre.
 
 ## 11. Limites connues (testées, ne pas reproposer sans élément nouveau)
 
@@ -272,3 +307,14 @@ depuis le démarrage de la TV (petit = la TV a redémarré à froid).
   l'écran : il envoie des photos et vidéos de la TV, à analyser image par image.
 - Ne jamais toucher au compte Samsung de la TV, ni au menu de service. Pas d'appareil externe.
 - Ne jamais mettre la clé de signature ou son mot de passe dans Git (le dépôt est public).
+
+## 14. Passation à une autre équipe : ce qui n'est PAS dans le dépôt
+
+| Élément | Où | Comment le transmettre |
+|---|---|---|
+| Clé d'auteur `opentv-author.p12` + mot de passe | Mac d'Alexandre : `~/Downloads/Nova-TV-Free/opentv-signing/` | En privé (gestionnaire de mots de passe), **jamais dans Git**. Sans elle, impossible de mettre à jour l'OpenTV installé : il faudrait le désinstaller (préférences perdues) et réinstaller sous une nouvelle clé. |
+| Accès à la TV en mode développeur | TV : Applis → `12345` → Host PC IP | La machine de l'équipe (ou le NanoPi) doit avoir l'IP réglée là, et être sur le même réseau local. |
+| Accès au NanoPi | SSH `alex` par Tailscale (Hermes), Muse par le Gadget SDK | Décision d'Alexandre. |
+| Outils | Tizen Studio CLI 5.6, Java, Python 3 + pexpect, Node, Playwright | Installation décrite dans `scripts/build.py` et §9. |
+
+Tout le reste (code, icône, images, tests, scripts de build et de déploiement, historique) est dans le dépôt.

@@ -3,3 +3,4 @@ node_modules/
 *.p12
 *.password.txt
 native/test/wgt/
+dist/

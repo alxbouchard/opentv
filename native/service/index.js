@@ -16,9 +16,29 @@ var url = require('url');
 var os = require('os');
 
 var PORT = 8096;
-var VERSION = 16;
+var VERSION = 17;
 var REMOTE = { n: 0, cmd: '' };
 var CLIENT = null; // dernier état rapporté par l'écran OpenTV
+
+// ---- démarrage automatique ----
+// Allumage depuis la veille : le service est gelé pendant la veille, son horloge fait un saut au réveil
+// -> on ramène OpenTV au premier plan. Démarrage à froid : si le système vient de booter, idem.
+var APP_ID = 'OpnTV00001.OpenTV';
+var AUTO = { wakes: [], launches: [], bootUptime: Math.round(os.uptime()) };
+function remember(list, item) { list.push(item); if (list.length > 10) list.shift(); }
+function bringUp(reason) {
+  var entry = { reason: reason, at: Date.now(), result: 'pending' };
+  remember(AUTO.launches, entry);
+  try {
+    tizen.application.launch(APP_ID, function () { entry.result = 'ok'; }, function (e) { entry.result = 'err ' + e.name; });
+  } catch (e) { entry.result = 'exc ' + e.message; }
+}
+var lastTick = Date.now();
+setInterval(function () {
+  var now = Date.now(), gap = now - lastTick; lastTick = now;
+  if (gap > 20000) { remember(AUTO.wakes, { at: now, gapMs: gap }); bringUp('wake'); }
+}, 5000);
+if (os.uptime() < 180) setTimeout(function () { bringUp('boot'); }, 1500);
 
 function reply(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -114,7 +134,7 @@ var server = http.createServer(function (req, res) {
     CLIENT = { build: String(q.build || '').slice(0, 40), screen: String(q.screen || '').slice(0, 20), apps: Number(q.apps) || 0, focus: String(q.focus || '').slice(0, 80), live: String(q.live || '').slice(0, 8), tvw: String(q.tvw || '').slice(0, 120), at: Date.now() };
     reply(res, 200, { ok: true });
   } else if (p === '/status') {
-    reply(res, 200, { ok: true, version: VERSION, remote: REMOTE, client: CLIENT, clientAgeMs: CLIENT ? Date.now() - CLIENT.at : null });
+    reply(res, 200, { ok: true, version: VERSION, remote: REMOTE, client: CLIENT, clientAgeMs: CLIENT ? Date.now() - CLIENT.at : null, auto: AUTO, uptime: Math.round(os.uptime()), now: Date.now() });
   } else if (p === '/version') {
     reply(res, 200, { version: VERSION });
   } else if (p === '/shutdown') {

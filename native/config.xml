@@ -19,7 +19,7 @@
     <tizen:privilege name="http://tizen.org/privilege/application.info"/>
     <tizen:privilege name="http://tizen.org/privilege/tv.window"/>
     <tizen:profile name="tv-samsung"/>
-    <tizen:service id="OpnTV00001.OpenTVService">
+    <tizen:service id="OpnTV00001.OpenTVService" auto-restart="true" on-boot="true">
         <tizen:content src="service/index.js"/>
         <tizen:name>OpenTVService</tizen:name>
         <tizen:description>OpenTV launcher service</tizen:description>

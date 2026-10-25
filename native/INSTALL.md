@@ -1,3 +1,5 @@
+> Méthode actuelle : `python3 scripts/build.py` puis `scripts/deploy.sh` — voir `AGENTS.md` §7 et §8.
+
 # OpenTV natif — build, signature, installation
 
 App Tizen autonome « OpenTV » (icône OpenTV). Ne dépend ni de TizenBrew ni de jsDelivr :
