@@ -219,3 +219,8 @@ html.live, html.live body { background: transparent !important; }
 #stage.live #tiles .tile img.logo { max-width: 120px; max-height: 40px; }
 #stage.live #tiles .tile .name { font-size: 17px; bottom: 10px; }
 #stage.live #quick { top: auto; bottom: 85px; right: 80px; white-space: nowrap; }
+
+/* tuile externe (NanoPi / HDMI 1) : badge pour la distinguer d'une appli Tizen */
+.tile .via { position: absolute; top: 10px; left: 12px; font-size: 13px; font-weight: 700; letter-spacing: .5px;
+  padding: 2px 8px; border-radius: 8px; background: rgba(0,0,0,.45); color: rgba(255,255,255,.85); }
+#stage.live #tiles .tile .via { top: 6px; left: 8px; font-size: 11px; }

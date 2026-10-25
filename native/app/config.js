@@ -56,3 +56,10 @@ window.NOVA_LOOK = [
   ["clock",  "Horloge",         [["show", "Afficher"], ["hide", "Masquer"]]],
   ["saver",  "Veille",          [["hdmi", "HDMI 1 en direct"], ["clock", "Horloge"]]]
 ];
+
+/* Applis EXTERNES rendues par le NanoPi sur HDMI 1 (contrat : native/NANOPI-API.md).
+   Ce ne sont PAS des applis Tizen : OpenTV n'envoie que la clé et des touches bornées, jamais d'URL. */
+window.NOVA_NANOPI = window.NOVA_NANOPI || { base: "http://192.168.2.28:8097" };
+window.NOVA_EXTERNAL = window.NOVA_EXTERNAL || [
+  { key: "catalogue", name: "Films", icon: "film", bg: ["#3A2A5C", "#140E24"], glow: "#9B6BFF" }
+];

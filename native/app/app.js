@@ -14,6 +14,10 @@
   var PRESETS = window.NOVA_PRESETS || [];
   var DESIGNS = window.NOVA_DESIGNS || [];
   var LOOK = window.NOVA_LOOK || [];
+  // Applis EXTERNES : rendues par le NanoPi sur HDMI 1 (jamais lancées comme appli Tizen).
+  var NANOPI = window.NOVA_NANOPI || {};
+  var NANOPI_BASE = /^http:\/\/(127\.0\.0\.1|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d{1,5})?$/.test(NANOPI.base || "") ? NANOPI.base : "";
+  var EXTERNAL = NANOPI_BASE ? (window.NOVA_EXTERNAL || []).filter(function (x) { return x && /^[a-z0-9-]{1,24}$/.test(x.key || ""); }) : [];
 
   var DEFAULT_PREFS = {
     bg: { type: "preset", id: "misty-coast" },
@@ -28,6 +32,7 @@
     web: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>',
     app: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg>',
     tv: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/></svg>',
+    film: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16M17 4v16M3 9h4M3 15h4M17 9h4M17 15h4"/></svg>',
     phone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18h2"/></svg>'
   };
   var IMG_TINT = { white: "brightness(0) invert(1)", black: "brightness(0)", none: "none" };
@@ -177,17 +182,18 @@
     }
     return '<span class="ic" style="display:inline-block;width:56px;height:56px;color:#fff">' + (ICONS[app.icon] || ICONS.app) + '</span>';
   }
-  function tileHtml(id, key, extra, off) {
-    var app = appInfo(id);
+  function tileHtml(id, key, extra, off, info) {
+    var app = info || appInfo(id);
     var vars = "--c1:" + app.bg[0] + ";--c2:" + app.bg[1] + ";--glow:" + (app.glow || "#fff") + ";--tfg:" + (app.fg || "#fff");
-    return '<div class="tile focusable glow' + (off ? " off" : "") + '" data-key="' + key + '" data-app="' + esc(id) +
+    return '<div class="tile focusable glow' + (off ? " off" : "") + (info ? " ext" : "") + '" data-key="' + key + '" data-app="' + esc(id) +
+      (info ? '" data-kind="nanopi' : "") +
       '" style="' + vars + '">' + (extra || "") +
       '<div class="logoWrap">' + logoHtml(app) + '</div><div class="name">' + esc(app.name) + '</div></div>';
   }
 
   // ---- lancement ----
   function launch(id) {
-    liveOff();   // la vidéo HDMI ne doit pas rester derrière l'appli lancée
+    liveOff();   // la vidéo HDMI ne doit pas rester derrière l'appli lancée (ferme aussi une session NanoPi)
     // appli native : lancement direct par l'API Tizen de la page
     if (HAS_TIZEN) {
       try {
@@ -251,6 +257,10 @@
     $("tiles").innerHTML = '<div class="grid">' + ids.map(function (id) {
       bind("app-" + id, function () { launch(id); });
       return tileHtml(id, "app-" + id);
+    }).join("") + EXTERNAL.map(function (x) {
+      bind("ext-" + x.key, function () { extSelect(x); });
+      return tileHtml("nanopi:" + x.key, "ext-" + x.key, '<span class="via">HDMI 1</span>', false,
+        { name: x.name, icon: x.icon || "web", bg: x.bg || ["#2A2F3A", "#141820"], glow: x.glow || "#5B8DEF" });
     }).join("") + "</div>";
     keepFocus();
   }
@@ -508,6 +518,7 @@
     });
   }
   function liveFail() {          // pas de vidéo : on revient au menu et à l'horloge pour ne pas laisser un écran noir
+    if (EXT) { extEnd("hdmi", true); toast("HDMI 1 indisponible"); }
     LIVE = ""; setLiveClass(); showSaver();
   }
   // rangée du bas en direct : faire défiler pour garder la tuile sélectionnée visible
@@ -519,17 +530,108 @@
     else if (l < grid.scrollLeft + 6) grid.scrollLeft = Math.max(0, l - 6);
   }
   function livePeek() { LIVE = "peek"; setLiveClass(); restoreFocus("home"); }
-  function liveDown() { LIVE = "full"; setLiveClass(); }
+  function liveDown() { if (EXT) return extFocus("nanopi"); LIVE = "full"; setLiveClass(); }
   function liveOff() {
+    if (EXT) extEnd("live-off", true);
     if (!LIVE) return;
     LIVE = ""; setLiveClass();
     try { tizen.tvwindow.hide(function () {}, function () {}, "MAIN"); } catch (e) {}
+  }
+
+  // ---- appli externe NanoPi (catalogue rendu sur HDMI 1) ----
+  // EXT : "" | "opening" (session demandée) | "on" (HDMI 1 affiché, touches relayées).
+  // EXT_FOCUS : "nanopi" (flèches/OK/Retour -> NanoPi) | "opentv" (rangée OpenTV par-dessus).
+  // Le NanoPi possède le contenu (catalogue, page publique du film) ; OpenTV n'envoie que la clé
+  // de l'appli et des touches bornées, jamais d'URL. Fin (Retour à la racine, fermeture, échec,
+  // inactivité) -> HDMI 1 reste affiché = tableau de bord du NanoPi.
+  var EXT = "", EXT_APP = null, EXT_SESSION = "", EXT_STATE = "", EXT_FOCUS = "", EXT_GEN = 0;
+  var EXT_Q = [], EXT_BUSY = false, EXT_FAILS = 0, EXT_LAST = "";
+  var EXT_KEYS = { up: 1, down: 1, left: 1, right: 1, ok: 1, back: 1 };
+  var EXT_STATES = { starting: 1, catalogue: 1, player: 1, dashboard: 1 };
+  function noop() {}
+  function extSelect(x) {
+    if (EXT && EXT_APP && EXT_APP.key === x.key) return extFocus("nanopi");   // tuile active : retour au contenu
+    if (EXT) extEnd("switch", true);
+    if (!HAS_TVW) { toast("« " + x.name + " » : HDMI 1 indisponible"); return; }
+    if (lookOpen) closeLook(true);
+    if (current() !== "home") goHome();
+    EXT = "opening"; EXT_APP = x; EXT_SESSION = ""; EXT_STATE = "starting"; EXT_FOCUS = "nanopi"; EXT_FAILS = 0;
+    var gen = ++EXT_GEN; report();
+    xhr("POST", NANOPI_BASE + "/v1/session?app=" + encodeURIComponent(x.key), function (ok, d) {
+      if (gen !== EXT_GEN) return;                     // annulé entre-temps
+      if (!ok || !d || d.ok !== true || !/^[A-Za-z0-9_-]{8,64}$/.test(d.session || "") || !EXT_STATES[d.state] || d.state === "dashboard") {
+        extEnd("open-failed", true); toast("« " + x.name + " » indisponible"); return;
+      }
+      EXT = "on"; EXT_SESSION = d.session; EXT_STATE = d.state;
+      liveOn();                                        // HDMI 1 plein écran derrière la page transparente
+    });
+  }
+  function extFocus(f) {
+    if (!EXT) return;
+    EXT_FOCUS = f;
+    if (f === "opentv") { LIVE = "peek"; setLiveClass(); restoreFocus("home"); }
+    else { LIVE = "full"; setLiveClass(); }
+  }
+  function extEnd(reason, tell) {
+    if (!EXT) return;
+    var s = EXT_SESSION, app = EXT_APP;
+    EXT = ""; EXT_SESSION = ""; EXT_STATE = ""; EXT_FOCUS = ""; EXT_APP = null; EXT_GEN++;
+    EXT_Q = []; EXT_BUSY = false; EXT_LAST = reason;
+    if (tell) xhr("POST", NANOPI_BASE + "/v1/close?" + (s ? "session=" + encodeURIComponent(s) : "app=" + encodeURIComponent(app ? app.key : "")) +
+      "&reason=" + encodeURIComponent(reason), noop);
+    if (LIVE) { LIVE = "full"; setLiveClass(); }       // le tableau de bord du NanoPi reste visible
+    else report();
+  }
+  function extResult(ok, d) {
+    if (ok && d && d.ok === true && EXT_STATES[d.state]) {
+      EXT_FAILS = 0;
+      if (d.state === "dashboard" || (d.session && d.session !== EXT_SESSION)) return extEnd("nanopi", false);
+      if (d.state !== EXT_STATE) { EXT_STATE = d.state; report(); }
+      return;
+    }
+    if (d && d.error === "no_session") return extEnd("expired", false);
+    if (++EXT_FAILS >= 3) { extEnd("unreachable", true); toast("NanoPi injoignable"); }
+  }
+  function extSend(k) {
+    if (EXT_Q.length < 4) EXT_Q.push(k);               // borne : pas de rafale si le NanoPi rame
+    extPump();
+  }
+  function extPump() {
+    if (EXT !== "on" || EXT_BUSY || !EXT_Q.length) return;
+    var k = EXT_Q.shift(), gen = EXT_GEN; EXT_BUSY = true;
+    xhr("POST", NANOPI_BASE + "/v1/key?session=" + encodeURIComponent(EXT_SESSION) + "&k=" + k, function (ok, d) {
+      if (gen !== EXT_GEN) return;
+      EXT_BUSY = false; extResult(ok, d); extPump();
+    });
+  }
+  function extPoll() {
+    if (EXT !== "on") return;
+    var gen = EXT_GEN;
+    xhr("GET", NANOPI_BASE + "/v1/health?session=" + encodeURIComponent(EXT_SESSION), function (ok, d) {
+      if (gen === EXT_GEN) extResult(ok, d);
+    });
+  }
+  function extCommand(cmd) {
+    if (cmd === "exit") return extEnd("user", true);                   // -> tableau de bord NanoPi
+    if (cmd === "home") { extEnd("home", true); liveOff(); return goHome(); }  // -> menu OpenTV
+    if (EXT === "opening") { if (cmd === "back") extEnd("cancel", true); return; }
+    if (cmd === "focus") return extFocus(EXT_FOCUS === "nanopi" ? "opentv" : "nanopi");
+    if (EXT_FOCUS === "opentv") {
+      if (cmd === "back") return extFocus("nanopi");
+      if (cmd === "up" || cmd === "down" || cmd === "left" || cmd === "right") return move(cmd);
+      if (cmd === "ok") return select();             // tuile native -> launch() ferme la session
+      return;
+    }
+    if (EXT_KEYS[cmd]) extSend(cmd);
   }
 
   // ---- entrées clavier / télécommande ----
   function command(cmd) {
     idleAt = Date.now();
     if (hideSaver()) return;
+    if (EXT) return extCommand(cmd);
+    if (cmd === "exit") cmd = "back";
+    if (cmd === "focus") return;
     if (cmd === "live") { if (LIVE === "full") return; return liveOn(); }
     if (LIVE === "full") return livePeek();           // 1re touche : le menu remonte par-dessus HDMI 1
     var atHome = current() === "home" && !lookOpen;
@@ -550,7 +652,8 @@
     if (code === 37) return command("left");
     if (code === 39) return command("right");
     if (code === 13) return command("ok");
-    if (code === 10071 || code === 10228) return command("back"); // Exit -> revient à l'accueil
+    if (code === 403) { e.preventDefault(); return command("focus"); }  // touche rouge : focus OpenTV <-> NanoPi
+    if (code === 10071 || code === 10228) return command("exit"); // Exit : ferme le contenu NanoPi, sinon = Retour
   });
 
   // ---- XHR simple ----
@@ -602,12 +705,12 @@
     report();
   }
   // état de l'écran -> service (diagnostic à distance : GET /status)
-  var BUILD = "OpenTV v20 native";
+  var BUILD = "OpenTV v21 native";
   var SVC_VERSION = 17;   // doit égaler VERSION dans service/index.js
   function report() {
     if (!remoteOn) return;
     var k = focusEl ? (focusEl.getAttribute("data-key") || "") : "";
-    xhr("GET", SERVICE + "/report?build=" + encodeURIComponent(BUILD) + "&screen=" + encodeURIComponent(lookOpen ? "look" : current()) +
+    xhr("GET", SERVICE + "/report?build=" + encodeURIComponent(BUILD) + "&screen=" + encodeURIComponent(EXT ? "ext:" + (EXT_FOCUS || "n").charAt(0) + ":" + (EXT === "opening" ? "opening" : EXT_STATE) : (lookOpen ? "look" : current())) +
       "&apps=" + installedIds().length + "&focus=" + encodeURIComponent(k) + "&live=" + LIVE + "&tvw=" + encodeURIComponent(TVW), function () {});
   }
   // liste des applis : API Tizen directe (appli native), sinon le service
@@ -628,6 +731,8 @@
   function boot() {
     applyPrefs();
     tick(); setInterval(tick, 1000);
+    if (EXTERNAL.length) setInterval(extPoll, 2000);
+    try { if (tizen.tvinputdevice) tizen.tvinputdevice.registerKey("ColorF0Red"); } catch (e) {}
     startService();
     listApps(function (ok, data) {
       if (ok && data && data.length) {

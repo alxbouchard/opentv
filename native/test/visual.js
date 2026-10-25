@@ -15,13 +15,13 @@ for (const [name,set] of Object.entries(SETS)) {
  },set);
  await p.goto('http://127.0.0.1:8092/app/index.html');await p.waitForTimeout(3000);
  await p.keyboard.press('Escape');await p.waitForTimeout(900);
- await p.screenshot({path:`/home/claude/e2e/peek-${name}-0-full.png`});
+ await p.screenshot({path:require('path').join(process.env.OPENTV_SHOTS||require('os').tmpdir(),`peek-${name}-0-full.png`)});
  await p.keyboard.press('ArrowRight');await p.waitForTimeout(900);
- await p.screenshot({path:`/home/claude/e2e/peek-${name}-1.png`});
+ await p.screenshot({path:require('path').join(process.env.OPENTV_SHOTS||require('os').tmpdir(),`peek-${name}-1.png`)});
  const n=set.length; for(let i=0;i<n;i++){await p.keyboard.press('ArrowRight');await p.waitForTimeout(250);}
  await p.waitForTimeout(500);
  const vis=await p.evaluate(()=>{const f=document.querySelector('.focused'),t=document.getElementById('tiles').getBoundingClientRect(),r=f.getBoundingClientRect();return {f:f.textContent.trim().slice(0,30),inRow:r.left>=t.left-2&&r.right<=t.right+40,top:Math.round(r.top),bottom:Math.round(r.bottom),hero:getComputedStyle(document.getElementById('hero')).display,clock:getComputedStyle(document.getElementById('clockBox')).display};});
- await p.screenshot({path:`/home/claude/e2e/peek-${name}-2-end.png`});
+ await p.screenshot({path:require('path').join(process.env.OPENTV_SHOTS||require('os').tmpdir(),`peek-${name}-2-end.png`)});
  console.log(name, JSON.stringify(vis), 'erreurs:', errs.length);
  await p.close();}
 await b.close();web.close();})();

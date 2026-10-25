@@ -10,7 +10,7 @@ for(let i=1;i<n;i++){await p.keyboard.press('ArrowRight');await p.waitForTimeout
  const v=await p.evaluate(()=>{const f=document.querySelector('.focused'),t=document.getElementById('tiles').getBoundingClientRect(),r=f.getBoundingClientRect();return {f:f.textContent.trim(),ok:r.left>=t.left-1&&r.right<=t.right+1};});
  if(!v.ok)bad.push(v.f); seq.push(v.f||'(bouton)');}
 const last=await p.evaluate(()=>document.querySelector('.focused').textContent.trim());
-await p.screenshot({path:'/home/claude/e2e/peek-twelve-scrolled.png'});
+await p.screenshot({path:require('path').join(process.env.OPENTV_SHOTS||require('os').tmpdir(),'peek-twelve-scrolled.png')});
 for(let i=1;i<n;i++){await p.keyboard.press('ArrowLeft');await p.waitForTimeout(200);}
 const first=await p.evaluate(()=>{const f=document.querySelector('.focused'),t=document.getElementById('tiles').getBoundingClientRect(),r=f.getBoundingClientRect();return f.textContent.trim()+' visible='+(r.left>=t.left-1);});
 console.log(seq.join(' > '));console.log(n+' tuiles; dernière atteinte: '+last+'; tuiles hors champ pendant le défilement: '+(bad.length?bad.join(','):'aucune')+'; retour au début: '+first);
