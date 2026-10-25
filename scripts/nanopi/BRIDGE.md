@@ -155,12 +155,53 @@ fiches `b/wadrox/<lien>`. Le `data-id` interne est stable (Super Mario 17397) ma
   depuis le magasin brut : `STATE_DIR=… python3 opentv_bridge.py backfill-site-ids current.json`
   (correspondance exacte `link_id`, même hôte, copie `.bak` 0600). Essai sur copie : 196/196 remplis.
 
+## Banc d'essai GPU (`opentv_gpu_trial.py`, manuel, fail-closed)
+
+Le profil de production reste **weston pixman + Chromium `--disable-gpu` 1920x1080** ; le banc ne modifie ni
+`opentv-bridge.env`, ni le pont, ni `muse-display`. État au 25 oct. 2026 : **NO-GO** (noyau constructeur 4.19.232,
+`/dev/mali0` Midgard propriétaire, `renderD128` = rockchip-drm, aucun panfrost). Il faudra un noyau mainline
+avec panfrost (et sans kbase) avant tout essai.
+
+```sh
+install -m 0644 opentv_gpu_trial.py ~/opentv-bridge/       # pas dans install-bridge.sh : outil ponctuel
+python3 -I ~/opentv-bridge/opentv_gpu_trial.py preflight    # JSON ; exit 0 GO, 1 NO-GO
+python3 -I ~/opentv-bridge/opentv_gpu_trial.py run --dry-run          # contrôles + commande, rien n'est lancé
+python3 -I ~/opentv-bridge/opentv_gpu_trial.py run --duration 60 --url chrome://gpu
+```
+
+- **`preflight`** (`--root` pour les tests, lecture seule) exige : noyau ≥ 5.15 ; aucun `/dev/mali*`,
+  `/sys/class/misc/mali0`, module `mali*`/`*kbase*` ; un `renderD*` dont le pilote sysfs (lien `driver` **et**
+  `uevent`) est `panfrost`, avec `/dev/dri/renderD*` caractère 226:N identique au sysfs et lisible/écrivable ;
+  `panfrost_dri.so`, `weston` + `gl-renderer.so`, `chromium`, `systemd-run`, `/run/seatd.sock` ; une sonde EGL
+  (sous-processus, plateforme *device* limitée à ce nœud de rendu, jamais le nœud primaire/maître DRM) dont
+  `GL_RENDERER` contient `Panfrost` (llvmpipe/softpipe refusés). Sortie sans environnement ni secret.
+- **`run`** : préflight GO obligatoire, puis refus (exit 3) si : root, `XDG_RUNTIME_DIR` douteux, verrou déjà
+  pris, gestionnaire `systemctl --user` injoignable, `muse-display` pas `active`/PID mort, pont en transition ou
+  en session (`127.0.0.1:8098/ui/state.json` ≠ `dashboard` ou illisible), tout processus
+  `weston`/`chromium` existant, unité `opentv-gpu-trial-*` déjà chargée, env du pont illisible.
+- Lancement : `systemd-run --user --unit=opentv-gpu-trial-<horodatage>.service --collect`, `Type=exec`,
+  `RuntimeMaxSec=durée+30` (rollback indépendant même si la session SSH tombe), `KillMode=mixed`,
+  `TimeoutStopSec=10` puis SIGKILL, `OOMScoreAdjust=600`, `Restart=no`. Dans l'unité : `weston --backend=drm
+  --renderer=gl --shell=kiosk` (HDMI-A-1 1920x1080) puis Chromium Wayland kiosque **sans `--disable-gpu`**
+  (`--ignore-gpu-blocklist`, profil temporaire, URL limitée à `chrome://gpu`, `about:blank` ou l'UI locale du
+  pont). Durée 10–300 s. Arrêt : Chromium puis Weston (SIGTERM 5 s, puis SIGKILL).
+- Surveillance chaque seconde : PID/`NRestarts`/état de `muse-display` modifiés → arrêt immédiat ; une session du
+  pont qui démarre → arrêt. Nettoyage toujours (succès, échec, Ctrl-C) : `stop`, `kill SIGKILL` de l'unité,
+  puis SIGKILL des seuls PID de son cgroup ; vérification qu'aucun weston/chromium ne reste.
+- Journaux plafonnés dans `$XDG_RUNTIME_DIR/opentv-gpu-trial-<horodatage>/` (weston 256 Kio, chromium 512 Kio,
+  3 essais conservés) + `session.json` (issue, codes, lignes `GL renderer`, erreurs du processus GPU).
+- Codes : 0 essai complet **et** `GL renderer … Panfrost` dans weston sans erreur GPU Chromium ; 1 NO-GO ;
+  2 usage ; 3 refus ; 4 essai échoué/interrompu mais nettoyé ; 5 **alerte** (restes, `muse-display` changé ou
+  env modifié). Un code 0 ne prouve pas l'image : photo d'Alex exigée pendant l'essai **et** après le retour au
+  tableau de bord.
+
 ## Tests (Mac, sans NanoPi ni TV)
 
 ```sh
 python3 -m unittest -v native.test.test_opentv_bridge   # 69 tests, dont Chromium réel headless par CDP
 python3 -m unittest -v native.test.test_opentv_play_assist   # 17 : assistance de lecture, 9 en Chromium réel (iframe d'une autre origine)
 python3 -m unittest -v native.test.test_opentv_tmdb   # 27 : correspondance, budget, panne, atomicité, CLI/secret, UI
+python3 -m unittest -v native.test.test_opentv_gpu_trial   # 68 : banc GPU, mocks seulement (aucun affichage)
 cd native/test && node bridge_e2e.js                     # 17 : vraie page OpenTV v22 ↔ vrai pont (sous-processus)
 ```
 
