@@ -9,7 +9,8 @@ Pré-requis :
       curl -o tizen-installer https://download.tizen.org/sdk/Installer/tizen-studio_5.6/web-cli_Tizen_Studio_5.6_ubuntu-64.bin
       chmod +x tizen-installer && ./tizen-installer --accept-license ~/tizen-studio
     (macOS : web-cli_Tizen_Studio_5.6_macos-64.bin ; chemin du CLI via TIZEN_CLI si différent)
-  - Java (OpenJDK 11+), python3, pexpect (pip install pexpect), openssl (pour la vérification).
+  - Java 8 (le CLI 5.6 utilise JAXB inclus dans Java 8), python3, pexpect (pip install pexpect),
+    openssl (pour la vérification). Java 11+ sans dépendances JAXB échoue pendant `build-web`.
   - La clé d'auteur OpenTV (.p12) et son mot de passe : HORS du dépôt (voir AGENTS.md §7).
     Toutes les mises à jour doivent être signées avec CETTE clé, sinon la TV refuse de remplacer l'appli.
 

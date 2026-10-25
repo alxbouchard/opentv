@@ -316,6 +316,6 @@ Information transmise par Muse (agent d'Alexandre), état au 24 oct. 2026 — no
 | Clé d'auteur `opentv-author.p12` + mot de passe | Mac d'Alexandre : `~/Downloads/Nova-TV-Free/opentv-signing/` | En privé (gestionnaire de mots de passe), **jamais dans Git**. Sans elle, impossible de mettre à jour l'OpenTV installé : il faudrait le désinstaller (préférences perdues) et réinstaller sous une nouvelle clé. |
 | Accès à la TV en mode développeur | TV : Applis → `12345` → Host PC IP | La machine de l'équipe (ou le NanoPi) doit avoir l'IP réglée là, et être sur le même réseau local. |
 | Accès au NanoPi | SSH `alex` par Tailscale (Hermes), Muse par le Gadget SDK | Décision d'Alexandre. |
-| Outils | Tizen Studio CLI 5.6, Java, Python 3 + pexpect, Node, Playwright | Installation décrite dans `scripts/build.py` et §9. |
+| Outils | Tizen Studio CLI 5.6, Java 8 (JAXB), Python 3 + pexpect, Node, Playwright | Installation décrite dans `scripts/build.py` et §9. |
 
 Tout le reste (code, icône, images, tests, scripts de build et de déploiement, historique) est dans le dépôt.
