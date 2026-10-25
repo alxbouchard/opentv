@@ -13,7 +13,7 @@ dash() { systemctl --user show muse-display.service -p ActiveState -p MainPID -p
 python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'
 python3 -I -m py_compile "$SRC/opentv_bridge.py"
 BEFORE="$(dash)"; echo "muse-display before: $BEFORE"
-case "$BEFORE" in active*) ;; *) echo "refuse: muse-display not active; fix the dashboard first" >&2; exit 1;; esac
+printf '%s\n' "$BEFORE" | grep -Eq '(^|[[:space:]])active([[:space:]]|$)' || { echo "refuse: muse-display not active; fix the dashboard first" >&2; exit 1; }
 mkdir -p "$APPDIR" "$UNITDIR"
 for f in opentv_bridge.py opentv_bridge_ui.html; do
   [ -f "$APPDIR/$f" ] && cp -p "$APPDIR/$f" "$APPDIR/$f.prev"

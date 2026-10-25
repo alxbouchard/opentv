@@ -802,6 +802,11 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("muse-display not active", r.stderr)
         self.assertFalse(os.path.exists(os.path.join(home, "opentv-bridge")))
 
+    def test_accepts_real_systemctl_value_order(self):
+        # systemd ne garantit pas l'ordre demandé avec --value; le NanoPi renvoie PID, NRestarts, ActiveState.
+        r, _, _ = self.run_install(dash="765\n0\nactive\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
     def test_dashboard_change_triggers_rollback(self):
         r, calls, home = self.run_install(dash_changes=True)
         self.assertNotEqual(r.returncode, 0)
