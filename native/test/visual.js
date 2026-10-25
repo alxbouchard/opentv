@@ -1,5 +1,5 @@
 const { chromium } = require('playwright'); const http=require('http'),fs=require('fs'),path=require('path');
-const ROOT=path.join(__dirname,'wgt'); const mime={'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.jpg':'image/jpeg','.png':'image/png'};
+const ROOT=path.join(__dirname, 'wgt'); const mime={'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.jpg':'image/jpeg','.png':'image/png'};
 const web=http.createServer((q,r)=>{const f=path.join(ROOT,decodeURIComponent(q.url.split('?')[0]));fs.readFile(f,(e,d)=>{if(e){r.writeHead(404);return r.end();}r.writeHead(200,{'Content-Type':mime[path.extname(f)]||'x'});r.end(d);});}).listen(8092);
 const SETS={six:[['org.tizen.netflix-app','Netflix'],['com.samsung.tv.cobalt-yt','YouTube'],['evKhCgZelL.AmazonIgnitionLauncher2','Prime Video'],['rJeHak5zRg.Spotify','Spotify'],['org.tizen.channel-list','Live TV'],['org.tizen.browser','Internet']],
  twelve:[['n','Netflix'],['y','YouTube'],['p','Prime Video'],['d','Disney+'],['a','Apple TV'],['s','Spotify'],['x','Plex'],['t','Tubi'],['c','Crunchyroll'],['pp','Paramount+'],['am','Apple Music'],['org.tizen.browser','Internet']]};

@@ -1,5 +1,5 @@
 const { chromium } = require('playwright'); const http=require('http'),fs=require('fs'),path=require('path');
-const ROOT=path.join(__dirname,'wgt'); const mime={'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.jpg':'image/jpeg','.png':'image/png'};
+const ROOT=path.join(__dirname, 'wgt'); const mime={'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.jpg':'image/jpeg','.png':'image/png'};
 const web=http.createServer((q,r)=>{const f=path.join(ROOT,decodeURIComponent(q.url.split('?')[0]));fs.readFile(f,(e,d)=>{if(e){r.writeHead(404);return r.end();}r.writeHead(200,{'Content-Type':mime[path.extname(f)]||'x'});r.end(d);});}).listen(8091);
 (async()=>{const b=await chromium.launch();const p=await b.newPage({viewport:{width:1920,height:1080}});
 await p.addInitScript(()=>{const A=[['n','Netflix'],['y','YouTube'],['p','Prime Video'],['d','Disney+'],['a','Apple TV'],['s','Spotify'],['x','Plex'],['t','Tubi'],['c','Crunchyroll'],['pp','Paramount+'],['am','Apple Music'],['org.tizen.browser','Internet']].map(x=>({id:x[0],name:x[1],show:true}));
