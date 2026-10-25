@@ -287,7 +287,7 @@ class Harness:
     def __init__(self, n_items=14, env=None, resolver=None, factory=None, clock=None):
         self.d = tempfile.mkdtemp()
         e = {"STATE_DIR": self.d, "ALLOW_IPS": "127.0.0.1", "DASHBOARD_UNIT": "", "APPS": "catalogue,docs",
-             "UI_PORT": "0", "COLS": "6"}
+             "UI_PORT": "0", "COLS": "6", "SOURCE_APPROVED": "1"}
         e.update(env or {})
         self.cfg = B.Config(e)
         write_catalogue(self.cfg.catalogue_file, n_items)
@@ -343,6 +343,15 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(code, 200, b)
         self.assertTrue(self.h.wait_state("catalogue"))
         return b["session"]
+
+    def test_source_requires_explicit_owner_gate(self):
+        h = Harness(env={"SOURCE_APPROVED": "0"})
+        try:
+            code, body, _ = h.req("POST", "/v1/session?app=catalogue")
+            self.assertEqual((code, body.get("error")), (503, "source_unapproved"))
+            self.assertIsNone(h.ctl.s)
+        finally:
+            h.close()
 
     def key(self, s, k):
         return self.h.req("POST", "/v1/key?session=%s&k=%s" % (s, k))
@@ -815,7 +824,8 @@ class ServeSmokeTests(unittest.TestCase):
         B.atomic_write_json(os.path.join(d, "prefix.json"), {"prefix": "aab2ae3", "discovered_at": time.time(),
                                                             "validated_at": time.time(), "listing_path": "/aab2ae3/home/fakrov"})
         env = dict(os.environ, STATE_DIR=d, PORT=str(port), UI_PORT=str(ui_port), BIND="127.0.0.1",
-                   ALLOW_IPS="127.0.0.1", DISPLAY_BACKEND="null", CATALOGUE_REFRESH_S="0", DASHBOARD_UNIT="")
+                   ALLOW_IPS="127.0.0.1", DISPLAY_BACKEND="null", SOURCE_APPROVED="1",
+                   CATALOGUE_REFRESH_S="0", DASHBOARD_UNIT="")
         p = subprocess.Popen([sys.executable, "-I", SRC, "serve"], env=env, stdout=subprocess.PIPE, text=True)
         try:
             base = "http://127.0.0.1:%d" % port

@@ -20,7 +20,7 @@ for f in opentv_bridge.py opentv_bridge_ui.html; do
   install -m 0644 "$SRC/$f" "$APPDIR/$f"
 done
 install -m 0644 "$SRC/opentv-bridge.service" "$UNITDIR/$UNIT"
-[ -f "$CONF" ] || printf 'DISPLAY_BACKEND=off\nALLOW_IPS=192.168.2.14\nPORT=8097\nUI_PORT=8098\nSITE_ROOT=https://fakrov.com/\nOUTPUT_MODE=1920x1080\nOUTPUT_NAME=HDMI-A-1\nCATALOGUE_IDLE_S=300\nPLAYER_MAX_S=14400\nHEARTBEAT_S=30\n' > "$CONF"
+[ -f "$CONF" ] || printf 'DISPLAY_BACKEND=off\nSOURCE_APPROVED=0\nALLOW_IPS=192.168.2.14\nPORT=8097\nUI_PORT=8098\nSITE_ROOT=https://fakrov.com/\nOUTPUT_MODE=1920x1080\nOUTPUT_NAME=HDMI-A-1\nCATALOGUE_REFRESH_S=0\nCATALOGUE_IDLE_S=300\nPLAYER_MAX_S=14400\nHEARTBEAT_S=30\n' > "$CONF"
 chmod 0600 "$CONF"
 if command -v systemd-analyze >/dev/null; then systemd-analyze --user verify "$UNITDIR/$UNIT"; fi
 systemctl --user daemon-reload

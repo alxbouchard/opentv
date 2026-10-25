@@ -77,6 +77,9 @@ class Config:
         self.state_dir = env.get("STATE_DIR") or os.path.join(home, ".local/state/opentv-bridge")
         self.catalogue_file = env.get("CATALOGUE_FILE") or os.path.join(self.state_dir, "catalogue.json")
         self.site_root = env.get("SITE_ROOT", "https://fakrov.com/")
+        # Gate humain explicite : l'installation et un simple changement de backend ne doivent jamais
+        # activer par accident une source externe dont l'autorisation n'a pas été confirmée.
+        self.source_approved = env.get("SOURCE_APPROVED", "0") == "1"
         self.detail_re = re.compile(env.get("DETAIL_RE", r"^b/fakrov/[0-9]{1,12}$"))
         self.apps = frozenset(x for x in env.get("APPS", "catalogue").split(",") if APP_RE.match(x))
         self.cols = _num(env, "COLS", 6, int)
@@ -87,7 +90,9 @@ class Config:
         self.prefix_ttl_s = _num(env, "PREFIX_TTL_S", 6 * 3600.0)
         self.prefix_grace_s = _num(env, "PREFIX_GRACE_S", 24 * 3600.0)
         self.fetch_timeout_s = _num(env, "FETCH_TIMEOUT_S", 4.0)
-        self.catalogue_refresh_s = _num(env, "CATALOGUE_REFRESH_S", 6 * 3600.0)
+        # Pas de robot en arrière-plan par défaut. Un rafraîchissement périodique exige à la fois
+        # SOURCE_APPROVED=1 et une valeur > 0 explicitement configurée.
+        self.catalogue_refresh_s = _num(env, "CATALOGUE_REFRESH_S", 0.0)
         self.display = env.get("DISPLAY_BACKEND", "chromium")   # chromium | off | null (tests)
         if self.display not in ("chromium", "off", "null"):
             raise SystemExit("config: DISPLAY_BACKEND invalide")
@@ -759,6 +764,8 @@ class Controller:
             raise ApiError(404, "unknown_app")
         if self.factory is None:   # DISPLAY_BACKEND=off : API vivante, affichage non installé/validé
             raise ApiError(503, "display_unavailable")
+        if not self.cfg.source_approved:
+            raise ApiError(503, "source_unapproved")
         with self.lock:
             s = self.s
             if s and s["app"] == app:
@@ -1145,7 +1152,7 @@ def serve(cfg):
 
     signal.signal(signal.SIGTERM, on_term)
     signal.signal(signal.SIGINT, on_term)
-    for fn in (watchdog, ui.serve_forever) + ((refresher,) if cfg.catalogue_refresh_s > 0 else ()):
+    for fn in (watchdog, ui.serve_forever) + ((refresher,) if cfg.source_approved and cfg.catalogue_refresh_s > 0 else ()):
         threading.Thread(target=fn, daemon=True).start()
     log("start", port=cfg.port, ui_port=cfg.ui_port, display=cfg.display, allow=sorted(cfg.allow_ips))
     api.serve_forever(poll_interval=0.5)
@@ -1159,6 +1166,8 @@ def main(argv):
     if cmd == "serve":
         serve(cfg)
     elif cmd == "refresh-catalogue":
+        if not cfg.source_approved:
+            raise SystemExit("source non approuvée: définir SOURCE_APPROVED=1 après validation humaine")
         r = Resolver(cfg.site_root, os.path.join(cfg.state_dir, "prefix.json"), ttl=cfg.prefix_ttl_s,
                      grace=cfg.prefix_grace_s, timeout=cfg.fetch_timeout_s)
         print(len(refresh_catalogue(cfg, r)))

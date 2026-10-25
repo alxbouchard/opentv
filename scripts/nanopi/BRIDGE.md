@@ -66,9 +66,12 @@ cd native/test && node bridge_e2e.js                     # 17 : vraie page OpenT
    `alex` est déjà dans `video`/`render`/`input`. Aucun autre service système touché.
 2. `./install-bridge.sh` → service en `DISPLAY_BACKEND=off` ; contrôle lecture seule que `muse-display`
    (état, PID, redémarrages) est identique avant/après, sinon retour arrière automatique.
-3. Essai terrain manuel du compositeur **sans OpenTV**, TV allumée sur HDMI 1, photo à chaque étape :
+3. L'installation garde `SOURCE_APPROVED=0` et `CATALOGUE_REFRESH_S=0` : aucune collecte ni ouverture de
+   source externe n'est alors possible, même si le backend d'affichage est changé par erreur. Ne mettre
+   `SOURCE_APPROVED=1` qu'après confirmation humaine que la source et son mode d'accès sont autorisés.
+4. Essai terrain manuel du compositeur **sans OpenTV**, TV allumée sur HDMI 1, photo à chaque étape :
    lancer weston+chromium 30 s, les arrêter ; exiger le tableau de bord intact (même PID `dashlive.py`).
-4. Passer `DISPLAY_BACKEND=chromium`, redémarrer le service, puis parcours complet depuis la TV.
-5. Livrer OpenTV v21 (build/signature/installation via le chemin NanoPi validé), `/status`, confirmation d'Alex.
+5. Passer `DISPLAY_BACKEND=chromium`, redémarrer le service, puis parcours complet depuis la TV.
+6. Livrer OpenTV v21 (build/signature/installation via le chemin NanoPi validé), `/status`, confirmation d'Alex.
 
 Retour arrière : `./rollback-bridge.sh` (ne retire que ce service).

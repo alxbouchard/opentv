@@ -18,7 +18,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   fs.writeFileSync(path.join(state, 'catalogue.json'), JSON.stringify({ items: Array.from({ length: 14 }, (_, i) => ({ title: 'Film ' + i, detail_path: 'b/fakrov/' + (1000 + i) })) }));
   let lines = [], bridge;
   const start = () => {
-    bridge = spawn('python3', ['-I', BRIDGE, 'serve'], { env: Object.assign({}, process.env, { STATE_DIR: state, PORT: String(port), UI_PORT: String(uiPort), BIND: '127.0.0.1', ALLOW_IPS: '127.0.0.1', DISPLAY_BACKEND: 'null', CATALOGUE_REFRESH_S: '0', DASHBOARD_UNIT: '', CATALOGUE_IDLE_S: '6', HEARTBEAT_S: '5' }) });
+    bridge = spawn('python3', ['-I', BRIDGE, 'serve'], { env: Object.assign({}, process.env, { STATE_DIR: state, PORT: String(port), UI_PORT: String(uiPort), BIND: '127.0.0.1', ALLOW_IPS: '127.0.0.1', DISPLAY_BACKEND: 'null', SOURCE_APPROVED: '1', CATALOGUE_REFRESH_S: '0', DASHBOARD_UNIT: '', CATALOGUE_IDLE_S: '6', HEARTBEAT_S: '5' }) });
     bridge.stdout.on('data', d => String(d).split('\n').filter(Boolean).forEach(l => { try { lines.push(JSON.parse(l)); } catch (e) {} }));
     return sleep(800);
   };
