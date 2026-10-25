@@ -34,9 +34,11 @@
   .card .ph { position:absolute; inset:0; display:flex; align-items:flex-end; padding:16px;
     font-size:22px; font-weight:700; background:linear-gradient(160deg,#2a2f45,#121522); }
   .card.on { transform:scale(1.08); z-index:2; box-shadow:0 0 0 5px var(--acc), 0 18px 48px rgba(155,107,255,.45); }
-  #help { position:absolute; left:96px; right:96px; bottom:30px; font-size:22px; color:var(--mut);
-    display:flex; gap:40px; }
+  #help { position:absolute; left:96px; right:620px; bottom:30px; font-size:22px; color:var(--mut);
+    display:flex; gap:40px; white-space:nowrap; }
   #help b { color:var(--fg); }
+  #credit { position:absolute; right:96px; bottom:32px; max-width:500px; text-align:right;
+    font-size:15px; color:#747b91; }
   #empty { position:absolute; left:0; right:0; top:560px; text-align:center; font-size:32px; color:var(--mut); display:none; }
   #msg { position:absolute; left:50%; bottom:110px; transform:translateX(-50%); padding:14px 28px;
     border-radius:12px; background:rgba(255,80,80,.18); color:#ffd0d0; font-size:24px; display:none; }
@@ -53,6 +55,7 @@
 <div id="empty">Catalogue vide ou indisponible</div>
 <div id="msg"></div>
 <div id="help"><span><b>◀ ▲ ▼ ▶</b> parcourir</span><span><b>OK</b> ouvrir la page du film</span><span><b>Retour</b> tableau de bord</span></div>
+<div id="credit">Information courtesy of IMDb (https://www.imdb.com). Used with permission.</div>
 <script>
 // Vue passive : l'état (curseur, état de session) appartient au pont Python, qui pousse update()
 // par CDP ; un sondage /ui/state.json sert de filet. Aucune donnée n'est insérée comme HTML.
