@@ -590,17 +590,33 @@ class ChromiumKiosk:
             env["WAYLAND_DISPLAY"] = sock
         if self.closed.is_set():
             raise CDPError("cancelled")
-        # tubes CDP : le navigateur lit fd 3 et écrit fd 4
-        c_r, p_w = os.pipe()
-        p_r, c_w = os.pipe()
-        argv = ["/bin/sh", "-c", 'exec "$0" "$@" 3<&%d 4>&%d %d<&- %d>&-' % (c_r, c_w, c_r, c_w)]
-        argv += cfg.browser_cmd + cfg.browser_flags + [
-            "--user-data-dir=" + self.profile, "--remote-debugging-pipe", "about:blank"]
+        # Chromium exige ses tubes CDP sur fd 3/4. Réserver ces numéros avant os.pipe : sur un
+        # processus Linux minimal ils sont libres, c_r devient alors 3 et l'ancien shell faisait
+        # `3<&3 3<&-`, fermant aussitôt le tube. Les tests macOS avaient d'autres fd déjà ouverts.
+        reserved = []
         try:
-            self.browser = self._spawn(argv, env, pass_fds=(c_r, c_w))
+            for target in (3, 4):
+                try:
+                    os.fstat(target)
+                except OSError:
+                    fd = os.open(os.devnull, os.O_RDWR)
+                    if fd != target:
+                        os.close(fd)
+                        raise CDPError("fd_reserve")
+                    reserved.append(fd)
+            c_r, p_w = os.pipe()
+            p_r, c_w = os.pipe()
+            argv = ["/bin/sh", "-c", 'exec "$0" "$@" 3<&%d 4>&%d %d<&- %d>&-' % (c_r, c_w, c_r, c_w)]
+            argv += cfg.browser_cmd + cfg.browser_flags + [
+                "--user-data-dir=" + self.profile, "--remote-debugging-pipe", "about:blank"]
+            try:
+                self.browser = self._spawn(argv, env, pass_fds=(c_r, c_w))
+            finally:
+                os.close(c_r)
+                os.close(c_w)
         finally:
-            os.close(c_r)
-            os.close(c_w)
+            for fd in reserved:
+                os.close(fd)
         self.cdp = CDP(p_w, p_r, self._event)
         end = time.monotonic() + 20
         while True:   # attendre la première page
