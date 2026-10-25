@@ -178,6 +178,17 @@ class ResolverTests(unittest.TestCase):
         with quiet(), self.assertRaises(B.DiscoveryFailed):
             r.current()
 
+    def test_refresh_lock_wait_respects_total_budget(self):
+        r = self.R(FakeSite(fakrov_routes()))
+        r.lock.acquire()
+        try:
+            started = time.monotonic()
+            with self.assertRaisesRegex(B.DiscoveryFailed, "busy"):
+                r.refresh(budget=0.05)
+            self.assertLess(time.monotonic() - started, 0.25)
+        finally:
+            r.lock.release()
+
     def test_corrupt_cache_ignored(self):
         with open(self.cache, "w") as f:
             f.write('{"prefix": "../../etc", "validated_at": 5}')
@@ -1167,23 +1178,42 @@ class RouteMapTests(unittest.TestCase):
         pages = [([{"id": str(100 + i), "link": "/99c7f65/b/wadrox/%d" % (900 + i)}], True) for i in range(10)]
         site = self.r.fetch = FakeSite(wadrox_routes(api=pages))
         m, ep = self.M(max_pages=3), self.r.epoch()
-        self.assertEqual(m.resolve(ep, "4242", time.monotonic() + 5), ("absent", None))
+        self.assertEqual(m.resolve(ep, "4242", time.monotonic() + 5), ("unknown", None))
         self.assertEqual(len([u for u in site.log if "api_films" in u]), 3)
         self.assertIn("route_page_cap", self.out.getvalue())
-        # erreur transitoire : non conclusif, réessai plus tard ; JSON invalide : conclusif
+        # Toute erreur de transport/HTTP/format reste inconclusive et peut être retentée plus tard.
         routes = wadrox_routes()
         routes[api_url(0)] = B.FetchError("timeout")
         site = self.r.fetch = FakeSite(routes)
         m2 = B.RouteMap(self.r, os.path.join(self.d, "r2.json"))
         self.assertEqual(m2.resolve(ep, "4242", time.monotonic() + 5), ("unknown", None))
         site.routes[api_url(0)] = (200, JSONH, b"{not json")
-        self.assertEqual(m2.resolve(ep, "4242", time.monotonic() + 5), ("absent", None))
+        self.assertEqual(m2.resolve(ep, "4242", time.monotonic() + 5), ("unknown", None))
         site.routes[api_url(0)] = (200, HTML, api_body([], False))
         m3 = B.RouteMap(self.r, os.path.join(self.d, "r3.json"))
-        self.assertEqual(m3.resolve(ep, "4242", time.monotonic() + 5), ("absent", None))
+        self.assertEqual(m3.resolve(ep, "4242", time.monotonic() + 5), ("unknown", None))
+        routes = wadrox_routes()
+        routes[api_url(0)] = (429, HTML, b"rate limited")
+        m4 = B.RouteMap(self.r, os.path.join(self.d, "r4.json"))
+        self.r.fetch = FakeSite(routes)
+        self.assertEqual(m4.resolve(ep, "4242", time.monotonic() + 5), ("unknown", None))
         # nouvelle époque : table remise à zéro (aucun chemin d'une ancienne époque réutilisé)
         ep2 = dict(ep, prefix="abc1234", key="wadrox.com/abc1234/wadrox")
         self.assertEqual(m.peek(ep2, "100"), ("unknown", None))
+
+    def test_transient_listing_failure_retries_listing(self):
+        ep = self.r.epoch()
+        routes = wadrox_routes()
+        listing = "https://wadrox.com/99c7f65/home/wadrox"
+        routes[listing] = B.FetchError("timeout")
+        site = self.r.fetch = FakeSite(routes)
+        m = self.M()
+        self.assertEqual(m.resolve(ep, MARIO_SID, time.monotonic() + 5), ("unknown", None))
+        self.assertFalse(m.state["listing_done"])
+        site.routes[listing] = (200, HTML, wad_listing())
+        self.assertEqual(m.resolve(ep, MARIO_SID, time.monotonic() + 5),
+                         ("found", "b/wadrox/" + MARIO_NEW))
+        self.assertEqual(site.log.count(listing), 2)
 
 
 # ----------------------------------------------------------------------------- catalogue hérité + lecteur après migration
@@ -1253,6 +1283,12 @@ class MigratedPlayerTests(unittest.TestCase):
             n = len(site.log)
             s = h.ctl.open("catalogue")
             self.assertTrue(h.wait_state("catalogue") and s["prep"].wait(5))
+            # Même si une table complète/cappée ne contient pas cet id, le chemin du catalogue est déjà
+            # celui de l'époque courante : il reste directement valide.
+            resolver = h.resolver
+            assert resolver is not None
+            h.ctl.router.state = h.ctl.router._fresh(resolver.epoch()["key"])
+            h.ctl.router.state["exhausted"] = True
             self.assertEqual(h.ctl.key(s["id"], "ok"), "player")
             self.assertEqual(h.displays[0].calls[-1], ("navigate", "https://fakrov.com/aab2ae3/b/fakrov/" + MARIO_OLD))
             self.assertEqual(len(site.log), n)

@@ -100,7 +100,8 @@ class Config:
         # Ouverture de session : revalidation (rotation/migration) si la dernière date de plus de SESSION_CHECK_S.
         self.session_check_s = _num(env, "SESSION_CHECK_S", 300.0)
         # Moniteur d'adresse/routage en arrière-plan (racine de confiance seulement ; 0 = désactivé).
-        # N'interroge ni catalogue ni IMDb ; exige aussi SOURCE_APPROVED=1. Minimum 300 s.
+        # Ne régénère pas catalogue.json et n'interroge jamais IMDb ; il peut lire le listing et l'API
+        # publique de routage. Exige aussi SOURCE_APPROVED=1. Minimum 300 s.
         self.routing_refresh_s = _num(env, "ROUTING_REFRESH_S", 0.0)
         if 0 < self.routing_refresh_s < 300:
             raise SystemExit("config: ROUTING_REFRESH_S doit valoir 0 ou >= 300")
@@ -434,7 +435,8 @@ class Resolver:
         host = (u.hostname or "").lower()
         if u.scheme != "https" or u.netloc.lower() != host or u.path not in ("", "/") or u.query or u.fragment:
             return None   # http (déclassement), identifiants, port, chemin, requête : refusés
-        if host == cur_host or not valid_public_host(host) or host not in text:
+        named = re.search(r"(?<![a-z0-9.-])%s(?![a-z0-9.-])" % re.escape(host), text)
+        if host == cur_host or not valid_public_host(host) or not named:
             return None
         return host
 
@@ -535,15 +537,21 @@ class Resolver:
     def refresh(self, budget=None, min_age=None, blocking=True):
         """Revalide l'époque courante (détecte rotation de préfixe et migration annoncée). Lève DiscoveryFailed.
         blocking=False : vol unique — renvoie None sans rien faire si un rafraîchissement est déjà en cours."""
-        if not self.lock.acquire(blocking):
+        started = time.monotonic()
+        if blocking:
+            wait = budget if budget is not None else 3 * self.timeout + 2
+            if not self.lock.acquire(timeout=max(0.0, wait)):
+                raise DiscoveryFailed("busy")
+        elif not self.lock.acquire(False):
             return None
         try:
-            return self._refresh_locked(budget, min_age)
+            left = None if budget is None else max(0.0, budget - (time.monotonic() - started))
+            return self._refresh_locked(left, min_age)
         finally:
             self.lock.release()
 
     def _refresh_locked(self, budget, min_age):
-        deadline = time.monotonic() + (budget if budget else 3 * self.timeout + 2)
+        deadline = time.monotonic() + (budget if budget is not None else 3 * self.timeout + 2)
         c = self.cache
         now = self.clock()
         if min_age is not None and c and now - c["checked_at"] < min_age:
@@ -594,8 +602,8 @@ class Resolver:
 class RouteMap:
     """Table bornée site_id (data-id interne stable) -> chemin de fiche de l'époque courante.
 
-    Construite seulement à la demande d'une session utilisateur, à partir de la page de liste validée puis,
-    si nécessaire, des pages successives de l'API publique du site (api_films.php). Aucun calcul d'identifiant :
+    Construite à la demande d'une session utilisateur ou du moniteur de routage, à partir de la page de liste
+    validée puis, si nécessaire, des pages successives de l'API publique du site (api_films.php). Aucun calcul :
     seul un couple (id, lien) publié par le site et revalidé (même hôte, /<p>/b/<jeton>/<n>) est retenu ;
     un site_id ou un chemin revendiqué deux fois est écarté. Remise à zéro à chaque changement d'époque.
     """
@@ -687,9 +695,9 @@ class RouteMap:
         return body
 
     def _listing_step(self, ep, st, deadline):
-        st["listing_done"] = True
-        c = self.r.cache
-        url = ep["origin"] + (c["listing_path"] if c else "/%s/" % ep["prefix"])
+        # Le chemin appartient à l'époque fournie, pas au cache mutable du resolver. Ne marquer l'étape
+        # terminée qu'après une réponse valide : un timeout doit permettre de relire le listing au prochain essai.
+        url = "%s/%s/home/%s" % (ep["origin"], ep["prefix"], ep["token"])
         body = self._get(url, deadline, False)
         cards = _Cards(4000)
         try:
@@ -698,6 +706,7 @@ class RouteMap:
             pass
         pairs = [(x["site_id"], self._rel(ep, x["href"])) for x in cards.items if x.get("site_id")]
         self._ingest(st, [(a, b) for a, b in pairs if b])
+        st["listing_done"] = True
 
     def _api_step(self, ep, st, deadline):
         q = urllib.parse.urlencode([("offset", st["offset"]), ("limit", self.page_size), ("folder", ep["prefix"]),
@@ -747,18 +756,16 @@ class RouteMap:
                     if step == "listing":
                         self._listing_step(ep, st, deadline)
                     elif st["pages"] >= self.max_pages:
-                        st["exhausted"] = True
                         log("route_page_cap", pages=st["pages"])
+                        break   # borne atteinte : inconclusif, jamais « absent »
                     else:
                         self._api_step(ep, st, deadline)
                 except DiscoveryFailed as e:
                     why = str(e)
-                    transient = why == "timeout" or why.startswith("fetch:") or why.startswith("route_status_5")
-                    log("route_fetch_failed", step=step, why=why, transient=transient)
-                    if transient:
-                        break   # réessai à la prochaine demande utilisateur / tick du moniteur
-                    if step == "api":
-                        st["exhausted"] = True   # API changée/refusée : conclusif (Page indisponible)
+                    # Une erreur HTTP (403/429 inclus), de type ou de JSON peut être transitoire. Seul un
+                    # document JSON valide avec hasMore=false permet de conclure qu'un identifiant est absent.
+                    log("route_fetch_failed", step=step, why=why, transient=True)
+                    break   # réessai à la prochaine demande utilisateur / tick du moniteur
             if dirty:
                 self._save()
             return st
@@ -1449,7 +1456,7 @@ class Controller:
                            else self.router.resolve(ep, sid, deadline))
             if kind == "found":
                 rel = found
-            elif kind == "absent":
+            elif kind == "absent" and not direct:
                 raise ApiError(404, "unmapped")   # retiré du site ou ambigu : Page indisponible
         if rel is None:
             if not direct:
@@ -1863,9 +1870,9 @@ def serve(cfg):
     log("start", port=cfg.port, ui_port=cfg.ui_port, display=cfg.display, allow=sorted(cfg.allow_ips),
         routing_refresh_s=cfg.routing_refresh_s if monitor else 0)
     api.serve_forever(poll_interval=0.5)
+    ctl.shutdown()
     if monitor is not None:
         monitor.shutdown()
-    ctl.shutdown()
     log("stop")
 
 
