@@ -55,7 +55,8 @@ scripts/
   deploy.sh          envoi + install + relance + vérification (à lancer là où sdb atteint la TV)
   install.mjs        envoi du .wgt sur la TV (protocole sync de sdb, en JS pur)
   sdb.mjs            exécute des commandes « shell: » sdb (en JS pur)
-  autostart.mjs      lance OpenTV à l'allumage depuis un appareil externe (refusé par Alexandre, voir §11)
+  autostart.mjs      ancien prototype Node d'autostart (ne pas déployer sur le NanoPi)
+  nanopi/            autostart Python supervisé, installation, tests et retour arrière
 app/ service.js package.json README.md   ancien module TizenBrew (historique)
 ```
 
@@ -197,7 +198,7 @@ Claude, on passe par le pont vers le Mac : une VM Linux (sous-réseau NAT `172.1
 TV ; le dossier connecté `~/Downloads/Nova-TV-Free` y apparaît dans `~/mnt/Nova-TV-Free`.
 
 ```sh
-scripts/deploy.sh 192.168.2.14 OpenTV.wgt
+scripts/deploy.sh 192.168.2.14 dist/OpenTV.wgt
 ```
 1. `install.mjs` pousse le `.wgt` dans `/home/owner/share/tmp/sdk_tools/OpenTV.wgt` (sync sdb) ;
 2. `0 vd_appinstall OpnTV00001 <chemin>` → attendre `install completed` et `cmd_ret:0` ;
@@ -219,6 +220,7 @@ Décompresser le `.wgt` livré dans `native/test/wgt/`, puis lancer depuis `nati
 | `animcheck.js` | la rangée monte **uniquement depuis le bas**, la page ne défile jamais (Chromium moderne + comportement Chromium 56 simulé) |
 | `scroll.js` / `visual.js` | défilement de la rangée avec 12 applis ; captures avec une fausse image HDMI |
 | `faketv.mjs` | fausse TV (port sdb + service) pour tester `autostart.mjs` |
+| `test_opentv_autostart.py` | 43 tests stdlib du démon Python NanoPi : SDB fragmenté, cycles, délais, reprises, CEC, journaux, installation et rollback |
 
 Les tests remplacent l'API `tizen` par une maquette (`addInitScript`). Ils ne remplacent pas la TV :
 après chaque livraison, vérifier `/status` sur la vraie TV, et faire confirmer l'écran par Alexandre
@@ -251,11 +253,11 @@ Information transmise par Muse (agent d'Alexandre), état au 24 oct. 2026 — no
 - **Décision d'Alexandre (24 oct.)** : l'intégration Muse ↔ OpenTV passe par le NanoPi. Muse appelle
   le service d'OpenTV en HTTP sur le LAN (`http://192.168.2.14:8096/status`, `/cmd?cmd=…`), ce qui ne
   marche que lorsqu'OpenTV est ouvert.
-- **Pistes ouvertes, en attente du feu vert d'Alexandre** :
+- **Pistes et décisions** :
   1. API agent dans OpenTV (`/show` pour afficher n'importe quoi, `/open?app=`, `/live`, `/home`) ;
-  2. démarrage auto d'OpenTV depuis le NanoPi (CEC détecte l'allumage → `scripts/autostart.mjs`).
-     Exige que la « Host PC IP » de la TV passe du Mac au NanoPi (`192.168.2.28`) ; les mises à jour
-     passeraient alors par le NanoPi ;
+  2. démarrage auto d'OpenTV depuis le NanoPi : **autorisé le 25 oct. 2026**. La Host PC IP a été
+     changée par Alexandre vers `192.168.2.28` et la poignée de main SDB puis le lancement manuel
+     d'OpenTV v20/service v17 ont été vérifiés. Utiliser uniquement `scripts/nanopi/` ;
   3. navigateur moderne : Chromium sur le NanoPi (sortie HDMI 1), piloté par Muse, au lieu d'un
      navigateur dans OpenTV (qui aurait le Chromium 56 de la TV).
 - Pièges `system.run` : un processus d'arrière-plan meurt à l'expiration de l'appel (utiliser
@@ -280,9 +282,8 @@ Information transmise par Muse (agent d'Alexandre), état au 24 oct. 2026 — no
   - « Power On with Mobile » activé : aucun effet.
   - SmartThings (`custom.launchapp` → `launchApp`) : bloqué, la TV est sur le compte Samsung de
     quelqu'un d'autre, et en changer impose une réinitialisation (refusé).
-  - Appareil externe qui lance OpenTV par sdb (`scripts/autostart.mjs`, prêt et testé contre une
-    fausse TV) : **refusé par Alexandre** (« je veux pas de device externe »).
-  - Contournement retenu : épingler OpenTV en premier dans la barre Samsung (Home → OK).
+  - Le lancement SDB par le **NanoPi existant** est maintenant autorisé ; aucun nouvel appareil.
+    Le raccourci OpenTV épinglé dans Home reste le retour arrière.
 - **TizenBrew** : avec Host PC IP ≠ `127.0.0.1`, TizenBrew ne peut plus lancer ses modules. OpenTV
   natif n'en a pas besoin. Pour revenir à TizenBrew : remettre `127.0.0.1`.
 - **Menu de service** : ne rien y changer. Les options « Support » (Bluetooth, Local Dimming,

@@ -5,3 +5,6 @@
 3. À chaque nouvelle version, mettre à jour dans `test.js` la version attendue (`vNN native`) et la version du service (`"version":NN`).
 
 L'API `tizen` est simulée (addInitScript). Ces tests ne remplacent pas la vérification sur la TV (`/status`) ni la confirmation à l'écran.
+
+Autostart NanoPi sans Node : depuis la racine, `python3 -m unittest -v native.test.test_opentv_autostart`.
+La suite exerce le vrai démon Python contre une fausse TV SDB/HTTP et vérifie également les scripts d'installation/rollback.

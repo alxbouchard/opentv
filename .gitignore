@@ -4,3 +4,5 @@ node_modules/
 *.password.txt
 native/test/wgt/
 dist/
+__pycache__/
+*.pyc
