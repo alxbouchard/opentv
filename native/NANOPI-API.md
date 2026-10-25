@@ -69,4 +69,5 @@ que la session est terminée : OpenTV quitte le mode externe et laisse HDMI 1 af
 `scripts/nanopi/opentv_bridge.py` + `BRIDGE.md`. Précisions : débit 20 req/s (OpenTV compte un 429 comme échec) ;
 `503 display_unavailable` tant que l'affichage n'est pas validé (`DISPLAY_BACKEND=off`) ; un `close` portant une
 session périmée ne ferme pas la session courante ; le préfixe est validé en suivant ≤3 redirections même origine
-restant sous `/<préfixe>/` (aujourd'hui 302 vers `/<préfixe>/home/fakrov`).
+restant sous `/<préfixe>/` (302 vers `/<préfixe>/home/<jeton>`). Migration de domaine (fakrov.com → wadrox.com)
+annoncée par la racine de confiance et validée côté pont, sans changement du contrat ni de l'appli TV.

@@ -258,13 +258,19 @@ class CatalogueTests(unittest.TestCase):
 
 # ----------------------------------------------------------------------------- contrôleur + API HTTP
 class StubResolver:
-    def __init__(self, origin="https://fakrov.com", prefix="aab2ae3", fail=False):
+    def __init__(self, origin="https://fakrov.com", prefix="aab2ae3", fail=False, token="fakrov"):
         self.origin, self.prefix, self.fail, self.host = origin, prefix, fail, "fakrov.com"
+        self.anchor, self.token, self.checks = "fakrov.com", token, 0
 
-    def current(self, budget=None):
+    def current(self, budget=None, check=False):
         if self.fail:
             raise B.DiscoveryFailed("stub")
+        self.checks += bool(check)
         return self.origin, self.prefix, "fresh"
+
+    def epoch(self):
+        return {"origin": self.origin, "host": self.host, "prefix": self.prefix, "token": self.token,
+                "key": "%s/%s/%s" % (self.host, self.prefix, self.token)}
 
     def status(self):
         return "fresh"
@@ -284,13 +290,20 @@ def write_catalogue(path, n):
 
 
 class Harness:
-    def __init__(self, n_items=14, env=None, resolver=None, factory=None, clock=None):
+    def __init__(self, n_items=14, env=None, resolver=None, factory=None, clock=None, catalogue=None, make=None):
         self.d = tempfile.mkdtemp()
         e = {"STATE_DIR": self.d, "ALLOW_IPS": "127.0.0.1", "DASHBOARD_UNIT": "", "APPS": "catalogue,docs",
              "UI_PORT": "0", "COLS": "6", "SOURCE_APPROVED": "1"}
         e.update(env or {})
         self.cfg = B.Config(e)
-        write_catalogue(self.cfg.catalogue_file, n_items)
+        if catalogue is not None:
+            B.atomic_write_json(self.cfg.catalogue_file, catalogue)
+        else:
+            write_catalogue(self.cfg.catalogue_file, n_items)
+        router = None
+        if make is not None:
+            resolver, router = make(self.d)
+        self.resolver, self.router = resolver, router
         self.displays = []
 
         def fac(cfg):
@@ -301,7 +314,7 @@ class Harness:
             return d
         self.fail_open = False
         self.clock = clock or time.monotonic
-        self.ctl = B.Controller(self.cfg, resolver or StubResolver(), factory or fac, clock=self.clock)
+        self.ctl = B.Controller(self.cfg, resolver or StubResolver(), factory or fac, clock=self.clock, router=router)
         self.api = B.Server(("127.0.0.1", 0), B.make_api_handler(self.ctl, self.cfg, B.RateLimiter(self.cfg.rate)))
         threading.Thread(target=self.api.serve_forever, daemon=True).start()
         self.base = "http://127.0.0.1:%d" % self.api.server_address[1]
@@ -858,6 +871,602 @@ class ServeSmokeTests(unittest.TestCase):
             if p.poll() is None:
                 p.kill()
             shutil.rmtree(d)
+
+
+# ----------------------------------------------------------------------------- migration de domaine fakrov -> wadrox
+JSONH = {"content-type": "application/json"}
+MARIO_SID, MARIO_OLD, MARIO_NEW = "17397", "52277985", "87837453"   # faits vérifiés : 3005 × id puis 5049 × id
+WAD_IDS = (17397, 17885, 17884, 17883)
+API_IDS = [(13321, "Spider-Man"), (17833, "Spider-Man 2021"), (17001, "Page deux")]
+
+
+def wad_listing(prefix="99c7f65", token="wadrox", ids=WAD_IDS, extra=""):
+    # les liens de la fixture reproduisent la forme réelle (5049 × id) ; le code n'en déduit jamais rien
+    cards = "".join('<a class="trend-card" href="/%s/b/%s/%d"><div class="trend-card-poster">'
+                    '<img src="https://image.tmdb.org/t/p/w300/%d.jpg" alt="Film %d">'
+                    '<button class="card-info-btn" data-id="%d" data-title="Film %d"></button></div></a>'
+                    % (prefix, token, sid * 5049, sid, sid, sid, sid) for sid in ids)
+    return ('<html><title>wadrox</title><div class="trend-row">%s%s</div></html>' % (cards, extra)).encode()
+
+
+def api_url(offset, prefix="99c7f65", token="wadrox", host="wadrox.com"):
+    return "https://%s/%s/api_films.php?offset=%d&limit=20&folder=%s&pr=%s" % (host, prefix, offset, prefix, token)
+
+
+def api_body(films, more):
+    return json.dumps({"films": films, "hasMore": more}).encode()
+
+
+FAKROV_MOVED = (b"<html><head><title>fakrov devient wadrox.com</title></head><body><h1>fakrov devient wadrox.com</h1>"
+                b"<p>Nouvelle adresse : <a href=\"https://wadrox.com/\">wadrox.com</a></p></body></html>")
+
+
+def wadrox_routes(prefix="99c7f65", listing=None, api=None):
+    r = {
+        "https://fakrov.com/": (200, HTML, FAKROV_MOVED),
+        "https://fakrov.com/aab2ae3/": (404, HTML, b"gone"),
+        "https://wadrox.com/": (200, HTML, ("<html><title>wadrox wadrox.com</title><a data-ref='4d01' "
+                                            "href='%s'>Entrer</a></html>" % prefix).encode()),
+        "https://wadrox.com/%s/" % prefix: (302, {"location": "/%s/home/wadrox" % prefix}, b""),
+        "https://wadrox.com/%s/home/wadrox" % prefix: (200, HTML, listing or wad_listing(prefix)),
+    }
+    pages = api if api is not None else [
+        ([{"id": str(s), "title": n, "link": "/%s/b/wadrox/%d" % (prefix, s * 5049)} for s, n in API_IDS[:2]], True),
+        ([{"id": str(API_IDS[2][0]), "title": API_IDS[2][1], "link": "/%s/b/wadrox/%d" % (prefix, API_IDS[2][0] * 5049)}], False),
+    ]
+    off = 0
+    for films, more in pages:
+        r[api_url(off, prefix)] = (200, JSONH, api_body(films, more))
+        off += len(films)
+    return r
+
+
+def write_legacy_cache(path, validated_at):
+    with open(path, "w") as f:   # format v1 tel que présent sur le NanoPi : ni hôte, ni jeton
+        json.dump({"prefix": "aab2ae3", "discovered_at": validated_at, "validated_at": validated_at,
+                   "listing_path": "/aab2ae3/home/fakrov"}, f)
+
+
+class MigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.cache = os.path.join(self.d, "prefix.json")
+        self.now = [100000.0]
+        self._q = quiet()
+        self.out = self._q.__enter__()
+
+    def tearDown(self):
+        self._q.__exit__(None, None, None)
+        shutil.rmtree(self.d)
+
+    def R(self, site, **kw):
+        kw.setdefault("session_check", 300)
+        return B.Resolver("https://fakrov.com/", self.cache, fetch=site, clock=lambda: self.now[0], **kw)
+
+    def test_genuine_fakrov_to_wadrox_from_legacy_cache(self):
+        write_legacy_cache(self.cache, self.now[0] - 1000)
+        site = FakeSite(wadrox_routes())
+        r = self.R(site)
+        self.assertEqual(r.epoch()["key"], "fakrov.com/aab2ae3/fakrov")   # cache v1 relu, jeton déduit
+        self.assertEqual(r.current(check=True), ("https://wadrox.com", "99c7f65", "fresh"))
+        ep = r.epoch()
+        self.assertEqual((ep["host"], ep["prefix"], ep["token"]), ("wadrox.com", "99c7f65", "wadrox"))
+        with open(self.cache) as f:
+            disk = json.load(f)
+        self.assertEqual((disk["v"], disk["anchor"], disk["host"], disk["token"], disk["via"]),
+                         (2, "fakrov.com", "wadrox.com", "wadrox", ["fakrov.com"]))
+        self.assertEqual(disk["history"][0]["host"], "fakrov.com")
+        self.assertEqual(stat.S_IMODE(os.stat(self.cache).st_mode), 0o600)
+        self.assertNotIn("https://fakrov.com/aab2ae3/", site.log)   # racine faisant autorité : pas de vieux préfixe
+        self.assertTrue(all(u.startswith(("https://fakrov.com/", "https://wadrox.com/")) for u in site.log))
+        self.assertIn('"migrated": true', self.out.getvalue())
+
+    def test_fresh_install_follows_advertised_migration(self):
+        r = self.R(FakeSite(wadrox_routes()))
+        self.assertEqual(r.current()[:2], ("https://wadrox.com", "99c7f65"))
+        self.assertEqual(r.cache["anchor"], "fakrov.com")
+
+    def test_malicious_cross_origin_link_refused(self):
+        routes = wadrox_routes()
+        # ancre étrangère non citée dans le texte de la page : pas une annonce de migration
+        routes["https://fakrov.com/"] = (200, HTML, b"<title>fakrov</title><a href='https://evil-mirror.com/'>x</a>")
+        site = FakeSite(routes)
+        with self.assertRaises(B.DiscoveryFailed):
+            self.R(site).current()
+        self.assertFalse(any("evil-mirror" in u for u in site.log))
+        # citée, mais l'hôte ne se valide pas (jeton absent du nom, liste /home/fakrov) : refus, cache intact
+        write_legacy_cache(self.cache, self.now[0] - 1000)
+        routes["https://fakrov.com/"] = (200, HTML, b"<title>fakrov devient evil-mirror.com</title>"
+                                                   b"<a href='https://evil-mirror.com/'>evil-mirror.com</a>")
+        routes["https://evil-mirror.com/"] = (200, HTML, b"<a href='aab2ae3'>x</a>")
+        routes["https://evil-mirror.com/aab2ae3/"] = (302, {"location": "/aab2ae3/home/fakrov"}, b"")
+        routes["https://evil-mirror.com/aab2ae3/home/fakrov"] = (200, HTML, LISTING.replace("PFX", "aab2ae3").encode())
+        r = self.R(FakeSite(routes))
+        with open(self.cache) as f:
+            before = f.read()
+        self.assertEqual(r.current(check=True)[0], "https://fakrov.com")   # dernière époque valide conservée
+        self.assertIn("token_host_mismatch", self.out.getvalue())
+        with open(self.cache) as f:
+            self.assertEqual(f.read(), before)
+
+    def test_advert_forms_refused(self):
+        bad = ["http://wadrox.com/", "https://wadrox.com:8443/", "https://wadrox.com:443/", "https://u:p@wadrox.com/",
+               "https://wadrox.com/99c7f65/", "https://wadrox.com/?x=1", "https://wadrox.com/#a", "https://1.2.3.4/",
+               "https://[::1]/", "https://localhost/", "https://wadrox.local/", "https://wadrox/", "//wadrox.com:81/",
+               "https://wadrox.com./", "https://-bad-.com/", "https://192.168.2.28/"]
+        for href in bad:
+            routes = wadrox_routes()
+            routes["https://fakrov.com/"] = (200, HTML, ("<title>fakrov devient wadrox.com %s 1.2.3.4 ::1 localhost "
+                                                         "wadrox.local wadrox 192.168.2.28 -bad-.com</title>"
+                                                         "<a href='%s'>go</a>" % (href, href)).encode())
+            site = FakeSite(routes)
+            with self.assertRaises(B.DiscoveryFailed, msg=href):
+                self.R(site).current()
+            self.assertEqual(site.log, ["https://fakrov.com/"], href)
+            self.assertFalse(os.path.exists(self.cache))
+        for h in ("wadrox.com", "a.b.co", "xn--bcher-kva.example.org"):
+            self.assertTrue(B.valid_public_host(h), h)
+        for h in ("site.example", "WADROX.com", "1.2.3.4", "::1", "localhost", "a", "a..b", "wadrox.123", "x.home.arpa", "", None):
+            self.assertFalse(B.valid_public_host(h), h)
+
+    def test_foreign_redirects_refused(self):
+        routes = wadrox_routes()
+        routes["https://fakrov.com/"] = (301, {"location": "https://wadrox.com/"}, b"")   # redirection, pas annonce
+        site = FakeSite(routes)
+        with self.assertRaises(B.DiscoveryFailed) as cm:
+            self.R(site).current()
+        self.assertEqual(str(cm.exception), "foreign_redirect")
+        self.assertEqual(site.log, ["https://fakrov.com/"])
+        routes = wadrox_routes()
+        routes["https://wadrox.com/"] = (302, {"location": "https://evil.com/"}, b"")
+        with self.assertRaises(B.DiscoveryFailed) as cm:
+            self.R(FakeSite(routes)).current()
+        self.assertEqual(str(cm.exception), "migration:foreign_redirect")
+        routes = wadrox_routes()
+        routes["https://wadrox.com/99c7f65/"] = (302, {"location": "http://wadrox.com:8080/99c7f65/home/wadrox"}, b"")
+        with self.assertRaises(B.DiscoveryFailed):
+            self.R(FakeSite(routes)).current()
+
+    def test_token_and_path_mismatch(self):
+        cases = {
+            "token_host_mismatch": {"https://wadrox.com/99c7f65/": (302, {"location": "/99c7f65/home/fakrov"}, b""),
+                                    "https://wadrox.com/99c7f65/home/fakrov": (200, HTML, wad_listing(token="fakrov"))},
+            "token_mismatch": {"https://wadrox.com/99c7f65/home/wadrox": (200, HTML, wad_listing(
+                extra='<a href="/99c7f65/b/fakrov/52277985">vieux</a>'))},
+            "no_detail_links": {"https://wadrox.com/99c7f65/home/wadrox": (200, HTML, wad_listing(ids=(17397, 17885)))},
+            "listing_shape": {"https://wadrox.com/99c7f65/": (302, {"location": "/99c7f65/liste"}, b""),
+                              "https://wadrox.com/99c7f65/liste": (200, HTML, wad_listing())},
+        }
+        for why, patch in cases.items():
+            routes = wadrox_routes()
+            routes.update(patch)
+            with self.assertRaises(B.DiscoveryFailed) as cm:
+                self.R(FakeSite(routes)).current()
+            self.assertEqual(str(cm.exception), "migration:" + why)
+
+    def test_cache_migration_persists_reload_and_anchor_change(self):
+        self.R(FakeSite(wadrox_routes())).current()
+        r2 = self.R(FakeSite({}))
+        self.assertEqual(r2.current(), ("https://wadrox.com", "99c7f65", "fresh"))
+        self.assertEqual(r2.same_origin("https://wadrox.com/99c7f65/x"), "https://wadrox.com/99c7f65/x")
+        self.assertIsNone(r2.same_origin("https://fakrov.com/99c7f65/x"))
+        other = B.Resolver("https://other-anchor.com/", self.cache, fetch=FakeSite({}))
+        self.assertEqual(other.status(), "none")   # cache d'une autre racine de confiance ignoré
+        with open(self.cache, "w") as f:
+            json.dump({"v": 2, "anchor": "fakrov.com", "host": "10.0.0.1", "prefix": "99c7f65", "token": "wadrox",
+                       "validated_at": 5}, f)
+        self.assertEqual(self.R(FakeSite({})).status(), "none")
+
+    def test_same_origin_prefix_rotation_on_migrated_host(self):
+        r = self.R(FakeSite(wadrox_routes()), ttl=100, grace=1000)
+        r.current()
+        r.fetch = FakeSite(dict(wadrox_routes(prefix="abc1234"),
+                                **{"https://wadrox.com/99c7f65/": (404, HTML, b"")}))
+        self.now[0] += 400
+        self.assertEqual(r.current(check=True)[:2], ("https://wadrox.com", "abc1234"))
+        self.assertEqual(r.cache["history"][0], {"host": "wadrox.com", "prefix": "99c7f65", "token": "wadrox",
+                                                 "until": self.now[0]})
+        self.assertFalse(any(u.startswith("https://fakrov.com") for u in r.fetch.log))   # hôte courant seulement
+
+    def test_dead_migrated_host_falls_back_to_anchor(self):
+        self.R(FakeSite(wadrox_routes())).current()
+        routes = {"https://wadrox.com/": B.FetchError("URLError"),
+                  "https://fakrov.com/": (200, HTML, b"<title>fakrov devient zadrox.net</title>"
+                                                     b"<a href='https://zadrox.net/'>zadrox.net</a>"),
+                  "https://zadrox.net/": (200, HTML, b"<a href='q1w2e3r'>x</a>"),
+                  "https://zadrox.net/q1w2e3r/": (302, {"location": "/q1w2e3r/home/zadrox"}, b""),
+                  "https://zadrox.net/q1w2e3r/home/zadrox": (200, HTML, wad_listing("q1w2e3r", "zadrox"))}
+        r = self.R(FakeSite(routes))
+        self.now[0] += 400
+        self.assertEqual(r.current(check=True)[:2], ("https://zadrox.net", "q1w2e3r"))
+        # l'ancre renvoie vers l'hôte déjà en panne : échec, dernière époque valide gardée
+        self.R(FakeSite(wadrox_routes())).refresh()
+        routes2 = {"https://wadrox.com/": B.FetchError("URLError"), "https://fakrov.com/": (200, HTML, FAKROV_MOVED)}
+        r = self.R(FakeSite(routes2))
+        self.now[0] += 400
+        self.assertEqual(r.current(check=True)[0], "https://wadrox.com")
+        self.assertIn("session_check_failed", self.out.getvalue())
+
+    def test_migration_hops_bounded(self):
+        routes = {}
+        chain = ["fakrov.com", "aaone.com", "bbtwo.com", "ccthree.com"]
+        for a, b in zip(chain, chain[1:]):
+            routes["https://%s/" % a] = (200, HTML, ("<title>devient %s</title><a href='https://%s/'>x</a>" % (b, b)).encode())
+        routes["https://ccthree.com/"] = (200, HTML, b"<a href='p1p2p3p'>x</a>")
+        site = FakeSite(routes)
+        with self.assertRaises(B.DiscoveryFailed) as cm:
+            self.R(site).current()
+        self.assertIn("migration_hops", str(cm.exception))
+        self.assertNotIn("https://ccthree.com/", site.log)
+
+    def test_session_check_interval(self):
+        site = FakeSite(fakrov_routes())
+        r = self.R(site)
+        r.current()
+        n = len(site.log)
+        self.now[0] += 100
+        r.current(check=True)
+        self.assertEqual(len(site.log), n)          # vérifié il y a < 300 s : aucun réseau
+        r.current()
+        self.now[0] += 250
+        r.current(check=True)
+        self.assertGreater(len(site.log), n)        # ouverture utilisateur : revalidation (racine incluse)
+        self.assertEqual(site.log[n], "https://fakrov.com/")
+
+
+class RouteMapTests(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self._q = quiet()
+        self.out = self._q.__enter__()
+        self.r = B.Resolver("https://fakrov.com/", os.path.join(self.d, "prefix.json"), fetch=FakeSite(wadrox_routes()))
+        self.r.current()
+
+    def tearDown(self):
+        self._q.__exit__(None, None, None)
+        shutil.rmtree(self.d)
+
+    def M(self, **kw):
+        return B.RouteMap(self.r, os.path.join(self.d, "routes.json"), **kw)
+
+    def test_listing_then_bounded_api_pages(self):
+        m, ep = self.M(), self.r.epoch()
+        site = self.r.fetch = FakeSite(wadrox_routes())
+        dl = time.monotonic() + 5
+        self.assertEqual(m.resolve(ep, MARIO_SID, dl), ("found", "b/wadrox/" + MARIO_NEW))
+        self.assertEqual(site.log, ["https://wadrox.com/99c7f65/home/wadrox"])   # liste suffit : pas d'API
+        self.assertEqual(m.resolve(ep, "17833", dl), ("found", "b/wadrox/%d" % (17833 * 5049)))
+        self.assertEqual(site.log[-1], api_url(0))
+        self.assertEqual(m.resolve(ep, "17001", dl), ("found", "b/wadrox/%d" % (17001 * 5049)))
+        self.assertEqual(site.log[-1], api_url(2))
+        n = len(site.log)
+        self.assertEqual(m.resolve(ep, "99999", dl), ("absent", None))   # hasMore=false : conclusif
+        self.assertEqual(len(site.log), n)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.d, "routes.json")).st_mode), 0o600)
+        self.assertEqual(self.M().peek(ep, MARIO_SID), ("found", "b/wadrox/" + MARIO_NEW))   # relu du disque
+
+    def test_hostile_api_entries_ignored_and_conflicts_dropped(self):
+        films = [{"id": "1", "link": "https://evil.com/99c7f65/b/wadrox/5049"},
+                 {"id": "2", "link": "/99c7f65/b/fakrov/10098"},
+                 {"id": "3", "link": "/99c7f65/b/wadrox/15147?x=1"},
+                 {"id": "4", "link": "/other12/b/wadrox/20196"},
+                 {"id": "../5", "link": "/99c7f65/b/wadrox/25245"},
+                 {"id": True, "link": "/99c7f65/b/wadrox/1"},
+                 {"id": "6", "link": "https://u:p@wadrox.com/99c7f65/b/wadrox/30294"},
+                 {"id": "7", "link": "/99c7f65/b/wadrox/700"}, {"id": "7", "link": "/99c7f65/b/wadrox/701"},
+                 {"id": "8", "link": "/99c7f65/b/wadrox/800"}, {"id": "9", "link": "/99c7f65/b/wadrox/800"},
+                 {"id": "10", "link": "http://wadrox.com/99c7f65/b/wadrox/1000"}, "x", None]
+        self.r.fetch = FakeSite(wadrox_routes(api=[(films, False)]))
+        m, ep = self.M(), self.r.epoch()
+        st = m.ensure(ep, {str(i) for i in range(1, 11)}, time.monotonic() + 5)
+        self.assertEqual({k: v for k, v in st["map"].items() if int(k) < 100}, {"10": "b/wadrox/1000"})
+        self.assertEqual(sorted(st["conflicts"], key=int), ["7", "8", "9"])
+        self.assertEqual(m.peek(ep, "7"), ("absent", None))
+
+    def test_page_cap_bad_json_transient_and_epoch_reset(self):
+        pages = [([{"id": str(100 + i), "link": "/99c7f65/b/wadrox/%d" % (900 + i)}], True) for i in range(10)]
+        site = self.r.fetch = FakeSite(wadrox_routes(api=pages))
+        m, ep = self.M(max_pages=3), self.r.epoch()
+        self.assertEqual(m.resolve(ep, "4242", time.monotonic() + 5), ("absent", None))
+        self.assertEqual(len([u for u in site.log if "api_films" in u]), 3)
+        self.assertIn("route_page_cap", self.out.getvalue())
+        # erreur transitoire : non conclusif, réessai plus tard ; JSON invalide : conclusif
+        routes = wadrox_routes()
+        routes[api_url(0)] = B.FetchError("timeout")
+        site = self.r.fetch = FakeSite(routes)
+        m2 = B.RouteMap(self.r, os.path.join(self.d, "r2.json"))
+        self.assertEqual(m2.resolve(ep, "4242", time.monotonic() + 5), ("unknown", None))
+        site.routes[api_url(0)] = (200, JSONH, b"{not json")
+        self.assertEqual(m2.resolve(ep, "4242", time.monotonic() + 5), ("absent", None))
+        site.routes[api_url(0)] = (200, HTML, api_body([], False))
+        m3 = B.RouteMap(self.r, os.path.join(self.d, "r3.json"))
+        self.assertEqual(m3.resolve(ep, "4242", time.monotonic() + 5), ("absent", None))
+        # nouvelle époque : table remise à zéro (aucun chemin d'une ancienne époque réutilisé)
+        ep2 = dict(ep, prefix="abc1234", key="wadrox.com/abc1234/wadrox")
+        self.assertEqual(m.peek(ep2, "100"), ("unknown", None))
+
+
+# ----------------------------------------------------------------------------- catalogue hérité + lecteur après migration
+def legacy_catalogue():
+    return {"source": "fakrov.com", "generated_at": "2026-10-25T00:00:00Z", "items": [
+        {"title": "Super Mario Galaxy, le film", "detail_path": "b/fakrov/" + MARIO_OLD, "source_id": MARIO_OLD,
+         "site_id": MARIO_SID, "year": 2026},
+        {"title": "Via API", "detail_path": "b/fakrov/%d" % (17001 * 3005), "site_id": "17001"},
+        {"title": "Retiré du site", "detail_path": "b/fakrov/%d" % (99999 * 3005), "site_id": "99999"},
+        {"title": "Sans site_id", "detail_path": "b/fakrov/53744425"},
+    ]}
+
+
+class MigratedPlayerTests(unittest.TestCase):
+    def setUp(self):
+        self._q = quiet()
+        self.out = self._q.__enter__()
+        self.site = FakeSite(wadrox_routes())
+
+        def make(d):
+            write_legacy_cache(os.path.join(d, "prefix.json"), time.time() - 1000)
+            r = B.Resolver("https://fakrov.com/", os.path.join(d, "prefix.json"), fetch=self.site, session_check=300)
+            return r, B.RouteMap(r, os.path.join(d, "routes.json"))
+        self.h = Harness(catalogue=legacy_catalogue(), make=make, env={"COLS": "4"})
+
+    def tearDown(self):
+        self._q.__exit__(None, None, None)
+        self.h.close()
+
+    def test_old_catalogue_plays_through_site_id_map(self):
+        self.assertEqual(self.h.resolver.epoch()["host"], "fakrov.com")
+        s = self.h.ctl.open("catalogue")
+        self.assertTrue(self.h.wait_state("catalogue"))
+        self.assertTrue(s["prep"].wait(5))
+        self.assertEqual(self.h.resolver.epoch()["key"], "wadrox.com/99c7f65/wadrox")   # migration à l'ouverture
+        self.assertEqual(self.h.ctl.items[0]["site_id"], MARIO_SID)                    # métadonnées conservées
+        self.assertEqual(self.h.ctl.items[0]["detail_path"], "b/fakrov/" + MARIO_OLD)
+        d = self.h.displays[0]
+        self.assertEqual(self.h.ctl.key(s["id"], "ok"), "player")
+        self.assertEqual(d.calls[-1], ("navigate", "https://wadrox.com/99c7f65/b/wadrox/" + MARIO_NEW))
+        self.assertEqual(self.h.ctl.key(s["id"], "back"), "catalogue")
+        self.h.ctl.key(s["id"], "right")
+        self.assertEqual(self.h.ctl.key(s["id"], "ok"), "player")                       # trouvé par l'API
+        self.assertEqual(d.calls[-1], ("navigate", "https://wadrox.com/99c7f65/b/wadrox/%d" % (17001 * 5049)))
+        self.h.ctl.key(s["id"], "back")
+        for _ in range(2):   # retiré du site, puis sans site_id : Page indisponible, aucune URL calculée
+            self.h.ctl.key(s["id"], "right")
+            n = len(d.calls)
+            self.assertEqual(self.h.ctl.key(s["id"], "ok"), "catalogue")
+            self.assertEqual(self.h.ctl.view()["message"], "Page indisponible")
+            self.assertFalse([c for c in d.calls[n:] if c[0] == "navigate"])
+        self.assertFalse([u for u in self.site.log if "/b/" in u])   # jamais de sonde de fiche
+        self.assertFalse([u for u in self.site.log if str(99999 * 5049) in u])
+        self.assertIn('"error": "unmapped"', self.out.getvalue().replace("'", '"'))
+
+    def test_unmigrated_catalogue_uses_direct_path_without_route_traffic(self):
+        site = FakeSite(fakrov_routes())
+
+        def make(d):
+            r = B.Resolver("https://fakrov.com/", os.path.join(d, "prefix.json"), fetch=site)
+            r.current()
+            return r, B.RouteMap(r, os.path.join(d, "routes.json"))
+        cat = {"source": "fakrov.com", "items": [{"title": "Mario", "detail_path": "b/fakrov/" + MARIO_OLD,
+                                                  "site_id": MARIO_SID}]}
+        h = Harness(catalogue=cat, make=make)
+        try:
+            n = len(site.log)
+            s = h.ctl.open("catalogue")
+            self.assertTrue(h.wait_state("catalogue") and s["prep"].wait(5))
+            self.assertEqual(h.ctl.key(s["id"], "ok"), "player")
+            self.assertEqual(h.displays[0].calls[-1], ("navigate", "https://fakrov.com/aab2ae3/b/fakrov/" + MARIO_OLD))
+            self.assertEqual(len(site.log), n)
+            self.assertFalse(os.path.exists(os.path.join(h.d, "routes.json")))
+        finally:
+            h.close()
+
+    def test_health_stays_responsive_while_resolving(self):
+        gate = threading.Event()
+        s = self.h.ctl.open("catalogue")
+        self.assertTrue(self.h.wait_state("catalogue") and s["prep"].wait(5))
+        self.h.ctl.key(s["id"], "right")
+        orig = self.h.ctl.router.resolve
+
+        def slow(*a):
+            gate.wait(2)
+            return orig(*a)
+        self.h.ctl.router.resolve = slow
+        res = []
+        th = threading.Thread(target=lambda: res.append(self.h.ctl.key(s["id"], "ok")))
+        th.start()
+        time.sleep(0.1)
+        t0 = time.time()
+        self.assertEqual(self.h.ctl.health(s["id"])[0], "catalogue")
+        self.assertEqual(self.h.ctl.key(s["id"], "ok"), "catalogue")   # OK répété ignoré pendant l'ouverture
+        self.assertLess(time.time() - t0, 0.5)
+        gate.set()
+        th.join(5)
+        self.assertEqual(res, ["player"])
+
+
+class LegacyCatalogueTests(unittest.TestCase):
+    def test_site_id_retained_deduped_and_listing_data_id(self):
+        d = tempfile.mkdtemp()
+        try:
+            p = os.path.join(d, "c.json")
+            raw = legacy_catalogue()
+            raw["items"].append({"title": "Doublon site_id", "detail_path": "b/fakrov/1", "site_id": MARIO_SID})
+            raw["items"].append({"title": "site_id hostile", "detail_path": "b/fakrov/2", "site_id": "1;rm"})
+            B.atomic_write_json(p, raw)
+            items, gen, host = B.load_catalogue_meta(p, B.Config({}).detail_re)
+            self.assertEqual(host, "fakrov.com")
+            self.assertEqual([i["site_id"] for i in items], [MARIO_SID, "17001", "99999", None, None])
+            self.assertEqual(B.load_catalogue(p, B.Config({}).detail_re)[1], gen)
+        finally:
+            shutil.rmtree(d)
+        r = B.Resolver("https://fakrov.com/", "/nonexistent/x.json", fetch=FakeSite({}))
+        items = B.parse_listing('<a class="film-card" href="/aab2ae3/b/fakrov/53744425"><img src="https://i/a.jpg" alt="Contre">'
+                                '<button class="card-info-btn" data-id="17885"></button></a>',
+                                "https://fakrov.com/aab2ae3/home/fakrov", r, B.Config({}).detail_re)
+        self.assertEqual((items[0]["site_id"], items[0]["source_id"]), ("17885", "53744425"))
+
+    def test_backfill_site_ids_from_raw_store(self):
+        cat = {"source": "fakrov.com", "items": [
+            {"title": "Mario", "detail_path": "b/fakrov/" + MARIO_OLD, "source_id": MARIO_OLD},
+            {"title": "Déjà", "detail_path": "b/fakrov/9", "site_id": "3"},
+            {"title": "Inconnu", "detail_path": "b/fakrov/77"},
+            {"title": "Ambigu", "detail_path": "b/fakrov/88"}]}
+        store = {"origin": "https://fakrov.com", "catalog": {"items": [
+            {"link_id": MARIO_OLD, "site_id": MARIO_SID}, {"link_id": "88", "site_id": "1"},
+            {"link_id": "88", "site_id": "2"}, {"link_id": "x", "site_id": "4"}]}}
+        n = B.backfill_site_ids(cat, store, "fakrov.com")
+        self.assertEqual(n, {"filled": 1, "already": 1, "missing": 1, "ambiguous": 1})
+        self.assertEqual(cat["items"][0]["site_id"], MARIO_SID)
+        self.assertNotIn("site_id", cat["items"][3])
+        with self.assertRaises(ValueError):
+            B.backfill_site_ids(cat, dict(store, origin="https://wadrox.com"), "fakrov.com")
+
+    def test_backfill_command_keeps_backup(self):
+        d = tempfile.mkdtemp()
+        try:
+            cfg = B.Config({"STATE_DIR": d})
+            B.atomic_write_json(cfg.catalogue_file, {"source": "fakrov.com", "items": [
+                {"title": "Mario", "detail_path": "b/fakrov/" + MARIO_OLD}]})
+            sp = os.path.join(d, "current.json")
+            B.atomic_write_json(sp, {"origin": "https://fakrov.com", "catalog": {"items": [
+                {"link_id": MARIO_OLD, "site_id": MARIO_SID}]}})
+            self.assertEqual(B.backfill_command(cfg, sp)["filled"], 1)
+            self.assertEqual(B.load_catalogue(cfg.catalogue_file, cfg.detail_re)[0][0]["site_id"], MARIO_SID)
+            with open(cfg.catalogue_file + ".bak") as f:
+                self.assertNotIn("site_id", f.read())
+        finally:
+            shutil.rmtree(d)
+
+
+# ----------------------------------------------------------------------------- moniteur d'adresse en arrière-plan
+class RoutingMonitorTests(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self._q = quiet()
+        self.out = self._q.__enter__()
+        self.now = [100000.0]
+        self.cache = os.path.join(self.d, "prefix.json")
+        self.site = FakeSite(fakrov_routes())
+        B.atomic_write_json(self.cache, {"v": 2, "anchor": "fakrov.com", "host": "fakrov.com", "prefix": "aab2ae3",
+                                         "token": "fakrov", "listing_path": "/aab2ae3/home/fakrov",
+                                         "validated_at": self.now[0] - 10, "checked_at": self.now[0] - 10,
+                                         "discovered_at": self.now[0] - 10})
+        self.r = B.Resolver("https://fakrov.com/", self.cache, fetch=self.site, clock=lambda: self.now[0])
+        self.router = B.RouteMap(self.r, os.path.join(self.d, "routes.json"))
+        self.items = [{"site_id": MARIO_SID, "detail_path": "b/fakrov/" + MARIO_OLD}]
+
+        def wanted(ep):   # même règle que Controller.route_wanted, catalogue enregistré sous fakrov.com
+            return {i["site_id"] for i in self.items if ep["host"] != "fakrov.com" or ep["token"] != "fakrov"}
+        self.m = B.RoutingMonitor(self.r, self.router, wanted, interval=1800)
+
+    def tearDown(self):
+        self._q.__exit__(None, None, None)
+        self.m.shutdown()
+        shutil.rmtree(self.d)
+
+    def snap(self):
+        with open(self.cache, "rb") as f:
+            return f.read(), os.stat(self.cache).st_mtime_ns
+
+    def test_unchanged_domain_no_rewrite_then_detects_migration(self):
+        before = self.snap()
+        self.assertEqual(self.m.run_once(), "unchanged")
+        self.assertEqual(self.snap(), before)                                   # aucune réécriture inutile
+        self.assertFalse(os.path.exists(os.path.join(self.d, "routes.json")))  # aucun trafic de routage
+        self.assertFalse([u for u in self.site.log if "api_films" in u])
+        self.assertEqual(self.r.cache["validated_at"], self.now[0])            # fraîcheur en mémoire
+        self.site.routes = wadrox_routes()
+        self.now[0] += 1800
+        self.assertEqual(self.m.run_once(), "changed")
+        self.assertEqual(self.r.epoch()["key"], "wadrox.com/99c7f65/wadrox")
+        with open(self.cache) as f:
+            self.assertEqual(json.load(f)["host"], "wadrox.com")
+        self.assertEqual(B.RouteMap(self.r, os.path.join(self.d, "routes.json")).peek(self.r.epoch(), MARIO_SID),
+                         ("found", "b/wadrox/" + MARIO_NEW))
+        ev = [json.loads(l) for l in self.out.getvalue().splitlines() if '"routing_check_ok"' in l]
+        self.assertEqual([e["changed"] for e in ev], [False, True])
+        self.assertEqual(ev[1]["routes"], {"wanted": 1, "mapped": 1, "exhausted": False})
+        n = len(self.site.log)
+        self.now[0] += 1800
+        self.assertEqual(self.m.run_once(), "unchanged")   # table complète : pas de nouvelle page d'API
+        self.assertFalse([u for u in self.site.log[n:] if "api_films" in u])
+
+    def test_no_overlap_single_flight(self):
+        gate, entered = threading.Event(), threading.Event()
+        real = self.site
+
+        def blocking(url, timeout):
+            entered.set()
+            gate.wait(3)
+            return real(url, timeout)
+        self.r.fetch = blocking
+        res = []
+        th = threading.Thread(target=lambda: res.append(self.m.run_once()))
+        th.start()
+        self.assertTrue(entered.wait(2))
+        self.assertEqual(self.m.run_once(), "busy")                 # pas de second vol du moniteur
+        self.assertIsNone(self.r.refresh(blocking=False))           # ni chevauchement avec une session
+        gate.set()
+        th.join(5)
+        self.assertEqual(res, ["unchanged"])
+        self.assertIn('"why": "overlap"', self.out.getvalue())
+        # une ouverture de session en cours bloque le moniteur (et non l'inverse)
+        self.r.lock.acquire()
+        try:
+            self.assertEqual(self.m.run_once(), "busy")
+        finally:
+            self.r.lock.release()
+
+    def test_failure_keeps_last_good_and_backs_off(self):
+        before = self.snap()
+        self.site.routes = {"https://fakrov.com/": B.FetchError("URLError")}
+        self.assertEqual(self.m.delay(), 1800)
+        for want in (3600, 7200, 14400, 14400):
+            self.assertEqual(self.m.run_once(), "failed")
+            self.assertEqual(self.m.delay(), want)
+        self.assertEqual(self.r.epoch()["key"], "fakrov.com/aab2ae3/fakrov")
+        self.assertEqual(self.snap(), before)
+        # migration annoncée mais invalide : fail-closed, aucune adoption partielle
+        bad = wadrox_routes()
+        bad["https://wadrox.com/99c7f65/home/wadrox"] = (200, HTML, wad_listing(ids=(1,)))
+        self.site.routes = bad
+        self.assertEqual(self.m.run_once(), "failed")
+        self.assertEqual(self.r.epoch()["host"], "fakrov.com")
+        self.assertEqual(self.snap(), before)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "routes.json")))
+        self.site.routes = fakrov_routes()
+        self.assertEqual(self.m.run_once(), "unchanged")
+        self.assertEqual(self.m.delay(), 1800)
+
+    def test_thread_runs_and_shuts_down(self):
+        self.m.interval = 0.02
+        self.m.start()
+        end = time.time() + 3
+        while self.m.runs < 2 and time.time() < end:
+            time.sleep(0.01)
+        self.assertGreaterEqual(self.m.runs, 2)
+        self.m.shutdown(2)
+        self.assertFalse(self.m.thread.is_alive())
+        n = self.m.runs
+        time.sleep(0.1)
+        self.assertEqual(self.m.runs, n)
+
+    def test_crash_in_check_does_not_kill_monitor(self):
+        def boom(url, timeout):
+            raise RuntimeError("bug")
+        self.r.fetch = boom
+        self.m.interval = 0.01
+        self.m.max_backoff = 0
+        self.m.start()
+        time.sleep(0.15)
+        self.assertTrue(self.m.thread.is_alive())
+        self.assertIn("routing_monitor_error", self.out.getvalue())
+
+    def test_config_gate(self):
+        self.assertEqual(B.Config({}).routing_refresh_s, 0)
+        self.assertEqual(B.Config({"ROUTING_REFRESH_S": "1800"}).routing_refresh_s, 1800)
+        with self.assertRaises(SystemExit):
+            B.Config({"ROUTING_REFRESH_S": "60"})
 
 
 if __name__ == "__main__":

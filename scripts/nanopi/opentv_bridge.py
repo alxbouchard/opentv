@@ -11,10 +11,13 @@ Invariants :
   le compositeur prend le maître DRM le temps de la session ; à sa sortie, l'fbdev du tableau de bord
   redevient visible. Seule lecture : `systemctl --user is-active <DASHBOARD_UNIT>`.
 - OpenTV n'envoie jamais d'URL. Les URL ouvertes sont reconstruites ici : origine HTTPS découverte +
-  /<préfixe>/ + chemin de fiche validé (DETAIL_RE). Aucun flux vidéo n'est extrait, relayé ou contourné.
+  /<préfixe>/ + chemin de fiche validé (b/<jeton>/<id>). Aucun flux vidéo n'est extrait, relayé ou contourné.
+- Migration de domaine (ex. fakrov.com -> wadrox.com) : seulement annoncée par la racine de confiance et
+  validée de bout en bout ; le lecteur suit le site_id stable via une table de routage publiée par le site.
 """
 import html.parser
 import http.server
+import ipaddress
 import json
 import os
 import re
@@ -80,7 +83,8 @@ class Config:
         # Gate humain explicite : l'installation et un simple changement de backend ne doivent jamais
         # activer par accident une source externe dont l'autorisation n'a pas été confirmée.
         self.source_approved = env.get("SOURCE_APPROVED", "0") == "1"
-        self.detail_re = re.compile(env.get("DETAIL_RE", r"^b/fakrov/[0-9]{1,12}$"))
+        # forme générique : le jeton (fakrov, wadrox, …) est revérifié contre l'époque validée à l'ouverture
+        self.detail_re = re.compile(env.get("DETAIL_RE", r"^b/[a-z][a-z0-9]{2,23}/[0-9]{1,12}$"))
         self.apps = frozenset(x for x in env.get("APPS", "catalogue").split(",") if APP_RE.match(x))
         self.cols = _num(env, "COLS", 6, int)
         self.catalogue_idle_s = _num(env, "CATALOGUE_IDLE_S", 300.0)
@@ -93,6 +97,15 @@ class Config:
         # Pas de robot en arrière-plan par défaut. Un rafraîchissement périodique exige à la fois
         # SOURCE_APPROVED=1 et une valeur > 0 explicitement configurée.
         self.catalogue_refresh_s = _num(env, "CATALOGUE_REFRESH_S", 0.0)
+        # Ouverture de session : revalidation (rotation/migration) si la dernière date de plus de SESSION_CHECK_S.
+        self.session_check_s = _num(env, "SESSION_CHECK_S", 300.0)
+        # Moniteur d'adresse/routage en arrière-plan (racine de confiance seulement ; 0 = désactivé).
+        # N'interroge ni catalogue ni IMDb ; exige aussi SOURCE_APPROVED=1. Minimum 300 s.
+        self.routing_refresh_s = _num(env, "ROUTING_REFRESH_S", 0.0)
+        if 0 < self.routing_refresh_s < 300:
+            raise SystemExit("config: ROUTING_REFRESH_S doit valoir 0 ou >= 300")
+        self.route_max_pages = _num(env, "ROUTE_MAX_PAGES", 25, int)
+        self.route_budget_s = _num(env, "ROUTE_BUDGET_S", 20.0)
         self.display = env.get("DISPLAY_BACKEND", "chromium")   # chromium | off | null (tests)
         if self.display not in ("chromium", "off", "null"):
             raise SystemExit("config: DISPLAY_BACKEND invalide")
@@ -163,63 +176,198 @@ def http_fetch(url, timeout, limit=MAX_BODY):
     return resp.status if hasattr(resp, "status") else resp.code, headers, body
 
 
-# --------------------------------------------------------------------------- préfixe rotatif
+# --------------------------------------------------------------------------- préfixe rotatif + migration de domaine
 class DiscoveryFailed(Exception):
     pass
 
 
-class _Links(html.parser.HTMLParser):
-    def __init__(self, cap=5000):
+class _Moved(Exception):
+    """La racine de confiance n'offre plus de préfixe valide mais annonce explicitement un nouveau domaine."""
+
+    def __init__(self, hosts, why):
+        super().__init__(why)
+        self.hosts = hosts
+
+
+TOKEN_RE = re.compile(r"^[a-z][a-z0-9]{2,23}$")      # ex. « fakrov », « wadrox » (route /<p>/home/<jeton>)
+NUM_ID_RE = re.compile(r"^[0-9]{1,12}$")             # identifiants de fiche (link_id) et internes (site_id)
+MAX_MIGRATION_HOPS = 2       # sauts de domaine par rafraîchissement (fakrov -> wadrox -> suivant)
+MAX_MIGRATION_CANDIDATES = 2
+MIN_MIGRATION_DETAILS = 3    # fiches /<p>/b/<jeton>/<id> exigées sur la liste d'un nouveau domaine
+_LABEL_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
+_TLD_RE = re.compile(r"^(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$")
+_RESERVED_SUFFIXES = (".local", ".localhost", ".internal", ".lan", ".home", ".corp", ".intranet", ".home.arpa",
+                      ".test", ".invalid", ".example", ".onion", ".arpa")
+
+
+def valid_public_host(h):
+    """Nom d'hôte DNS public en minuscules ; refuse IP littérales, ports, noms locaux/réservés, mono-label."""
+    if not isinstance(h, str) or not h or len(h) > 253 or h != h.lower() or not h.isascii():
+        return False
+    try:
+        ipaddress.ip_address(h)
+        return False
+    except ValueError:
+        pass
+    labels = h.split(".")
+    if len(labels) < 2 or not all(_LABEL_RE.match(x) for x in labels) or not _TLD_RE.match(labels[-1]):
+        return False
+    return h != "localhost" and not any(("." + h).endswith(s) for s in _RESERVED_SUFFIXES)
+
+
+def _port(u):
+    try:
+        return u.port
+    except ValueError:
+        return -1
+
+
+def _segs(path):
+    return [s for s in (path or "").split("/") if s]
+
+
+def token_from_listing(listing_path, prefix):
+    s = _segs(listing_path)
+    return s[2] if len(s) == 3 and s[0] == prefix and s[1] == "home" and TOKEN_RE.match(s[2]) else None
+
+
+class _Page(html.parser.HTMLParser):
+    """Ancres + texte visible borné (titre compris), sans exécuter de script."""
+
+    def __init__(self, cap=5000, text_cap=65536):
         super().__init__(convert_charrefs=True)
-        self.hrefs, self.cap = [], cap
+        self.hrefs, self.cap, self.parts, self.text_cap, self._n, self._skip = [], cap, [], text_cap, 0, 0
 
     def handle_starttag(self, tag, attrs):
-        if tag == "a" and len(self.hrefs) < self.cap:
+        if tag in ("script", "style"):
+            self._skip += 1
+        elif tag == "a" and len(self.hrefs) < self.cap:
             for k, v in attrs:
                 if k == "href" and v:
                     self.hrefs.append(v.strip())
 
+    def handle_endtag(self, tag):
+        if tag in ("script", "style") and self._skip:
+            self._skip -= 1
+
+    def handle_data(self, data):
+        if not self._skip and self._n < self.text_cap:
+            self.parts.append(data)
+            self._n += len(data)
+
+    @property
+    def text(self):
+        return " ".join(self.parts).lower()
+
+
+def _parse_page(body):
+    p = _Page()
+    try:
+        p.feed(body.decode("utf-8", "replace"))
+    except Exception:
+        pass
+    return p
+
 
 class Resolver:
-    """Découvre et valide https://<hôte>/<préfixe>/ à partir d'une racine stable."""
+    """Découvre et valide https://<hôte>/<préfixe>/ à partir d'une racine de confiance stable (SITE_ROOT).
+
+    Migration de domaine bornée : uniquement si la racine actuellement de confiance n'offre plus de préfixe
+    valide ET publie une ancre HTTPS explicite `https://<nouvel-hôte>/` dont le nom figure aussi dans son texte
+    (ex. « fakrov devient wadrox.com »). Le nouvel hôte est validé de bout en bout (racine, préfixe, page de
+    liste /<p>/home/<jeton>, fiches /<p>/b/<jeton>/<id>, jeton présent dans le nom d'hôte) avant d'être adopté.
+    Jamais : redirection inter-domaines, http, identifiants, port explicite, IP littérale, nom local.
+    """
 
     def __init__(self, root, cache_path, fetch=None, clock=time.time, ttl=6 * 3600, grace=24 * 3600,
-                 timeout=4.0):
+                 timeout=4.0, session_check=300.0):
         u = urllib.parse.urlsplit(root)
-        if u.scheme != "https" or not u.hostname or u.username or u.password or u.port not in (None, 443):
+        host = (u.hostname or "").lower()
+        if u.scheme != "https" or not host or u.username or u.password or _port(u) not in (None, 443) \
+                or not valid_public_host(host):
             raise ValueError("SITE_ROOT doit être https://hôte/ sans identifiants ni port")
-        self.host = u.hostname.lower()
-        self.origin = "https://" + self.host
-        self.root = self.origin + "/"
+        self.anchor = host
         self.cache_path, self.fetch = cache_path, fetch or http_fetch
         self.clock, self.ttl, self.grace, self.timeout = clock, ttl, grace, timeout
+        self.session_check = session_check
         self.lock = threading.Lock()
         self.cache = self._load()
+        self._persisted_at = self.cache["validated_at"] if self.cache else 0.0
 
-    # -- cache 0600 {prefix, discovered_at, validated_at, listing_path}
+    # -- état courant (hôte migré éventuel)
+    @property
+    def host(self):
+        c = self.cache
+        return c["host"] if c else self.anchor
+
+    @property
+    def origin(self):
+        return "https://" + self.host
+
+    @property
+    def root(self):
+        return self.origin + "/"
+
+    def epoch(self):
+        """{origin, host, prefix, token, key} de l'époque validée courante, ou None."""
+        c = self.cache
+        if not c:
+            return None
+        return {"origin": "https://" + c["host"], "host": c["host"], "prefix": c["prefix"], "token": c["token"],
+                "key": "%s/%s/%s" % (c["host"], c["prefix"], c["token"])}
+
+    # -- cache 0600 v2 {anchor, host, prefix, token, listing_path, *_at, history} ; v1 (préfixe seul) relu
     def _load(self):
         try:
             with open(self.cache_path, encoding="utf-8") as f:
                 c = json.load(f)
-            if PREFIX_RE.match(c.get("prefix", "")) and float(c["validated_at"]) > 0:
-                return c
+            if not isinstance(c, dict):
+                return None
+            prefix = c.get("prefix")
+            validated = float(c["validated_at"])
+            if not isinstance(prefix, str) or not PREFIX_RE.match(prefix) or validated <= 0:
+                return None
+            if c.get("anchor", self.anchor) != self.anchor:   # cache d'une autre racine de confiance
+                return None
+            host = c.get("host") or self.anchor              # v1 : toujours l'hôte d'ancrage
+            if not valid_public_host(host):
+                return None
+            lp = c.get("listing_path")
+            if not isinstance(lp, str) or not lp.startswith("/%s/" % prefix) or len(lp) > 200:
+                lp = "/%s/" % prefix
+            token = c.get("token") or token_from_listing(lp, prefix)
+            if token is not None and (not isinstance(token, str) or not TOKEN_RE.match(token)):
+                return None
+            hist = []
+            for h in c.get("history") or []:
+                if isinstance(h, dict) and valid_public_host(h.get("host")) and PREFIX_RE.match(str(h.get("prefix"))):
+                    hist.append({"host": h["host"], "prefix": h["prefix"], "token": h.get("token")
+                                 if TOKEN_RE.match(str(h.get("token"))) else None, "until": h.get("until")})
+            return {"v": 2, "anchor": self.anchor, "host": host, "prefix": prefix, "token": token,
+                    "listing_path": lp, "discovered_at": float(c.get("discovered_at") or validated),
+                    "validated_at": validated, "checked_at": float(c.get("checked_at") or validated),
+                    "migrated_at": c.get("migrated_at"), "via": [h for h in (c.get("via") or [])
+                                                                  if valid_public_host(h)][:MAX_MIGRATION_HOPS],
+                    "history": hist[:5]}
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
-            pass
-        return None
+            return None
 
     def _save(self, c):
         atomic_write_json(self.cache_path, c)
+        self._persisted_at = self.clock()
 
-    def same_origin(self, url):
+    def same_origin(self, url, host=None):
         """URL absolue acceptée (http même hôte remonté en https) ou None."""
+        host = host or self.host
         u = urllib.parse.urlsplit(url)
-        if u.username or u.password or (u.hostname or "").lower() != self.host:
+        if u.username or u.password or (u.hostname or "").lower() != host:
             return None
-        if u.scheme == "http" and u.port in (None, 80):
+        port = _port(u)
+        if u.scheme == "http" and port in (None, 80):
             pass
-        elif u.scheme != "https" or u.port not in (None, 443):
+        elif u.scheme != "https" or port not in (None, 443):
             return None
-        return urllib.parse.urlunsplit(("https", self.host, u.path or "/", u.query, ""))
+        return urllib.parse.urlunsplit(("https", host, u.path or "/", u.query, ""))
 
     def _get(self, url, deadline):
         left = deadline - time.monotonic()
@@ -230,12 +378,13 @@ class Resolver:
         except FetchError as e:
             raise DiscoveryFailed("fetch:" + str(e))
 
-    def _follow(self, url, deadline, must_start=None):
-        """Suit ≤3 redirections même origine (et sous must_start si donné) ; exige 200 text/html."""
+    def _follow(self, url, deadline, must_start=None, host=None):
+        """Suit ≤3 redirections même hôte (et sous must_start si donné) ; exige 200 text/html."""
+        host = host or self.host
         for _ in range(4):
             status, headers, body = self._get(url, deadline)
             if status in (301, 302, 303, 307, 308):
-                nxt = self.same_origin(urllib.parse.urljoin(url, headers.get("location", "")))
+                nxt = self.same_origin(urllib.parse.urljoin(url, headers.get("location", "")), host)
                 if not nxt:
                     raise DiscoveryFailed("foreign_redirect")
                 if must_start and not urllib.parse.urlsplit(nxt).path.startswith(must_start):
@@ -249,61 +398,172 @@ class Resolver:
             return url, body
         raise DiscoveryFailed("too_many_redirects")
 
-    def validate(self, prefix, deadline):
+    def validate(self, prefix, deadline, host=None):
+        """-> (listing_path, token). Identité : /<p>/home/<jeton> et fiches /<p>/b/<jeton>/<id> cohérentes."""
+        host = host or self.host
+        strict = host != self.anchor
         start = "/" + prefix + "/"
-        final, body = self._follow(self.origin + start, deadline, must_start=start)
-        return urllib.parse.urlsplit(final).path, body
-
-    def discover(self, deadline):
-        final, body = self._follow(self.root, deadline)
-        path = urllib.parse.urlsplit(final).path.strip("/").split("/")
-        cands = [path[0]] if path and PREFIX_RE.match(path[0]) else []
-        p = _Links()
-        try:
-            p.feed(body.decode("utf-8", "replace"))
-        except Exception:
-            pass
-        for href in p.hrefs:
-            absu = self.same_origin(urllib.parse.urljoin(final, href))
+        final, body = self._follow("https://%s%s" % (host, start), deadline, must_start=start, host=host)
+        listing = urllib.parse.urlsplit(final).path
+        token = token_from_listing(listing, prefix)
+        if not token:
+            raise DiscoveryFailed("listing_shape")
+        if strict and token not in re.split(r"[.-]", host):
+            raise DiscoveryFailed("token_host_mismatch")
+        details, foreign_token = set(), 0
+        for href in _parse_page(body).hrefs:
+            absu = self.same_origin(urllib.parse.urljoin(final, href), host)
             if not absu:
                 continue
-            segs = [s for s in urllib.parse.urlsplit(absu).path.split("/") if s]
-            if len(segs) == 1 and PREFIX_RE.match(segs[0]) and segs[0] not in cands:
-                cands.append(segs[0])
-        if not cands:
-            raise DiscoveryFailed("no_prefix_link")
-        last = "no_candidate"
+            u = urllib.parse.urlsplit(absu)
+            s = _segs(u.path)
+            if len(s) == 4 and s[0] == prefix and s[1] == "b" and NUM_ID_RE.match(s[3]) and not u.query:
+                if s[2] == token:
+                    details.add(s[3])
+                else:
+                    foreign_token += 1
+        if foreign_token:
+            raise DiscoveryFailed("token_mismatch")
+        if len(details) < (MIN_MIGRATION_DETAILS if strict else 1):
+            raise DiscoveryFailed("no_detail_links")
+        return listing, token
+
+    def _advertised(self, url, cur_host, text):
+        """Nouvel hôte annoncé par une ancre exacte https://hôte/ citée dans le texte de la page, sinon None."""
+        u = urllib.parse.urlsplit(url)
+        host = (u.hostname or "").lower()
+        if u.scheme != "https" or u.netloc.lower() != host or u.path not in ("", "/") or u.query or u.fragment:
+            return None   # http (déclassement), identifiants, port, chemin, requête : refusés
+        if host == cur_host or not valid_public_host(host) or host not in text:
+            return None
+        return host
+
+    def _probe(self, host, cached, deadline):
+        """Préfixe valide sur `host` -> état ; sinon _Moved(hôtes annoncés) ou DiscoveryFailed."""
+        tried = set()
+
+        def attempt(p):
+            tried.add(p)
+            listing, token = self.validate(p, deadline, host)
+            return {"host": host, "prefix": p, "token": token, "listing_path": listing}
+        try:
+            final, body = self._follow("https://%s/" % host, deadline, host=host)
+        except DiscoveryFailed as e:
+            if cached:   # racine en panne : le dernier préfixe connu de cet hôte reste vérifiable
+                try:
+                    return attempt(cached["prefix"])
+                except DiscoveryFailed:
+                    pass
+            raise e
+        page = _parse_page(body)
+        text = page.text
+        segs = _segs(urllib.parse.urlsplit(final).path)
+        cands = [segs[0]] if segs and PREFIX_RE.match(segs[0]) else []
+        moves = []
+        for href in page.hrefs:
+            joined = urllib.parse.urljoin(final, href)
+            absu = self.same_origin(joined, host)
+            if absu:
+                s = _segs(urllib.parse.urlsplit(absu).path)
+                if len(s) == 1 and PREFIX_RE.match(s[0]) and s[0] not in cands:
+                    cands.append(s[0])
+                continue
+            h = self._advertised(joined, host, text)
+            if h and h not in moves:
+                moves.append(h)
+        if cached and cached["prefix"] in cands:
+            cands.remove(cached["prefix"])
+            cands.insert(0, cached["prefix"])
+        last = "no_prefix_link"
         for c in cands[:3]:   # premier candidat valide ; borne à 3 sondes
             try:
-                listing, _ = self.validate(c, deadline)
-                return c, listing
+                return attempt(c)
+            except DiscoveryFailed as e:
+                last = str(e)
+        if moves:
+            raise _Moved(moves[:MAX_MIGRATION_CANDIDATES], last)
+        if cached and cached["prefix"] not in tried:
+            try:
+                return attempt(cached["prefix"])
             except DiscoveryFailed as e:
                 last = str(e)
         raise DiscoveryFailed(last)
 
-    def refresh(self, budget=None):
-        """Valide le préfixe en cache, sinon une seule redécouverte. Lève DiscoveryFailed."""
-        deadline = time.monotonic() + (budget if budget else 3 * self.timeout + 2)
-        with self.lock:
-            c = self.cache
-            now = self.clock()
-            if c:
+    def _resolve(self, host, cached, deadline, hops, visited):
+        visited.add(host)
+        try:
+            return self._probe(host, cached if cached and cached["host"] == host else None, deadline)
+        except _Moved as m:
+            if hops >= MAX_MIGRATION_HOPS:
+                raise DiscoveryFailed("migration_hops")
+            last = "migration_loop"
+            for h in m.hosts:
+                if h in visited:
+                    continue
+                log("migration_candidate", src=host, dst=h)
                 try:
-                    listing, _ = self.validate(c["prefix"], deadline)
-                    c = dict(c, validated_at=now, listing_path=listing)
-                    self.cache = c
-                    self._save(c)
-                    return c
+                    st = self._resolve(h, cached, deadline, hops + 1, visited)
+                    st["via"] = [host] + st.get("via", [])
+                    return st
                 except DiscoveryFailed as e:
-                    log("prefix_invalid", prefix=c["prefix"], why=str(e))
-            prefix, listing = self.discover(deadline)
-            changed = not c or c.get("prefix") != prefix
-            c = {"prefix": prefix, "discovered_at": now if changed else c.get("discovered_at", now),
-                 "validated_at": now, "listing_path": listing}
-            self.cache = c
-            self._save(c)
-            log("prefix_ok", prefix=prefix, changed=changed)
-            return c
+                    last = "migration:" + str(e)
+                    log("migration_rejected", src=host, dst=h, why=str(e))
+            raise DiscoveryFailed(last)
+
+    def _touch(self, c, now):
+        if c:   # échec : dernière époque valide conservée telle quelle (seul checked_at avance, en mémoire)
+            self.cache = dict(c, checked_at=now)
+
+    def _commit(self, c, st, now):
+        moved = bool(c) and c["host"] != st["host"]
+        changed = not c or moved or c["prefix"] != st["prefix"] or c.get("token") != st["token"]
+        hist = list(c.get("history", [])) if c else []
+        if c and changed:
+            hist.insert(0, {"host": c["host"], "prefix": c["prefix"], "token": c.get("token"), "until": now})
+        n = {"v": 2, "anchor": self.anchor, "host": st["host"], "prefix": st["prefix"], "token": st["token"],
+             "listing_path": st["listing_path"], "discovered_at": now if changed else c["discovered_at"],
+             "validated_at": now, "checked_at": now, "history": hist[:5],
+             "via": st.get("via", []) if (changed or not c) else c.get("via", []),
+             "migrated_at": now if moved or (not c and st["host"] != self.anchor) else (c.get("migrated_at") if c else None)}
+        self.cache = n
+        # époque inchangée : horodatages en mémoire ; réécriture disque au plus toutes les ttl/4
+        if changed or now - self._persisted_at >= min(self.ttl / 4.0, 3600.0):
+            self._save(n)
+        log("prefix_ok", host=n["host"], prefix=n["prefix"], token=n["token"], changed=changed, migrated=moved)
+        return n
+
+    def refresh(self, budget=None, min_age=None, blocking=True):
+        """Revalide l'époque courante (détecte rotation de préfixe et migration annoncée). Lève DiscoveryFailed.
+        blocking=False : vol unique — renvoie None sans rien faire si un rafraîchissement est déjà en cours."""
+        if not self.lock.acquire(blocking):
+            return None
+        try:
+            return self._refresh_locked(budget, min_age)
+        finally:
+            self.lock.release()
+
+    def _refresh_locked(self, budget, min_age):
+        deadline = time.monotonic() + (budget if budget else 3 * self.timeout + 2)
+        c = self.cache
+        now = self.clock()
+        if min_age is not None and c and now - c["checked_at"] < min_age:
+            return c   # déjà vérifié par un appel concurrent
+        start = c["host"] if c else self.anchor
+        visited = set()
+        try:
+            st = self._resolve(start, c, deadline, 0, visited)
+        except DiscoveryFailed as e:
+            if start == self.anchor:
+                self._touch(c, now)
+                raise
+            # hôte migré muet : retour à l'ancre de confiance, qui peut annoncer un domaine plus récent
+            log("host_failed", host=start, why=str(e))
+            try:
+                st = self._resolve(self.anchor, c, deadline, 0, visited)
+            except DiscoveryFailed:
+                self._touch(c, now)
+                raise
+        return self._commit(c, st, now)
 
     def status(self):
         c = self.cache
@@ -312,8 +572,9 @@ class Resolver:
         age = self.clock() - float(c["validated_at"])
         return "fresh" if age < self.ttl else ("stale" if age < self.grace else "expired")
 
-    def current(self, budget=None):
-        """(origine, préfixe, 'fresh'|'stale'). Réseau seulement si aucun préfixe utilisable."""
+    def current(self, budget=None, check=False):
+        """(origine, préfixe, 'fresh'|'stale'). Réseau si aucun préfixe utilisable, ou si check=True
+        (ouverture de session par l'utilisateur) et dernière vérification plus vieille que session_check."""
         st = self.status()
         if st in ("none", "expired"):
             try:
@@ -321,13 +582,211 @@ class Resolver:
             except DiscoveryFailed as e:
                 log("discovery_failed", why=str(e))
                 raise
-            st = "fresh"
-        return self.origin, self.cache["prefix"], st
+        elif check and self.clock() - self.cache["checked_at"] >= self.session_check:
+            try:
+                self.refresh(budget, min_age=self.session_check)
+            except DiscoveryFailed as e:   # garder la dernière époque valide (marquée stale si vieille)
+                log("session_check_failed", why=str(e))
+        return self.origin, self.cache["prefix"], self.status()
+
+
+# --------------------------------------------------------------------------- routage site_id -> fiche courante
+class RouteMap:
+    """Table bornée site_id (data-id interne stable) -> chemin de fiche de l'époque courante.
+
+    Construite seulement à la demande d'une session utilisateur, à partir de la page de liste validée puis,
+    si nécessaire, des pages successives de l'API publique du site (api_films.php). Aucun calcul d'identifiant :
+    seul un couple (id, lien) publié par le site et revalidé (même hôte, /<p>/b/<jeton>/<n>) est retenu ;
+    un site_id ou un chemin revendiqué deux fois est écarté. Remise à zéro à chaque changement d'époque.
+    """
+
+    def __init__(self, resolver, path, max_pages=25, page_size=20, max_entries=5000):
+        self.r, self.path = resolver, path
+        self.max_pages, self.page_size, self.max_entries = max_pages, page_size, max_entries
+        self.lock = threading.Lock()
+        self.state = self._load()
+
+    def _fresh(self, key):
+        return {"epoch": key, "map": {}, "conflicts": [], "listing_done": False, "offset": 0, "pages": 0,
+                "exhausted": False}
+
+    def _load(self):
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                s = json.load(f)
+            if not isinstance(s, dict) or not isinstance(s.get("epoch"), str) or not isinstance(s.get("map"), dict):
+                return None
+            tok = s["epoch"].rsplit("/", 1)[-1]
+            rx = re.compile(r"^b/%s/[0-9]{1,12}$" % re.escape(tok))
+            out = self._fresh(s["epoch"])
+            out["map"] = {k: v for k, v in list(s["map"].items())[:self.max_entries]
+                          if isinstance(k, str) and NUM_ID_RE.match(k) and isinstance(v, str) and rx.match(v)}
+            out["conflicts"] = [x for x in (s.get("conflicts") or []) if isinstance(x, str) and NUM_ID_RE.match(x)][:1000]
+            out["listing_done"] = s.get("listing_done") is True
+            out["exhausted"] = s.get("exhausted") is True
+            for k in ("offset", "pages"):
+                v = s.get(k)
+                out[k] = v if isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 10 ** 6 else 0
+            return out
+        except (OSError, ValueError, TypeError, AttributeError):
+            return None
+
+    def _save(self):
+        try:
+            atomic_write_json(self.path, self.state)
+        except OSError as e:
+            log("route_save_failed", error=type(e).__name__)
+
+    def _rel(self, ep, link):
+        if not isinstance(link, str) or len(link) > 300:
+            return None
+        absu = self.r.same_origin(urllib.parse.urljoin(ep["origin"] + "/", link), ep["host"])
+        if not absu:
+            return None
+        u = urllib.parse.urlsplit(absu)
+        s = _segs(u.path)
+        if u.query or len(s) != 4 or s[0] != ep["prefix"] or s[1] != "b" or s[2] != ep["token"] \
+                or not NUM_ID_RE.match(s[3]):
+            return None
+        return "/".join(s[1:])
+
+    def _ingest(self, st, pairs):
+        m, conf = st["map"], st["conflicts"]
+        rev = {v: k for k, v in m.items()}
+        for sid, rel in pairs:
+            if sid in conf:
+                continue
+            other = rev.get(rel)
+            if other is not None and other != sid:   # une fiche revendiquée par deux ids : les deux écartés
+                m.pop(other, None)
+                conf.extend(x for x in (other, sid) if x not in conf)
+                continue
+            old = m.get(sid)
+            if old is None:
+                if len(m) < self.max_entries:
+                    m[sid] = rel
+                    rev[rel] = sid
+            elif old != rel:
+                m.pop(sid, None)
+                conf.append(sid)
+        del conf[1000:]
+
+    def _get(self, url, deadline, json_body):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise DiscoveryFailed("timeout")
+        try:
+            status, headers, body = self.r.fetch(url, min(self.r.timeout, left))
+        except FetchError as e:
+            raise DiscoveryFailed("fetch:" + str(e))
+        ctype = headers.get("content-type", "").lower()
+        if status != 200:   # aucune redirection suivie ici
+            raise DiscoveryFailed("route_status_%d" % status)
+        if not ctype.startswith("application/json" if json_body else "text/html"):
+            raise DiscoveryFailed("route_type")
+        return body
+
+    def _listing_step(self, ep, st, deadline):
+        st["listing_done"] = True
+        c = self.r.cache
+        url = ep["origin"] + (c["listing_path"] if c else "/%s/" % ep["prefix"])
+        body = self._get(url, deadline, False)
+        cards = _Cards(4000)
+        try:
+            cards.feed(body.decode("utf-8", "replace"))
+        except Exception:
+            pass
+        pairs = [(x["site_id"], self._rel(ep, x["href"])) for x in cards.items if x.get("site_id")]
+        self._ingest(st, [(a, b) for a, b in pairs if b])
+
+    def _api_step(self, ep, st, deadline):
+        q = urllib.parse.urlencode([("offset", st["offset"]), ("limit", self.page_size), ("folder", ep["prefix"]),
+                                    ("pr", ep["token"])])
+        body = self._get("%s/%s/api_films.php?%s" % (ep["origin"], ep["prefix"], q), deadline, True)
+        st["pages"] += 1
+        try:
+            obj = json.loads(body.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            raise DiscoveryFailed("route_json")
+        films = obj.get("films") if isinstance(obj, dict) else None
+        if not isinstance(films, list):
+            raise DiscoveryFailed("route_json")
+        pairs = []
+        for f in films[:self.page_size * 2]:
+            if not isinstance(f, dict):
+                continue
+            sid = f.get("id")
+            sid = str(sid) if isinstance(sid, (str, int)) and not isinstance(sid, bool) else ""
+            rel = self._rel(ep, f.get("link"))
+            if NUM_ID_RE.match(sid) and rel:
+                pairs.append((sid, rel))
+        self._ingest(st, pairs)
+        st["offset"] += len(films)
+        if not films or obj.get("hasMore") is not True:
+            st["exhausted"] = True
+
+    def ensure(self, ep, wanted, deadline, max_steps=None):
+        """Complète la table pour `wanted` (ensemble de site_id) ; borne pages/temps. -> état ou None."""
+        if not ep or not ep.get("token"):
+            return None
+        if not self.lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            return None
+        try:
+            st = self.state
+            if not st or st["epoch"] != ep["key"]:
+                st = self.state = self._fresh(ep["key"])
+                log("route_reset", epoch=ep["key"])
+            steps, dirty = 0, False
+            while max_steps is None or steps < max_steps:
+                missing = [w for w in wanted if w not in st["map"] and w not in st["conflicts"]]
+                if not missing or st["exhausted"] or time.monotonic() >= deadline:
+                    break
+                steps, dirty = steps + 1, True
+                step = "listing" if not st["listing_done"] else "api"
+                try:
+                    if step == "listing":
+                        self._listing_step(ep, st, deadline)
+                    elif st["pages"] >= self.max_pages:
+                        st["exhausted"] = True
+                        log("route_page_cap", pages=st["pages"])
+                    else:
+                        self._api_step(ep, st, deadline)
+                except DiscoveryFailed as e:
+                    why = str(e)
+                    transient = why == "timeout" or why.startswith("fetch:") or why.startswith("route_status_5")
+                    log("route_fetch_failed", step=step, why=why, transient=transient)
+                    if transient:
+                        break   # réessai à la prochaine demande utilisateur / tick du moniteur
+                    if step == "api":
+                        st["exhausted"] = True   # API changée/refusée : conclusif (Page indisponible)
+            if dirty:
+                self._save()
+            return st
+        finally:
+            self.lock.release()
+
+    def peek(self, ep, sid):
+        """Sans réseau : ('found', chemin) | ('absent', None) | ('unknown', None)."""
+        st = self.state
+        if not ep or not st or st["epoch"] != ep.get("key"):
+            return "unknown", None
+        if sid in st["conflicts"]:
+            return "absent", None
+        if sid in st["map"]:
+            return "found", st["map"][sid]
+        return ("absent" if st["exhausted"] else "unknown"), None
+
+    def resolve(self, ep, sid, deadline):
+        st = self.ensure(ep, {sid}, deadline)
+        if st is None:
+            return "unknown", None
+        return self.peek(ep, sid)
 
 
 # --------------------------------------------------------------------------- catalogue (métadonnées)
 class _Cards(html.parser.HTMLParser):
-    """Lit les cartes <a href="/<p>/b/fakrov/<id>"> : titre (alt/titre), affiche https, année, genre."""
+    """Lit les cartes <a href="/<p>/b/<jeton>/<id>"> : titre (alt/titre), affiche https, année, genre et
+    identifiant interne stable (premier data-id numérique imbriqué, ex. bouton synopsis)."""
 
     def __init__(self, cap):
         super().__init__(convert_charrefs=True)
@@ -341,10 +800,13 @@ class _Cards(html.parser.HTMLParser):
         a = dict(attrs)
         cls = a.get("class") or ""
         if tag == "a" and a.get("href") and len(self.items) < self.cap:
-            self.cur = {"href": a["href"], "title": "", "poster": "", "year": "", "cat": ""}
+            self.cur = {"href": a["href"], "title": "", "poster": "", "year": "", "cat": "", "site_id": None}
             self.items.append(self.cur)
             self.stack = []
         elif self.cur is not None:
+            did = a.get("data-id")
+            if self.cur["site_id"] is None and isinstance(did, str) and NUM_ID_RE.match(did.strip()):
+                self.cur["site_id"] = did.strip()
             if tag == "img" and not self.cur["poster"]:
                 self.cur["poster"] = a.get("src") or ""
                 self.cur["title"] = self.cur["title"] or (a.get("alt") or "")
@@ -395,7 +857,7 @@ def parse_listing(html_text, page_url, resolver, detail_re, cap=500):
         genre = cat.split("·", 1)[1].strip() if "·" in cat else ""
         year = re.search(r"\b(19|20)\d{2}\b", c["year"] or cat)
         out.append({
-            "source": resolver.host, "source_id": segs[-1], "detail_path": rel,
+            "source": resolver.host, "source_id": segs[-1], "detail_path": rel, "site_id": c.get("site_id"),
             "title": re.sub(r"\s+", " ", c["title"]).strip()[:200],
             "year": int(year.group(0)) if year else None, "genre": genre[:80] or None,
             "poster": c["poster"] if c["poster"].startswith("https://") else None,
@@ -422,8 +884,11 @@ def clean_item(x, detail_re):
         v = x.get(k)
         return v if isinstance(v, t) and not isinstance(v, bool) and lo <= v <= hi else None
     poster = x.get("poster")
+    sid = x.get("site_id")
+    sid = str(sid) if isinstance(sid, (str, int)) and not isinstance(sid, bool) else ""
     return {
         "source_id": str(x.get("source_id") or rel.split("/")[-1])[:64], "detail_path": rel,
+        "site_id": sid if NUM_ID_RE.match(sid) else None,
         "title": x["title"].strip()[:200], "year": num("year", 1880, 2100, int), "genre": s("genre", 80),
         "description": s("description", 1200),
         "poster": poster if isinstance(poster, str) and poster.startswith("https://") and len(poster) < 600 else None,
@@ -433,20 +898,69 @@ def clean_item(x, detail_re):
     }
 
 
-def load_catalogue(path, detail_re, cap=2000):
+def load_catalogue_meta(path, detail_re, cap=2000):
+    """-> (éléments, generated_at, hôte source ou None). Dédoublonne par site_id puis par chemin de fiche."""
     try:
         with open(path, encoding="utf-8") as f:
             raw = json.load(f)
     except (OSError, ValueError):
-        return [], None
+        return [], None, None
     items = raw.get("items") if isinstance(raw, dict) else raw
     out, seen = [], set()
     for x in (items if isinstance(items, list) else [])[:cap * 2]:
         c = clean_item(x, detail_re)
-        if c and c["detail_path"] not in seen:
-            seen.add(c["detail_path"])
-            out.append(c)
-    return out[:cap], (raw.get("generated_at") if isinstance(raw, dict) else None)
+        if not c or c["detail_path"] in seen or (c["site_id"] and ("s", c["site_id"]) in seen):
+            continue
+        seen.add(c["detail_path"])
+        if c["site_id"]:
+            seen.add(("s", c["site_id"]))
+        out.append(c)
+    src = raw.get("source") if isinstance(raw, dict) else None
+    return (out[:cap], (raw.get("generated_at") if isinstance(raw, dict) else None),
+            src if valid_public_host(src) else None)
+
+
+def load_catalogue(path, detail_re, cap=2000):
+    items, gen, _ = load_catalogue_meta(path, detail_re, cap)
+    return items, gen
+
+
+def backfill_site_ids(cat, store, default_host):
+    """Ajoute site_id aux éléments d'un catalogue hérité à partir du magasin brut (current.json), par
+    correspondance exacte link_id == dernier segment de detail_path, même hôte. Hors ligne ; -> compteurs."""
+    if not isinstance(cat, dict) or not isinstance(cat.get("items"), list) or not isinstance(store, dict):
+        raise ValueError("format")
+    host = cat.get("source") if valid_public_host(cat.get("source")) else default_host
+    shost = (urllib.parse.urlsplit(store.get("origin") or "").hostname or "").lower()
+    if shost != host:
+        raise ValueError("store_host_mismatch")
+    sitems = store.get("catalog", {}).get("items") if isinstance(store.get("catalog"), dict) else store.get("items")
+    by_link, dup = {}, set()
+    for x in sitems if isinstance(sitems, list) else []:
+        if not isinstance(x, dict):
+            continue
+        link, sid = str(x.get("link_id") or ""), str(x.get("site_id") or "")
+        if not (NUM_ID_RE.match(link) and NUM_ID_RE.match(sid)):
+            continue
+        if by_link.get(link, sid) != sid:
+            dup.add(link)
+        by_link[link] = sid
+    n = {"filled": 0, "already": 0, "missing": 0, "ambiguous": 0}
+    for it in cat["items"]:
+        if not isinstance(it, dict):
+            continue
+        if NUM_ID_RE.match(str(it.get("site_id") or "")):
+            n["already"] += 1
+            continue
+        link = str(it.get("detail_path") or "").rsplit("/", 1)[-1]
+        if link in dup:
+            n["ambiguous"] += 1
+        elif link in by_link:
+            it["site_id"] = by_link[link]
+            n["filled"] += 1
+        else:
+            n["missing"] += 1
+    return n
 
 
 def atomic_write_json(path, obj):
@@ -747,14 +1261,41 @@ class ApiError(Exception):
         self.code, self.error = code, error
 
 
+def fill_routes(router, ep, wanted, deadline, alive=lambda: True):
+    """Complète la table de routage pas à pas (verrou relâché entre deux requêtes) jusqu'à couverture,
+    épuisement, échec transitoire (aucun progrès), échéance ou alive() faux. -> état ou None."""
+    st = None
+    while wanted and alive() and time.monotonic() < deadline:
+        before = (st["listing_done"], st["pages"], st["exhausted"]) if st else None
+        st = router.ensure(ep, wanted, deadline, max_steps=1)
+        if st is None or st["exhausted"] or all(w in st["map"] or w in st["conflicts"] for w in wanted):
+            break
+        if before == (st["listing_done"], st["pages"], st["exhausted"]):
+            break   # échec transitoire : pas de nouvelle tentative immédiate
+    return st
+
+
 class Controller:
-    def __init__(self, cfg, resolver, display_factory, clock=time.monotonic):
+    def __init__(self, cfg, resolver, display_factory, clock=time.monotonic, router=None):
         self.cfg, self.resolver, self.factory, self.clock = cfg, resolver, display_factory, clock
+        self.router = router
         self.lock = threading.RLock()
         self.td_cv, self.td_n = threading.Condition(), 0   # fermetures en cours (pas d'ouverture pendant)
         self.s = None
-        self.items, self.generated_at = load_catalogue(cfg.catalogue_file, cfg.detail_re)
+        self.items, self.generated_at, self.catalogue_host = load_catalogue_meta(cfg.catalogue_file, cfg.detail_re)
         self.message = ""
+
+    # -- routage : un élément du catalogue est-il encore adressable par son chemin enregistré ?
+    def _direct_ok(self, item, ep):
+        host = self.catalogue_host or getattr(self.resolver, "anchor", None)
+        return bool(ep) and host == ep["host"] and item["detail_path"].split("/")[1] == ep.get("token")
+
+    def route_wanted(self, ep):
+        """site_id à remapper : éléments enregistrés sous un autre hôte/jeton que l'époque courante."""
+        if not ep or not ep.get("token"):
+            return set()
+        with self.lock:
+            return {it["site_id"] for it in self.items if it.get("site_id") and not self._direct_ok(it, ep)}
 
     # -- vue locale (servie au navigateur kiosque sur 127.0.0.1)
     def ui_url(self):
@@ -801,14 +1342,34 @@ class Controller:
                 if self.s["app"] == app:
                     return self.s
                 raise ApiError(409, "busy")
-            self.items, self.generated_at = load_catalogue(self.cfg.catalogue_file, self.cfg.detail_re)
+            self.items, self.generated_at, self.catalogue_host = load_catalogue_meta(
+                self.cfg.catalogue_file, self.cfg.detail_re)
             now = self.clock()
             s = {"id": secrets.token_urlsafe(18), "app": app, "state": "starting", "cursor": 0,
-                 "opened": now, "seen": now, "key_at": now, "player_at": None, "display": None}
+                 "opened": now, "seen": now, "key_at": now, "player_at": None, "display": None,
+                 "prep": threading.Event(), "opening": False}
             self.s, self.message = s, ""
             log("session_open", app=app, session=s["id"][:6], items=len(self.items), prefix=self.resolver.status())
+        threading.Thread(target=self._prepare, args=(s,), daemon=True, name="route-prep").start()
         threading.Thread(target=self._start, args=(s,), daemon=True, name="display-start").start()
         return s
+
+    def _prepare(self, s):
+        """Déclenché par l'ouverture utilisateur : revalide l'adresse (rotation/migration) puis remappe les
+        site_id du catalogue vers les fiches de l'époque courante, borné en temps et en pages."""
+        try:
+            try:
+                self.resolver.current(budget=6.0, check=True)
+            except DiscoveryFailed:
+                pass
+            if self.router is not None:
+                ep = self.resolver.epoch()
+                fill_routes(self.router, ep, self.route_wanted(ep), time.monotonic() + self.cfg.route_budget_s,
+                            alive=lambda: self.s is s)
+        except Exception as e:
+            log("route_prep_error", error=type(e).__name__)
+        finally:
+            s["prep"].set()
 
     def _start(self, s):
         d = self.factory(self.cfg)
@@ -850,48 +1411,86 @@ class Controller:
                 self._end_locked(s, "back")
                 return "dashboard"
             if k == "ok":
-                return self._open_item(s) if st == "catalogue" else st
-            n, cols, c = len(self.items), max(1, self.cfg.cols), s["cursor"]
-            if n:
-                if k == "left" and c % cols:
-                    c -= 1
-                elif k == "right" and c + 1 < n and (c + 1) % cols:
-                    c += 1
-                elif k == "up" and c >= cols:
-                    c -= cols
-                elif k == "down" and c + cols < n:
-                    c += cols
-                elif k == "down" and c // cols < (n - 1) // cols:   # dernière rangée incomplète
-                    c = n - 1
-            s["cursor"] = c
-            self._push(s)
-            return s["state"]
+                if st != "catalogue" or not self.items or s["opening"]:
+                    return st
+                s["opening"] = True
+                item = self.items[min(s["cursor"], len(self.items) - 1)]
+            else:
+                n, cols, c = len(self.items), max(1, self.cfg.cols), s["cursor"]
+                if n:
+                    if k == "left" and c % cols:
+                        c -= 1
+                    elif k == "right" and c + 1 < n and (c + 1) % cols:
+                        c += 1
+                    elif k == "up" and c >= cols:
+                        c -= cols
+                    elif k == "down" and c + cols < n:
+                        c += cols
+                    elif k == "down" and c // cols < (n - 1) // cols:   # dernière rangée incomplète
+                        c = n - 1
+                s["cursor"] = c
+                self._push(s)
+                return s["state"]
+        # OK : résolution (réseau borné possible) hors verrou, /v1/health reste réactif pendant ce temps
+        return self._open_item(s, item)
 
-    def detail_url(self, item):
-        origin, prefix, _ = self.resolver.current(budget=3.0)
-        url = "%s/%s/%s" % (origin, prefix, item["detail_path"])
-        # revérification indépendante : même origine, sous /<préfixe>/, chemin de fiche autorisé
+    def detail_url(self, item, deadline=None):
+        """URL de fiche reconstruite : époque validée + chemin exact (catalogue même époque, ou table de
+        routage site_id -> fiche publiée par le site). Jamais de calcul d'identifiant ni d'URL fournie."""
+        deadline = deadline or time.monotonic() + 3.0
+        self.resolver.current(budget=max(0.5, deadline - time.monotonic()))
+        ep = self.resolver.epoch()
+        if not ep or not ep.get("token"):
+            raise ApiError(503, "no_epoch")
+        origin, prefix, token = ep["origin"], ep["prefix"], ep["token"]
+        direct, sid, rel = self._direct_ok(item, ep), item.get("site_id"), None
+        if sid and self.router is not None:
+            kind, found = (self.router.peek(ep, sid) if direct
+                           else self.router.resolve(ep, sid, deadline))
+            if kind == "found":
+                rel = found
+            elif kind == "absent":
+                raise ApiError(404, "unmapped")   # retiré du site ou ambigu : Page indisponible
+        if rel is None:
+            if not direct:
+                raise ApiError(404, "unmapped")
+            rel = item["detail_path"]
+        url = "%s/%s/%s" % (origin, prefix, rel)
+        # revérification indépendante : même origine, sous /<préfixe>/, chemin de fiche du jeton courant
         u = urllib.parse.urlsplit(url)
+        tail = u.path[len(prefix) + 2:]
         if (u.scheme + "://" + u.netloc) != origin or not u.path.startswith("/%s/" % prefix) \
-                or not self.cfg.detail_re.match(u.path[len(prefix) + 2:]) or u.query or u.fragment:
+                or not self.cfg.detail_re.match(tail) or not re.match(r"^b/%s/[0-9]{1,12}$" % re.escape(token), tail) \
+                or u.query or u.fragment:
             raise ApiError(500, "bad_url")
         return url
 
-    def _open_item(self, s):
-        if not self.items:
-            return s["state"]
-        item = self.items[min(s["cursor"], len(self.items) - 1)]
+    def _open_item(self, s, item):
         try:
-            url = self.detail_url(item)
-            s["display"].navigate(url)
-        except (DiscoveryFailed, ApiError, CDPError, AttributeError) as e:
-            self.message = "Page indisponible"
-            log("player_open_failed", item=item["source_id"], error=str(e)[:80])
-            self._push(s)
-            return s["state"]
-        s["state"], s["player_at"], self.message = "player", self.clock(), ""
-        log("state", state="player", item=item["source_id"])
-        return "player"
+            if not s["prep"].wait(2.5):   # revalidation de session encore en cours : borne l'attente
+                log("route_prep_pending")
+            url = self.detail_url(item, time.monotonic() + 2.5)
+        except (DiscoveryFailed, ApiError) as e:
+            url, err = None, e
+        with self.lock:
+            s["opening"] = False
+            if self.s is not s:
+                return "dashboard"
+            if s["state"] != "catalogue":
+                return s["state"]
+            if url is not None:
+                try:
+                    s["display"].navigate(url)
+                except (CDPError, AttributeError) as e:
+                    url, err = None, e
+            if url is None:
+                self.message = "Page indisponible"
+                log("player_open_failed", item=item["source_id"], site_id=item.get("site_id"), error=str(err)[:80])
+                self._push(s)
+                return s["state"]
+            s["state"], s["player_at"], self.message = "player", self.clock(), ""
+            log("state", state="player", item=item["source_id"], site_id=item.get("site_id"))
+            return "player"
 
     def _to_catalogue(self, s):
         try:
@@ -1108,35 +1707,121 @@ class Server(http.server.ThreadingHTTPServer):
     request_queue_size = 16
 
 
-# --------------------------------------------------------------------------- catalogue en tâche de fond
+# --------------------------------------------------------------------------- catalogue (commande manuelle)
 def refresh_catalogue(cfg, resolver):
     """Rafraîchit préfixe + catalogue (page de liste) ; garde l'ancien fichier en cas d'échec."""
     c = resolver.refresh()
-    url = resolver.origin + c["listing_path"]
+    ep = resolver.epoch()
+    url = ep["origin"] + c["listing_path"]
     status, headers, body = resolver.fetch(url, cfg.fetch_timeout_s * 2)
     if status != 200 or not headers.get("content-type", "").startswith("text/html"):
         raise DiscoveryFailed("listing_status_%d" % status)
-    items = parse_listing(body.decode("utf-8", "replace"), url, resolver, cfg.detail_re)
+    detail_re = re.compile(r"^b/%s/[0-9]{1,12}$" % re.escape(ep["token"]))
+    items = parse_listing(body.decode("utf-8", "replace"), url, resolver, detail_re)
     if not items:
         raise DiscoveryFailed("listing_empty")
     old, _ = load_catalogue(cfg.catalogue_file, cfg.detail_re)
-    prev = {x["detail_path"]: x for x in old}
-    for it in items:   # conserve les enrichissements (description, IMDb) déjà connus
-        for k, v in prev.get(it["detail_path"], {}).items():
-            if it.get(k) is None and v is not None:
+    by_sid = {x["site_id"]: x for x in old if x.get("site_id")}
+    by_path = {x["detail_path"]: x for x in old}
+    for it in items:   # conserve les enrichissements (description, IMDb) : site_id stable d'abord
+        prev = by_sid.get(it.get("site_id")) or by_path.get(it["detail_path"]) or {}
+        for k, v in prev.items():
+            if it.get(k) is None and v is not None and k not in ("detail_path", "source_id"):
                 it[k] = v
     atomic_write_json(cfg.catalogue_file, {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                                           "source": resolver.host, "count": len(items), "items": items})
+                                           "source": ep["host"], "count": len(items), "items": items})
     log("catalogue_ok", count=len(items))
     return items
 
 
+# --------------------------------------------------------------------------- moniteur d'adresse/routage
+class RoutingMonitor:
+    """Surveillance supervisée (thread du service, pas de cron) de l'adresse du site.
+
+    Toutes les ROUTING_REFRESH_S : revalide l'époque à partir de la racine actuellement de confiance
+    (racine, préfixe, page de liste : 3 GET bornés), adopte une migration HTTPS annoncée et validée, puis
+    complète la table site_id -> fiche seulement pour les éléments du catalogue qui en ont besoin.
+    Vol unique (aucun chevauchement, ni avec une ouverture de session), délais bornés, repli exponentiel
+    après échec, dernière époque valide conservée (fail-closed : jamais d'adoption partielle).
+    Ne touche ni au catalogue ni aux notes IMDb.
+    """
+
+    def __init__(self, resolver, router, wanted_fn, interval, budget=20.0, route_budget=30.0, max_backoff=3):
+        self.resolver, self.router, self.wanted_fn = resolver, router, wanted_fn
+        self.interval, self.budget, self.route_budget, self.max_backoff = interval, budget, route_budget, max_backoff
+        self.fails, self.runs = 0, 0
+        self.flight = threading.Lock()
+        self.stop = threading.Event()
+        self.thread = None
+
+    def delay(self):
+        return self.interval * (2 ** min(self.fails, self.max_backoff))
+
+    def run_once(self):
+        """-> 'unchanged' | 'changed' | 'failed' | 'busy'."""
+        if not self.flight.acquire(blocking=False):
+            log("routing_check_skipped", why="overlap")
+            return "busy"
+        try:
+            self.runs += 1
+            before = self.resolver.epoch()
+            t0 = time.monotonic()
+            try:
+                c = self.resolver.refresh(budget=self.budget, blocking=False)
+            except DiscoveryFailed as e:
+                self.fails += 1
+                log("routing_check_failed", why=str(e)[:80], fails=self.fails, kept=before and before["key"],
+                    next_s=round(self.delay()))
+                return "failed"
+            if c is None:
+                log("routing_check_skipped", why="resolver_busy")
+                return "busy"
+            after = self.resolver.epoch()
+            changed = not before or before["key"] != after["key"]
+            routes = None
+            if self.router is not None:
+                wanted = self.wanted_fn(after)
+                if wanted:
+                    st = fill_routes(self.router, after, wanted, time.monotonic() + self.route_budget,
+                                     alive=lambda: not self.stop.is_set())
+                    routes = {"wanted": len(wanted), "mapped": len([w for w in wanted if st and w in st["map"]]),
+                              "exhausted": bool(st and st["exhausted"])}
+            self.fails = 0
+            log("routing_check_ok", changed=changed, epoch=after["key"], prev=before and before["key"],
+                routes=routes, seconds=round(time.monotonic() - t0, 2))
+            return "changed" if changed else "unchanged"
+        finally:
+            self.flight.release()
+
+    def _loop(self):
+        while not self.stop.wait(self.delay()):
+            try:
+                self.run_once()
+            except Exception as e:   # le moniteur ne doit jamais tuer le service
+                self.fails += 1
+                log("routing_monitor_error", error=type(e).__name__)
+
+    def start(self):
+        self.thread = threading.Thread(target=self._loop, daemon=True, name="routing-monitor")
+        self.thread.start()
+        log("routing_monitor_start", interval_s=self.interval)
+
+    def shutdown(self, timeout=5.0):
+        self.stop.set()
+        if self.thread is not None:
+            self.thread.join(timeout)
+
+
 def serve(cfg):
     os.makedirs(cfg.state_dir, mode=0o700, exist_ok=True)
-    resolver = Resolver(cfg.site_root, os.path.join(cfg.state_dir, "prefix.json"), ttl=cfg.prefix_ttl_s,
-                        grace=cfg.prefix_grace_s, timeout=cfg.fetch_timeout_s)
+    resolver = make_resolver(cfg)
+    router = RouteMap(resolver, os.path.join(cfg.state_dir, "routes.json"), max_pages=cfg.route_max_pages)
     factory = {"chromium": ChromiumKiosk, "null": NullDisplay, "off": None}[cfg.display]
-    ctl = Controller(cfg, resolver, factory)
+    ctl = Controller(cfg, resolver, factory, router=router)
+    monitor = None
+    if cfg.source_approved and cfg.routing_refresh_s > 0:
+        monitor = RoutingMonitor(resolver, router, ctl.route_wanted, cfg.routing_refresh_s,
+                                 route_budget=cfg.route_budget_s)
     api = Server((cfg.bind, cfg.port), make_api_handler(ctl, cfg, RateLimiter(cfg.rate)))
     ui = Server(("127.0.0.1", cfg.ui_port), make_ui_handler(ctl, os.path.join(HERE, "opentv_bridge_ui.html")))
     stop = threading.Event()
@@ -1154,7 +1839,8 @@ def serve(cfg):
                 refresh_catalogue(cfg, resolver)
                 with ctl.lock:
                     if not ctl.s:
-                        ctl.items, ctl.generated_at = load_catalogue(cfg.catalogue_file, cfg.detail_re)
+                        ctl.items, ctl.generated_at, ctl.catalogue_host = load_catalogue_meta(
+                            cfg.catalogue_file, cfg.detail_re)
                 wait = cfg.catalogue_refresh_s
             except (DiscoveryFailed, FetchError, OSError) as e:
                 log("catalogue_refresh_failed", error=str(e)[:80])
@@ -1163,6 +1849,8 @@ def serve(cfg):
 
     def on_term(*_):
         stop.set()
+        if monitor is not None:
+            monitor.stop.set()
         threading.Thread(target=api.shutdown, daemon=True).start()
         threading.Thread(target=ui.shutdown, daemon=True).start()
 
@@ -1170,10 +1858,34 @@ def serve(cfg):
     signal.signal(signal.SIGINT, on_term)
     for fn in (watchdog, ui.serve_forever) + ((refresher,) if cfg.source_approved and cfg.catalogue_refresh_s > 0 else ()):
         threading.Thread(target=fn, daemon=True).start()
-    log("start", port=cfg.port, ui_port=cfg.ui_port, display=cfg.display, allow=sorted(cfg.allow_ips))
+    if monitor is not None:
+        monitor.start()
+    log("start", port=cfg.port, ui_port=cfg.ui_port, display=cfg.display, allow=sorted(cfg.allow_ips),
+        routing_refresh_s=cfg.routing_refresh_s if monitor else 0)
     api.serve_forever(poll_interval=0.5)
+    if monitor is not None:
+        monitor.shutdown()
     ctl.shutdown()
     log("stop")
+
+
+def make_resolver(cfg):
+    return Resolver(cfg.site_root, os.path.join(cfg.state_dir, "prefix.json"), ttl=cfg.prefix_ttl_s,
+                    grace=cfg.prefix_grace_s, timeout=cfg.fetch_timeout_s, session_check=cfg.session_check_s)
+
+
+def backfill_command(cfg, store_path):
+    """Hors ligne : ajoute site_id au catalogue hérité depuis le magasin brut ; copie .bak 0600 conservée."""
+    with open(cfg.catalogue_file, encoding="utf-8") as f:
+        original = json.load(f)
+    with open(store_path, encoding="utf-8") as f:
+        store = json.load(f)
+    cat = json.loads(json.dumps(original))
+    n = backfill_site_ids(cat, store, urllib.parse.urlsplit(cfg.site_root).hostname)
+    if n["filled"]:
+        atomic_write_json(cfg.catalogue_file + ".bak", original)
+        atomic_write_json(cfg.catalogue_file, cat)
+    return n
 
 
 def main(argv):
@@ -1184,11 +1896,11 @@ def main(argv):
     elif cmd == "refresh-catalogue":
         if not cfg.source_approved:
             raise SystemExit("source non approuvée: définir SOURCE_APPROVED=1 après validation humaine")
-        r = Resolver(cfg.site_root, os.path.join(cfg.state_dir, "prefix.json"), ttl=cfg.prefix_ttl_s,
-                     grace=cfg.prefix_grace_s, timeout=cfg.fetch_timeout_s)
-        print(len(refresh_catalogue(cfg, r)))
+        print(len(refresh_catalogue(cfg, make_resolver(cfg))))
+    elif cmd == "backfill-site-ids" and len(argv) == 3:
+        print(json.dumps(backfill_command(cfg, argv[2]), sort_keys=True))
     else:
-        raise SystemExit("usage: opentv_bridge.py [serve|refresh-catalogue]")
+        raise SystemExit("usage: opentv_bridge.py [serve|refresh-catalogue|backfill-site-ids <current.json>]")
 
 
 if __name__ == "__main__":
