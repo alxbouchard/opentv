@@ -128,7 +128,7 @@ def load_config(env=None):
         "state_file": env.get("STATE_FILE", os.path.expanduser("~/.local/state/opentv-autostart/state.json")),
         "dry_run": env.get("DRY_RUN", "0") == "1",
         "cec_cmd": env.get("CEC_CMD", ""),
-        "disabled_file": env.get("DISABLED_FILE", os.path.expanduser("~/.config/opentv-autostart/disabled")),
+        "disabled_file": env.get("DISABLED_FILE", os.path.expanduser("~/.local/state/opentv-autostart/disabled")),
         "suppress_until_file": env.get("SUPPRESS_UNTIL_FILE", os.path.expanduser("~/.local/state/opentv-autostart/suppress-until")),
     }
     errs = []

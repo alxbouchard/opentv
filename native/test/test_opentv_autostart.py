@@ -590,7 +590,7 @@ class Deploy(unittest.TestCase):
             muse = [c for c in calls if "muse" in c]
             self.assertTrue(muse and all(" is-active " in c for c in muse), muse)   # read-only only
             self.assertFalse(os.path.exists(os.path.join(home, ".config/systemd/user/opentv-autostart.service")))
-            with open(os.path.join(home, ".config/opentv-autostart/env")) as f:
+            with open(os.path.join(home, ".config/systemd/user/opentv-autostart.env")) as f:
                 env_file = f.read()
             self.assertIn("DRY_RUN=1", env_file)          # first install is observe-only
         finally:

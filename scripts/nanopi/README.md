@@ -29,7 +29,7 @@ systemctl --user status opentv-autostart.service
 journalctl --user -u opentv-autostart.service --no-pager
 ```
 
-Configuration : `~/.config/opentv-autostart/env`.
+Configuration : `~/.config/systemd/user/opentv-autostart.env`.
 
 Défaut sûr :
 
@@ -46,7 +46,7 @@ Après observation en dry-run, activer :
 ```sh
 python3 - <<'PY'
 from pathlib import Path
-p = Path.home()/'.config/opentv-autostart/env'
+p = Path.home()/'.config/systemd/user/opentv-autostart.env'
 s = p.read_text()
 assert 'DRY_RUN=1' in s
 p.write_text(s.replace('DRY_RUN=1', 'DRY_RUN=0'))
@@ -57,8 +57,8 @@ systemctl --user restart opentv-autostart.service
 Suspension d'urgence sans désinstaller :
 
 ```sh
-mkdir -p ~/.config/opentv-autostart
-touch ~/.config/opentv-autostart/disabled
+mkdir -p ~/.local/state/opentv-autostart
+touch ~/.local/state/opentv-autostart/disabled
 ```
 
 Pour autoriser de nouveau : supprimer `disabled`, puis attendre un nouveau cycle d'alimentation réel.
