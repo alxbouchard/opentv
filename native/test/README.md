@@ -9,3 +9,7 @@ L'API `tizen` est simulée (addInitScript). Ces tests ne remplacent pas la véri
 
 Autostart NanoPi sans Node : depuis la racine, `python3 -m unittest -v native.test.test_opentv_autostart`.
 La suite exerce le vrai démon Python contre une fausse TV SDB/HTTP et vérifie également les scripts d'installation/rollback.
+
+Pont NanoPi des applis externes (scripts/nanopi/opentv_bridge.py, voir scripts/nanopi/BRIDGE.md) :
+`python3 -m unittest -v native.test.test_opentv_bridge` (39, dont Chromium réel headless) puis, depuis `native/test/`,
+`node bridge_e2e.js` (17 : vraie page OpenTV ↔ vrai pont en sous-processus, affichage nul).

@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Films</title>
+<style>
+  :root { --bg:#0b0d14; --fg:#f2f3f7; --mut:#9aa0b4; --acc:#9b6bff; --card:#161a26; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg); overflow:hidden;
+    font-family:"Inter","Noto Sans","DejaVu Sans",system-ui,sans-serif; cursor:none; }
+  #hero { position:absolute; left:0; right:0; top:0; height:400px; padding:56px 96px 0;
+    background:radial-gradient(1200px 500px at 85% 0%, rgba(155,107,255,.28), transparent 60%),
+               linear-gradient(180deg, #151829 0%, var(--bg) 100%); }
+  #heroBg { position:absolute; inset:0; background-size:cover; background-position:center 25%;
+    opacity:.22; filter:blur(18px) saturate(1.2); transform:scale(1.1); }
+  #heroInner { position:relative; max-width:1180px; }
+  #brand { font-size:22px; letter-spacing:.24em; text-transform:uppercase; color:var(--mut); }
+  #title { font-size:60px; font-weight:800; line-height:1.05; margin:14px 0 12px;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  #meta { display:flex; gap:14px; align-items:center; font-size:26px; color:var(--mut); }
+  .chip { padding:6px 14px; border-radius:999px; background:rgba(255,255,255,.08); color:var(--fg); }
+  .imdb { background:#f5c518; color:#000; font-weight:800; }
+  #desc { margin-top:14px; font-size:24px; line-height:1.45; color:#c9cddb; max-width:1100px;
+    display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+  #status { position:absolute; right:96px; top:64px; font-size:20px; color:var(--mut); text-align:right; }
+  #status .warn { color:#ffb454; }
+  #grid { position:absolute; left:72px; right:72px; top:360px; bottom:80px; overflow:hidden; padding:28px 24px 0; }
+  #rows { position:relative; transition:transform .22s ease; }
+  .row { display:flex; gap:28px; margin-bottom:34px; }
+  .card { flex:0 0 calc((100% - 5*28px)/6); aspect-ratio:2/3; border-radius:16px; position:relative;
+    background:var(--card); overflow:hidden; transition:transform .16s ease, box-shadow .16s ease;
+    box-shadow:0 8px 24px rgba(0,0,0,.45); }
+  .card img { width:100%; height:100%; object-fit:cover; display:block; }
+  .card .ph { position:absolute; inset:0; display:flex; align-items:flex-end; padding:16px;
+    font-size:22px; font-weight:700; background:linear-gradient(160deg,#2a2f45,#121522); }
+  .card.on { transform:scale(1.08); z-index:2; box-shadow:0 0 0 5px var(--acc), 0 18px 48px rgba(155,107,255,.45); }
+  #help { position:absolute; left:96px; right:96px; bottom:30px; font-size:22px; color:var(--mut);
+    display:flex; gap:40px; }
+  #help b { color:var(--fg); }
+  #empty { position:absolute; left:0; right:0; top:560px; text-align:center; font-size:32px; color:var(--mut); display:none; }
+  #msg { position:absolute; left:50%; bottom:110px; transform:translateX(-50%); padding:14px 28px;
+    border-radius:12px; background:rgba(255,80,80,.18); color:#ffd0d0; font-size:24px; display:none; }
+</style>
+</head>
+<body>
+<div id="hero"><div id="heroBg"></div><div id="heroInner">
+  <div id="brand">Films · HDMI 1</div>
+  <div id="title"></div>
+  <div id="meta"></div>
+  <div id="desc"></div>
+</div><div id="status"></div></div>
+<div id="grid"><div id="rows"></div></div>
+<div id="empty">Catalogue vide ou indisponible</div>
+<div id="msg"></div>
+<div id="help"><span><b>◀ ▲ ▼ ▶</b> parcourir</span><span><b>OK</b> ouvrir la page du film</span><span><b>Retour</b> tableau de bord</span></div>
+<script>
+// Vue passive : l'état (curseur, état de session) appartient au pont Python, qui pousse update()
+// par CDP ; un sondage /ui/state.json sert de filet. Aucune donnée n'est insérée comme HTML.
+(function () {
+  "use strict";
+  var items = [], view = { cursor: 0, cols: 6 }, cards = [], rowH = 0;
+  function $(id) { return document.getElementById(id); }
+  function text(el, s) { el.textContent = s == null ? "" : String(s); }
+  function chip(label, cls) { var s = document.createElement("span"); s.className = "chip" + (cls ? " " + cls : ""); text(s, label); return s; }
+  function build() {
+    var rows = $("rows"); rows.textContent = ""; cards = [];
+    var cols = view.cols || 6, row = null;
+    items.forEach(function (it, i) {
+      if (i % cols === 0) { row = document.createElement("div"); row.className = "row"; rows.appendChild(row); }
+      var c = document.createElement("div"); c.className = "card";
+      if (it.poster && /^https:\/\//.test(it.poster)) {
+        var img = document.createElement("img"); img.loading = "lazy"; img.alt = ""; img.referrerPolicy = "no-referrer";
+        img.src = it.poster; c.appendChild(img);
+      } else { var ph = document.createElement("div"); ph.className = "ph"; text(ph, it.title); c.appendChild(ph); }
+      row.appendChild(c); cards.push(c);
+    });
+    $("empty").style.display = items.length ? "none" : "block";
+    var first = rows.querySelector(".row"); rowH = first ? first.getBoundingClientRect().height + 34 : 0;
+  }
+  function render() {
+    var i = Math.max(0, Math.min(view.cursor || 0, items.length - 1));
+    cards.forEach(function (c, j) { c.classList.toggle("on", j === i); });
+    var it = items[i] || {};
+    text($("title"), it.title || "");
+    var meta = $("meta"); meta.textContent = "";
+    if (it.year) meta.appendChild(chip(it.year));
+    if (it.genre) meta.appendChild(chip(it.genre));
+    if (typeof it.imdb_rating === "number") meta.appendChild(chip("IMDb " + it.imdb_rating.toFixed(1) + (it.imdb_votes ? " · " + it.imdb_votes.toLocaleString("fr-CA") + " votes" : ""), "imdb"));
+    text($("desc"), it.description || "");
+    $("heroBg").style.backgroundImage = it.poster && /^https:\/\//.test(it.poster) ? 'url("' + it.poster.replace(/["\\]/g, "") + '")' : "none";
+    var r = Math.floor(i / (view.cols || 6));
+    $("rows").style.transform = "translateY(" + (-r * rowH) + "px)";   // rangée sélectionnée toujours en haut, entière
+    var st = $("status"); st.textContent = "";
+    var a = document.createElement("div"); text(a, items.length ? (i + 1) + " / " + items.length : ""); st.appendChild(a);
+    if (view.prefix === "stale") { var w = document.createElement("div"); w.className = "warn"; text(w, "adresse du site non revalidée"); st.appendChild(w); }
+    var m = $("msg"); text(m, view.message || ""); m.style.display = view.message ? "block" : "none";
+    document.body.setAttribute("data-cursor", String(i));
+  }
+  window.__opentv = { update: function (v) { if (v && typeof v === "object") { var rebuild = v.cols !== view.cols; view = v; if (rebuild) build(); render(); } } };
+  function poll() {
+    fetch("/ui/state.json", { cache: "no-store" }).then(function (r) { return r.json(); })
+      .then(function (v) { if (v.cursor !== view.cursor || v.message !== view.message || v.prefix !== view.prefix) window.__opentv.update(v); })
+      .catch(function () {}).then(function () { setTimeout(poll, 700); });
+  }
+  Promise.all([fetch("/ui/catalogue.json", { cache: "no-store" }).then(function (r) { return r.json(); }),
+               fetch("/ui/state.json", { cache: "no-store" }).then(function (r) { return r.json(); })])
+    .then(function (res) { items = Array.isArray(res[0].items) ? res[0].items : []; view = res[1]; build(); render();
+      document.body.setAttribute("data-ready", "1"); poll(); })
+    .catch(function () { build(); render(); document.body.setAttribute("data-ready", "error"); poll(); });
+})();
+</script>
+</body>
+</html>
