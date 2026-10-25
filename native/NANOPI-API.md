@@ -35,12 +35,15 @@ que la session est terminée : OpenTV quitte le mode externe et laisse HDMI 1 af
 
 ## Comportement attendu du NanoPi
 
-- **Catalogue** : interface propre (titres, affiches, description, lien IMDb), navigable aux flèches,
+- **Catalogue** : interface propre (titres, affiches, description, notes IMDb et TMDb étiquetées séparément), navigable aux flèches,
   rendue localement par le NanoPi. Métadonnées seulement.
 - **Lecture** : `ok` sur un titre ouvre **uniquement la page publique actuelle du film** dans Chromium
   plein écran (`state:"player"`). Aucune extraction, proxy, réécriture, blocage ou contournement des
   flux vidéo ou protections du site. Si une source légitime/autorisée est fournie plus tard, le lecteur
   peut l'utiliser à la place.
+  Assistance « un clic » côté NanoPi seulement (contrat inchangé) : après le OK, l'unique lecteur visible dominant
+  de la page (iframe, même d'une autre origine, ou `<video>`) est agrandi sur la page parente et reçoit au plus
+  un clic central, s'il n'est pas recouvert ; sinon la page publique reste telle quelle (voir BRIDGE.md).
 - **Retour** : lecteur → ferme la page et restaure le catalogue à la même position ; racine du
   catalogue → ferme la session (`dashboard`). `close`, échec, ou inactivité (catalogue 5 min sans
   touche ; lecteur : plafond configurable) → session fermée, tableau de bord affiché.
@@ -53,7 +56,7 @@ que la session est terminée : OpenTV quitte le mode externe et laisse HDMI 1 af
   `503 discovery_failed`. Toute URL ouverte dans le lecteur doit avoir l'origine découverte et commencer
   par `/<préfixe>/`.
 
-## Côté OpenTV (v21)
+## Côté OpenTV (v22)
 
 - `EXT` : `""` → `"opening"` (POST session) → `"on"` (HDMI 1 `BEHIND`, page transparente, touches
   relayées). Session acceptée **avant** d'afficher HDMI 1 ; échec = message, accueil, aucun écran noir.

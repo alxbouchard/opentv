@@ -1,11 +1,11 @@
 # opentv-bridge — appli externe « Films » sur HDMI 1 (côté NanoPi)
 
-Implémente `native/NANOPI-API.md` (API v1) pour OpenTV v21. **Non déployé.** Python 3.13 standard, utilisateur `alex`.
+Implémente `native/NANOPI-API.md` (API v1) pour OpenTV v22. Python 3.13 standard, utilisateur `alex`.
 
 ## Architecture
 
 ```
-TV 192.168.2.14 (OpenTV v21, tvwindow HDMI1 BEHIND)
+TV 192.168.2.14 (OpenTV v22, tvwindow HDMI1 BEHIND)
    │  POST /v1/session|key|close, GET /v1/health   (clé d'appli + 6 touches, jamais d'URL)
    ▼
 NanoPi 192.168.2.28:8097  opentv-bridge.service (systemd --user, KillMode=control-group, OOMScoreAdjust=600)
@@ -32,6 +32,7 @@ du noyau restaure l'affichage du tableau de bord (à valider sur le terrain, voi
 | OK sur la tuile Films | `POST /v1/session` → `starting` (réponse immédiate), lance weston+chromium en tâche de fond | tableau de bord → catalogue (~1 resynchro HDMI au changement de mode) |
 | Flèches | curseur Python (grille 6 col.), poussé à la page par CDP | sélection |
 | OK | URL = origine validée + `/<préfixe>/` + chemin exact (catalogue même époque, ou table site_id) → `Page.navigate` → `player` ; sinon « Page indisponible » | page publique du film, plein écran |
+| (après OK, auto) | assistance de lecture bornée (voir ci-dessous) : lecteur unique agrandi sur la page parente + **un** clic central | lecteur plein écran, lecture lancée |
 | Flèches/OK en lecteur | `Input.dispatchKeyEvent` vers la page | — |
 | Retour (lecteur) | renavigue vers l'UI locale, curseur conservé → `catalogue` | catalogue |
 | Retour (catalogue) | fin `back` → navigateur puis compositeur fermés | tableau de bord |
@@ -54,6 +55,74 @@ systemd tue le groupe (navigateur + compositeur) ; OpenTV sort après 3 échecs 
 - Validation du préfixe : `/<préfixe>/` répond aujourd'hui **302 → `/<préfixe>/home/fakrov`** et
   `/<préfixe>` **301 → `http://`** même hôte. Le résolveur suit ≤3 redirections même origine **restant sous
   `/<préfixe>/`**, exige 200 `text/html`, et mémorise ce chemin comme page de liste.
+
+## Assistance de lecture « un clic » (`PLAY_ASSIST`, défaut 1)
+
+Constat terrain : la fiche publique validée charge **une grande iframe de lecteur d'une autre origine** ; un
+`<video>` HTML5 n'est jamais visible depuis le document principal. Après le OK de l'utilisateur et la
+navigation vers la fiche, `ChromiumKiosk.play_assist` (thread `play-assist`, une seule exécution par OK) :
+
+1. sonde toutes les 0,4 s, au plus `PLAY_ASSIST_S` (15 s, ≤ 60), le **document principal seulement**, dans un
+   monde isolé CDP (`Page.createIsolatedWorld`) : les scripts de la page ne voient pas nos scripts et ne peuvent
+   pas falsifier `elementFromPoint`/`getBoundingClientRect` ; l'origine du document doit être exactement celle de
+   l'URL validée, sinon `foreign` et aucune action ;
+2. retient l'unique `<iframe>`/`<video>` visible dominant (≥ 480×270 et ≥ 15 % de la fenêtre ; si deux candidats
+   ont moins d'un facteur 2 d'écart → `ambiguous`, aucune action ; les petites iframes publicitaires sont ignorées) ;
+3. l'agrandit **sur la page parente** par style en ligne `!important` (`position:fixed; top/left/right/bottom:0;
+   100vw×100vh; border:0; z-index:2147483647`) et `overflow:hidden` sur `html`/`body` — rien n'est retiré, masqué
+   ni modifié dans l'iframe ;
+4. attend `PLAY_ASSIST_SETTLE_S` (1,5 s), revérifie que le lecteur couvre la fenêtre **et** que
+   `elementFromPoint(centre)` est bien ce lecteur (sinon `maximized-obstructed` : jamais de clic sur une surcouche),
+   puis envoie **un seul** clic gauche réel (`Input.dispatchMouseEvent`) au centre. Pas de boucle, pas de nouvelle
+   tentative : un OK = au plus un clic. Le focus passe à l'iframe, les flèches/OK suivants y sont relayés.
+
+Jamais : lecture de `src`/`currentSrc`/`srcObject`, accès au contenu de l'iframe (`contentWindow`/`contentDocument`),
+requête réseau, URL de flux, suppression de publicité, `muted`, contournement de protection. Les scripts sont des
+constantes statiques (test `StaticScriptTests`). Retour (lecteur) annule l'assistance (événement + `nav_lock` : aucun
+clic possible après la navigation de retour) et ramène le catalogue ; fermeture de session idem. Tout échec
+(`no-player`, `ambiguous`, `foreign`, `error`…) laisse la page publique utilisable, avec les touches relayées comme
+avant. Résultat journalisé : `{"event":"play_assist","outcome":…}`. `PLAY_ASSIST=0` = comportement précédent.
+
+## Notes TMDb (`opentv_tmdb.py`, commande ponctuelle — jamais en arrière-plan)
+
+Fournisseur **distinct** d'IMDb : champs `tmdb_*` uniquement (`tmdb_id`, `tmdb_rating` /10 = `vote_average`
+arrondi, `tmdb_votes`, `tmdb_match_status` ∈ matched|ambiguous|unmatched, `tmdb_match_method`,
+`tmdb_confidence`, `tmdb_reason`, `tmdb_evidence`, `tmdb_match_key`, `tmdb_rating_updated_at`) et
+`attribution.tmdb`. L'UI montre le logo officiel d'attribution (`tmdb-logo.svg`, variante `blue_short` publiée sur
+<https://www.themoviedb.org/about/logos-attribution>), un badge « TMDb x.x · n votes » séparé du badge IMDb et la mention
+« This product uses the TMDB API but is not endorsed or certified by TMDB. » dès qu'un titre est apparié.
+
+- **Correspondance prudente** : (0) `imdb_id` déjà connu → `/find` (unique, année ±1) ; (1) titre exact
+  (casse/espaces/apostrophes, titre localisé ou original) + même année → `high`, ou année ±1 si candidat
+  unique → `medium` ; (2) titre normalisé (accents, ponctuation, article initial) + même année → `medium` ;
+  sinon `ambiguous` (plusieurs candidats plausibles, jamais de choix) ou `unmatched` (`no_year`,
+  `year_mismatch`, `no_title_match`, `no_results`, `provider_gone`). 0 vote → note `null`, jamais 0. Le pont
+  (`clean_item`) n'expose une note que pour `matched` avec votes > 0.
+- **Coût borné** : `--max-requests` (400), ≤ 10 req/s, une reprise sur 429 (`Retry-After` ≤ 10 s), coupe-circuit
+  après 5 erreurs transitoires consécutives (valeurs antérieures conservées), langues `fr-FR,fr-CA`
+  (2e recherche seulement si la 1re ne donne rien). Réutilisation par `tmdb_match_key` (titre+année+imdb_id) ;
+  notes rafraîchies après 7 j, non-appariés revérifiés après 30 j ; horodatages dans
+  `catalogue.json.tmdb-state.json` pour que `catalogue.json` reste identique octet pour octet sans changement.
+- **Écriture atomique + retour arrière** : verrou `catalogue.json.lock`, refus si le fichier a changé pendant la
+  passe, refus si un champ non `tmdb_*` diffère ou si un champ tmdb est invalide, copie `catalogue.json.tmdb.bak`
+  (0600), remplacement atomique, relecture (restauration automatique si elle diverge). Le pont relit le
+  catalogue à chaque ouverture de session : aucun redémarrage nécessaire.
+- **Secret** : environnement uniquement (`TMDB_READ_TOKEN` v4 de préférence, sinon `TMDB_API_KEY` v3), retiré de
+  `os.environ` à la lecture, jamais en argument/journal/disque. 401/403 → arrêt, rien n'est écrit (code 3).
+  API épinglée sur `https://api.themoviedb.org/3` (seul `http://127.0.0.1:<port>/3` est admis pour les tests).
+
+Déploiement (depuis le Mac, après installation du pont ; trousseau → tube → NanoPi, sans écho) :
+
+```sh
+security find-generic-password -s com.paz.opentv.tmdb.read-access-token-v4 -a paz_alex -w \
+  | ssh <nanopi> '~/opentv-bridge/tmdb-enrich.sh --dry-run'   # compteurs seulement, rien n'est écrit
+security find-generic-password -s com.paz.opentv.tmdb.read-access-token-v4 -a paz_alex -w \
+  | ssh <nanopi> '~/opentv-bridge/tmdb-enrich.sh'             # écrit catalogue.json (+ .tmdb.bak)
+ssh <nanopi> '~/opentv-bridge/tmdb-enrich.sh status'           # matched/ambiguous/unmatched/rated, sans secret
+ssh <nanopi> '~/opentv-bridge/tmdb-enrich.sh rollback'         # restaure la copie d'avant enrichissement
+```
+
+Codes de sortie : 0 ok, 2 configuration/verrou, 3 authentification TMDb, 5 validation (rien n'est écrit).
 
 ## Migration de domaine et routage (fakrov.com → wadrox.com)
 
@@ -89,11 +158,13 @@ fiches `b/wadrox/<lien>`. Le `data-id` interne est stable (Super Mario 17397) ma
 ## Tests (Mac, sans NanoPi ni TV)
 
 ```sh
-python3 -m unittest -v native.test.test_opentv_bridge   # 67 tests, dont Chromium réel headless par CDP
-cd native/test && node bridge_e2e.js                     # 17 : vraie page OpenTV v21 ↔ vrai pont (sous-processus)
+python3 -m unittest -v native.test.test_opentv_bridge   # 69 tests, dont Chromium réel headless par CDP
+python3 -m unittest -v native.test.test_opentv_play_assist   # 17 : assistance de lecture, 9 en Chromium réel (iframe d'une autre origine)
+python3 -m unittest -v native.test.test_opentv_tmdb   # 27 : correspondance, budget, panne, atomicité, CLI/secret, UI
+cd native/test && node bridge_e2e.js                     # 17 : vraie page OpenTV v22 ↔ vrai pont (sous-processus)
 ```
 
-## Déploiement (NON fait — exige l'accord d'Alex)
+## Déploiement contrôlé
 
 1. **Prérequis root** (Alex) : `sudo apt install chromium weston seatd` ; `sudo systemctl enable --now seatd` ;
    `alex` est déjà dans `video`/`render`/`input`. Aucun autre service système touché.
@@ -105,6 +176,8 @@ cd native/test && node bridge_e2e.js                     # 17 : vraie page OpenT
 4. Essai terrain manuel du compositeur **sans OpenTV**, TV allumée sur HDMI 1, photo à chaque étape :
    lancer weston+chromium 30 s, les arrêter ; exiger le tableau de bord intact (même PID `dashlive.py`).
 5. Passer `DISPLAY_BACKEND=chromium`, redémarrer le service, puis parcours complet depuis la TV.
-6. Livrer OpenTV v21 (build/signature/installation via le chemin NanoPi validé), `/status`, confirmation d'Alex.
+5 bis. Optionnel : enrichissement TMDb (`tmdb-enrich.sh --dry-run`, puis sans) ; `PLAY_ASSIST=1` (défaut) — essai
+   terrain d'un film : lecteur plein écran + lecture après OK, Retour → catalogue, photo.
+6. Livrer OpenTV v22 (build/signature/installation via le chemin NanoPi validé), `/status`, confirmation d'Alex.
 
 Retour arrière : `./rollback-bridge.sh` (ne retire que ce service).

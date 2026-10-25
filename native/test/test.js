@@ -15,9 +15,10 @@ const results = []; const ok = (name, cond, extra='') => { results.push((cond ? 
   const apps = fs.readFileSync(path.join(__dirname, 'apps.json'), 'utf8');
   await p.addInitScript(appsJson => {
     const APPS = JSON.parse(appsJson);
+    localStorage.setItem('opentv.apps.v1', JSON.stringify(APPS.map(x => ({ id:x.id, name:x.name }))));
     window.tizen = {
       application: {
-        getAppsInfo: (ok) => setTimeout(() => ok(APPS), 50),
+        getAppsInfo: (ok) => setTimeout(() => ok(APPS), 1200),
         launch: (id, ok) => { window.__launched(id); ok && ok(); },
         getCurrentApplication: () => ({ appInfo: { packageId: 'OpnTV00001' } }),
         launchAppControl: (ctrl, id, ok) => { console.log('LAC '+location.href+' '+new Error().stack.split('\n').slice(2,4).join(' <- ')); window.__lastCtrl = { op: ctrl.operation, id }; window.__startSvc(); ok && ok(); }
@@ -26,7 +27,10 @@ const results = []; const ok = (name, cond, extra='') => { results.push((cond ? 
     };
   }, apps);
   await p.goto('http://127.0.0.1:8099/app/index.html');
-  await p.waitForTimeout(3500);
+  await p.waitForTimeout(200);
+  const early = await p.$$eval('#tiles .tile', els => els.map(e => e.textContent.trim()).join(' | '));
+  ok('accueil depuis le cache avant getAppsInfo', /Netflix/.test(early), early);
+  await p.waitForTimeout(3300);
   // 1. démarrage du service
   const ctrl = await p.evaluate(() => window.__lastCtrl);
   ok('service démarré via launchAppControl', ctrl && ctrl.id === 'OpnTV00001.OpenTVService' && ctrl.op === 'http://tizen.org/appcontrol/operation/service', JSON.stringify(ctrl));
@@ -37,7 +41,7 @@ const results = []; const ok = (name, cond, extra='') => { results.push((cond ? 
   ok('Netflix présent', /Netflix/.test(names)); ok('YouTube présent une seule fois', (names.match(/YouTube/g) || []).length === 1, names);
   ok('applis système cachées absentes', !/Paramètres|Apps\b/.test(names));
   ok('OpenTV/TizenBrew pas dans les tuiles', !/OpenTV|TizenBrew/.test(names));
-  const build = await p.textContent('#build'); ok('build tag natif', /v21 native/.test(build) && !/aperçu/.test(build), build);
+  const build = await p.textContent('#build'); ok('build tag natif', /v22 native/.test(build) && !/aperçu/.test(build), build);
   // 3. télécommande iPhone -> focus
   const before = await p.evaluate(() => (document.querySelector('.focused')||{}).id || (document.querySelector('.focused')||{}).textContent);
   await get('http://127.0.0.1:8096/cmd?cmd=right'); await p.waitForTimeout(1200);
@@ -51,7 +55,7 @@ const results = []; const ok = (name, cond, extra='') => { results.push((cond ? 
   // 6. page /remote servie
   const remote = await get('http://127.0.0.1:8096/remote'); ok('page télécommande servie', remote && /TÉLÉCOMMANDE OPENTV/.test(remote));
   const st = JSON.parse(await get('http://127.0.0.1:8096/status'));
-  ok('/status rapporte l\'écran', st.client && /v21 native/.test(st.client.build) && st.client.screen === 'home' && st.client.apps === 8 && /^app-/.test(st.client.focus), JSON.stringify(st.client));
+  ok('/status rapporte l\'écran', st.client && /v22 native/.test(st.client.build) && st.client.screen === 'home' && st.client.apps === 8 && /^app-/.test(st.client.focus), JSON.stringify(st.client));
   await get('http://127.0.0.1:8096/cmd?cmd=right'); await get('http://127.0.0.1:8096/cmd?cmd=up'); await p.waitForTimeout(1200);
   const moved = await p.evaluate(() => (document.querySelector('.focused')||{}).textContent);
   await p.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => false }); document.dispatchEvent(new Event('visibilitychange')); });

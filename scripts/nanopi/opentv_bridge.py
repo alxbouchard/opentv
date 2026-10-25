@@ -117,6 +117,13 @@ class Config:
         self.output_mode = env.get("OUTPUT_MODE", "1920x1080")
         self.output_name = env.get("OUTPUT_NAME", "HDMI-A-1")
         self.dashboard_unit = env.get("DASHBOARD_UNIT", "muse-display.service")
+        # Assistance de lecture après OK : agrandit sur la page parente l'unique lecteur visible dominant
+        # (iframe ou <video>) puis UN clic central hérité du OK. 0 = page publique seule.
+        self.play_assist = env.get("PLAY_ASSIST", "1") == "1"
+        self.play_assist_s = _num(env, "PLAY_ASSIST_S", 15.0)
+        self.play_assist_settle_s = _num(env, "PLAY_ASSIST_SETTLE_S", 1.5)
+        if not (0 <= self.play_assist_s <= 60 and 0 <= self.play_assist_settle_s <= 10):
+            raise SystemExit("config: PLAY_ASSIST_S doit être dans [0, 60] et PLAY_ASSIST_SETTLE_S dans [0, 10]")
         self.runtime_dir = env.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
 
 
@@ -893,7 +900,17 @@ def clean_item(x, detail_re):
     poster = x.get("poster")
     sid = x.get("site_id")
     sid = str(sid) if isinstance(sid, (str, int)) and not isinstance(sid, bool) else ""
-    return {
+    # TMDb (opentv_tmdb.py) : fournisseur distinct d'IMDb ; note affichée seulement pour une correspondance
+    # « matched » avec des votes. Jamais 0 à la place d'une donnée manquante.
+    tmdb_ok = x.get("tmdb_match_status") == "matched" and num("tmdb_id", 1, 10 ** 9, int) is not None
+    tmdb_votes = num("tmdb_votes", 1, 10 ** 9, int) if tmdb_ok else None
+    tmdb = {"tmdb_id": num("tmdb_id", 1, 10 ** 9, int) if tmdb_ok else None,
+            "tmdb_rating": num("tmdb_rating", 0, 10, (int, float)) if tmdb_votes else None,
+            "tmdb_votes": tmdb_votes,
+            "tmdb_match_status": x["tmdb_match_status"] if x.get("tmdb_match_status") in
+            ("matched", "ambiguous", "unmatched") else None,
+            "tmdb_rating_updated_at": s("tmdb_rating_updated_at", 40) if tmdb_ok else None}
+    out = {
         "source_id": str(x.get("source_id") or rel.split("/")[-1])[:64], "detail_path": rel,
         "site_id": sid if NUM_ID_RE.match(sid) else None,
         "title": x["title"].strip()[:200], "year": num("year", 1880, 2100, int), "genre": s("genre", 80),
@@ -903,6 +920,8 @@ def clean_item(x, detail_re):
         "imdb_rating": num("imdb_rating", 0, 10, (int, float)), "imdb_votes": num("imdb_votes", 0, 10 ** 9, int),
         "match_status": s("match_status", 16), "rating_updated_at": s("rating_updated_at", 40),
     }
+    out.update(tmdb)
+    return out
 
 
 def load_catalogue_meta(path, detail_re, cap=2000):
@@ -1068,6 +1087,55 @@ class CDP:
 KEYMAP = {"up": ("ArrowUp", 38), "down": ("ArrowDown", 40), "left": ("ArrowLeft", 37),
           "right": ("ArrowRight", 39), "ok": ("Enter", 13)}
 
+# --------------------------------------------------------------------------- assistance de lecture (page parente seulement)
+# Scripts statiques (aucune donnée du catalogue ni de la page interpolée), exécutés dans un monde isolé CDP :
+# les scripts de la page ne peuvent ni les voir ni falsifier leurs prototypes. Ils lisent uniquement la
+# géométrie/visibilité d'éléments <iframe>/<video> du document principal, n'entrent jamais dans une iframe,
+# ne lisent aucun attribut src/currentSrc/srcObject, ne retirent ni ne masquent aucun élément de la page.
+ASSIST_PROBE_JS = r"""(function () {
+  var W = window.innerWidth || 0, H = window.innerHeight || 0;
+  var out = {origin: String(location.origin), state: "none", n: 0, kind: ""};
+  if (document.readyState === "loading" || !W || !H) { out.state = "loading"; return out; }
+  var els = document.querySelectorAll("iframe,video"), c = [], i, e, r, cs;
+  for (i = 0; i < els.length && i < 200; i++) {
+    e = els[i]; r = e.getBoundingClientRect(); cs = window.getComputedStyle(e);
+    if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) < 0.1) continue;
+    if (r.width < 480 || r.height < 270 || r.width * r.height < 0.15 * W * H) continue;
+    c.push({e: e, a: r.width * r.height});
+  }
+  c.sort(function (x, y) { return y.a - x.a; });
+  out.n = c.length;
+  if (!c.length) return out;
+  if (c.length > 1 && c[0].a < 2 * c[1].a) { out.state = "ambiguous"; return out; }
+  window.__opentvPlayer = c[0].e;
+  out.state = "found"; out.kind = c[0].e.tagName.toLowerCase();
+  return out;
+})()"""
+ASSIST_MAXIMIZE_JS = r"""(function () {
+  var e = window.__opentvPlayer;
+  if (!e || !e.isConnected) return "gone";
+  var p = [["position", "fixed"], ["top", "0"], ["left", "0"], ["right", "0"], ["bottom", "0"],
+           ["width", "100vw"], ["height", "100vh"], ["max-width", "none"], ["max-height", "none"],
+           ["min-width", "0"], ["min-height", "0"], ["margin", "0"], ["padding", "0"], ["border", "0"],
+           ["transform", "none"], ["z-index", "2147483647"]], i;
+  for (i = 0; i < p.length; i++) e.style.setProperty(p[i][0], p[i][1], "important");
+  var roots = [document.documentElement, document.body];
+  for (i = 0; i < roots.length; i++) if (roots[i]) roots[i].style.setProperty("overflow", "hidden", "important");
+  window.scrollTo(0, 0);
+  return "ok";
+})()"""
+ASSIST_CHECK_JS = r"""(function () {
+  var e = window.__opentvPlayer, W = window.innerWidth, H = window.innerHeight;
+  if (!e || !e.isConnected) return {state: "gone"};
+  var r = e.getBoundingClientRect();
+  if (r.left > 2 || r.top > 2 || r.right < W - 2 || r.bottom < H - 2) return {state: "not_covering"};
+  var x = Math.floor(W / 2), y = Math.floor(H / 2);
+  if (document.elementFromPoint(x, y) !== e) return {state: "obstructed"};
+  return {state: "ready", x: x, y: y};
+})()"""
+ASSIST_OUTCOMES = ("clicked", "maximized-obstructed", "maximized-not_covering", "maximized-gone", "gone",
+                   "no-player", "ambiguous", "foreign", "cancelled", "error", "off")
+
 
 class ChromiumKiosk:
     """Compositeur Wayland (optionnel) + Chromium kiosque, profil temporaire, piloté par CDP."""
@@ -1079,6 +1147,8 @@ class ChromiumKiosk:
         self.profile = None
         self.closed = threading.Event()
         self.lock = threading.Lock()
+        self.nav_lock = threading.Lock()
+        self._world = None
 
     def _spawn(self, argv, env, pass_fds=()):
         return subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -1178,9 +1248,83 @@ class ChromiumKiosk:
             pass
 
     def navigate(self, url):
-        r = self.cdp.send("Page.navigate", {"url": url}, session=self.session, timeout=5)
+        with self.nav_lock:   # jamais de clic d'assistance pendant/après une navigation de retour
+            self._world = None
+            r = self.cdp.send("Page.navigate", {"url": url}, session=self.session, timeout=5)
         if r.get("errorText"):
             raise CDPError("navigate:" + r["errorText"][:80])
+
+    def _world_eval(self, expr):
+        """Évalue un script statique dans un monde isolé du cadre principal (recréé à chaque document)."""
+        frame = self.cdp.send("Page.getFrameTree", session=self.session, timeout=3)["frameTree"]["frame"]
+        key = (frame.get("id"), frame.get("loaderId"))
+        if self._world is None or self._world[0] != key:
+            ctx = self.cdp.send("Page.createIsolatedWorld", {"frameId": frame["id"], "worldName": "opentv-assist",
+                                                            "grantUniveralAccess": False},
+                                session=self.session, timeout=3)["executionContextId"]
+            self._world = (key, ctx)
+        r = self.cdp.send("Runtime.evaluate", {"expression": expr, "contextId": self._world[1], "returnByValue": True},
+                          session=self.session, timeout=3)
+        if r.get("exceptionDetails"):
+            raise CDPError("assist_js")
+        return r.get("result", {}).get("value")
+
+    def play_assist(self, expect_origin, cancelled, budget_s=15.0, settle_s=1.5, interval=0.4):
+        """Après OK + navigation : si la page de l'origine validée expose UN lecteur visible dominant (iframe,
+        même d'une autre origine, ou <video>), l'agrandir en plein écran sur la page parente (style fixe),
+        puis au plus UN clic gauche au centre, seulement si ce point touche bien ce lecteur (jamais une
+        surcouche). Aucune lecture d'URL de flux, aucun accès au contenu de l'iframe, aucune boucle de clics.
+        -> une valeur de ASSIST_OUTCOMES. La page publique reste utilisable dans tous les cas."""
+        end = time.monotonic() + max(0.0, budget_s)
+        last = "no-player"
+        while True:
+            if cancelled.is_set() or self.closed.is_set():
+                return "cancelled"
+            try:
+                r = self._world_eval(ASSIST_PROBE_JS)
+            except (CDPError, KeyError, TypeError):
+                r = None
+            if isinstance(r, dict) and isinstance(r.get("origin"), str):
+                if r["origin"] != expect_origin:
+                    last = "foreign"
+                elif r.get("state") == "found":
+                    break
+                elif r.get("state") == "ambiguous":
+                    last = "ambiguous"
+                else:
+                    last = "no-player"
+            if time.monotonic() + interval > end:
+                return last
+            cancelled.wait(interval)
+        try:
+            if self._world_eval(ASSIST_MAXIMIZE_JS) != "ok":
+                return "gone"
+        except (CDPError, KeyError, TypeError):
+            return "error"
+        if cancelled.wait(max(0.0, settle_s)) or self.closed.is_set():
+            return "cancelled"
+        with self.nav_lock:
+            if cancelled.is_set() or self.closed.is_set():
+                return "cancelled"
+            try:
+                chk = self._world_eval(ASSIST_CHECK_JS)
+            except (CDPError, KeyError, TypeError):
+                return "error"
+            st = chk.get("state") if isinstance(chk, dict) else None
+            if st != "ready":
+                return "maximized-" + st if st in ("obstructed", "not_covering", "gone") else "error"
+            x, y = chk.get("x"), chk.get("y")
+            if not all(isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 8192 for v in (x, y)):
+                return "error"
+            try:   # un seul clic, issu du OK de l'utilisateur
+                self.cdp.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y}, session=self.session)
+                self.cdp.send("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y, "button": "left",
+                                                           "buttons": 1, "clickCount": 1}, session=self.session)
+                self.cdp.send("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y, "button": "left",
+                                                           "buttons": 0, "clickCount": 1}, session=self.session)
+            except CDPError:
+                return "error"
+        return "clicked"
 
     def key(self, k):
         name, code = KEYMAP[k]
@@ -1238,6 +1382,15 @@ class NullDisplay:
 
     def __init__(self, cfg=None):
         self.calls, self._alive, self.fail_open, self.closed = [], True, False, threading.Event()
+        self.assists, self.assist_result, self.assist_hold = [], "no-player", None
+
+    def play_assist(self, expect_origin, cancelled, budget_s=15.0, settle_s=1.5):
+        self.assists.append({"origin": expect_origin, "cancelled": cancelled, "budget_s": budget_s})
+        if self.assist_hold is not None:   # tests : simule une page lente, interrompue par Retour
+            self.assist_hold.wait(5)
+            if cancelled.is_set():
+                return "cancelled"
+        return self.assist_result
 
     def open(self, url):
         self.calls.append(("open", url))
@@ -1354,7 +1507,7 @@ class Controller:
             now = self.clock()
             s = {"id": secrets.token_urlsafe(18), "app": app, "state": "starting", "cursor": 0,
                  "opened": now, "seen": now, "key_at": now, "player_at": None, "display": None,
-                 "prep": threading.Event(), "opening": False}
+                 "prep": threading.Event(), "opening": False, "assist": "off", "assist_cancel": None}
             self.s, self.message = s, ""
             log("session_open", app=app, session=s["id"][:6], items=len(self.items), prefix=self.resolver.status())
         threading.Thread(target=self._prepare, args=(s,), daemon=True, name="route-prep").start()
@@ -1497,9 +1650,42 @@ class Controller:
                 return s["state"]
             s["state"], s["player_at"], self.message = "player", self.clock(), ""
             log("state", state="player", item=item["source_id"], site_id=item.get("site_id"))
+            self._start_assist(s, url)
             return "player"
 
+    # -- assistance de lecture : bornée, une seule par OK, annulée par Retour/fermeture
+    def _start_assist(self, s, url):
+        d = s["display"]
+        s["assist"] = "off"
+        if not self.cfg.play_assist or self.cfg.play_assist_s <= 0 or not hasattr(d, "play_assist"):
+            return
+        u = urllib.parse.urlsplit(url)
+        cancel = threading.Event()
+        s["assist_cancel"], s["assist"] = cancel, "pending"
+        threading.Thread(target=self._assist, args=(s, d, u.scheme + "://" + u.netloc, cancel), daemon=True,
+                         name="play-assist").start()
+
+    def _assist(self, s, d, origin, cancel):
+        try:
+            out = d.play_assist(origin, cancel, self.cfg.play_assist_s, self.cfg.play_assist_settle_s)
+        except Exception as e:   # l'assistance ne doit jamais fermer la session : page publique conservée
+            log("play_assist_error", error=type(e).__name__)
+            out = "error"
+        out = out if out in ASSIST_OUTCOMES else "error"
+        with self.lock:
+            if s.get("assist_cancel") is cancel:
+                s["assist"] = out
+        log("play_assist", outcome=out)
+
+    @staticmethod
+    def _cancel_assist(s):
+        c = s.get("assist_cancel")
+        if c is not None:
+            c.set()
+        s["assist_cancel"] = None
+
     def _to_catalogue(self, s):
+        self._cancel_assist(s)
         try:
             s["display"].navigate(self.ui_url())
         except Exception as e:
@@ -1532,6 +1718,7 @@ class Controller:
 
     def _end_locked(self, s, reason):
         self.s = None
+        self._cancel_assist(s)
         log("session_end", reason=reason, state=s["state"], seconds=round(self.clock() - s["opened"], 1))
         with self.td_cv:
             self.td_n += 1
@@ -1688,6 +1875,9 @@ def make_ui_handler(ctl, ui_file):
             if p == "/ui/":
                 with open(ui_file, "rb") as f:
                     raw, ctype = f.read(), "text/html; charset=utf-8"
+            elif p == "/ui/tmdb-logo.svg":
+                with open(os.path.join(os.path.dirname(ui_file), "tmdb-logo.svg"), "rb") as f:
+                    raw, ctype = f.read(), "image/svg+xml"
             elif p == "/ui/catalogue.json":
                 raw, ctype = json.dumps({"items": ctl.items}).encode(), "application/json"
             elif p == "/ui/state.json":

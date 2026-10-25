@@ -63,6 +63,31 @@
     try { window.localStorage.setItem("opentv.prefs", JSON.stringify(P)); } catch (e) {}
     applyPrefs(); renderHome(); if (lookOpen) renderLook();
   }
+  var APPS_CACHE = "opentv.apps.v1";
+  function restoreAppsCache() {
+    try {
+      var raw = window.localStorage.getItem(APPS_CACHE), a = raw ? JSON.parse(raw) : [], n = 0;
+      if (!Array.isArray(a) || a.length > 300) return false;
+      for (var i = 0; i < a.length; i++) {
+        var x = a[i];
+        if (!x || typeof x.id !== "string" || typeof x.name !== "string" || !x.id || x.id.length > 200 ||
+            x.name.length > 200 || /[\x00-\x1f]/.test(x.id + x.name)) continue;
+        INSTALLED[x.id] = x.name; n++;
+      }
+      return n > 0;
+    } catch (e) { return false; }
+  }
+  function saveAppsCache(data) {
+    try {
+      var out = [];
+      for (var i = 0; i < data.length && i < 300; i++) {
+        var x = data[i];
+        if (x && typeof x.id === "string" && typeof x.name === "string" && x.id && x.id.length <= 200 &&
+            x.name.length <= 200 && !/[\x00-\x1f]/.test(x.id + x.name)) out.push({ id: x.id, name: x.name });
+      }
+      window.localStorage.setItem(APPS_CACHE, JSON.stringify(out));
+    } catch (e) {}
+  }
   function applyPrefs() {
     var keep = stage.className.split(/\s+/).filter(function (c) { return c && !/^(font|tiles|labels|logo|clock)-/.test(c); });
     keep.push("font-" + P.font, "tiles-" + P.tiles, "labels-" + P.labels, "logo-" + P.logo, "clock-" + P.clock);
@@ -705,7 +730,7 @@
     report();
   }
   // état de l'écran -> service (diagnostic à distance : GET /status)
-  var BUILD = "OpenTV v21 native";
+  var BUILD = "OpenTV v22 native";
   var SVC_VERSION = 17;   // doit égaler VERSION dans service/index.js
   function report() {
     if (!remoteOn) return;
@@ -729,22 +754,30 @@
   }
 
   function boot() {
+    var cachedApps = restoreAppsCache();
     applyPrefs();
     tick(); setInterval(tick, 1000);
     if (EXTERNAL.length) setInterval(extPoll, 2000);
     try { if (tizen.tvinputdevice) tizen.tvinputdevice.registerKey("ColorF0Red"); } catch (e) {}
+    // L'accueil ne dépend plus de getAppsInfo : le cache est rafraîchi ensuite en arrière-plan.
+    goHome();
+    var starting = $("build");
+    if (starting) starting.textContent = BUILD + " · " + (cachedApps ? (installedIds().length + " applis · cache") : "démarrage");
     startService();
     listApps(function (ok, data) {
       if (ok && data && data.length) {
+        INSTALLED = {};
         haveService = true;
         for (var i = 0; i < data.length; i++) INSTALLED[data[i].id] = data[i].name;
+        saveAppsCache(data);
       } else {
-        // aperçu hors TV : fabriquer des applis fictives à partir du catalogue
-        for (var b = 0; b < BRANDS.length; b++) INSTALLED["demo." + BRANDS[b].key] = BRANDS[b].name;
+        // aperçu hors TV : fabriquer des applis fictives à partir du catalogue, sauf si un cache existe
+        if (!cachedApps) for (var b = 0; b < BRANDS.length; b++) INSTALLED["demo." + BRANDS[b].key] = BRANDS[b].name;
       }
       var el = $("build");
-      if (el) el.textContent = BUILD + " · " + (haveService ? (installedIds().length + " applis") : "aperçu");
-      goHome();
+      if (el) el.textContent = BUILD + " · " + (haveService ? (installedIds().length + " applis") : (cachedApps ? "cache" : "aperçu"));
+      if (!cachedApps && current() === "home" && !LIVE) { lastKeyByScreen.home = ""; goHome(); }
+      else { renderScreen(current()); restoreFocus(current()); }
       if (!HAS_TIZEN && haveService) remoteReady();   // mode module : le service tourne déjà
     });
     // filet de sécurité : si le service tarde, afficher quand même l'accueil

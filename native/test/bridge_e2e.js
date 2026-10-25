@@ -1,4 +1,4 @@
-// Bout en bout OpenTV v21 (page réelle, API tizen simulée) <-> VRAI pont NanoPi (scripts/nanopi/opentv_bridge.py)
+// Bout en bout OpenTV v22 (page réelle, API tizen simulée) <-> VRAI pont NanoPi (scripts/nanopi/opentv_bridge.py)
 // lancé en sous-processus, affichage nul (aucun Chromium, aucun réseau externe, aucune TV).
 // Depuis native/test/ : node bridge_e2e.js   (exige le .wgt décompressé dans ./wgt et python3)
 const { chromium } = require('playwright'); const http = require('http'), fs = require('fs'), path = require('path'), os = require('os');

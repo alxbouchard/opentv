@@ -20,6 +20,7 @@
   #meta { display:flex; gap:14px; align-items:center; font-size:26px; color:var(--mut); }
   .chip { padding:6px 14px; border-radius:999px; background:rgba(255,255,255,.08); color:var(--fg); }
   .imdb { background:#f5c518; color:#000; font-weight:800; }
+  .tmdb { background:#0d253f; color:#90cea1; font-weight:800; box-shadow:inset 0 0 0 2px #01b4e4; }
   #desc { margin-top:14px; font-size:24px; line-height:1.45; color:#c9cddb; max-width:1100px;
     display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
   #status { position:absolute; right:96px; top:64px; font-size:20px; color:var(--mut); text-align:right; }
@@ -39,6 +40,7 @@
   #help b { color:var(--fg); }
   #credit { position:absolute; right:96px; bottom:32px; max-width:500px; text-align:right;
     font-size:15px; color:#747b91; }
+  #tmdbCredit img { width:120px; height:auto; vertical-align:middle; margin:4px 10px 4px 0; }
   #empty { position:absolute; left:0; right:0; top:560px; text-align:center; font-size:32px; color:var(--mut); display:none; }
   #msg { position:absolute; left:50%; bottom:110px; transform:translateX(-50%); padding:14px 28px;
     border-radius:12px; background:rgba(255,80,80,.18); color:#ffd0d0; font-size:24px; display:none; }
@@ -55,7 +57,7 @@
 <div id="empty">Catalogue vide ou indisponible</div>
 <div id="msg"></div>
 <div id="help"><span><b>◀ ▲ ▼ ▶</b> parcourir</span><span><b>OK</b> ouvrir la page du film</span><span><b>Retour</b> tableau de bord</span></div>
-<div id="credit">Information courtesy of IMDb (https://www.imdb.com). Used with permission.</div>
+<div id="credit"><div>Information courtesy of IMDb (https://www.imdb.com). Used with permission.</div><div id="tmdbCredit" style="display:none"><img src="/ui/tmdb-logo.svg" alt="TMDB">This product uses the TMDB API but is not endorsed or certified by TMDB.</div></div>
 <script>
 // Vue passive : l'état (curseur, état de session) appartient au pont Python, qui pousse update()
 // par CDP ; un sondage /ui/state.json sert de filet. Aucune donnée n'est insérée comme HTML.
@@ -78,6 +80,7 @@
       row.appendChild(c); cards.push(c);
     });
     $("empty").style.display = items.length ? "none" : "block";
+    $("tmdbCredit").style.display = items.some(function (it) { return it.tmdb_match_status === "matched" && it.tmdb_id; }) ? "block" : "none";
     var first = rows.querySelector(".row"); rowH = first ? first.getBoundingClientRect().height + 34 : 0;
   }
   function render() {
@@ -89,6 +92,8 @@
     if (it.year) meta.appendChild(chip(it.year));
     if (it.genre) meta.appendChild(chip(it.genre));
     if (typeof it.imdb_rating === "number") meta.appendChild(chip("IMDb " + it.imdb_rating.toFixed(1) + (it.imdb_votes ? " · " + it.imdb_votes.toLocaleString("fr-CA") + " votes" : ""), "imdb"));
+    // TMDb : fournisseur distinct, jamais fusionné avec IMDb ; absent = pas de badge (jamais 0)
+    if (it.tmdb_match_status === "matched" && typeof it.tmdb_rating === "number" && it.tmdb_votes > 0) meta.appendChild(chip("TMDb " + it.tmdb_rating.toFixed(1) + " · " + it.tmdb_votes.toLocaleString("fr-CA") + " votes", "tmdb"));
     text($("desc"), it.description || "");
     $("heroBg").style.backgroundImage = it.poster && /^https:\/\//.test(it.poster) ? 'url("' + it.poster.replace(/["\\]/g, "") + '")' : "none";
     var r = Math.floor(i / (view.cols || 6));

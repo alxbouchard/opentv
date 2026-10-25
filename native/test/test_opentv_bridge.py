@@ -517,6 +517,9 @@ class AccessTests(unittest.TestCase):
                 self.assertIn(b"window.__opentv", r.read())
             with urllib.request.urlopen(base + "/ui/catalogue.json") as r:
                 self.assertEqual(len(json.loads(r.read())["items"]), 14)
+            with urllib.request.urlopen(base + "/ui/tmdb-logo.svg") as r:
+                self.assertEqual(r.headers["Content-Type"], "image/svg+xml")
+                self.assertTrue(r.read().startswith(b"<svg"))
             with self.assertRaises(urllib.error.HTTPError) as cm:
                 urllib.request.urlopen(base + "/ui/../../etc/passwd")
             cm.exception.close()

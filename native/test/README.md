@@ -11,5 +11,6 @@ Autostart NanoPi sans Node : depuis la racine, `python3 -m unittest -v native.te
 La suite exerce le vrai démon Python contre une fausse TV SDB/HTTP et vérifie également les scripts d'installation/rollback.
 
 Pont NanoPi des applis externes (scripts/nanopi/opentv_bridge.py, voir scripts/nanopi/BRIDGE.md) :
-`python3 -m unittest -v native.test.test_opentv_bridge` (39, dont Chromium réel headless) puis, depuis `native/test/`,
+`python3 -m unittest -v native.test.test_opentv_bridge` (69, dont Chromium réel headless),
+`native.test.test_opentv_play_assist` (17, assistance de lecture, Chromium réel) et `native.test.test_opentv_tmdb` (27) puis, depuis `native/test/`,
 `node bridge_e2e.js` (17 : vraie page OpenTV ↔ vrai pont en sous-processus, affichage nul).
