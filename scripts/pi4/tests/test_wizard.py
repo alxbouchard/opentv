@@ -316,7 +316,9 @@ class TestWizardSemantics(unittest.TestCase):
         f = finish_form(body)
         self.assertIn("id=\"psk\" type=\"text\" class=\"ios-text-mask\"", f)
         self.assertNotIn("id=\"psk\" type=\"password\"", f)
-        self.assertNotIn("value=", re.search(r"<input name=\"psk\".*?>", f).group(0))
+        tag = re.search(r"<input name=\"psk\".*?>", f)
+        assert tag is not None
+        self.assertNotIn("value=", tag.group(0))
         for aid in ("hermit", "hermes"):
             sel = re.search(r"<select name=\"agent_%s\">(.*?)</select>" % aid, f).group(1)
             self.assertIn("<option value=\"none\" selected>", sel)
