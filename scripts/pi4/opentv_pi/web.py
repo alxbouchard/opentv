@@ -369,7 +369,7 @@ def _agent_fields(ctx, values, plan):
         % (" open" if is_open else "", e(name or "", quote=True), "".join(adv)))
 
 
-def _step_finish(token, ctx, plan, values):
+def _step_finish(token, ctx, plan, values, ios=False):
     e, mode = html.escape, plan["mode"]
     parts = [_progress(2)]
     if mode == "keep":
@@ -395,11 +395,13 @@ def _step_finish(token, ctx, plan, values):
                          "value=\"%s\"%s></label>"
                          % (e(plan["ssid"] or "", quote=True), "" if plan["ssid"] else " autofocus"))
         # jamais de value= : le mot de passe n'est pas réécrit dans la page, même après une erreur
-        parts.append("<label>Mot de passe<span class=\"pw\"><input name=\"psk\" id=\"psk\" type=\"password\" "
+        ptype = "text" if ios else "password"
+        pclass = " class=\"ios-text-mask\"" if ios else ""
+        parts.append("<label>Mot de passe<span class=\"pw\"><input name=\"psk\" id=\"psk\" type=\"%s\"%s "
                      "minlength=\"8\" maxlength=\"64\" required autocomplete=\"off\" inputmode=\"text\" "
                      "autocapitalize=\"none\" autocorrect=\"off\" spellcheck=\"false\" enterkeyhint=\"go\" "
                      "data-1p-ignore=\"true\" data-lpignore=\"true\"%s></span></label>"
-                     % (" autofocus" if mode == "wifi" or (mode == "other" and plan["ssid"]) else ""))
+                     % (ptype, pclass, " autofocus" if mode == "wifi" or (mode == "other" and plan["ssid"]) else ""))
         if mode == "other":
             hidden = (values or {}).get("hidden") == "1"
             parts.append("<label class=\"check\"><input type=\"checkbox\" name=\"hidden\" value=\"1\"%s>"
@@ -417,13 +419,13 @@ def _step_finish(token, ctx, plan, values):
     return "".join(parts)
 
 
-def setup_form(token, ctx, error=None, values=None, networks=None, choice=None, plan=None):
+def setup_form(token, ctx, error=None, values=None, networks=None, choice=None, plan=None, ios=False):
     """Page de l'assistant (étape 1 ou 2). networks : réseaux proches validés (wifiscan), utilisés à l'étape 1."""
     plan = plan or wizard_plan(ctx, error, values, choice)
     if plan["step"] == 1:
         inner = _step_network(token, ctx, plan, networks or [])
     else:
-        inner = _step_finish(token, ctx, plan, values)
+        inner = _step_finish(token, ctx, plan, values, ios=ios)
     return _page("Configurer OpenTV", inner, script=plan["step"] == 2)
 
 
@@ -445,6 +447,10 @@ def setup_result(kind):
 
 class LANHandler(_Base):
     csp = SETUP_CSP
+
+    def _ios(self):
+        ua = self.headers.get("User-Agent") or ""
+        return any(x in ua for x in ("iPhone", "iPad", "iPod"))
 
     def do_GET(self):
         u = urllib.parse.urlsplit(self.path)
@@ -468,7 +474,7 @@ class LANHandler(_Base):
             networks = self.app.setup_networks(tok, client=self.client_address[0])
             if networks is None:
                 return self.send(403, setup_result("denied"))
-        self.send(200, setup_form(tok, ctx, networks=networks, plan=plan))
+        self.send(200, setup_form(tok, ctx, networks=networks, plan=plan, ios=self._ios()))
 
     def do_POST(self):
         if urllib.parse.urlsplit(self.path).path != "/setup":
@@ -493,7 +499,8 @@ class LANHandler(_Base):
             networks = None
             if plan["step"] == 1:
                 networks = self.app.setup_networks(form.get("t", ""), client=self.client_address[0]) or []
-            return self.send(code, setup_form(form.get("t", ""), ctx, err, vals, networks=networks, plan=plan))
+            return self.send(code, setup_form(form.get("t", ""), ctx, err, vals, networks=networks, plan=plan,
+                                              ios=self._ios()))
         self.send(code, setup_result(kind))
 
 

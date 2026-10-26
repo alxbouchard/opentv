@@ -309,6 +309,14 @@ class TestWizardSemantics(unittest.TestCase):
         self.assertNotIn("name=\"hidden\"", f)
         # défauts sûrs : aucun agent, Muse décochée, nom « Salon »
         self.assertRegex(f, r"<input type=\"checkbox\" name=\"agent_muse\" value=\"feedback\">")
+
+    def test_step2_ios_is_text_before_first_paint_but_visually_masked(self):
+        ctx = self.a.setup_context()
+        body = web.setup_form(self.tok, ctx, plan=web.wizard_plan(ctx, choice=("wifi", "Maison")), ios=True)
+        f = finish_form(body)
+        self.assertIn("id=\"psk\" type=\"text\" class=\"ios-text-mask\"", f)
+        self.assertNotIn("id=\"psk\" type=\"password\"", f)
+        self.assertNotIn("value=", re.search(r"<input name=\"psk\".*?>", f).group(0))
         for aid in ("hermit", "hermes"):
             sel = re.search(r"<select name=\"agent_%s\">(.*?)</select>" % aid, f).group(1)
             self.assertIn("<option value=\"none\" selected>", sel)

@@ -14,7 +14,9 @@
   if (psk && /iPhone|iPad|iPod/.test(navigator.userAgent || "") && window.CSS &&
       typeof window.CSS.supports === "function" && window.CSS.supports("-webkit-text-security", "disc")) {
     psk.type = "text";
-    psk.className = (psk.className ? psk.className + " " : "") + "ios-text-mask";
+    if (psk.className.indexOf("ios-text-mask") < 0) {
+      psk.className = (psk.className ? psk.className + " " : "") + "ios-text-mask";
+    }
     iosTextMask = true;
   }
 
