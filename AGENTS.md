@@ -56,7 +56,9 @@ scripts/
   install.mjs        envoi du .wgt sur la TV (protocole sync de sdb, en JS pur)
   sdb.mjs            exécute des commandes « shell: » sdb (en JS pur)
   autostart.mjs      ancien prototype Node d'autostart (ne pas déployer sur le NanoPi)
-  nanopi/            autostart Python supervisé, installation, tests et retour arrière
+  nanopi/            autostart Python supervisé, pont Films/« Pour toi » (opentv_foryou.py, FORYOU.md),
+                     installation, tests et retour arrière
+docs/plans/          plans d'implémentation (ex. 2026-10-25-pour-toi.md)
 app/ service.js package.json README.md   ancien module TizenBrew (historique)
 ```
 
@@ -221,6 +223,8 @@ Décompresser le `.wgt` livré dans `native/test/wgt/`, puis lancer depuis `nati
 | `scroll.js` / `visual.js` | défilement de la rangée avec 12 applis ; captures avec une fausse image HDMI |
 | `faketv.mjs` | fausse TV (port sdb + service) pour tester `autostart.mjs` |
 | `test_opentv_autostart.py` | 43 tests stdlib du démon Python NanoPi : SDB fragmenté, cycles, délais, reprises, CEC, journaux, installation et rollback |
+| `ext.js` / `bridge_e2e.js` | tuiles externes « Films » et « Pour toi » contre un faux NanoPi / le vrai pont (33 / 25) |
+| `test_opentv_foryou.py` | 70 tests « Pour toi » : base SQLite (schéma, idempotence, vu ≠ ouvert, référence non vide), contention SQLite < 1 s (RESERVED/EXCLUSIVE/corrompue), moteur, navigation, CLI agent sans URL, UID `films/<site_id>` stable malgré SITE_ROOT, pont, Chromium réel |
 
 Les tests remplacent l'API `tizen` par une maquette (`addInitScript`). Ils ne remplacent pas la TV :
 après chaque livraison, vérifier `/status` sur la vraie TV, et faire confirmer l'écran par Alexandre
@@ -263,6 +267,16 @@ Information transmise par Muse (agent d'Alexandre), état au 24 oct. 2026 — no
 - Pièges `system.run` : un processus d'arrière-plan meurt à l'expiration de l'appel (utiliser
   `setsid nohup … < /dev/null &`), `pkill -f` peut se tuer lui-même. Ne pas toucher au rendu du
   tableau de bord, au réseau, au SDK ni aux services sans l'accord d'Alexandre.
+
+## 10 ter. « Pour toi » (OpenTV v23, côté NanoPi)
+
+Tuile externe `pourtoi` (après « Films ») : sélection personnelle du même catalogue accepté, actions à la
+télécommande (Regarder, J'aime, Pas pour moi, Déjà vu, À voir plus tard, Pas ce soir), historique local SQLite
+(`foryou.sqlite3` 0600 sous `STATE_DIR` du pont, jamais dans Git) et CLI JSON locale pour Muse/Hermit
+(`python3 -I ~/opentv-bridge/opentv_foryou.py status|recommend|search|feedback|history`). Aucun nouveau port,
+aucune URL dans la CLI ; identifiants `films/<site_id>` (`FORYOU_SOURCE_ID`, indépendants du domaine) ;
+ouvrir un film n'est jamais « vu ». Détails, commandes exactes et limites :
+`scripts/nanopi/FORYOU.md`. Service Tizen inchangé (v17) ; mettre à jour le pont avant la WGT v23.
 
 ## 11. Limites connues (testées, ne pas reproposer sans élément nouveau)
 

@@ -41,7 +41,7 @@ const results = []; const ok = (name, cond, extra='') => { results.push((cond ? 
   ok('Netflix présent', /Netflix/.test(names)); ok('YouTube présent une seule fois', (names.match(/YouTube/g) || []).length === 1, names);
   ok('applis système cachées absentes', !/Paramètres|Apps\b/.test(names));
   ok('OpenTV/TizenBrew pas dans les tuiles', !/OpenTV|TizenBrew/.test(names));
-  const build = await p.textContent('#build'); ok('build tag natif', /v22 native/.test(build) && !/aperçu/.test(build), build);
+  const build = await p.textContent('#build'); ok('build tag natif', /v23 native/.test(build) && !/aperçu/.test(build), build);
   // 3. télécommande iPhone -> focus
   const before = await p.evaluate(() => (document.querySelector('.focused')||{}).id || (document.querySelector('.focused')||{}).textContent);
   await get('http://127.0.0.1:8096/cmd?cmd=right'); await p.waitForTimeout(1200);
@@ -55,7 +55,7 @@ const results = []; const ok = (name, cond, extra='') => { results.push((cond ? 
   // 6. page /remote servie
   const remote = await get('http://127.0.0.1:8096/remote'); ok('page télécommande servie', remote && /TÉLÉCOMMANDE OPENTV/.test(remote));
   const st = JSON.parse(await get('http://127.0.0.1:8096/status'));
-  ok('/status rapporte l\'écran', st.client && /v22 native/.test(st.client.build) && st.client.screen === 'home' && st.client.apps === 8 && /^app-/.test(st.client.focus), JSON.stringify(st.client));
+  ok('/status rapporte l\'écran', st.client && /v23 native/.test(st.client.build) && st.client.screen === 'home' && st.client.apps === 8 && /^app-/.test(st.client.focus), JSON.stringify(st.client));
   await get('http://127.0.0.1:8096/cmd?cmd=right'); await get('http://127.0.0.1:8096/cmd?cmd=up'); await p.waitForTimeout(1200);
   const moved = await p.evaluate(() => (document.querySelector('.focused')||{}).textContent);
   await p.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => false }); document.dispatchEvent(new Event('visibilitychange')); });

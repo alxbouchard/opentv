@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Pour toi</title>
+<style>
+  /* Vue passive, légère pour weston pixman + Chromium --disable-gpu : aucun flou, aucune grande ombre,
+     affiches seulement autour de la rangée courante. ES5 + CSS compatibles Chromium 56. */
+  html, body { margin:0; height:100%; background:#0b0d14; color:#f2f3f7; overflow:hidden;
+    font-family:"Inter","Noto Sans","DejaVu Sans",sans-serif; cursor:none; }
+  #hero { position:absolute; left:96px; right:420px; top:40px; height:280px; }
+  #brand { font-size:22px; letter-spacing:4px; text-transform:uppercase; color:#9aa0b4; }
+  #title { font-size:54px; font-weight:800; line-height:1.08; margin:10px 0 10px; max-height:118px; overflow:hidden; }
+  #meta span { display:inline-block; margin:0 12px 8px 0; padding:5px 14px; border-radius:999px;
+    background:#1f2433; font-size:24px; color:#f2f3f7; }
+  #meta span.imdb { background:#f5c518; color:#000; font-weight:800; }
+  #meta span.tmdb { background:#0d253f; color:#90cea1; font-weight:800; border:2px solid #01b4e4; }
+  #why { font-size:22px; color:#c7b3ff; margin-top:2px; max-height:58px; overflow:hidden; }
+  #desc { font-size:21px; line-height:1.4; color:#c9cddb; margin-top:8px; max-height:60px; overflow:hidden; }
+  #poster { position:absolute; right:96px; top:40px; width:200px; height:300px; border-radius:12px;
+    background:#161a26; overflow:hidden; }
+  #poster img { width:100%; height:100%; object-fit:cover; display:block; }
+  #acts { position:absolute; left:96px; right:96px; top:338px; white-space:nowrap; }
+  .act { display:inline-block; margin-right:16px; padding:10px 24px; border-radius:12px; font-size:24px;
+    background:#1a1e2b; color:#c9cddb; border:3px solid #1a1e2b; }
+  .act.set { color:#fff; background:#3a2a5c; border-color:#3a2a5c; }
+  .act.on { background:#f2f3f7; color:#0b0d14; border-color:#9b6bff; font-weight:800; }
+  body[data-panel="0"] .act { opacity:.55; }
+  #note { position:absolute; left:96px; right:96px; top:398px; font-size:18px; color:#7d8399;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #rows { position:absolute; left:72px; right:0; top:432px; bottom:64px; overflow:hidden; }
+  #rowsIn { position:relative; -webkit-transition:-webkit-transform .18s ease; transition:transform .18s ease; }
+  .frow { height:292px; overflow:hidden; }
+  .rtitle { font-size:26px; font-weight:700; height:40px; line-height:40px; padding-left:24px; color:#dfe2ec;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .frow.cur .rtitle { color:#fff; }
+  .track { white-space:nowrap; padding:10px 24px 0; -webkit-transition:-webkit-transform .18s ease; transition:transform .18s ease; }
+  .fcard { display:inline-block; vertical-align:top; position:relative; width:150px; height:225px; margin-right:24px;
+    border-radius:12px; background:#161a26; overflow:hidden; white-space:normal; }
+  .fcard img { width:100%; height:100%; object-fit:cover; display:block; }
+  .fcard .ph { position:absolute; left:0; right:0; bottom:0; padding:12px; font-size:18px; font-weight:700; }
+  .fcard img + .ph { display:none; }
+  .fcard.dim { opacity:.45; }
+  .fcard.on { outline:5px solid #9b6bff; -webkit-transform:scale(1.06); transform:scale(1.06); z-index:2; }
+  .fcard .marks { position:absolute; left:6px; top:6px; font-size:22px; color:#fff; background:#0b0d14;
+    border-radius:8px; padding:0 6px; }
+  .fcard .marks:empty { display:none; }
+  #msg { position:absolute; left:300px; right:300px; bottom:96px; text-align:center; padding:14px 28px;
+    border-radius:12px; background:#2a2140; color:#efe6ff; font-size:24px; display:none; z-index:5; }
+  #help { position:absolute; left:96px; right:640px; bottom:22px; font-size:21px; color:#9aa0b4; white-space:nowrap; }
+  #help b { color:#f2f3f7; }
+  #credit { position:absolute; right:96px; bottom:20px; width:520px; text-align:right; font-size:14px; color:#747b91; }
+  #tmdbCredit img { width:110px; height:auto; vertical-align:middle; margin:2px 8px 2px 0; }
+  #empty { position:absolute; left:0; right:0; top:560px; text-align:center; font-size:32px; color:#9aa0b4; display:none; }
+</style>
+</head>
+<body data-panel="0">
+<div id="hero">
+  <div id="brand">Pour toi · HDMI 1</div>
+  <div id="title"></div>
+  <div id="meta"></div>
+  <div id="why"></div>
+  <div id="desc"></div>
+</div>
+<div id="poster"></div>
+<div id="acts"></div>
+<div id="note"></div>
+<div id="rows"><div id="rowsIn"></div></div>
+<div id="empty">Aucun film disponible pour l'instant.</div>
+<div id="msg"></div>
+<div id="help"></div>
+<div id="credit"><div>Information courtesy of IMDb (https://www.imdb.com). Used with permission.</div><div id="tmdbCredit" style="display:none"><img src="/ui/tmdb-logo.svg" alt="TMDB">This product uses the TMDB API but is not endorsed or certified by TMDB.</div></div>
+<script>
+// Vue passive : l'état (rangée, colonne, panneau, bouton, marques) appartient au pont Python, qui pousse
+// update() par CDP ; un sondage /ui/state.json sert de filet. Aucune donnée n'est insérée comme HTML.
+(function () {
+  "use strict";
+  window.__errors = [];
+  window.addEventListener("error", function (e) { window.__errors.push(String(e.message || e)); });
+  var data = { rows: [], buttons: [], note: "" }, view = { row: 0, col: 0, panel: false, btn: 0, marks: {} };
+  var rowEls = [], cardEls = [], heroFor = "", msgShown = "", msgTimer = 0, ROW_H = 292, CARD_W = 174, VISIBLE = 9;
+  var DEFAULT_BUTTONS = [["watch", "Regarder"], ["like", "J'aime"], ["dislike", "Pas pour moi"], ["seen", "Déjà vu"],
+    ["watchlist", "À voir plus tard"], ["not-tonight", "Pas ce soir"]];
+  function $(id) { return document.getElementById(id); }
+  function text(el, s) { el.textContent = s == null ? "" : String(s); }
+  function el(tag, cls, s) { var e = document.createElement(tag); if (cls) e.className = cls; if (s != null) text(e, s); return e; }
+  function get(url, cb) {
+    var x = new XMLHttpRequest(), done = false;
+    x.open("GET", url, true);
+    x.timeout = 3000;                                  // pont occupé : la vue reprend au prochain sondage
+    x.ontimeout = function () { if (done) return; done = true; cb(null); };
+    x.onreadystatechange = function () {
+      if (x.readyState !== 4 || done) return;
+      done = true;
+      var v = null;
+      try { v = x.status === 200 ? JSON.parse(x.responseText) : null; } catch (e) { v = null; }
+      cb(v);
+    };
+    x.send();
+  }
+  function num(n) { var s = String(Math.round(n)), out = ""; while (s.length > 3) { out = " " + s.slice(-3) + out; s = s.slice(0, -3); } return s + out; }
+  function dec(n) { return (Math.round(n * 10) / 10).toFixed(1).replace(".", ","); }
+  function thumb(u) {
+    if (!u || !/^https:\/\//.test(u)) return "";
+    return u.replace(/^(https:\/\/image\.tmdb\.org\/t\/p\/)(original|w[0-9]+)\//, "$1w300/");
+  }
+  function mark(id) { return (view.marks && view.marks[id]) || {}; }
+  function markText(m) {
+    var s = "";
+    if (m.opinion === "like") s += "♥";
+    if (m.opinion === "dislike") s += "✕";
+    if (m.seen) s += "✓";
+    if (m.watchlist) s += "+";
+    if (m.not_tonight) s += "☾";
+    return s;
+  }
+  function build() {
+    var root = $("rowsIn"); root.textContent = ""; rowEls = []; cardEls = [];
+    var anyTmdb = false;
+    data.rows.forEach(function (r, ri) {
+      var row = el("div", "frow"), track = el("div", "track"), cards = [];
+      row.appendChild(el("div", "rtitle", r.title));
+      r.items.forEach(function (it) {
+        var c = el("div", "fcard");
+        c.appendChild(el("div", "ph", it.title));
+        c.appendChild(el("div", "marks", ""));
+        track.appendChild(c); cards.push(c);
+        if (it.tmdb) anyTmdb = true;
+      });
+      row.appendChild(track); root.appendChild(row); rowEls.push(row); cardEls.push(cards);
+    });
+    var acts = $("acts"); acts.textContent = "";
+    (data.buttons && data.buttons.length ? data.buttons : DEFAULT_BUTTONS).forEach(function (b) {
+      var a = el("span", "act", b[1]); a.setAttribute("data-act", b[0]); acts.appendChild(a);
+    });
+    text($("note"), data.note || "");
+    $("empty").style.display = data.rows.length ? "none" : "block";
+    $("tmdbCredit").style.display = anyTmdb ? "block" : "none";
+  }
+  function loadImages(r0) {   // affiches seulement pour la rangée courante et les deux suivantes
+    for (var r = Math.max(0, r0 - 1); r < Math.min(cardEls.length, r0 + 3); r++) {
+      var items = data.rows[r].items, cards = cardEls[r];
+      for (var i = 0; i < cards.length; i++) {
+        var u = thumb(items[i].poster);
+        if (u && !cards[i].querySelector("img")) {
+          var img = document.createElement("img"); img.alt = ""; img.referrerPolicy = "no-referrer"; img.src = u;
+          cards[i].insertBefore(img, cards[i].firstChild);
+        }
+      }
+    }
+  }
+  function render() {
+    if (!data.rows.length) {
+      text($("title"), ""); text($("help"), "Retour : tableau de bord");
+      document.body.setAttribute("data-pos", "");
+      return;
+    }
+    var r = Math.max(0, Math.min(view.row || 0, data.rows.length - 1));
+    var items = data.rows[r].items, c = Math.max(0, Math.min(view.col || 0, items.length - 1));
+    var it = items[c], m = mark(it.id);
+    rowEls.forEach(function (row, ri) { row.classList.toggle("cur", ri === r); });
+    cardEls.forEach(function (cards, ri) {
+      cards.forEach(function (card, ci) {
+        var mm = mark(data.rows[ri].items[ci].id);
+        card.classList.toggle("on", ri === r && ci === c);
+        card.classList.toggle("dim", mm.opinion === "dislike" || !!mm.seen || !!mm.not_tonight);
+        text(card.querySelector(".marks"), markText(mm));
+      });
+    });
+    $("rowsIn").style.transform = "translateY(" + (-r * ROW_H) + "px)";
+    var track = rowEls[r].querySelector(".track");
+    track.style.transform = "translateX(" + (-Math.max(0, c - (VISIBLE - 2)) * CARD_W) + "px)";
+    loadImages(r);
+    text($("title"), it.title);
+    var meta = $("meta"); meta.textContent = "";
+    if (it.year) meta.appendChild(el("span", "", it.year));
+    if (it.genres && it.genres.length) meta.appendChild(el("span", "", it.genres.join(" · ")));
+    // IMDb et TMDb : deux fournisseurs distincts, jamais fusionnés ; absent = pas de badge (jamais 0)
+    if (it.imdb && typeof it.imdb.rating === "number") meta.appendChild(el("span", "imdb", "IMDb " + dec(it.imdb.rating) + (it.imdb.votes ? " · " + num(it.imdb.votes) + " votes" : "")));
+    if (it.tmdb && typeof it.tmdb.rating === "number") meta.appendChild(el("span", "tmdb", "TMDb " + dec(it.tmdb.rating) + " · " + num(it.tmdb.votes) + " votes"));
+    text($("why"), it.reasons && it.reasons.length ? "Pourquoi : " + it.reasons.map(function (x) { return x.text; }).join(" · ") : "");
+    text($("desc"), it.description || "");
+    if (heroFor !== it.id) {   // affiche du héros : une seule image, vignette w300
+      heroFor = it.id;
+      var p = $("poster"); p.textContent = "";
+      var u = thumb(it.poster);
+      if (u) { var img = document.createElement("img"); img.alt = ""; img.referrerPolicy = "no-referrer"; img.src = u; p.appendChild(img); }
+    }
+    var acts = $("acts").querySelectorAll(".act");
+    for (var i = 0; i < acts.length; i++) {
+      var k = acts[i].getAttribute("data-act");
+      acts[i].classList.toggle("on", !!view.panel && i === view.btn);
+      acts[i].classList.toggle("set", (k === "like" && m.opinion === "like") || (k === "dislike" && m.opinion === "dislike") ||
+        (k === "seen" && !!m.seen) || (k === "watchlist" && !!m.watchlist) || (k === "not-tonight" && !!m.not_tonight));
+    }
+    var help = $("help"); help.textContent = "";
+    var parts = view.panel ? [["◀ ▶", " choisir"], ["OK", " valider"], ["Retour", " fermer les actions"]]
+                           : [["◀ ▲ ▼ ▶", " parcourir"], ["OK", " actions (Regarder…)"], ["Retour", " tableau de bord"]];
+    parts.forEach(function (p, j) { if (j) help.appendChild(document.createTextNode("   ·   ")); help.appendChild(el("b", "", p[0])); help.appendChild(document.createTextNode(p[1])); });
+    var msg = $("msg");
+    if ((view.message || "") !== msgShown) {   // message bref : masqué après 4 s, sans attendre une touche
+      msgShown = view.message || ""; text(msg, msgShown); msg.style.display = msgShown ? "block" : "none";
+      clearTimeout(msgTimer); if (msgShown) msgTimer = setTimeout(function () { msg.style.display = "none"; }, 4000);
+    }
+    document.body.setAttribute("data-pos", r + ":" + c);
+    document.body.setAttribute("data-panel", view.panel ? "1" : "0");
+  }
+  function sig(v) { return JSON.stringify([v.row, v.col, v.panel, v.btn, v.message, v.marks]); }
+  window.__opentv = { update: function (v) { if (v && typeof v === "object") { view = v; render(); } } };
+  function poll() {
+    get("/ui/state.json", function (v) {
+      if (v && sig(v) !== sig(view)) window.__opentv.update(v);
+      setTimeout(poll, 700);
+    });
+  }
+  get("/ui/foryou.json", function (d) {
+    if (d && Array.isArray(d.rows)) data = d;
+    get("/ui/state.json", function (v) {
+      if (v) view = v;
+      build(); render();
+      document.body.setAttribute("data-ready", d ? "1" : "error");
+      poll();
+    });
+  });
+})();
+</script>
+</body>
+</html>

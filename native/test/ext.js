@@ -1,10 +1,10 @@
-// Appli externe NanoPi (tuile « Films ») : HDMI 1 + touches relayées + retour au tableau de bord.
+// Applis externes NanoPi (tuiles « Films » et « Pour toi ») : HDMI 1 + touches relayées + retour au tableau de bord.
 // Faux NanoPi local (contrat : native/NANOPI-API.md). Ne remplace pas /status sur la vraie TV.
 const { chromium } = require('playwright'); const http = require('http'), fs = require('fs'), path = require('path');
 const ROOT = path.join(__dirname, 'wgt'); const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.jpg': 'image/jpeg', '.png': 'image/png' };
 const web = http.createServer((q, r) => { const f = path.join(ROOT, decodeURIComponent(q.url.split('?')[0])); fs.readFile(f, (e, d) => { if (e) { r.writeHead(404); return r.end(); } r.writeHead(200, { 'Content-Type': mime[path.extname(f)] || 'x' }); r.end(d); }); }).listen(8094);
 // ---- faux NanoPi ----
-const NP = { log: [], state: 'dashboard', session: null, mode: 'ok', delay: 0, n: 0 };
+const NP = { log: [], state: 'dashboard', session: null, mode: 'ok', delay: 0, n: 0, app: null };
 function npReply(r, code, body) { r.writeHead(code, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }); r.end(JSON.stringify(body)); }
 const nanopi = http.createServer((q, r) => {
   const u = new URL(q.url, 'http://x'), p = u.pathname, s = u.searchParams;
@@ -14,8 +14,8 @@ const nanopi = http.createServer((q, r) => {
     if (NP.mode === 'bogus') return npReply(r, 200, { ok: true, session: '<img src=x onerror=alert(1)>', state: 'pwned' });
     if (p === '/v1/session' && q.method === 'POST') {
       if (NP.mode === 'fail') return npReply(r, 503, { ok: false, error: 'discovery_failed' });
-      if (s.get('app') !== 'catalogue') return npReply(r, 404, { ok: false, error: 'unknown_app' });
-      NP.session = 'sess' + (++NP.n) + 'abcdef'; NP.state = 'catalogue';
+      if (s.get('app') !== 'catalogue' && s.get('app') !== 'pourtoi') return npReply(r, 404, { ok: false, error: 'unknown_app' });
+      NP.session = 'sess' + (++NP.n) + 'abcdef'; NP.state = 'catalogue'; NP.app = s.get('app');
       return npReply(r, 200, { ok: true, session: NP.session, state: NP.state });
     }
     if (p === '/v1/key' && q.method === 'POST') {
@@ -54,7 +54,9 @@ const INIT = base => {
 
   // 1. tuile externe distincte
   const tile = await p.evaluate(() => { const t = document.querySelector('#tiles [data-key="ext-catalogue"]'); const all = [].map.call(document.querySelectorAll('#tiles .tile'), e => e.getAttribute('data-key')); return t && { kind: t.getAttribute('data-kind'), ext: t.classList.contains('ext'), via: (t.querySelector('.via') || {}).textContent, name: t.querySelector('.name').textContent, last: all[all.length - 1], all: all.join(',') }; });
-  ok('tuile Films = externe NanoPi (badge HDMI 1, en dernier, pas app-)', tile && tile.kind === 'nanopi' && tile.ext && tile.via === 'HDMI 1' && tile.last === 'ext-catalogue', JSON.stringify(tile));
+  ok('tuile Films = externe NanoPi (badge HDMI 1, après les applis natives, pas app-)', tile && tile.kind === 'nanopi' && tile.ext && tile.via === 'HDMI 1' && /,ext-catalogue,ext-pourtoi$/.test(tile.all), JSON.stringify(tile));
+  const fy = await p.evaluate(() => { const t = document.querySelector('#tiles [data-key="ext-pourtoi"]'); return t && { kind: t.getAttribute('data-kind'), via: (t.querySelector('.via') || {}).textContent, name: t.querySelector('.name').textContent, svg: !!t.querySelector('svg') }; });
+  ok('tuile « Pour toi » = externe NanoPi (badge HDMI 1, en dernier)', fy && fy.kind === 'nanopi' && fy.via === 'HDMI 1' && fy.name === 'Pour toi' && fy.svg, JSON.stringify(fy));
   let s = await st(); ok('touche rouge enregistrée', s.log.includes('registerKey ColorF0Red'));
   ok('focus initial = 1re appli native', s.f === 'app-org.tizen.netflix-app', s.f);
 
@@ -131,6 +133,25 @@ const INIT = base => {
   const keys = NP.log.filter(l => /\/v1\/key/.test(l)).length;
   ok('rafale de 10 touches -> au plus 5 relayées (1 en vol + 4 en file)', keys >= 1 && keys <= 5, String(keys));
   NP.delay = 0; await code(10071, 400);
+
+  // 12. « Pour toi » : session distincte (clé pourtoi), touches relayées, bascule propre vers Films
+  const p3 = await b.newPage({ viewport: { width: 1920, height: 1080 } }); p3.on('pageerror', e => errs.push(e.message));
+  await p3.addInitScript(INIT, 'http://127.0.0.1:18097'); await p3.goto('http://127.0.0.1:8094/app/index.html'); await p3.waitForTimeout(2500);
+  const k3 = async (k, wait = 400) => { await p3.keyboard.press(k); await p3.waitForTimeout(wait); };
+  const f3 = () => p3.evaluate(() => ({ f: (document.querySelector('.focused') || { getAttribute: () => '' }).getAttribute('data-key'), cls: document.getElementById('stage').className, log: LOG.slice() }));
+  await k3('ArrowRight', 150); await k3('ArrowRight', 150); await k3('ArrowRight', 150);
+  let t3 = await f3(); ok('navigation jusqu\'à « Pour toi » (après Films)', t3.f === 'ext-pourtoi', t3.f);
+  NP.log = []; await k3('Enter', 900); t3 = await f3();
+  ok('OK « Pour toi » -> POST /v1/session?app=pourtoi (aucune URL) + HDMI 1 BEHIND', NP.log[0] === 'POST /v1/session?app=pourtoi' && NP.app === 'pourtoi' && t3.log.includes('show MAIN BEHIND') && !t3.log.some(l => /^launch/.test(l)), NP.log.join(' | '));
+  const sPt = NP.session; NP.log = []; await k3('Enter', 300); await k3('ArrowRight', 300); await k3('Enter', 400);
+  ok('actions « Pour toi » relayées comme touches bornées', NP.log.join(',') === ['ok', 'right', 'ok'].map(k => 'POST /v1/key?session=' + sPt + '&k=' + k).join(','), NP.log.join(' | '));
+  await p3.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { keyCode: 403, bubbles: true }))); await p3.waitForTimeout(300);
+  NP.log = []; await k3('ArrowLeft', 300); t3 = await f3();
+  ok('focus OpenTV : flèche gauche -> tuile Films (non relayée)', t3.f === 'ext-catalogue' && NP.log.length === 0, t3.f + ' ' + NP.log.join('|'));
+  await k3('Enter', 900);
+  ok('Films depuis Pour toi -> close(switch) puis nouvelle session catalogue', NP.log[0] === 'POST /v1/close?session=' + sPt + '&reason=switch' && NP.log[1] === 'POST /v1/session?app=catalogue' && NP.app === 'catalogue', NP.log.join(' | '));
+  await p3.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { keyCode: 10071, bubbles: true }))); await p3.waitForTimeout(400);
+  await p3.close();
 
   // 11. base NanoPi non locale -> aucune tuile externe
   const p2 = await b.newPage(); await p2.addInitScript(INIT, 'http://evil.example.com:8097'); await p2.goto('http://127.0.0.1:8094/app/index.html'); await p2.waitForTimeout(2000);

@@ -25,7 +25,7 @@ en `http://` vers 127.0.0.1 / 10.x / 172.16-31.x / 192.168.x, sinon aucune tuile
 
 | Requête | Réponse 200 | Erreurs |
 |---|---|---|
-| `POST /v1/session?app=catalogue` | `{ok:true, session, state:"starting"\|"catalogue"}` ; idempotent si déjà ouvert | 404 `unknown_app`, 409 `busy`, 503 `discovery_failed` |
+| `POST /v1/session?app=catalogue` (Films) ou `?app=pourtoi` (Pour toi) | `{ok:true, session, state:"starting"\|"catalogue"}` ; idempotent si déjà ouvert | 404 `unknown_app`, 409 `busy`, 503 `discovery_failed` |
 | `POST /v1/key?session=S&k=K` | `{ok:true, state}` (après traitement de la touche) | 400 `bad_key`, 410 `no_session` |
 | `POST /v1/close?session=S&reason=R` ou `?app=A&reason=R` | `{ok:true, state:"dashboard"}` ; idempotent | — |
 | `GET /v1/health?session=S` | `{ok:true, api:1, state, session\|null}` | — |
@@ -56,7 +56,14 @@ que la session est terminée : OpenTV quitte le mode externe et laisse HDMI 1 af
   `503 discovery_failed`. Toute URL ouverte dans le lecteur doit avoir l'origine découverte et commencer
   par `/<préfixe>/`.
 
-## Côté OpenTV (v22)
+## Appli « Pour toi » (`pourtoi`, OpenTV v23)
+
+Même contrat, mêmes états : `catalogue` désigne ici la vue personnelle (rangées + panneau d'actions), `player` la
+page publique ouverte par « Regarder » (même chemin que Films). OpenTV relaie seulement les 6 touches ; les actions
+(J'aime, Pas pour moi, Déjà vu, À voir plus tard, Pas ce soir) sont décidées et enregistrées par le NanoPi
+(`scripts/nanopi/FORYOU.md`). Une seule session à la fois : passer de Films à Pour toi ferme l'une puis ouvre l'autre.
+
+## Côté OpenTV (v22, inchangé en v23)
 
 - `EXT` : `""` → `"opening"` (POST session) → `"on"` (HDMI 1 `BEHIND`, page transparente, touches
   relayées). Session acceptée **avant** d'afficher HDMI 1 ; échec = message, accueil, aucun écran noir.

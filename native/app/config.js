@@ -61,5 +61,7 @@ window.NOVA_LOOK = [
    Ce ne sont PAS des applis Tizen : OpenTV n'envoie que la clé et des touches bornées, jamais d'URL. */
 window.NOVA_NANOPI = window.NOVA_NANOPI || { base: "http://192.168.2.28:8097" };
 window.NOVA_EXTERNAL = window.NOVA_EXTERNAL || [
-  { key: "catalogue", name: "Films", icon: "film", bg: ["#3A2A5C", "#140E24"], glow: "#9B6BFF" }
+  { key: "catalogue", name: "Films", icon: "film", bg: ["#3A2A5C", "#140E24"], glow: "#9B6BFF" },
+  /* « Pour toi » : même catalogue, sélection personnelle et actions (J'aime, Déjà vu…) gérées par le NanoPi. */
+  { key: "pourtoi", name: "Pour toi", icon: "star", bg: ["#5C2A4A", "#240E1C"], glow: "#FF6BB5" }
 ];

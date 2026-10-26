@@ -17,6 +17,7 @@ Invariants :
 """
 import html.parser
 import http.server
+import importlib.util
 import ipaddress
 import json
 import os
@@ -58,6 +59,21 @@ def log(event, **fields):
         sys.stdout.flush()
 
 
+def _load_sibling(name):
+    """Charge un module voisin par chemin explicite (le service tourne en `python3 -I` : pas de sys.path local)."""
+    try:
+        spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, name + ".py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except (OSError, ImportError, SyntaxError, AttributeError) as e:
+        log("module_unavailable", module=name, error=type(e).__name__)
+        return None
+
+
+FY = _load_sibling("opentv_foryou")   # « Pour toi » : historique local + recommandations (module dédié)
+
+
 # --------------------------------------------------------------------------- configuration
 def _num(env, name, default, cast=float):
     raw = env.get(name, "")
@@ -85,7 +101,14 @@ class Config:
         self.source_approved = env.get("SOURCE_APPROVED", "0") == "1"
         # forme générique : le jeton (fakrov, wadrox, …) est revérifié contre l'époque validée à l'ouverture
         self.detail_re = re.compile(env.get("DETAIL_RE", r"^b/[a-z][a-z0-9]{2,23}/[0-9]{1,12}$"))
-        self.apps = frozenset(x for x in env.get("APPS", "catalogue").split(",") if APP_RE.match(x))
+        self.apps = frozenset(x for x in env.get("APPS", "catalogue,pourtoi").split(",") if APP_RE.match(x))
+        # « Pour toi » : base SQLite locale (0600) ; identifiants stables <FORYOU_SOURCE_ID>/<site_id>, espace de
+        # noms logique (défaut « films ») indépendant de SITE_ROOT/domaine/préfixe/jeton. Invalide -> None (tuile refusée)
+        self.foryou_db = env.get("FORYOU_DB") or os.path.join(self.state_dir, "foryou.sqlite3")
+        try:
+            self.foryou_source = FY.source_id(env) if FY is not None else None
+        except ValueError:
+            self.foryou_source = None
         self.cols = _num(env, "COLS", 6, int)
         self.catalogue_idle_s = _num(env, "CATALOGUE_IDLE_S", 300.0)
         self.player_max_s = _num(env, "PLAYER_MAX_S", 4 * 3600.0)
@@ -1444,10 +1467,38 @@ class Controller:
         self.s = None
         self.items, self.generated_at, self.catalogue_host = load_catalogue_meta(cfg.catalogue_file, cfg.detail_re)
         self.message = ""
+        self.close_seq = {}   # app -> nombre de /v1/close par app (annule une ouverture abandonnée par la TV)
+        self.fy = None
+        if FY is not None and cfg.foryou_source is None:
+            log("foryou_config_invalid", key="FORYOU_SOURCE_ID")   # Films intact, « Pour toi » refusée (404)
+        elif FY is not None:
+            self.fy = FY.Bridge(cfg.foryou_db, cfg.foryou_source, log)
+
+    # -- « Pour toi » (opentv_foryou.Bridge) : crochets fins. Aucun appel SQLite sous self.lock : la base
+    #    (verrouillée, corrompue, sauvegarde en cours) ne peut jamais retarder Films, /v1/health ni /v1/close.
+    def foryou_reset(self):
+        if self.fy is not None:
+            self.fy.reset(self.cfg.foryou_db)
+
+    def _fy_absent(self, items, host):
+        """site_id dont le routage de l'époque courante prouve l'absence (élément retiré du site). Sans base."""
+        ep = self.resolver.epoch() if self.router is not None else None
+        return frozenset(it["site_id"] for it in items if ep and it.get("site_id")
+                         and not self._direct_ok(it, ep, host) and self.router.peek(ep, it["site_id"])[0] == "absent")
+
+    def foryou_data(self):
+        with self.lock:
+            s = self.s
+            if s and s.get("fy"):
+                return s["fy"]["data"]
+            items, host = self.items, self.catalogue_host
+        if self.fy is None:
+            return {"rows": []}
+        return self.fy.session(items, self._fy_absent(items, host))["data"]   # hors verrou, borné
 
     # -- routage : un élément du catalogue est-il encore adressable par son chemin enregistré ?
-    def _direct_ok(self, item, ep):
-        host = self.catalogue_host or getattr(self.resolver, "anchor", None)
+    def _direct_ok(self, item, ep, host=None):
+        host = host or self.catalogue_host or getattr(self.resolver, "anchor", None)
         return bool(ep) and host == ep["host"] and item["detail_path"].split("/")[1] == ep.get("token")
 
     def route_wanted(self, ep):
@@ -1458,15 +1509,19 @@ class Controller:
             return {it["site_id"] for it in self.items if it.get("site_id") and not self._direct_ok(it, ep)}
 
     # -- vue locale (servie au navigateur kiosque sur 127.0.0.1)
-    def ui_url(self):
-        return "http://127.0.0.1:%d/ui/" % self.cfg.ui_port
+    def ui_url(self, app=None):
+        return "http://127.0.0.1:%d/ui/%s" % (self.cfg.ui_port, "pourtoi/" if app == "pourtoi" else "")
 
     def view(self):
         with self.lock:
             s = self.s
-            return {"state": s["state"] if s else "dashboard", "cursor": s["cursor"] if s else 0,
-                    "cols": self.cfg.cols, "count": len(self.items), "message": self.message,
-                    "prefix": self.resolver.status(), "generated_at": self.generated_at}
+            v = {"state": s["state"] if s else "dashboard", "cursor": s["cursor"] if s else 0,
+                 "cols": self.cfg.cols, "count": len(self.items), "message": self.message,
+                 "prefix": self.resolver.status(), "generated_at": self.generated_at}
+            if s and s.get("fy"):
+                nav = s["fy"]["nav"]
+                v.update(nav.view(), app="pourtoi", mode="foryou", marks=dict(nav.marks))   # copie, jamais l'état
+            return v
 
     def _push(self, s):
         if s["display"] is not None and s["state"] == "catalogue":
@@ -1479,6 +1534,8 @@ class Controller:
     def open(self, app):
         if not APP_RE.match(app or "") or app not in self.cfg.apps:
             raise ApiError(404, "unknown_app")
+        if app == "pourtoi" and self.fy is None:   # module absent : tuile refusée proprement, Films intact
+            raise ApiError(404, "unknown_app")
         if self.factory is None:   # DISPLAY_BACKEND=off : API vivante, affichage non installé/validé
             raise ApiError(503, "display_unavailable")
         if not self.cfg.source_approved:
@@ -1490,6 +1547,7 @@ class Controller:
                 return s
             if s:
                 raise ApiError(409, "busy")
+            closes = self.close_seq.get(app, 0)
         with self.td_cv:
             if not self.td_cv.wait_for(lambda: self.td_n == 0, timeout=4):
                 raise ApiError(409, "busy")
@@ -1497,19 +1555,27 @@ class Controller:
             self.resolver.current(budget=4.0)
         except DiscoveryFailed:
             raise ApiError(503, "discovery_failed")
+        # catalogue et sélection « Pour toi » préparés HORS verrou (SQLite borné + disjoncteur)
+        items, generated_at, host = load_catalogue_meta(self.cfg.catalogue_file, self.cfg.detail_re)
+        fy = self.fy.session(items, self._fy_absent(items, host)) if app == "pourtoi" else None
         with self.lock:
+            if self.close_seq.get(app, 0) != closes:   # la TV a fermé/abandonné entre-temps : aucune séance fantôme
+                log("session_open_cancelled", app=app)
+                raise ApiError(409, "busy")
             if self.s:   # course entre deux ouvertures
                 if self.s["app"] == app:
                     return self.s
                 raise ApiError(409, "busy")
-            self.items, self.generated_at, self.catalogue_host = load_catalogue_meta(
-                self.cfg.catalogue_file, self.cfg.detail_re)
+            self.items, self.generated_at, self.catalogue_host = items, generated_at, host
             now = self.clock()
             s = {"id": secrets.token_urlsafe(18), "app": app, "state": "starting", "cursor": 0,
                  "opened": now, "seen": now, "key_at": now, "player_at": None, "display": None,
-                 "prep": threading.Event(), "opening": False, "assist": "off", "assist_cancel": None}
+                 "prep": threading.Event(), "opening": False, "acting": False, "assist": "off",
+                 "assist_cancel": None, "fy": fy}   # « Pour toi » : sélection figée pour la séance
             self.s, self.message = s, ""
             log("session_open", app=app, session=s["id"][:6], items=len(self.items), prefix=self.resolver.status())
+        if app != "pourtoi" and self.fy is not None:
+            self.fy.observe_async(items)   # instantané du catalogue accepté (nouveautés) : file bornée, sans attente
         threading.Thread(target=self._prepare, args=(s,), daemon=True, name="route-prep").start()
         threading.Thread(target=self._start, args=(s,), daemon=True, name="display-start").start()
         return s
@@ -1538,7 +1604,7 @@ class Controller:
                 return
             s["display"] = d
         try:
-            d.open(self.ui_url())
+            d.open(self.ui_url(s["app"]))
         except Exception as e:
             log("display_open_failed", error=str(e)[:120])
             self.end(s, "display-failed")
@@ -1559,7 +1625,23 @@ class Controller:
             now = self.clock()
             s["seen"] = s["key_at"] = now
             st = s["state"]
-            if st == "player":
+            item, pending = None, None
+            if st == "catalogue" and s.get("fy") is not None:
+                if s["acting"] and k == "ok":   # action en cours d'écriture : pas de double appui
+                    return st
+                act = self.fy.nav_key(s["fy"], k)
+                if act[0] == "end":
+                    self._end_locked(s, "back")
+                    return "dashboard"
+                if act[0] == "act" and not s["opening"]:
+                    s["acting"], pending = True, act
+                elif act[0] in ("stay", "act") or s["opening"]:
+                    self.message = act[1] if act[0] == "stay" else self.message
+                    self._push(s)
+                    return st
+                else:
+                    s["opening"], item = True, act[1]
+            if st == "player" and pending is None:
                 if k == "back":
                     return self._to_catalogue(s)
                 try:
@@ -1567,10 +1649,12 @@ class Controller:
                 except Exception as e:
                     log("key_relay_failed", error=str(e)[:80])
                 return st
-            if k == "back":
+            if item is not None or pending is not None:
+                pass
+            elif k == "back":
                 self._end_locked(s, "back")
                 return "dashboard"
-            if k == "ok":
+            elif k == "ok":
                 if st != "catalogue" or not self.items or s["opening"]:
                     return st
                 s["opening"] = True
@@ -1591,8 +1675,26 @@ class Controller:
                 s["cursor"] = c
                 self._push(s)
                 return s["state"]
+        if pending is not None:   # écriture « Pour toi » HORS verrou (bornée), puis séance revérifiée
+            return self._fy_act(s, pending[1], pending[2])
         # OK : résolution (réseau borné possible) hors verrou, /v1/health reste réactif pendant ce temps
         return self._open_item(s, item)
+
+    def _fy_act(self, s, uid, action):
+        try:
+            state, msg = self.fy.act(s["fy"], uid, action)
+        finally:
+            with self.lock:
+                s["acting"] = False
+        with self.lock:
+            if self.s is not s:   # séance fermée pendant l'écriture : rien à afficher
+                return "dashboard"
+            if state is not None:
+                s["fy"]["nav"].marks[uid] = state
+            self.message = msg
+            if s["state"] == "catalogue":
+                self._push(s)
+            return s["state"]
 
     def detail_url(self, item, deadline=None):
         """URL de fiche reconstruite : époque validée + chemin exact (catalogue même époque, ou table de
@@ -1650,6 +1752,8 @@ class Controller:
                 return s["state"]
             s["state"], s["player_at"], self.message = "player", self.clock(), ""
             log("state", state="player", item=item["source_id"], site_id=item.get("site_id"))
+            if self.fy is not None:   # signal « ouvert » (jamais « vu ») : file bornée, aucune attente SQLite
+                self.fy.opened_async(item, s["app"])
             self._start_assist(s, url)
             return "player"
 
@@ -1687,7 +1791,7 @@ class Controller:
     def _to_catalogue(self, s):
         self._cancel_assist(s)
         try:
-            s["display"].navigate(self.ui_url())
+            s["display"].navigate(self.ui_url(s["app"]))
         except Exception as e:
             log("catalogue_return_failed", error=str(e)[:80])
             self._end_locked(s, "return-failed")
@@ -1699,6 +1803,8 @@ class Controller:
     def close(self, sid=None, app=None, reason="other"):
         reason = reason if REASON_RE.match(reason or "") else "other"
         with self.lock:
+            if not sid and app and APP_RE.match(app) and app in self.cfg.apps:
+                self.close_seq[app] = self.close_seq.get(app, 0) + 1   # annule une ouverture en préparation
             s = self.s
             if s and ((sid and s["id"] == sid) or (not sid and app and s["app"] == app)):
                 self._end_locked(s, "tv-" + reason[:21])
@@ -1774,6 +1880,7 @@ class Controller:
                 self._end_locked(self.s, "shutdown")
         with self.td_cv:
             self.td_cv.wait_for(lambda: self.td_n == 0, timeout=10)
+        self.foryou_reset()
 
 
 # --------------------------------------------------------------------------- serveurs HTTP
@@ -1878,6 +1985,11 @@ def make_ui_handler(ctl, ui_file):
             elif p == "/ui/tmdb-logo.svg":
                 with open(os.path.join(os.path.dirname(ui_file), "tmdb-logo.svg"), "rb") as f:
                     raw, ctype = f.read(), "image/svg+xml"
+            elif p == "/ui/pourtoi/":   # vue « Pour toi » (même serveur local, aucun port nouveau)
+                with open(os.path.join(os.path.dirname(ui_file), "opentv_foryou_ui.html"), "rb") as f:
+                    raw, ctype = f.read(), "text/html; charset=utf-8"
+            elif p == "/ui/foryou.json":
+                raw, ctype = json.dumps(ctl.foryou_data(), ensure_ascii=False).encode(), "application/json"
             elif p == "/ui/catalogue.json":
                 raw, ctype = json.dumps({"items": ctl.items}).encode(), "application/json"
             elif p == "/ui/state.json":

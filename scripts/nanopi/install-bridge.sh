@@ -13,16 +13,19 @@ dash() { systemctl --user show muse-display.service -p ActiveState -p MainPID -p
 python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'
 python3 -I -m py_compile "$SRC/opentv_bridge.py"
 python3 -I -m py_compile "$SRC/opentv_tmdb.py"
+python3 -I -m py_compile "$SRC/opentv_foryou.py"
 BEFORE="$(dash)"; echo "muse-display before: $BEFORE"
 printf '%s\n' "$BEFORE" | grep -Eq '(^|[[:space:]])active([[:space:]]|$)' || { echo "refuse: muse-display not active; fix the dashboard first" >&2; exit 1; }
 mkdir -p "$APPDIR" "$UNITDIR"
-for f in opentv_bridge.py opentv_bridge_ui.html opentv_tmdb.py tmdb-enrich.sh tmdb-logo.svg; do
+# « Pour toi » : module + vue ; la base foryou.sqlite3 (0600) est créée au premier usage sous STATE_DIR
+for f in opentv_bridge.py opentv_bridge_ui.html opentv_tmdb.py tmdb-enrich.sh tmdb-logo.svg \
+         opentv_foryou.py opentv_foryou_ui.html; do
   [ -f "$APPDIR/$f" ] && cp -p "$APPDIR/$f" "$APPDIR/$f.prev"
   install -m 0644 "$SRC/$f" "$APPDIR/$f"
 done
 chmod 0755 "$APPDIR/tmdb-enrich.sh"
 install -m 0644 "$SRC/opentv-bridge.service" "$UNITDIR/$UNIT"
-[ -f "$CONF" ] || printf 'DISPLAY_BACKEND=off\nSOURCE_APPROVED=0\nALLOW_IPS=192.168.2.14\nPORT=8097\nUI_PORT=8098\nSITE_ROOT=https://fakrov.com/\nOUTPUT_MODE=1920x1080\nOUTPUT_NAME=HDMI-A-1\nCATALOGUE_REFRESH_S=0\nROUTING_REFRESH_S=0\nSESSION_CHECK_S=300\nCATALOGUE_IDLE_S=300\nPLAYER_MAX_S=14400\nHEARTBEAT_S=30\nPLAY_ASSIST=1\nPLAY_ASSIST_S=15\n' > "$CONF"
+[ -f "$CONF" ] || printf 'DISPLAY_BACKEND=off\nSOURCE_APPROVED=0\nALLOW_IPS=192.168.2.14\nPORT=8097\nUI_PORT=8098\nSITE_ROOT=https://fakrov.com/\nOUTPUT_MODE=1920x1080\nOUTPUT_NAME=HDMI-A-1\nCATALOGUE_REFRESH_S=0\nROUTING_REFRESH_S=0\nSESSION_CHECK_S=300\nCATALOGUE_IDLE_S=300\nPLAYER_MAX_S=14400\nHEARTBEAT_S=30\nPLAY_ASSIST=1\nPLAY_ASSIST_S=15\nFORYOU_SOURCE_ID=films\n' > "$CONF"
 chmod 0600 "$CONF"
 if command -v systemd-analyze >/dev/null; then systemd-analyze --user verify "$UNITDIR/$UNIT"; fi
 systemctl --user daemon-reload

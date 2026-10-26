@@ -349,6 +349,7 @@ class Harness:
     def close(self):
         self.api.shutdown()
         self.api.server_close()
+        self.ctl.foryou_reset()
         shutil.rmtree(self.d, ignore_errors=True)
 
 

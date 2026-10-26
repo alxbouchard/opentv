@@ -1,4 +1,4 @@
-// Bout en bout OpenTV v22 (page réelle, API tizen simulée) <-> VRAI pont NanoPi (scripts/nanopi/opentv_bridge.py)
+// Bout en bout OpenTV v23 (page réelle, API tizen simulée) <-> VRAI pont NanoPi (scripts/nanopi/opentv_bridge.py)
 // lancé en sous-processus, affichage nul (aucun Chromium, aucun réseau externe, aucune TV).
 // Depuis native/test/ : node bridge_e2e.js   (exige le .wgt décompressé dans ./wgt et python3)
 const { chromium } = require('playwright'); const http = require('http'), fs = require('fs'), path = require('path'), os = require('os');
@@ -15,7 +15,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const state = fs.mkdtempSync(path.join(os.tmpdir(), 'opentv-bridge-e2e-'));
   const now = Date.now() / 1000;
   fs.writeFileSync(path.join(state, 'prefix.json'), JSON.stringify({ prefix: 'aab2ae3', discovered_at: now, validated_at: now, listing_path: '/aab2ae3/home/fakrov' }));
-  fs.writeFileSync(path.join(state, 'catalogue.json'), JSON.stringify({ items: Array.from({ length: 14 }, (_, i) => ({ title: 'Film ' + i, detail_path: 'b/fakrov/' + (1000 + i) })) }));
+  fs.writeFileSync(path.join(state, 'catalogue.json'), JSON.stringify({ items: Array.from({ length: 14 }, (_, i) => ({ title: 'Film ' + i, detail_path: 'b/fakrov/' + (1000 + i), site_id: String(500 + i), genre: i % 2 ? 'Drame' : 'Comédie', year: 2026, imdb_rating: 5 + (i % 5) / 2, imdb_votes: 2000 * (i + 1) })) }));
   let lines = [], bridge;
   const start = () => {
     bridge = spawn('python3', ['-I', BRIDGE, 'serve'], { env: Object.assign({}, process.env, { STATE_DIR: state, PORT: String(port), UI_PORT: String(uiPort), BIND: '127.0.0.1', ALLOW_IPS: '127.0.0.1', DISPLAY_BACKEND: 'null', SOURCE_APPROVED: '1', CATALOGUE_REFRESH_S: '0', DASHBOARD_UNIT: '', CATALOGUE_IDLE_S: '6', HEARTBEAT_S: '5' }) });
@@ -92,6 +92,28 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok('session rouverte après redémarrage', (await uiState()).state === 'catalogue');
   await p.close(); await sleep(7500);
   ok('plus de /v1/health -> fin tv-lost', ev('session_end', 'reason').slice(-1)[0] === 'tv-lost', ev('session_end', 'reason').join(','));
+
+  // 7. tuile « Pour toi » <-> vrai pont : vue personnelle, action persistée, Regarder = lecteur Films, Retour
+  await openPage();
+  const openFy = async () => { await key('ArrowRight', 150); await key('ArrowRight', 150); await key('ArrowRight', 150); await key('Enter', 1200); };
+  await openFy(); u = await uiState();
+  ok('tuile Pour toi -> session pourtoi (vue foryou) dans le vrai pont', u.state === 'catalogue' && u.mode === 'foryou' && ev('session_open', 'app').slice(-1)[0] === 'pourtoi', JSON.stringify(u).slice(0, 200));
+  const fyData = await new Promise(res => http.get('http://127.0.0.1:' + uiPort + '/ui/foryou.json', r => { let b = ''; r.on('data', c => b += c); r.on('end', () => res(JSON.parse(b))); }));
+  const first = fyData.rows[0].items[0];
+  ok('profil vide : « Le choix de ce soir » + explication honnête', fyData.rows[0].title === 'Le choix de ce soir' && fyData.cold_start === true && /IMDb/.test(fyData.note) && !/b\/fakrov/.test(JSON.stringify(fyData)), fyData.rows.map(r => r.title).join(' | '));
+  await key('Enter', 400); await key('ArrowRight', 400); await key('Enter', 500); u = await uiState();
+  ok('OK, droite, OK -> « J\'aime » enregistré depuis la télécommande', u.panel === true && u.marks[first.id] && u.marks[first.id].opinion === 'like' && /aimé/.test(u.message), JSON.stringify(u.marks[first.id]));
+  await key('ArrowLeft', 400); await key('Enter', 700); u = await uiState();
+  ok('« Regarder » -> page publique via le lecteur Films (state player)', u.state === 'player' && ev('state', 'site_id').slice(-1)[0] === first.id.split('/')[1], JSON.stringify(ev('state').slice(-1)));
+  await key('Escape', 700); u = await uiState();
+  ok('Retour lecteur -> vue Pour toi, position conservée', u.state === 'catalogue' && u.mode === 'foryou' && u.row === 0 && u.col === 0, JSON.stringify(u).slice(0, 160));
+  await key('Escape', 500); await key('Escape', 800); u = await uiState();
+  ok('Retour (panneau fermé) puis Retour -> tableau de bord', u.state === 'dashboard' && ev('session_end', 'reason').slice(-1)[0] === 'back', ev('session_end', 'reason').join(','));
+  const cli = require('child_process').spawnSync('python3', ['-I', path.join(__dirname, '..', '..', 'scripts', 'nanopi', 'opentv_foryou.py'), 'history', '--list', 'events'], { env: Object.assign({}, process.env, { STATE_DIR: state, HOME: state }), encoding: 'utf8' });
+  let hist = null; try { hist = JSON.parse(cli.stdout); } catch (e) {}
+  const opened = require('child_process').spawnSync('python3', ['-I', path.join(__dirname, '..', '..', 'scripts', 'nanopi', 'opentv_foryou.py'), 'history', '--list', 'seen'], { env: Object.assign({}, process.env, { STATE_DIR: state, HOME: state }), encoding: 'utf8' });
+  ok('CLI agent : J\'aime vu dans l\'historique (origine tv, UID films/<site_id>), « ouvert » ≠ « vu »', cli.status === 0 && hist && hist.items[0].id === first.id && /^films\/[0-9]+$/.test(first.id) && hist.items[0].action === 'like' && hist.items[0].origin === 'tv' && JSON.parse(opened.stdout).items.length === 0 && !/http/.test(cli.stdout), cli.stdout + cli.stderr);
+  ok('base locale 0600', (fs.statSync(path.join(state, 'foryou.sqlite3')).mode & 0o777) === 0o600);
 
   ok('aucune erreur JS', errs.length === 0, errs.join(' / '));
   ok('aucune réponse 5xx/erreur interne du pont', ev('api_error').length === 0);

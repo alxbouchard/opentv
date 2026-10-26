@@ -1,6 +1,7 @@
 # opentv-bridge — appli externe « Films » sur HDMI 1 (côté NanoPi)
 
-Implémente `native/NANOPI-API.md` (API v1) pour OpenTV v22. Python 3.13 standard, utilisateur `alex`.
+Implémente `native/NANOPI-API.md` (API v1) pour OpenTV v23 (tuiles « Films » et « Pour toi »). Python 3.13 standard,
+utilisateur `alex`. « Pour toi » (recommandations locales, historique SQLite, CLI agent) : voir `FORYOU.md`.
 
 ## Architecture
 
@@ -14,7 +15,8 @@ NanoPi 192.168.2.28:8097  opentv-bridge.service (systemd --user, KillMode=contro
    ├─ RouteMap   : site_id stable → b/<jeton>/<lien> de l'époque courante (routes.json 0600, borné)
    ├─ RoutingMonitor (optionnel, ROUTING_REFRESH_S) : revalidation d'adresse en arrière-plan
    ├─ Catalogue  : catalogue.json (métadonnées seules) ; rafraîchi depuis la page de liste découverte
-   ├─ UI locale  : 127.0.0.1:8098/ui/ (vue passive, CSP stricte, aucun HTML injecté)
+   ├─ UI locale  : 127.0.0.1:8098/ui/ (Films) et /ui/pourtoi/ (Pour toi) : vues passives, CSP stricte, aucun HTML injecté
+   ├─ opentv_foryou.py : « Pour toi » (foryou.sqlite3 0600 sous STATE_DIR, UID FORYOU_SOURCE_ID/site_id, CLI JSON locale)
    └─ ChromiumKiosk (enfants, pendant la session uniquement)
         weston --backend=drm --renderer=pixman --shell=kiosk (1920x1080, prend le maître DRM)
         chromium --kiosk --ozone-platform=wayland, profil temporaire, piloté par CDP sur tube (fd 3/4,
@@ -202,7 +204,8 @@ python3 -m unittest -v native.test.test_opentv_bridge   # 69 tests, dont Chromiu
 python3 -m unittest -v native.test.test_opentv_play_assist   # 17 : assistance de lecture, 9 en Chromium réel (iframe d'une autre origine)
 python3 -m unittest -v native.test.test_opentv_tmdb   # 27 : correspondance, budget, panne, atomicité, CLI/secret, UI
 python3 -m unittest -v native.test.test_opentv_gpu_trial   # 68 : banc GPU, mocks seulement (aucun affichage)
-cd native/test && node bridge_e2e.js                     # 17 : vraie page OpenTV v22 ↔ vrai pont (sous-processus)
+python3 -m unittest -v native.test.test_opentv_foryou      # 70 : Pour toi (base, moteur, navigation, CLI, pont, contention SQLite, Chromium réel)
+cd native/test && node bridge_e2e.js                     # 25 : vraie page OpenTV v23 ↔ vrai pont (Films + Pour toi)
 ```
 
 ## Déploiement contrôlé
@@ -219,6 +222,8 @@ cd native/test && node bridge_e2e.js                     # 17 : vraie page OpenT
 5. Passer `DISPLAY_BACKEND=chromium`, redémarrer le service, puis parcours complet depuis la TV.
 5 bis. Optionnel : enrichissement TMDb (`tmdb-enrich.sh --dry-run`, puis sans) ; `PLAY_ASSIST=1` (défaut) — essai
    terrain d'un film : lecteur plein écran + lecture après OK, Retour → catalogue, photo.
-6. Livrer OpenTV v22 (build/signature/installation via le chemin NanoPi validé), `/status`, confirmation d'Alex.
+6. Livrer OpenTV v23 (build/signature/installation via le chemin NanoPi validé), `/status`, confirmation d'Alex.
+   Le pont doit être mis à jour (`install-bridge.sh`) **avant** la WGT v23 : un ancien pont répond 404 `unknown_app`
+   à la tuile « Pour toi » (message « indisponible », Films intact).
 
 Retour arrière : `./rollback-bridge.sh` (ne retire que ce service).
