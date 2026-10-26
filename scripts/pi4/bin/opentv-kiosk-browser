@@ -1,0 +1,42 @@
+#!/bin/bash
+# OpenTV Pi : navigateur du kiosque, lancé par Cage (opentv-kiosk.service).
+# Chromium de Raspberry Pi OS en Wayland, sandbox conservé, profil dédié. Aucun flag ni périphérique Rockchip.
+set -euo pipefail
+
+PORT="${OPENTV_TV_PORT:-8080}"
+[[ "$PORT" =~ ^[0-9]{4,5}$ ]] || PORT=8080
+PROFILE="${OPENTV_KIOSK_PROFILE:-/var/lib/opentv-kiosk/chromium}"
+OUTPUT="${OPENTV_HDMI_OUTPUT:-HDMI-A-1}"
+MODE="${OPENTV_HDMI_MODE:-1920x1080}"
+[[ "$OUTPUT" =~ ^HDMI-A-[12]$ ]] || OUTPUT=HDMI-A-1
+[[ "$MODE" =~ ^[0-9]{3,4}x[0-9]{3,4}(@[0-9]{2,3})?$ ]] || MODE=1920x1080
+URL="http://127.0.0.1:${PORT}/tv"
+FALLBACK="file:///opt/opentv/share/ui/fallback.html#${PORT}"
+
+log() { printf '{"event":"%s","detail":"%s"}\n' "$1" "${2:-}" >&2; }
+
+CHROMIUM_BIN=""
+for c in /usr/bin/chromium-browser /usr/bin/chromium; do
+  if [[ -x "$c" ]]; then CHROMIUM_BIN="$c"; break; fi
+done
+[[ -n "$CHROMIUM_BIN" ]] || { log kiosk_error chromium_missing; exit 1; }
+
+if command -v wlr-randr >/dev/null 2>&1; then
+  wlr-randr --output "$OUTPUT" --mode "$MODE" >/dev/null 2>&1 || log kiosk_mode_warning "$OUTPUT $MODE"
+fi
+
+target="$FALLBACK"
+for _ in $(seq 1 20); do
+  if (exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null; then target="$URL"; break; fi
+  sleep 1
+done
+log kiosk_start "${target%%#*}"
+
+mkdir -p -- "$PROFILE"
+rm -f -- "${PROFILE:?}/SingletonLock" "${PROFILE:?}/SingletonSocket" "${PROFILE:?}/SingletonCookie"
+
+exec "$CHROMIUM_BIN" \
+  --kiosk --ozone-platform=wayland --noerrdialogs --disable-infobars --no-first-run \
+  --disable-session-crashed-bubble --disable-features=Translate,MediaRouter --password-store=basic \
+  --check-for-update-interval=31536000 --overscroll-history-navigation=0 --disable-pinch \
+  --user-data-dir="$PROFILE" "$target"

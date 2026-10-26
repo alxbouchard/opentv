@@ -1,0 +1,153 @@
+"""Configuration : fichier env lu (jamais exécuté), valeurs validées, chemins dérivés, état de l'appareil 0600."""
+import json
+import os
+import re
+import time
+
+from . import validate
+from .agents import atomic_write_json
+
+ENV_FILE = "/etc/opentv/opentv.env"
+KEY_RE = re.compile(r"OPENTV_[A-Z0-9_]{1,40}")
+SOURCE_RE = re.compile(r"[a-z][a-z0-9-]{1,23}")
+DEFAULTS = {
+    "OPENTV_STATE_DIR": "/var/lib/opentv",
+    "OPENTV_RUN_DIR": "/run/opentv",
+    "OPENTV_SHARE_DIR": "/opt/opentv/share/ui",
+    "OPENTV_QRCODE_JS": "",
+    "OPENTV_FORYOU_ENGINE_DIR": "/opt/opentv/lib/foryou",
+    "OPENTV_CATALOGUE_FILE": "",
+    "OPENTV_FORYOU_SOURCE_ID": "films",
+    "OPENTV_TV_PORT": "8080",
+    "OPENTV_SETUP_PORT": "8081",
+    "OPENTV_HOTSPOT_ENABLED": "1",
+    "OPENTV_HOTSPOT_GRACE_S": "60",
+    "OPENTV_HOTSPOT_MAX_S": "1200",
+    "OPENTV_SETUP_TOKEN_TTL_S": "600",
+    "OPENTV_WIFI_IFNAME": "wlan0",
+    "OPENTV_AGENT_SOCKET": "",
+    # fichiers clients des agents émis par root : dossier root:root 0755 (tmpfiles), aucune composante d'un home
+    "OPENTV_AGENT_CLIENTS_DIR": "/etc/opentv/agents",
+    "OPENTV_AGENT_GROUP": "opentv-agent",
+    "OPENTV_SERVICE_USER": "opentv",
+    "OPENTV_TV_CLIENT_USER": "opentv-kiosk",
+    "OPENTV_NM_DIR": "/etc/NetworkManager/system-connections",
+}
+
+
+def read_env_file(path, cap=65536):
+    """KEY=VALUE (guillemets simples/doubles retirés). Seules les clés OPENTV_* sont retenues ; rien n'est évalué."""
+    out = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read(cap)
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k, v = k.strip(), v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        if KEY_RE.fullmatch(k):
+            out[k] = v
+    return out
+
+
+def _port(v, name):
+    if not re.fullmatch(r"[0-9]{1,5}", v or "") or not (int(v) == 0 or 1024 <= int(v) <= 65535):
+        raise ValueError("config: %s invalide" % name)
+    return int(v)
+
+
+def _bool(v, name):
+    if v not in ("0", "1"):
+        raise ValueError("config: %s doit valoir 0 ou 1" % name)
+    return v == "1"
+
+
+def _num(v, lo, hi, name):
+    try:
+        f = float(v)
+    except ValueError:
+        raise ValueError("config: %s invalide" % name)
+    if not lo <= f <= hi:
+        raise ValueError("config: %s hors bornes" % name)
+    return f
+
+
+class Config:
+    def __init__(self, env=None):
+        e = dict(DEFAULTS)
+        e.update({k: v for k, v in (env or {}).items() if KEY_RE.fullmatch(k)})
+        self.raw = e
+        self.state_dir = e["OPENTV_STATE_DIR"]
+        self.run_dir = e["OPENTV_RUN_DIR"]
+        self.share_dir = e["OPENTV_SHARE_DIR"]
+        self.qrcode_js = e["OPENTV_QRCODE_JS"] or os.path.join(self.share_dir, "qrcode.js")
+        self.engine_dir = e["OPENTV_FORYOU_ENGINE_DIR"]
+        self.catalogue_file = e["OPENTV_CATALOGUE_FILE"] or os.path.join(self.state_dir, "catalogue.json")
+        if not SOURCE_RE.fullmatch(e["OPENTV_FORYOU_SOURCE_ID"]):
+            raise ValueError("config: OPENTV_FORYOU_SOURCE_ID invalide")
+        self.source_id = e["OPENTV_FORYOU_SOURCE_ID"]
+        self.tv_port = _port(e["OPENTV_TV_PORT"], "OPENTV_TV_PORT")
+        self.setup_port = _port(e["OPENTV_SETUP_PORT"], "OPENTV_SETUP_PORT")
+        self.hotspot_enabled = _bool(e["OPENTV_HOTSPOT_ENABLED"], "OPENTV_HOTSPOT_ENABLED")
+        self.hotspot_grace_s = _num(e["OPENTV_HOTSPOT_GRACE_S"], 10, 3600, "OPENTV_HOTSPOT_GRACE_S")
+        # durée maximale cumulée du Wi-Fi temporaire depuis son premier démarrage (par démarrage de la boîte)
+        self.hotspot_max_s = _num(e["OPENTV_HOTSPOT_MAX_S"], 120, 3600, "OPENTV_HOTSPOT_MAX_S")
+        self.token_ttl_s = _num(e["OPENTV_SETUP_TOKEN_TTL_S"], 60, 3600, "OPENTV_SETUP_TOKEN_TTL_S")
+        if not re.fullmatch(r"[a-z][a-z0-9]{1,14}", e["OPENTV_WIFI_IFNAME"]):
+            raise ValueError("config: OPENTV_WIFI_IFNAME invalide")
+        self.wifi_ifname = e["OPENTV_WIFI_IFNAME"]
+        self.agent_socket = e["OPENTV_AGENT_SOCKET"] or os.path.join(self.run_dir, "agent.sock")
+        if not os.path.isabs(e["OPENTV_AGENT_CLIENTS_DIR"]):
+            raise ValueError("config: OPENTV_AGENT_CLIENTS_DIR doit être absolu")
+        self.agent_clients_dir = e["OPENTV_AGENT_CLIENTS_DIR"]
+        for k in ("OPENTV_AGENT_GROUP", "OPENTV_SERVICE_USER", "OPENTV_TV_CLIENT_USER"):
+            if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", e[k]):
+                raise ValueError("config: %s invalide" % k)
+        self.agent_group = e["OPENTV_AGENT_GROUP"]
+        self.service_user = e["OPENTV_SERVICE_USER"]
+        self.tv_client_user = e["OPENTV_TV_CLIENT_USER"]
+        self.nm_dir = e["OPENTV_NM_DIR"]
+        s = self.state_dir
+        self.device_file = os.path.join(s, "device.json")
+        self.setup_flag = os.path.join(s, "setup-requested")
+        self.hotspot_state = os.path.join(s, "hotspot.json")
+        self.hotspot_rearm = os.path.join(s, "hotspot-rearm")
+        self.apply_state = os.path.join(s, "wifi-apply.json")
+        self.jobs_dir = os.path.join(s, "netjobs")
+        self.jobs_tmp = os.path.join(s, "netjobs-tmp")
+        self.results_dir = os.path.join(s, "netresults")
+        self.registry_file = os.path.join(s, "agents.json")
+        self.audit_file = os.path.join(s, "audit.jsonl")
+        self.foryou_state = os.path.join(s, "foryou")
+
+    @classmethod
+    def load(cls, path=ENV_FILE, environ=None):
+        env = read_env_file(path)
+        env.update({k: v for k, v in (os.environ if environ is None else environ).items() if KEY_RE.fullmatch(k)})
+        return cls(env)
+
+    def ensure_dirs(self):
+        for d in (self.state_dir, self.jobs_dir, self.jobs_tmp, self.results_dir, self.foryou_state):
+            os.makedirs(d, mode=0o700, exist_ok=True)
+        os.makedirs(self.run_dir, mode=0o750, exist_ok=True)
+
+
+def load_device(cfg):
+    """-> {"name", "configured_at"} ou None (non configuré / illisible : fail-closed vers la configuration)."""
+    try:
+        with open(cfg.device_file, encoding="utf-8") as f:
+            d = json.load(f)
+        return {"name": validate.device_name(d["name"]), "configured_at": d.get("configured_at")}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def save_device(cfg, data):
+    d = {"v": 1, "name": validate.device_name(data["name"]), "configured_at": round(time.time(), 3)}
+    return atomic_write_json(cfg.device_file, d)

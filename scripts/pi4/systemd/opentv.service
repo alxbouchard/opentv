@@ -1,0 +1,49 @@
+[Unit]
+Description=OpenTV Pi - service local (tableau de bord, configuration QR, Agent Port)
+Documentation=file:///opt/opentv/README.md
+Wants=NetworkManager.service
+After=network.target NetworkManager.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=opentv
+Group=opentv
+SupplementaryGroups=video opentv-agent
+EnvironmentFile=-/etc/opentv/opentv.env
+ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-pi serve
+Restart=always
+RestartSec=3
+WatchdogSec=30
+TimeoutStartSec=60
+StateDirectory=opentv
+StateDirectoryMode=0700
+RuntimeDirectory=opentv
+RuntimeDirectoryMode=0751
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ReadWritePaths=/var/lib/opentv /run/opentv
+ProtectHome=yes
+PrivateTmp=yes
+DevicePolicy=closed
+DeviceAllow=char-cec rw
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

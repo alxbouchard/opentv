@@ -1,0 +1,11 @@
+[Unit]
+Description=OpenTV Pi - surveille les jobs reseau deposes par le service
+
+[Path]
+DirectoryNotEmpty=/var/lib/opentv/netjobs
+Unit=opentv-net-helper.service
+TriggerLimitIntervalSec=10
+TriggerLimitBurst=20
+
+[Install]
+WantedBy=multi-user.target

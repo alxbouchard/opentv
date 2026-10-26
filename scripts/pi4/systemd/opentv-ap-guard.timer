@@ -1,0 +1,12 @@
+[Unit]
+Description=OpenTV Pi - garde periodique du Wi-Fi temporaire (independante de opentv.service)
+Documentation=file:///opt/opentv/README.md
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=opentv-ap-guard.service
+
+[Install]
+WantedBy=timers.target

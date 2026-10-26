@@ -58,7 +58,9 @@ scripts/
   autostart.mjs      ancien prototype Node d'autostart (ne pas déployer sur le NanoPi)
   nanopi/            autostart Python supervisé, pont Films/« Pour toi » (opentv_foryou.py, FORYOU.md),
                      installation, tests et retour arrière
-docs/plans/          plans d'implémentation (ex. 2026-10-25-pour-toi.md)
+  pi4/               PROTOTYPE Raspberry Pi 4 (§10 quater) : service opentv_pi/ (stdlib), UI TV, QR de
+                     configuration, Agent Port MCP, systemd, install/uninstall/prepare, tests/ — non vérifié sur Pi
+docs/plans/          plans d'implémentation (ex. 2026-10-25-pour-toi.md, 2026-10-26-opentv-pi4.md)
 app/ service.js package.json README.md   ancien module TizenBrew (historique)
 ```
 
@@ -224,6 +226,7 @@ Décompresser le `.wgt` livré dans `native/test/wgt/`, puis lancer depuis `nati
 | `faketv.mjs` | fausse TV (port sdb + service) pour tester `autostart.mjs` |
 | `test_opentv_autostart.py` | 43 tests stdlib du démon Python NanoPi : SDB fragmenté, cycles, délais, reprises, CEC, journaux, installation et rollback |
 | `ext.js` / `bridge_e2e.js` | tuiles externes « Films » et « Pour toi » contre un faux NanoPi / le vrai pont (33 / 25) |
+| `scripts/pi4/tests/` | 176 tests stdlib du prototype Pi 4 (`python3 -m unittest discover -s scripts/pi4/tests -t scripts/pi4`, aussi `python3.11`) : validation Wi-Fi, jeton QR, helper réseau (budget réel < `TimeoutStartSec`), MCP, routes/CSP, préflight, installation/mise à jour/rollback en rootfs temporaire, hotspot borné + garde root `opentv-ap-guard`, échéance du wifi-apply, `boot_id` illisible, politique d'agents, Chromium headless réel (reprise après rotation de clé, sonde à attente croissante), revue n°2 (`test_review2.py` : E/S root par descripteur, fichier client root-owned hors home, Wi-Fi transactionnel, faux jetons, slowloris, kiosque, journal HTTP, install.sh après point de non-retour) |
 | `test_opentv_foryou.py` | 70 tests « Pour toi » : base SQLite (schéma, idempotence, vu ≠ ouvert, référence non vide), contention SQLite < 1 s (RESERVED/EXCLUSIVE/corrompue), moteur, navigation, CLI agent sans URL, UID `films/<site_id>` stable malgré SITE_ROOT, pont, Chromium réel |
 
 Les tests remplacent l'API `tizen` par une maquette (`addInitScript`). Ils ne remplacent pas la TV :
@@ -278,6 +281,49 @@ aucune URL dans la CLI ; identifiants `films/<site_id>` (`FORYOU_SOURCE_ID`, ind
 ouvrir un film n'est jamais « vu ». Détails, commandes exactes et limites :
 `scripts/nanopi/FORYOU.md`. Service Tizen inchangé (v17) ; mettre à jour le pont avant la WGT v23.
 
+## 10 quater. Prototype Raspberry Pi 4 (`scripts/pi4/`, 26 oct. 2026)
+
+GO d'Alexandre pour un prototype « Pi neuve → HDMI → QR → config → OpenTV → agent branchable ». **Implémenté et
+vérifié hors matériel seulement** (aucune Pi visible) : ne jamais le présenter comme plug-and-play avant la checklist
+terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visible / CEC / décodage / rollback).
+
+- **Séparation** : la Pi est une source HDMI (tableau de bord, « Pour toi », messages d'agents). Les applis Samsung
+  restent sur OpenTV Tizen. `native/`, `scripts/nanopi/` et la racine TizenBrew ne sont pas modifiés. Aucun flag ni
+  périphérique Rockchip : Raspberry Pi OS Lite Bookworm 64-bit, KMS `vc4-kms-v3d`, Cage + Chromium, NetworkManager,
+  systemd. Pi 5 refusé par le préflight (futur).
+- **Moteur réutilisé** : `opentv_foryou.py` + `opentv_bridge.py` copiés **tels quels** sous `/opt/opentv/lib/foryou/`
+  (hash au manifeste) et chargés par chemin ; les outils agents passent par la CLI du moteur (`main()` en mémoire).
+- **Premier démarrage** : Imager « Raspberry Pi OS (Legacy, 64-bit) Lite » (= Bookworm). Non configuré ⇒ QR (jeton
+  usage unique, TTL 10 min, 5 soumissions ; un GET ne consomme rien) vers un formulaire LAN (`:8081`, ouvert
+  seulement pendant la configuration). Sans réseau : hotspot NetworkManager `OpenTV-XXXX` borné à
+  `OPENTV_HOTSPOT_MAX_S` (20 min, persistant par `boot_id`), arrêté à toute configuration réussie même derrière
+  Ethernet, jamais rediffusé automatiquement après expiration, fermé par la garde root `opentv-ap-guard.timer` si
+  `opentv.service` n'est pas actif ou le budget dépassé, aucun hotspot si `boot_id` illisible ; wifi-apply borné à
+  210 s puis nouveau QR (non vérifié sur Pi). Le Wi-Fi passe par un job 0600 consommé une fois par `opentv-net-helper` (root) qui écrit le
+  keyfile NetworkManager et lance `nmcli` en argv fixe ; jamais de mot de passe en argv, journal ou résultat.
+  **Transactionnel** : profil candidat `opentv-wifi-candidate` d'abord, l'ancien `opentv-wifi` remplacé seulement
+  après succès, sinon remonté. Formulaire LAN en **HTTP non chiffré** : configurer par Ethernet seulement depuis un
+  LAN de confiance (ou par le hotspot). Jeton faux = aucun essai consommé.
+- **E/S root** : jamais de `chown`/`chmod` par chemin ni de lien suivi (`opentv_pi/fsutil.py` : `dir_fd`,
+  `O_NOFOLLOW|O_NONBLOCK`, `fchown`/`fchmod`) ; `agent issue` sous root n'écrit jamais dans un home : fichier client
+  `/etc/opentv/agents/agent-<id>-<uid>.json` (root:<groupe privé> 0640), `--out` refusé, rollback du jeton.
+- **TV** : page loopback `127.0.0.1:8080/tv`, CSP stricte, clé par démarrage (403 `tv_key` ⇒ rechargement sondé,
+  au plus 3 par 10 min), Host vérifié, réservée à l'UID `opentv-kiosk` (`/proc/net/tcp`) ; kiosque
+  `opentv-kiosk.service` (Cage sur tty1, Chromium profil persistant dédié, lanceur testant le port TCP, page de
+  secours sondant `/healthz`). 1080p : `video=HDMI-A-1:1920x1080@60` ajouté par `install.sh` (réversible).
+- **Agent Port** : socket `/run/opentv/agent.sock` (groupe `opentv-agent`), jeton par agent (SHA-256 au registre),
+  scopes `read|feedback|display` plafonnés au QR (les trois agents connus toujours enregistrés, « aucun accès » =
+  scopes vides ; agent inconnu ou scope en trop refusé sauf `--force`), débit/verrouillage par UID (`SO_PEERCRED`),
+  audit expurgé ; `opentv-mcp` = MCP stdio (initialize, tools/list,
+  tools/call, ping). Outils : status, recommend, search, feedback, history, display_message. Aucune URL en sortie.
+  Relais sortant : non implémenté (`relay: not_implemented`).
+- **Installation** : `prepare-pi.sh [--yes] [--no-install]` (préflight matériel strict avant tout apt),
+  `install.sh [--dry-run] [--root DIR --skip-preflight]` (mise à jour : restart des services, fichiers obsolètes
+  retirés, rollback automatique avant le manifeste, message explicite + commande `uninstall.sh` après le point de
+  non-retour), `uninstall.sh [--purge [--forget-wifi]]`,
+  `opentv-pi health|preflight [--stage hardware]|cec|agent|setup reset`. Détails : `scripts/pi4/README.md`,
+  plan : `docs/plans/2026-10-26-opentv-pi4.md`.
+
 ## 11. Limites connues (testées, ne pas reproposer sans élément nouveau)
 
 - **Remplacer Tizen / démarrer directement sur OpenTV / détourner le bouton Home** : impossible,
@@ -331,5 +377,6 @@ ouvrir un film n'est jamais « vu ». Détails, commandes exactes et limites :
 | Accès à la TV en mode développeur | TV : Applis → `12345` → Host PC IP | La machine de l'équipe (ou le NanoPi) doit avoir l'IP réglée là, et être sur le même réseau local. |
 | Accès au NanoPi | SSH `alex` par Tailscale (Hermes), Muse par le Gadget SDK | Décision d'Alexandre. |
 | Outils | Tizen Studio CLI 5.6, Java 8 (JAXB), Python 3 + pexpect, Node, Playwright | Installation décrite dans `scripts/build.py` et §9. |
+| Prototype Pi 4 sur le terrain | Aucune Pi 4 encore branchée | Carte flashée avec Raspberry Pi Imager (Lite 64-bit, SSH, pays Wi-Fi) ; secrets Wi-Fi saisis seulement dans le formulaire QR, jamais dans Git. Fichiers clients d'agents (`/etc/opentv/agents/agent-<id>-<uid>.json`, root:<groupe privé> 0640) créés sur la boîte par root. |
 
 Tout le reste (code, icône, images, tests, scripts de build et de déploiement, historique) est dans le dépôt.

@@ -1,0 +1,31 @@
+[Unit]
+Description=OpenTV Pi - kiosque Cage (Wayland) + Chromium Raspberry Pi OS sur HDMI (tty1)
+Documentation=file:///opt/opentv/README.md
+Wants=opentv.service
+After=systemd-user-sessions.service plymouth-quit-wait.service opentv.service getty@tty1.service
+Conflicts=getty@tty1.service
+ConditionPathExists=/dev/tty1
+# jamais « failed » après une série de plantages : redémarrage illimité, espacé par RestartSec
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=opentv-kiosk
+PAMName=opentv-kiosk
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+EnvironmentFile=-/etc/opentv/opentv.env
+Environment=XDG_SESSION_TYPE=wayland
+ExecStart=/usr/bin/cage -d -s -- /opt/opentv/bin/opentv-kiosk-browser
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

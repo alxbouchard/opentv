@@ -1,0 +1,57 @@
+/* OpenTV Pi — 1920×1080, sombre, gros caractères, effets légers (pas de flou). */
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #0d1117; color: #f0f3f6;
+  font-family: "Noto Sans", "DejaVu Sans", sans-serif; }
+#app { position: relative; width: 1920px; height: 1080px; padding: 32px 80px 20px; display: flex; flex-direction: column; }
+header { display: flex; align-items: center; gap: 32px; flex: 0 0 80px; }
+.brand { font-size: 40px; font-weight: 800; color: #58a6ff; }
+.device { font-size: 34px; flex: 1; }
+.badges { display: flex; gap: 16px; }
+.badge { font-size: 24px; padding: 6px 18px; border-radius: 999px; background: #21262d; }
+.badge.ethernet, .badge.wifi { background: #1f6f3f; }
+.badge.hotspot { background: #8a5a00; }
+.badge.offline { background: #8b1d1d; }
+.clock { font-size: 40px; font-variant-numeric: tabular-nums; }
+#setup { display: flex; gap: 80px; margin-top: 60px; flex: 1; min-height: 0; }
+#home { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#setup[hidden], #home[hidden] { display: none; }
+.steps { flex: 1; }
+.steps h1 { font-size: 64px; margin: 0 0 40px; }
+.steps ol { font-size: 40px; line-height: 1.5; padding-left: 50px; }
+.setupmsg { font-size: 32px; color: #ffd166; }
+.url { font-size: 26px; color: #8b949e; }
+.qrs { display: flex; gap: 40px; align-items: flex-start; }
+.qrs figure { margin: 0; text-align: center; font-size: 28px; }
+.qrs figure[hidden] { display: none; }
+.qrs canvas { background: #fff; border-radius: 16px; display: block; margin: 0 auto 16px; }
+.title { font-size: 52px; margin: 24px 0 4px; }
+.note { font-size: 24px; color: #8b949e; margin: 0 0 16px; }
+.samsung { font-size: 20px; color: #6e7681; margin: 0 0 12px; }
+#rows { flex: 1; min-height: 0; overflow: hidden; }
+.row h2 { font-size: 32px; margin: 18px 0 10px; }
+.strip { display: flex; gap: 24px; overflow: hidden; }
+.card { flex: 0 0 300px; height: 250px; border-radius: 16px; background: #161b22; overflow: hidden; position: relative;
+  border: 4px solid transparent; transition: transform .12s ease-out; }
+.card.focused { border-color: #58a6ff; transform: scale(1.04); }
+.card img, .card .ph { width: 100%; height: 120px; object-fit: cover; display: block; background: #21262d; }
+.card .ph { font-size: 64px; text-align: center; line-height: 120px; color: #8b949e; }
+.card.settings .ph { color: #ffd166; }
+.info { padding: 8px 12px; }
+.info .t { font-size: 24px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.info .y, .info .r { font-size: 18px; color: #8b949e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mark { display: inline-block; font-size: 16px; background: #1f6feb; border-radius: 8px; padding: 2px 8px; margin: 4px 4px 0 0; }
+.panel { position: absolute; left: 160px; right: 160px; bottom: 120px; background: #161b22; border: 3px solid #58a6ff;
+  border-radius: 24px; padding: 32px 48px; }
+.panel[hidden], .banner[hidden], .toast[hidden], .offline[hidden], footer[hidden] { display: none; }
+.panel h2 { font-size: 44px; margin: 0 0 8px; }
+.pmeta { font-size: 24px; color: #c9d1d9; max-height: 100px; overflow: hidden; }
+.pbtns { display: flex; gap: 20px; flex-wrap: wrap; }
+.pbtns button { font: inherit; font-size: 30px; padding: 16px 28px; border-radius: 16px; border: 3px solid #30363d;
+  background: #21262d; color: #f0f3f6; }
+.pbtns button.on { background: #1f6f3f; }
+.pbtns button.focused { border-color: #58a6ff; background: #1f6feb; }
+.banner { flex: 0 0 auto; margin-top: 12px; font-size: 36px; background: #8a5a00; padding: 16px 32px; border-radius: 16px; }
+.toast { position: absolute; right: 80px; bottom: 80px; font-size: 28px; background: #21262d; padding: 16px 28px; border-radius: 16px; }
+.offline { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; background: rgba(13, 17, 23, .92);
+  font-size: 56px; display: flex; align-items: center; justify-content: center; }
+footer { flex: 0 0 auto; padding-top: 10px; font-size: 22px; color: #8b949e; }

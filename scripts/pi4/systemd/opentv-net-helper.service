@@ -1,0 +1,28 @@
+[Unit]
+Description=OpenTV Pi - helper reseau privilegie (jobs Wi-Fi/hotspot valides, nmcli sans shell)
+Wants=NetworkManager.service
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/opentv/opentv.env
+ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-pi net-helper
+TimeoutStartSec=180
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+ProtectSystem=strict
+ReadWritePaths=/var/lib/opentv /etc/NetworkManager/system-connections
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+SystemCallArchitectures=native

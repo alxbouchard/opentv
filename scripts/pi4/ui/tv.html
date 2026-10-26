@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1920, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="opentv-key" content="{{TV_KEY}}">
+<title>OpenTV</title>
+<link rel="stylesheet" href="/static/tv.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand">OpenTV</div>
+    <div id="device" class="device"></div>
+    <div class="badges"><span id="net" class="badge"></span><span id="agents" class="badge"></span></div>
+    <div id="clock" class="clock"></div>
+  </header>
+
+  <section id="setup" hidden>
+    <div class="steps">
+      <h1>Bienvenue ! Configurons ta TV</h1>
+      <ol id="steps"></ol>
+      <p id="setupmsg" class="setupmsg"></p>
+      <p id="url" class="url"></p>
+    </div>
+    <div class="qrs">
+      <figure id="apfig" hidden><canvas id="apqr" width="360" height="360" data-size="360"></canvas>
+        <figcaption>1. Rejoins le Wi-Fi <b id="apssid"></b></figcaption></figure>
+      <figure id="qrfig"><canvas id="qr" width="420" height="420" data-size="420" data-qr=""></canvas>
+        <figcaption id="qrcap">Scanne avec l'appareil photo de ton téléphone</figcaption></figure>
+    </div>
+  </section>
+
+  <section id="home" hidden>
+    <h1 class="title">Pour toi</h1>
+    <p id="note" class="note"></p>
+    <p class="samsung">Les applis Samsung (YouTube, Netflix…) restent sur la TV : ouvre-les avec la télécommande de la TV.</p>
+    <div id="rows"></div>
+  </section>
+
+  <div id="panel" class="panel" hidden>
+    <h2 id="ptitle"></h2>
+    <p id="pmeta" class="pmeta"></p>
+    <div id="pbtns" class="pbtns"></div>
+  </div>
+
+  <div id="banner" class="banner" hidden></div>
+  <div id="toast" class="toast" hidden></div>
+  <div id="offline" class="offline" hidden>Reconnexion à OpenTV…</div>
+  <footer id="help">← → ↑ ↓ choisir · OK agir · Retour fermer</footer>
+</div>
+<script src="/static/qrcode.js"></script>
+<script src="/static/tv.js"></script>
+</body>
+</html>
