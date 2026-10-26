@@ -396,7 +396,7 @@ def _step_finish(token, ctx, plan, values):
                          % (e(plan["ssid"] or "", quote=True), "" if plan["ssid"] else " autofocus"))
         # jamais de value= : le mot de passe n'est pas réécrit dans la page, même après une erreur
         parts.append("<label>Mot de passe<span class=\"pw\"><input name=\"psk\" id=\"psk\" type=\"password\" "
-                     "minlength=\"8\" maxlength=\"64\" required autocomplete=\"one-time-code\" inputmode=\"text\" "
+                     "minlength=\"8\" maxlength=\"64\" required autocomplete=\"off\" inputmode=\"text\" "
                      "autocapitalize=\"none\" autocorrect=\"off\" spellcheck=\"false\" enterkeyhint=\"go\" "
                      "data-1p-ignore=\"true\" data-lpignore=\"true\"%s></span></label>"
                      % (" autofocus" if mode == "wifi" or (mode == "other" and plan["ssid"]) else ""))

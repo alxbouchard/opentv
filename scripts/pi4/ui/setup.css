@@ -38,6 +38,7 @@ input:not([type]), input[type=text], input[type=password], select { display: blo
 input:focus, select:focus { border-color: #2f81f7; outline: none; }
 .pw { display: flex; gap: 8px; align-items: stretch; }
 .pw input { flex: 1; min-width: 0; }
+.pw input.ios-text-mask { -webkit-text-security: disc; }
 .reveal { flex: none; min-width: 96px; min-height: 58px; margin-top: 8px; border-radius: 14px; border: 2px solid #30363d;
   background: #21262d; color: #f0f3f6; font: inherit; font-size: 17px; }
 .check { display: flex; align-items: flex-start; gap: 14px; min-height: 56px; padding: 14px 16px; border-radius: 14px;
