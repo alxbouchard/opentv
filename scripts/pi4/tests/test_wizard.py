@@ -303,6 +303,9 @@ class TestWizardSemantics(unittest.TestCase):
         self.assertIn("<input type=\"hidden\" name=\"net\" value=\"wifi\">", f)
         self.assertRegex(f, r"<input name=\"psk\" id=\"psk\" type=\"password\" minlength=\"8\" "
                             r"maxlength=\"64\" required")
+        self.assertIn("autocomplete=\"one-time-code\"", f)
+        self.assertIn("inputmode=\"text\"", f)
+        self.assertNotIn("autocomplete=\"new-password\"", f)
         self.assertNotIn("name=\"hidden\"", f)
         # défauts sûrs : aucun agent, Muse décochée, nom « Salon »
         self.assertRegex(f, r"<input type=\"checkbox\" name=\"agent_muse\" value=\"feedback\">")
