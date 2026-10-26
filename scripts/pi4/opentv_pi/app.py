@@ -9,7 +9,7 @@ import string
 import threading
 import time
 
-from . import VERSION, agents, bootid, cec, config, fsutil, netjobs, netstate, nethelper, peeruid, validate
+from . import VERSION, agents, bootid, cec, config, fsutil, netjobs, netstate, nethelper, peeruid, validate, wifiscan
 from .foryou import ForYou, EngineError
 from .setup_token import SetupToken
 
@@ -24,6 +24,7 @@ FORYOU_TTL_S = 120.0
 APPLY_DEADLINE_S = nethelper.WIFI_APPLY_PICKUP_MAX_S + nethelper.RUN_BUDGET_S + 30.0
 STALE_JOBS_MAX = 32
 CEC_REFRESH_S = 300.0
+SCAN_PRIME_S = 15.0           # hors ligne, avant le Wi-Fi temporaire : relevé des réseaux proches (thread, borné)
 # Soumissions avec un jeton faux (jamais émis) : sans effet sur le QR (256 bits, aucun essai à deviner), mais bornées
 # par adresse IP pour ne pas laisser un appareil du LAN occuper le service ; table bornée.
 BAD_TOKEN_PER_IP = 30
@@ -36,6 +37,13 @@ ERR_FR = {
     "apply_timeout": "La connexion au Wi-Fi n'a pas répondu à temps. Vérifie le nom du réseau et le mot de passe, "
                      "puis scanne le nouveau QR.",
 }
+# Erreurs du formulaire QR (texte affiché tel quel ; web.py en déduit l'étape de l'assistant à réafficher)
+ERR_FORM_NAME = "Nom de la TV invalide : lettres, chiffres, espaces, apostrophes ou tirets (32 au maximum)."
+ERR_FORM_NET = "Choisis comment la TV se connecte."
+ERR_FORM_OFFLINE = "La TV n'a pas encore Internet : choisis ton Wi-Fi."
+ERR_FORM_SSID = "Nom du Wi-Fi invalide (1 à 32 caractères, sans « ; »)."
+ERR_FORM_PSK = "Mot de passe Wi-Fi invalide : il faut entre 8 et 63 caractères."
+ERR_FORM_AGENT = "Choix d'agent invalide."
 MSG_NO_NETWORK = ("Branche un câble Ethernet à la boîte OpenTV (recommandé). Sans câble, un Wi-Fi temporaire "
                   "« OpenTV » apparaîtra dans une minute.")
 MSG_NO_NETWORK_NO_AP = "Branche un câble Ethernet à la boîte OpenTV pour la configurer."
@@ -67,6 +75,7 @@ class App:
         if self.tv_client_uids is None:
             log("tv_peer_check_unavailable")
         self.token = SetupToken(clock=mono, ttl=cfg.token_ttl_s)
+        self.wifi_scan = wifiscan.Scanner(runner, mono)   # réseaux proches (assistant QR) : borné, mis en cache
         self.registry = agents.Registry(cfg.registry_file)
         self.audit = agents.Audit(cfg.audit_file)
         try:
@@ -87,6 +96,7 @@ class App:
         self.fy_session, self.fy_at = None, -1e9
         self.cec, self.cec_at = {"adapters": [], "discovery_only": True}, -1e9
         self._cec_thread = None
+        self._scan_thread, self.scan_prime_at = None, -1e9
         self.ap_stop_at = -1e9
         self.boot_id = _boot_id(proc_root)
         self.hs = self._hs_load()
@@ -307,7 +317,23 @@ class App:
                 self._hotspot()
             if self.message and self.mono() >= self.message["until"]:
                 self.message = None
+            prime = self.setup_mode and net["mode"] == "offline" and net["wifi_present"] and \
+                not net.get("ap_active") and self.ap is None
         self._cec_refresh()
+        if prime:
+            self._scan_prime()
+
+    def _scan_prime(self):
+        """Hors ligne, avant le Wi-Fi temporaire (qui rend wlan0 aveugle aux autres réseaux) : relève la liste des
+        réseaux proches dans un thread, pour la proposer ensuite au téléphone connecté au point d'accès. Jamais dans
+        la boucle (watchdog) ; au plus un relevé en cours et un par SCAN_PRIME_S."""
+        if self.mono() - self.scan_prime_at < SCAN_PRIME_S:
+            return
+        if self._scan_thread is not None and self._scan_thread.is_alive():
+            return
+        self.scan_prime_at = self.mono()
+        self._scan_thread = threading.Thread(target=self.wifi_scan.networks, daemon=True, name="wifi-scan")
+        self._scan_thread.start()
 
     def _cec_refresh(self):
         """Découverte CEC hors de la boucle (thread) : un cec-ctl lent ne retarde jamais le watchdog."""
@@ -398,6 +424,20 @@ class App:
         with self.lock:
             return self.setup_mode and self.phase != "applying" and self.token.check(tok)
 
+    def setup_networks(self, tok, client=None):
+        """Réseaux Wi-Fi proches pour l'étape 1 de l'assistant -> liste, ou None (jeton refusé / adresse limitée).
+
+        Même contrôle que l'affichage du formulaire (jamais d'essai consommé). nmcli n'est lancé qu'avec un jeton
+        valide, hors du verrou du service (la boucle n'attend jamais un balayage), et son coût est borné par le cache
+        du Scanner quel que soit le nombre de requêtes."""
+        with self.lock:
+            if self._bad_token_limited(client, record=False):
+                return None
+            if not (self.setup_mode and self.phase != "applying" and self.token.check(tok)):
+                return None
+            hotspot = self.net["mode"] == "hotspot"
+        return self.wifi_scan.networks(allow_stale=hotspot)
+
     def _bad_token_limited(self, client, record):
         """Débit des POST à jeton faux par adresse IP (table bornée). -> True si l'adresse est limitée."""
         now, ip = self.mono(), client if isinstance(client, str) else "?"
@@ -433,22 +473,22 @@ class App:
             try:
                 name = validate.device_name(g("name"))
             except ValueError:
-                err = "Nom de la TV invalide : lettres, chiffres, espaces, apostrophes ou tirets (32 au maximum)."
+                err = ERR_FORM_NAME
             net = g("net")
             if err is None and net not in ("keep", "wifi"):
-                err = "Choisis comment la TV se connecte."
+                err = ERR_FORM_NET
             if err is None and net == "keep" and self.net["mode"] not in ("ethernet", "wifi"):
-                err = "La TV n'a pas encore Internet : choisis ton Wi-Fi."
+                err = ERR_FORM_OFFLINE
             if err is None and net == "wifi":
                 try:
                     ssid = validate.ssid(g("ssid"))
                 except ValueError:
-                    err = "Nom du Wi-Fi invalide (1 à 32 caractères, sans « ; »)."
+                    err = ERR_FORM_SSID
                 if err is None:
                     try:
                         psk = validate.psk(g("psk"))
                     except ValueError:
-                        err = "Mot de passe Wi-Fi invalide (8 à 63 caractères)."
+                        err = ERR_FORM_PSK
                 if err is None:
                     restore = self.net["mode"] == "hotspot"
                     payload = {"ssid": ssid, "psk": psk, "hidden": g("hidden") == "1",
@@ -457,7 +497,7 @@ class App:
             for a in KNOWN_AGENTS:
                 lvl = g("agent_" + a) or "none"
                 if lvl not in AGENT_LEVELS:
-                    err = err or "Choix d'agent invalide."
+                    err = err or ERR_FORM_AGENT
                 else:
                     policy[a] = list(AGENT_LEVELS[lvl])
             if err is not None:

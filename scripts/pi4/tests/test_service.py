@@ -120,11 +120,14 @@ class TestFirstBootSetup(unittest.TestCase):
         code, h, body = s.req("GET", "/setup?t=" + urllib.parse.quote(tok), lan=True)
         self.assertEqual(code, 200)
         self.assertIn("default-src 'none'", h["content-security-policy"])
-        self.assertNotIn("script-src", h["content-security-policy"])
+        csp = h["content-security-policy"]   # un seul script externe de même origine, jamais en ligne ni connexion
+        self.assertIn("script-src 'self';", csp)
+        self.assertNotIn("unsafe", csp)
+        self.assertNotIn("connect-src", csp)
         self.assertEqual(h["cache-control"], "no-store")
         self.assertEqual(h["referrer-policy"], "no-referrer")
-        self.assertNotIn("<script", body)
-        self.assertIn("Nom de la TV", body)
+        self.assertIsNone(re.search(r"<script(?![^>]*\bsrc=\"/static/setup\.js\")", body))
+        self.assertIn("Quel est ton Wi-Fi", body)
         for bad in ("/setup", "/setup?t=nope", "/tv", "/api/tv/state", "/static/tv.js"):
             self.assertIn(s.req("GET", bad, lan=True)[0], (403, 404), bad)
         self.assertNotIn(tok, json.dumps(a.test_logs))

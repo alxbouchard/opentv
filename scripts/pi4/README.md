@@ -119,9 +119,19 @@ que les applis Samsung (YouTube, Netflix…) restent sur la TV.
 
 1. La TV affiche « Bienvenue ! Configurons ta TV » et un QR (valable 10 min, **une seule fois**, 5 essais de
    **soumission** ; ouvrir/rafraîchir le formulaire (GET), même avec un mauvais code, n'use aucun essai).
-2. Le téléphone ouvre le formulaire (sans JavaScript) : **nom de la TV**, connexion (garder l'Ethernet ou choisir un
-   Wi-Fi : nom + mot de passe, réseau masqué), **agents autorisés** (Muse, Hermit, Hermes : aucun / lecture /
-   lecture + avis / lecture + avis + messages TV).
+2. Le téléphone ouvre un **assistant en 3 étapes** (rendu par le serveur, utilisable sans JavaScript ; `setup.js`
+   de même origine ajoute seulement « Afficher » le mot de passe et l'anti double envoi) :
+   1. « Quel est ton Wi-Fi ? » : grandes cartes des réseaux proches (`nmcli -t -f SSID,SIGNAL,SECURITY device wifi
+      list --rescan no`, argv fixe sans shell, seulement avec un jeton valide ; WPA personnel uniquement, SSID
+      validés, doublons fusionnés, 8 au plus, cache 20 s, au plus une exécution par 5 s, une à la fois), « Mon Wi-Fi
+      n'est pas dans la liste » (nom + réseau masqué) ou « Garder le câble / le Wi-Fi actuel » ;
+   2. mot de passe (un seul champ) + « Connecter la TV ». Case facultative, **décochée** : « Laisser Muse apprendre
+      de mes goûts » (= avis). « Plus d'options » : nom de la TV (« Salon »), Hermit et Hermes (**aucun accès** par
+      défaut ; voir seulement / voir + avis / tout). Une reconfiguration reprend la politique enregistrée ;
+   3. « C'est prêt » / « Regarde la TV ».
+   Les étapes 1→2 sont des GET (jeton jamais consommé, au plus 4 champs, jamais de mot de passe) ; seul le POST
+   final porte `name/net/ssid/psk/hidden/agent_*`. Après une erreur, l'étape fautive est réaffichée sans le mot de
+   passe.
 3. Le mot de passe Wi-Fi part dans un job 0600 consommé une fois par le helper root, puis seulement dans le profil
    NetworkManager candidat (`opentv-wifi-candidate.nmconnection`, root 0600, `autoconnect=false`), promu en
    `opentv-wifi.nmconnection` seulement après connexion réussie. Jamais en argv, en journal, sur la TV, ni dans un

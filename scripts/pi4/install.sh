@@ -80,7 +80,7 @@ FILES=()
 add() { FILES+=("$1|$2|$3"); }
 for f in "$HERE"/opentv_pi/*.py; do add "$f" "/opt/opentv/lib/opentv_pi/$(basename "$f")" 644; done
 for b in opentv-pi opentv-mcp opentv-net-helper opentv-kiosk-browser; do add "$HERE/bin/$b" "/opt/opentv/bin/$b" 755; done
-for u in tv.html tv.js tv.css setup.css fallback.html; do add "$HERE/ui/$u" "/opt/opentv/share/ui/$u" 644; done
+for u in tv.html tv.js tv.css setup.css setup.js fallback.html; do add "$HERE/ui/$u" "/opt/opentv/share/ui/$u" 644; done
 add "$REPO/native/app/qrcode.js" /opt/opentv/share/ui/qrcode.js 644                  # réutilisé tel quel
 add "$REPO/scripts/nanopi/opentv_foryou.py" /opt/opentv/lib/foryou/opentv_foryou.py 644  # moteur « Pour toi »
 add "$REPO/scripts/nanopi/opentv_bridge.py" /opt/opentv/lib/foryou/opentv_bridge.py 644  # load_catalogue_meta

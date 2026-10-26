@@ -48,7 +48,10 @@ WIFI_APPLY_WORST_S = 10 + (AP_DOWN_WAIT_S + NM_GRACE_S) + NM_CMD_TIMEOUT_S + (WI
     7 * 2 * KILL_GRACE_S
 # un wifi-apply plus vieux que ceci n'est plus exécuté : il finirait après l'échéance du service (netjobs)
 WIFI_APPLY_PICKUP_MAX_S = 60.0
-SAFE_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
+# C.UTF-8 garde les sorties des outils déterministes/en anglais tout en préservant
+# les SSID non ASCII imprimés par nmcli (avec LC_ALL=C, GLib les remplace par « ? »).
+# Raspberry Pi OS Bookworm fournit cette locale intégrée à glibc.
+SAFE_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C.UTF-8"}
 
 
 def default_runner(argv, timeout):
