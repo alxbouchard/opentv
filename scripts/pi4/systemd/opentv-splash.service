@@ -1,0 +1,49 @@
+[Unit]
+Description=OpenTV Pi - ecran de demarrage tty1 (OpenTV / Demarrage...), borne, jamais bloquant
+Documentation=file:///opt/opentv/README.md
+# Très tôt (sysinit) mais après le chargement de la police console ; aucune dépendance stricte : un échec ne retarde
+# ni n'empêche le démarrage. Seul le kiosque attend la fin de ce oneshot (au plus TimeoutStartSec).
+DefaultDependencies=no
+After=systemd-vconsole-setup.service console-setup.service local-fs.target
+Before=opentv-kiosk.service getty@tty1.service
+ConditionPathExists=/dev/tty1
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /opt/opentv/bin/opentv-splash
+TimeoutStartSec=5
+# sortie seule sur tty1 : jamais terminal de contrôle, n'attend jamais la libération de la console
+StandardInput=null
+StandardOutput=tty
+StandardError=journal
+TTYPath=/dev/tty1
+TTYReset=no
+TTYVHangup=no
+TTYVTDisallocate=no
+# root sans capacité hormis CAP_SYS_TTY_CONFIG (setfont sur tty1, best effort)
+CapabilityBoundingSet=CAP_SYS_TTY_CONFIG
+AmbientCapabilities=
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateNetwork=yes
+DevicePolicy=closed
+DeviceAllow=/dev/tty1 rw
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=sysinit.target

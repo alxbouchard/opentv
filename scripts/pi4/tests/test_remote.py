@@ -798,11 +798,144 @@ HARNESS_DRIVER = r"""
     document.dispatchEvent(e);
     return e.defaultPrevented;
   }
+  function R(e) { var r = e.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; }
+  function vis(e) { return !!e && !e.hidden && e.getClientRects().length > 0; }
+  function inter(a, b) { return Math.min(a[2], b[2]) - Math.max(a[0], b[0]) > 0.5 &&
+                                Math.min(a[3], b[3]) - Math.max(a[1], b[1]) > 0.5; }
+  function inside(a, b) { return a[0] >= b[0] - 0.5 && a[1] >= b[1] - 0.5 && a[2] <= b[2] + 0.5 && a[3] <= b[3] + 0.5; }
+  function ringClip(fe) {   // anneau complet (box-shadow × échelle) : aucun ancêtre overflow≠visible ne le rogne
+    var cs = getComputedStyle(fe), spread = 0, m = /matrix\(([-\d.e]+)/.exec(cs.transform || ""), out = [];
+    (cs.boxShadow || "").replace(/rgba?\([^)]*\)/g, "").split(",").forEach(function (s) {
+      var n = s.trim().split(/\s+/).map(parseFloat).filter(function (x) { return !isNaN(x); });
+      if (n.length >= 4 && !/inset/.test(s)) { spread = Math.max(spread, Math.abs(n[0]) + n[2] + n[3]); }
+    });
+    var k = m ? parseFloat(m[1]) : 1, r = R(fe), d = spread * k;
+    var ring = [r[0] - d, r[1] - d, r[2] + d, r[3] + d];
+    for (var a = fe.parentElement; a && a !== document.documentElement; a = a.parentElement) {
+      var ac = getComputedStyle(a);
+      if ((ac.overflowX !== "visible" || ac.overflowY !== "visible") && !inside(ring, R(a))) {
+        out.push((a.id || a.className) + " ring=" + ring.map(Math.round) + " clip=" + R(a).map(Math.round));
+      }
+    }
+    if (!inside(ring, [0, 0, 1920, 1080])) { out.push("viewport"); }
+    return out;
+  }
+  function lines(e) {   // nombre de lignes de texte réellement rendues (1 = aucun retour à la ligne)
+    var rg = document.createRange(), rs, n = 1;
+    rg.selectNodeContents(e);
+    rs = Array.prototype.filter.call(rg.getClientRects(), function (x) { return x.width > 0 && x.height > 0; });
+    for (var i = 0; i < rs.length; i++) { for (var j = 0; j < rs.length; j++) {
+      if (rs[j].top >= rs[i].bottom - 1) { n = 2; } } }
+    return n;
+  }
+  function header() {   // barre du haut 1920×1080 : une seule ligne, aucun chevauchement, rien hors écran
+    var hd = document.querySelector("header"), kids = [], ids = ["brand", "tab", "gear", "device", "net", "agents", "clock"];
+    var nodes = [document.querySelector(".brand"), document.querySelector(".tab"), $("gear"), $("device"), $("net"),
+                 $("agents"), $("clock")];
+    nodes.forEach(function (e, i) {
+      if (!vis(e)) { return; }
+      kids.push({ id: ids[i], r: R(e), lines: lines(e), clipped: e.scrollWidth > e.clientWidth + 1,
+                  ellipsis: getComputedStyle(e).textOverflow, ws: getComputedStyle(e).whiteSpace });
+    });
+    var over = [];
+    for (var i = 0; i < kids.length; i++) { for (var j = i + 1; j < kids.length; j++) {
+      if (inter(kids[i].r, kids[j].r)) { over.push(kids[i].id + "/" + kids[j].id); } } }
+    return { h: R(hd), kids: kids, overlaps: over };
+  }
+  function qrs() {   // QR nets : 1 pixel du canvas = 1 pixel CSS, modules entiers, taille fixe (data-size)
+    var o = {};
+    ["qr", "apqr", "rqr"].forEach(function (id) {
+      var c = $(id);
+      if (!vis(c) || c.getAttribute("data-qr") !== "ok") { return; }
+      var r = c.getBoundingClientRect();
+      o[id] = { w: c.width, h: c.height, cssw: r.width, cssh: r.height, size: Number(c.getAttribute("data-size")),
+                cell: Number(c.getAttribute("data-cell")), quiet: Number(c.getAttribute("data-quiet")),
+                rendering: getComputedStyle(c).imageRendering };
+    });
+    return o;
+  }
+  function layout() {   // mesure 1920×1080 : Réglages en haut, focus visible, QR jamais sur une carte/le panneau
+    var VP = [0, 0, 1920, 1080], gear = $("gear"), box = $("remotebox"), main = $("main");
+    var fe = document.querySelector(".card.focused") || (gear.className.indexOf("focused") >= 0 ? gear : null);
+    var over = [], cs = fe ? getComputedStyle(fe) : null, rows = R($("rows"));
+    if (vis(box)) {
+      Array.prototype.forEach.call(document.querySelectorAll(".card"), function (c) {
+        var r = R(c), m = R(main);   // partie réellement peinte : #main coupe le débordement d'une rangée longue
+        var p = [Math.max(r[0], m[0]), Math.max(r[1], m[1]), Math.min(r[2], m[2]), Math.min(r[3], m[3])];
+        if (inter(r, m) && inter(p, VP) && inter(p, R(box))) { over.push(c.textContent.slice(0, 30)); }
+      });
+    }
+    var fr = fe ? R(fe) : null, pan = $("panel"), ban = $("banner"), hits = [];
+    if (vis(pan)) {   // ce que la télécommande valide est réellement visible : rien ne recouvre titre ni boutons
+      [$("ptitle")].concat(Array.prototype.slice.call($("pbtns").children)).forEach(function (e) {
+        var r = R(e), h = document.elementFromPoint((r[0] + r[2]) / 2, (r[1] + r[3]) / 2);
+        if (!h || !pan.contains(h)) { hits.push((e.getAttribute("data-label") || e.textContent).slice(0, 30)); }
+      });
+    }
+    return { gear: R(gear), gear_visible: vis(gear) && inside(R(gear), VP) && R(gear)[3] <= 150,
+             ring_clip: fe ? ringClip(fe) : [], panel_hidden_by: hits,
+             banner_panel_overlap: vis(pan) && vis(ban) && inter(R(pan), R(ban)), banner_visible: vis(ban),
+             focus_rect: fr, focus_in_view: !!fr && inside(fr, VP) && (!vis(box) || !inter(fr, R(box))) &&
+               (fe === gear || inside([fr[0], fr[1], fr[2], fr[3]], [R(main)[0], rows[1] - 40, R(main)[2], rows[3] + 40])),
+             focus_ring: !!cs && (cs.boxShadow !== "none" || (cs.outlineStyle !== "none" && cs.outlineWidth !== "0px")),
+             card_box_overlaps: over, box: vis(box) ? R(box) : null, main: R(main),
+             panel_box_overlap: vis($("panel")) && vis(box) && inter(R($("panel")), R(box)),
+             panel_in_view: !vis($("panel")) || inside(R($("panel")), VP) };
+  }
+  function geom() {   // 1920×1080 : bandeau d'assistant, héros, écran de configuration (QR) — rectangles réels
+    var o = { vp: [0, 0, 1920, 1080], ids: {} };
+    ["banner", "hero", "main", "htitle", "hkicker", "hmeta", "hchips", "hposter", "hlogo", "remotebox", "rqr", "setup",
+     "qr", "apqr", "qrfig", "apfig", "steps", "setupmsg", "phoneonly", "url", "panel"].forEach(function (id) {
+      var e = $(id);
+      o.ids[id] = vis(e) ? R(e) : null;
+    });
+    var sh = document.querySelector("#setup h1"), sk = document.querySelector("#setup .kicker");
+    o.ids.setup_h1 = vis(sh) ? R(sh) : null;
+    o.ids.setup_kicker = vis(sk) ? R(sk) : null;
+    // ce qui est réellement peint au premier plan sur 5 points de chaque cible (centre + coins rentrés de 12 px)
+    o.top = {};
+    ["qr", "apqr", "htitle", "banner", "phoneonly", "setupmsg"].forEach(function (id) {
+      var e = $(id);
+      if (!vis(e)) { return; }
+      var r = R(e), pts = [[(r[0] + r[2]) / 2, (r[1] + r[3]) / 2], [r[0] + 12, r[1] + 12], [r[2] - 12, r[1] + 12],
+                           [r[0] + 12, r[3] - 12], [r[2] - 12, r[3] - 12]];
+      o.top[id] = pts.map(function (p) {
+        var h = document.elementFromPoint(p[0], p[1]);
+        return !!h && (h === e || e.contains(h));
+      });
+    });
+    var b = $("banner");
+    if (vis(b)) {
+      var cs = getComputedStyle(b), lh = parseFloat(cs.lineHeight);
+      o.banner = { text: b.textContent, clientH: b.clientHeight, lineH: lh, clamp: cs.webkitLineClamp,
+                   scrollH: b.scrollHeight, inHtext: b.parentNode.className.indexOf("htext") >= 0 };
+    }
+    var t = $("htitle");
+    o.htitle = { clientH: t.clientHeight, scrollH: t.scrollHeight, lineH: parseFloat(getComputedStyle(t).lineHeight) };
+    o.heroClass = $("hero").className;
+    // texte de configuration rogné ? (débordement de son conteneur ou hors écran)
+    o.setupClip = [];
+    Array.prototype.forEach.call(document.querySelectorAll("#setup .steps > *, #setup figure"), function (e) {
+      if (!vis(e)) { return; }
+      var r = R(e), s = R($("setup"));
+      var clips = getComputedStyle(e).overflowY !== "visible" && e.scrollHeight > e.clientHeight + 1;
+      if (r[3] > s[3] + 0.5 || r[3] > 1080.5 || r[2] > 1920.5 || clips) {
+        o.setupClip.push((e.id || e.tagName) + " r=" + r.map(Math.round) + " setup=" + s.map(Math.round));
+      }
+    });
+    return o;
+  }
   function snap(label, prevented) {
     var f = document.querySelector(".card.focused .t");
     out.push({ s: label, focus: f ? f.textContent : null, panel: !$("panel").hidden, prevented: prevented,
+               settings: $("gear").className.indexOf("focused") >= 0, ptitle: $("panel").hidden ? null :
+                 $("ptitle").textContent,
+               btns: $("panel").hidden ? [] : Array.prototype.map.call($("pbtns").children, function (b) {
+                 return b.getAttribute("data-label") || b.textContent; }),
                btn: $("panel").hidden ? null : document.querySelector("#pbtns .focused") &&
-                    document.querySelector("#pbtns .focused").textContent });
+                    (document.querySelector("#pbtns .focused").getAttribute("data-label") ||
+                     document.querySelector("#pbtns .focused").textContent),
+               hint: $("help").innerText, layout: layout(), geom: geom() });
   }
   setTimeout(function () {
     window.__STEPS__.forEach(function (st) {
@@ -815,6 +948,9 @@ HARNESS_DRIVER = r"""
     r.textContent = JSON.stringify({ steps: out, calls: window.__CALLS__, setup: !$("setup").hidden,
                                      home: !$("home").hidden, focus: f ? f.textContent : null,
                                      panel: !$("panel").hidden, remotebox: !$("remotebox").hidden,
+                                     settings: $("gear").className.indexOf("focused") >= 0, layout: layout(),
+                                     hint: $("help").innerText, header: header(), qrs: qrs(), geom: geom(),
+                                     banner: $("banner").hidden ? null : $("banner").textContent,
                                      rqr: $("rqr").getAttribute("data-qr"),
                                      toast: $("toast").hidden ? null : $("toast").textContent,
                                      toastBig: $("toast").className.indexOf("big") >= 0,
@@ -828,15 +964,21 @@ HARNESS_DRIVER = r"""
 
 @unittest.skipUnless(find_chromium(), "Chromium introuvable")
 class TestTvKeysInChromium(unittest.TestCase):
-    def render(self, state, steps, remote=None, delay=1500):
+    FY = {"note": "", "marks": {}, "rows": [
+        {"id": "r1", "title": "Le choix de ce soir", "items": [{"id": "a", "title": "Alpha"},
+                                                              {"id": "b", "title": "Bravo"},
+                                                              {"id": "c", "title": "Charlie"}]},
+        {"id": "r2", "title": "Autres", "items": [{"id": "d", "title": "Delta"}, {"id": "e", "title": "Echo"}]},
+        {"id": "r3", "title": "Encore", "items": [{"id": "f", "title": "Foxtrot"}, {"id": "g", "title": "Golf"},
+                                                  {"id": "h", "title": "Hotel"}, {"id": "i", "title": "India"}]}]}
+
+    def render(self, state, steps, remote=None, delay=1500, fy=None):
         d = tmpdir(self, "otvkeys")
         with open(os.path.join(PI4, "ui", "tv.html"), encoding="utf-8") as f:
             page = f.read().replace("{{TV_KEY}}", "k")
-        fy = {"note": "", "marks": {}, "rows": [
-            {"id": "r1", "title": "Le choix de ce soir", "items": [{"id": "a", "title": "Alpha"},
-                                                                  {"id": "b", "title": "Bravo"},
-                                                                  {"id": "c", "title": "Charlie"}]},
-            {"id": "r2", "title": "Autres", "items": [{"id": "d", "title": "Delta"}, {"id": "e", "title": "Echo"}]}]}
+        fy = self.FY if fy is None else fy
+        # mesures déterministes : aucune transition pendant le harnais (le CSS produit garde ses transitions courtes)
+        page = page.replace("</head>", "<style>*,*::before,*::after{transition:none!important}</style></head>")
         stub = ("<script>window.__DELAY__=%d;window.__CALLS__=[];window.__STEPS__=%s;var S=%s,F=%s,R=%s;"
                 "window.fetch=function(p,o){var m=(o&&o.method)||'GET';__CALLS__.push(m+' '+p);"
                 "var d=p.indexOf('/api/tv/state')===0?(Array.isArray(S)?(S.length>1?S.shift():S[0]):S):"
@@ -888,6 +1030,236 @@ class TestTvKeysInChromium(unittest.TestCase):
         self.assertTrue(s[16]["prevented"])                                      # bouton souris « précédent »
         posts = [c for c in res["calls"] if c.startswith("POST")]
         self.assertEqual(posts, ["POST /api/tv/feedback"])                       # OK répété : aucune rafale
+
+    REMOTE1 = {"enabled": True, "url": "http://opentv-salon.local:8082/r?p=" + "x" * 43, "expires_in": 300, "phones": 1}
+
+    def assertLayout(self, lay, where):
+        self.assertTrue(lay["gear_visible"], (where, lay))                       # Réglages toujours en haut, visibles
+        self.assertEqual(lay["card_box_overlaps"], [], (where, lay))             # QR : jamais sur une carte
+        self.assertFalse(lay["panel_box_overlap"], (where, lay))                 # ni sur le panneau
+        self.assertTrue(lay["panel_in_view"], (where, lay))
+        self.assertEqual(lay["ring_clip"], [], (where, lay))                    # anneau de focus jamais rogné
+        if lay["box"]:
+            self.assertLessEqual(lay["main"][2] + 40, lay["box"][0], (where, lay))   # colonne du QR séparée
+        self.assertEqual(lay["panel_hidden_by"], [], (where, lay))              # titre/boutons du panneau visibles
+        self.assertFalse(lay["banner_panel_overlap"], (where, lay))             # message d'assistant jamais dessus
+        if lay["focus_rect"] is not None:
+            self.assertTrue(lay["focus_in_view"], (where, lay))                  # focus entièrement visible
+            self.assertTrue(lay["focus_ring"], (where, lay))                     # anneau de focus évident
+
+    def test_up_reaches_settings_from_any_row_in_one_press(self):
+        st = dict(self.STATE, remote=self.REMOTE1)
+        steps = [["ArrowUp", {"tag": "row0"}], ["ArrowDown", {"tag": "ret0"}],
+                 ["ArrowDown"], ["ArrowRight"], ["ArrowUp", {"tag": "row1"}], ["ArrowDown", {"tag": "ret1"}],
+                 ["ArrowDown"], ["ArrowRight"], ["ArrowRight"], ["ArrowRight"], ["ArrowRight", {"tag": "end"}],
+                 ["ArrowDown", {"tag": "last"}], ["ArrowUp", {"tag": "row2"}], ["Enter", {"tag": "open"}],
+                 ["Escape", {"tag": "close"}], ["Escape", {"tag": "leave"}], ["Escape", {"tag": "start"}]]
+        res = self.render(st, steps)
+        s = {x["s"]: x for x in res["steps"]}
+        for tag in ("ArrowUp:row0", "ArrowUp:row1", "ArrowUp:row2"):             # un seul ↑ depuis chaque rangée
+            self.assertTrue(s[tag]["settings"] and s[tag]["focus"] is None and not s[tag]["panel"], s[tag])
+            self.assertTrue(s[tag]["prevented"])
+        self.assertEqual(s["ArrowDown:ret0"]["focus"], "Alpha")                  # ↓ : retour à la même carte
+        self.assertEqual(s["ArrowDown:ret1"]["focus"], "Echo")
+        self.assertEqual(s["ArrowRight:end"]["focus"], "India")                  # rangée longue : dernière carte
+        self.assertEqual(s["ArrowDown:last"]["focus"], "India")                  # dernière rangée : reste en place
+        self.assertEqual((s["Enter:open"]["ptitle"], s["Enter:open"]["btn"]), ("Réglages", "Reconfigurer"))
+        self.assertFalse(s["Escape:close"]["panel"])                             # Retour ferme…
+        self.assertTrue(s["Escape:close"]["settings"])                           # … et le focus reste sur Réglages
+        self.assertEqual(s["Escape:leave"]["focus"], "India")                    # Retour en haut : contenu retrouvé
+        self.assertEqual(s["Escape:start"]["focus"], "Echo")                     # Retour : une rangée plus haut
+        for x in res["steps"]:
+            self.assertLayout(x["layout"], x["s"])
+        self.assertIn("↑ Réglages", res["hint"])
+        self.assertEqual([c for c in res["calls"] if c.startswith("POST")], [])
+
+    FY4 = {"note": "", "marks": {}, "rows": FY["rows"] + [
+        {"id": "r4", "title": "Pour finir", "items": [{"id": "j", "title": "Juliett"}, {"id": "k", "title": "Kilo"},
+                                                      {"id": "l", "title": "Lima"}]}]}
+
+    def test_back_climbs_one_row_at_a_time_keeping_each_column(self):
+        """Choix produit : sur l'accueil sans panneau, Retour remonte d'UNE rangée (colonne mémorisée par rangée) ;
+        rangée 0 : reste en rangée 0 (début) ; ↓ redescend ; ↑ mène toujours aux Réglages en un geste."""
+        st = dict(self.STATE, remote=self.REMOTE1)
+        steps = [["ArrowRight"], ["ArrowDown"], ["ArrowRight", {"tag": "r1"}], ["ArrowDown"], ["ArrowRight"],
+                 ["ArrowRight", {"tag": "r2"}], ["ArrowDown"], ["ArrowRight", {"tag": "r3"}],
+                 ["Escape", {"tag": "back3"}], ["Escape", {"tag": "back2"}], ["Escape", {"tag": "back1"}],
+                 ["Escape", {"tag": "back0"}], ["GoBack", {"tag": "again0"}],
+                 ["ArrowDown", {"tag": "down1"}], ["ArrowDown", {"tag": "down2"}], ["ArrowDown", {"tag": "down3"}],
+                 ["ArrowUp", {"tag": "settings"}], ["ArrowDown", {"tag": "ret"}],
+                 ["Escape", {"tag": "b"}], ["ArrowUp", {"tag": "settings2"}], ["Escape", {"tag": "ret2"}]]
+        res = self.render(st, steps, fy=self.FY4)
+        s = {x["s"]: x for x in res["steps"]}
+        self.assertEqual([s[t]["focus"] for t in ("ArrowRight:r1", "ArrowRight:r2", "ArrowRight:r3")],
+                         ["Echo", "Hotel", "Kilo"])
+        # rangée 3 -> Retour -> rangée 2 -> Retour -> rangée 1 -> Retour -> rangée 0 ; jamais de saut à la rangée 0
+        self.assertEqual([s[t]["focus"] for t in ("Escape:back3", "Escape:back2", "Escape:back1")],
+                         ["Hotel", "Echo", "Bravo"])
+        self.assertEqual(s["Escape:back0"]["focus"], "Alpha")                    # rangée 0 : reste en rangée 0
+        self.assertEqual(s["GoBack:again0"]["focus"], "Alpha")
+        for t in ("Escape:back3", "Escape:back2", "Escape:back1", "Escape:back0", "GoBack:again0"):
+            self.assertTrue(s[t]["prevented"] and not s[t]["panel"] and not s[t]["settings"], s[t])
+        self.assertEqual([s[t]["focus"] for t in ("ArrowDown:down1", "ArrowDown:down2", "ArrowDown:down3")],
+                         ["Echo", "Hotel", "Kilo"])                              # ↓ : colonne de chaque rangée gardée
+        self.assertTrue(s["ArrowUp:settings"]["settings"] and s["ArrowUp:settings2"]["settings"])  # ↑ : un geste
+        self.assertEqual(s["ArrowDown:ret"]["focus"], "Kilo")
+        self.assertEqual(s["Escape:b"]["focus"], "Hotel")
+        self.assertEqual(s["Escape:ret2"]["focus"], "Hotel")                     # Retour depuis Réglages : même carte
+        for x in res["steps"]:
+            self.assertLayout(x["layout"], x["s"])
+        rows_hint = s["Escape:back2"]["hint"]                                    # aide explicite, dans les rangées
+        for want in ("↓", "Retour", "Rangée précédente", "↑ Réglages", "OK"):
+            self.assertIn(want, rows_hint)
+        self.assertIn("Rangée suivante", rows_hint)
+        self.assertNotIn("Rangée précédente", s["ArrowUp:settings"]["hint"])    # en haut : aide propre aux Réglages
+        self.assertIn("OK", s["ArrowUp:settings"]["hint"])
+        self.assertEqual([c for c in res["calls"] if c.startswith("POST")], [])
+
+    MSG = {"from": "muse", "text": "Ce soir, je te propose un film calme : bonne soirée ! " * 2}
+
+    def test_assistant_message_never_covers_any_panel(self):
+        st = dict(self.STATE, remote=self.REMOTE1, agents=["muse", "hermit", "hermes"], message=self.MSG)
+        steps = [["ArrowRight", {"tag": "home"}], ["ArrowUp", {"tag": "top"}], ["Enter", {"tag": "settings"}],
+                 ["Enter", {"tag": "confirm"}], ["Escape", {"tag": "back"}], ["ArrowRight"], ["Enter", {"tag": "forget"}],
+                 ["Escape"], ["Escape", {"tag": "closed"}], ["ArrowDown"], ["Enter", {"tag": "title"}],
+                 ["Escape", {"tag": "end"}]]
+        res = self.render(st, steps)
+        s = {x["s"]: x for x in res["steps"]}
+        self.assertTrue(s["ArrowRight:home"]["layout"]["banner_visible"])      # message lisible à l'accueil
+        for t in ("Enter:settings", "Enter:confirm", "Enter:forget", "Enter:title"):
+            lay = s[t]["layout"]
+            self.assertTrue(s[t]["panel"], t)
+            self.assertFalse(lay["banner_panel_overlap"], (t, lay))
+            self.assertEqual(lay["panel_hidden_by"], [], (t, lay))
+        self.assertEqual((s["Enter:confirm"]["ptitle"], s["Enter:confirm"]["btn"]),
+                         ("Afficher un nouveau QR de configuration ?", "Non"))   # « Non » par défaut, visible
+        self.assertEqual(s["Enter:forget"]["btn"], "Non")
+        self.assertTrue(s["Escape:closed"]["layout"]["banner_visible"])        # panneau fermé : message revient
+        self.assertIn("Message de Muse", res["banner"])
+        for x in res["steps"]:
+            self.assertLayout(x["layout"], x["s"])
+        self.assertEqual([c for c in res["calls"] if c.startswith("POST")], [])
+
+    def test_header_long_device_name_and_three_assistants_stay_on_one_line(self):
+        st = dict(self.STATE, remote=self.REMOTE1, device="Salon du sous-sol chez grand-maman Gertrude, télé principale",
+                  agents=["muse", "hermit", "hermes"], network={"mode": "hotspot"})
+        res = self.render(st, [["ArrowUp"]])
+        hd = res["header"]
+        self.assertEqual(hd["overlaps"], [], hd)
+        self.assertLessEqual(hd["h"][3] - hd["h"][1], 96.5, hd)
+        kids = {k["id"]: k for k in hd["kids"]}
+        self.assertEqual(set(kids), {"brand", "tab", "gear", "device", "net", "agents", "clock"})
+        for k in hd["kids"]:
+            self.assertEqual(k["lines"], 1, k)                                   # jamais de retour à la ligne
+            self.assertTrue(k["r"][0] >= 0 and k["r"][2] <= 1920 and k["r"][1] >= 0 and k["r"][3] <= hd["h"][3] + 1, k)
+        for k in ("brand", "tab", "gear", "net", "clock"):
+            self.assertFalse(kids[k]["clipped"], kids[k])                        # Réglages, onglet, heure : entiers
+        for k in ("device", "agents"):
+            self.assertTrue(kids[k]["clipped"], kids[k])                         # textes longs : ellipsés
+            self.assertEqual((kids[k]["ellipsis"], kids[k]["ws"]), ("ellipsis", "nowrap"), kids[k])
+        self.assertTrue(res["settings"])
+        self.assertTrue(res["layout"]["gear_visible"])
+        self.assertEqual(res["layout"]["ring_clip"], [])
+        res = self.render(dict(self.STATE, agents=["muse"]), [])                 # cas court : rien d'ellipsé
+        kids = {k["id"]: k for k in res["header"]["kids"]}
+        self.assertFalse(kids["agents"]["clipped"] or kids["device"]["clipped"], kids)
+
+    FYLONG = {"note": "", "marks": {}, "rows": [
+        {"id": "l", "title": "Beaucoup", "items": [{"id": "n%d" % i, "title": "Titre %d" % i} for i in range(14)]},
+        {"id": "w", "title": "Peu", "items": [{"id": "w1", "title": "Large un"}, {"id": "w2", "title": "Large deux"}]},
+        {"id": "l2", "title": "Encore", "items": [{"id": "m%d" % i, "title": "Autre %d" % i} for i in range(9)]}]}
+
+    def test_focus_ring_is_never_clipped_on_standard_and_wide_cards(self):
+        st = dict(self.STATE, remote=self.REMOTE1)
+        steps = [["ArrowLeft", {"tag": "first"}]] + [["ArrowRight"]] * 6 + [["ArrowRight", {"tag": "mid"}]] + \
+                [["ArrowRight"]] * 5 + [["ArrowRight", {"tag": "last"}], ["ArrowDown", {"tag": "wide1"}],
+                                        ["ArrowRight", {"tag": "wide2"}], ["ArrowDown", {"tag": "std"}],
+                                        ["ArrowUp", {"tag": "gear"}]]
+        res = self.render(st, steps, fy=self.FYLONG)
+        s = {x["s"]: x for x in res["steps"]}
+        self.assertEqual([s[t]["focus"] for t in ("ArrowLeft:first", "ArrowRight:mid", "ArrowRight:last",
+                                                  "ArrowDown:wide1", "ArrowRight:wide2", "ArrowDown:std")],
+                         ["Titre 0", "Titre 7", "Titre 13", "Large un", "Large deux", "Autre 0"])
+        for x in res["steps"]:
+            self.assertEqual(x["layout"]["ring_clip"], [], (x["s"], x["layout"]))
+            self.assertLayout(x["layout"], x["s"])
+
+    def test_qr_canvases_are_crisp_and_fixed_size(self):
+        st = dict(self.STATE, remote=self.REMOTE1)
+        long_remote = dict(self.REMOTE1, url="http://opentv-salon-du-sous-sol.local:8082/r?p=" + "y" * 64)
+        hs = dict(self.STATE, setup={"active": True, "url": "http://opentv-salon.local:8081/setup?t=" + "x" * 43,
+                                     "message": "", "expires_in": 600,
+                                     "hotspot": {"ssid": "OpenTV-AB12", "state": "active",
+                                                 "wifi_qr": "WIFI:T:WPA;S:OpenTV-AB12;P:abcdefghijkm;;"}})
+        seen = set()
+        for state in (st, dict(st, remote=long_remote), hs):
+            for cid, q in self.render(state, [])["qrs"].items():
+                seen.add(cid)
+                self.assertEqual((q["w"], q["h"]), (q["size"], q["size"]), (cid, q))   # taille fixe, cohérente
+                self.assertEqual((q["cssw"], q["cssh"]), (q["w"], q["h"]), (cid, q))   # aucun rééchantillonnage
+                self.assertEqual(q["cell"], int(q["cell"]), (cid, q))
+                self.assertGreaterEqual(q["cell"], 3, (cid, q))
+                self.assertGreaterEqual(q["quiet"], 4 * q["cell"], (cid, q))           # zone calme ≥ 4 modules
+                self.assertEqual(q["rendering"], "pixelated", (cid, q))
+        self.assertEqual(seen, {"qr", "apqr", "rqr"})
+
+    def test_settings_panel_six_keys_and_explicit_confirmation(self):
+        st = dict(self.STATE, remote=self.REMOTE1)
+        steps = [["ArrowUp"], ["Enter", {"tag": "open"}], ["ArrowRight", {"tag": "r1"}], ["ArrowRight", {"tag": "r2"}],
+                 ["ArrowRight", {"tag": "r3"}], ["ArrowLeft", {"tag": "l1"}], ["ArrowDown", {"tag": "down"}],
+                 ["ArrowUp", {"tag": "up"}], ["Enter", {"tag": "ask"}], ["Enter", {"tag": "no"}],
+                 ["Enter", {"tag": "ask2"}], ["ArrowLeft", {"tag": "yes"}], ["Escape", {"tag": "back"}],
+                 ["Escape", {"tag": "closed"}], ["Enter", {"tag": "reopen"}], ["Enter", {"tag": "setup"}],
+                 ["ArrowLeft"], ["Enter", {"tag": "confirm"}]]
+        res = self.render(st, steps)
+        s = {x["s"]: x for x in res["steps"]}
+        self.assertEqual(s["Enter:open"]["btns"], ["Reconfigurer", "Oublier les téléphones", "Fermer"])
+        self.assertEqual([s[t]["btn"] for t in ("ArrowRight:r1", "ArrowRight:r2", "ArrowRight:r3", "ArrowLeft:l1",
+                                                "ArrowDown:down", "ArrowUp:up")],
+                         ["Oublier les téléphones", "Fermer", "Fermer", "Oublier les téléphones",
+                          "Oublier les téléphones", "Oublier les téléphones"])
+        self.assertEqual(s["Enter:ask"]["ptitle"], "Oublier tous les téléphones ?")
+        self.assertEqual(s["Enter:ask"]["btn"], "Non")                           # choix sûr par défaut
+        self.assertEqual((s["Enter:no"]["ptitle"], s["Enter:no"]["btn"]), ("Réglages", "Oublier les téléphones"))
+        self.assertEqual(s["ArrowLeft:yes"]["btn"], "Oui, oublier")
+        self.assertEqual(s["Escape:back"]["ptitle"], "Réglages")                 # Retour : un niveau, rien révoqué
+        self.assertFalse(s["Escape:closed"]["panel"])
+        self.assertTrue(s["Escape:closed"]["settings"])
+        self.assertEqual((s["Enter:setup"]["ptitle"], s["Enter:setup"]["btn"]),
+                         ("Afficher un nouveau QR de configuration ?", "Non"))
+        self.assertFalse(s["Enter:confirm"]["panel"])
+        self.assertEqual([c for c in res["calls"] if c.startswith("POST")], ["POST /api/tv/setup"])
+        for x in res["steps"]:
+            self.assertLayout(x["layout"], x["s"])
+        res = self.render(st, [["ArrowUp"], ["Enter"], ["ArrowRight"], ["Enter"], ["ArrowLeft"], ["Enter"]])
+        self.assertEqual([c for c in res["calls"] if c.startswith("POST")], ["POST /api/tv/remote/revoke"])
+
+    def test_settings_without_phones_and_from_title_panel(self):
+        st = dict(self.STATE, remote=dict(self.REMOTE1, phones=0))
+        steps = [["ArrowDown"], ["Enter", {"tag": "title"}], ["ArrowUp", {"tag": "up"}], ["Enter", {"tag": "open"}],
+                 ["ArrowRight"], ["Enter", {"tag": "close"}]]
+        res = self.render(st, steps)
+        s = {x["s"]: x for x in res["steps"]}
+        self.assertEqual(s["Enter:title"]["ptitle"], "Delta")
+        self.assertTrue(s["ArrowUp:up"]["settings"] and not s["ArrowUp:up"]["panel"])   # ↑ même depuis un titre
+        self.assertEqual(s["Enter:open"]["btns"], ["Reconfigurer", "Fermer"])    # aucun téléphone : rien à oublier
+        self.assertFalse(s["Enter:close"]["panel"])
+        self.assertEqual([c for c in res["calls"] if c.startswith("POST")], [])
+
+    def test_empty_catalogue_is_intentional_and_settings_reachable(self):
+        st = dict(self.STATE, remote=self.REMOTE1)
+        empty = {"note": "", "marks": {}, "rows": []}
+        res = self.render(st, [["ArrowDown", {"tag": "down"}], ["ArrowUp"], ["Enter", {"tag": "open"}],
+                               ["Escape", {"tag": "close"}]], fy=empty)
+        s = {x["s"]: x for x in res["steps"]}
+        self.assertTrue(s["ArrowDown:down"]["settings"])                          # seul choix : Réglages au focus
+        self.assertEqual(s["Enter:open"]["ptitle"], "Réglages")
+        self.assertTrue(s["Escape:close"]["settings"] and not s["Escape:close"]["panel"])
+        self.assertIn("Pour toi", res["text"])
+        self.assertIn("se prépare", res["text"])                                 # état vide écrit, pas des blocs vides
+        self.assertEqual(res["layout"]["card_box_overlaps"], [])
+        self.assertTrue(res["layout"]["gear_visible"])
+        self.assertTrue(res["remotebox"])
 
     def test_setup_screen_is_phone_driven(self):
         st = dict(self.STATE, setup={"active": True, "url": "http://192.168.2.32:8081/setup?t=x", "hotspot": None,
@@ -963,6 +1335,113 @@ class TestTvKeysInChromium(unittest.TestCase):
         text = self.render(hs, [])["text"]
         self.assertIn("rejoins le Wi-Fi « OpenTV-AB12 »", text)
         self.assertNotIn("agent", text.lower())
+
+    # ---- géométrie 1920×1080 : bandeau d'assistant (accueil seulement, emplacement réservé) et écran de configuration
+    @staticmethod
+    def _inter(a, b):
+        return min(a[2], b[2]) - max(a[0], b[0]) > 0.5 and min(a[3], b[3]) - max(a[1], b[1]) > 0.5
+
+    @staticmethod
+    def _inside(a, b):
+        return a[0] >= b[0] - 0.5 and a[1] >= b[1] - 0.5 and a[2] <= b[2] + 0.5 and a[3] <= b[3] + 0.5
+
+    SETUP_N = {"active": True, "url": "http://opentv-salon.local:8081/setup?t=" + "x" * 43, "hotspot": None,
+               "message": "", "expires_in": 600}
+    SETUP_HS = dict(SETUP_N, hotspot={"ssid": "OpenTV-AB12", "state": "active",
+                                      "wifi_qr": "WIFI:T:WPA;S:OpenTV-AB12;P:abcdefghijkm;;"})
+
+    def assertSetupClean(self, res, hot, where):
+        g, ids, vp = res["geom"], res["geom"]["ids"], [0, 0, 1920, 1080]
+        self.assertTrue(res["setup"] and not res["home"], where)
+        self.assertIsNone(res["banner"], where)                                  # jamais de message en configuration
+        self.assertIsNone(ids["banner"], where)
+        self.assertNotIn("Message de", res["text"], where)
+        qrs = ["qr", "apqr"] if hot else ["qr"]
+        self.assertEqual(ids["apqr"] is not None, hot, where)
+        figs = [ids["qrfig"]] + ([ids["apfig"]] if hot else [])
+        for q in qrs:
+            self.assertTrue(self._inside(ids[q], vp) and self._inside(ids[q], ids["setup"]), (where, q, ids))
+            self.assertEqual(g["top"][q], [True] * 5, (where, q))               # rien ne recouvre le QR
+        if hot:
+            self.assertFalse(self._inter(ids["qrfig"], ids["apfig"]), (where, ids))
+        for t in ("setup_kicker", "setup_h1", "steps", "setupmsg", "phoneonly"):
+            self.assertIsNotNone(ids[t], (where, t))
+            self.assertTrue(self._inside(ids[t], vp), (where, t, ids[t]))
+            for f in figs:                                                       # titre/étapes jamais sur un QR
+                self.assertFalse(self._inter(ids[t], f), (where, t, ids[t], f))
+        self.assertEqual(g["setupClip"], [], where)                              # aucun texte rogné en bas
+        self.assertLessEqual(ids["phoneonly"][3], ids["setup"][3] + 0.5, (where, ids))
+        self.assertLessEqual(ids["phoneonly"][3], 1080, (where, ids))
+        self.assertEqual(g["top"]["phoneonly"], [True] * 5, where)               # « Tout se règle… » entier, visible
+        self.assertIn("Tout se règle sur le téléphone", res["text"])
+
+    def test_setup_normal_and_hotspot_layout_without_overlap_or_clipping(self):
+        """Configuration (normale et hotspot), avec un message d'assistant en attente : le message n'est jamais
+        rendu ; QR, titre et étapes ne se recouvrent pas ; la ligne « Tout se règle… » tient dans l'écran."""
+        base = dict(self.STATE, agents=["muse", "hermit", "hermes"], message=self.MSG, remote=self.REMOTE1)
+        for hot, setup in ((False, self.SETUP_N), (True, self.SETUP_HS)):
+            res = self.render(dict(base, setup=setup), [["Enter"], ["ArrowDown"]])
+            self.assertSetupClean(res, hot, "hotspot" if hot else "normal")
+            for x in res["steps"]:
+                self.assertIsNone(x["geom"]["ids"]["banner"], x["s"])
+        # accueil avec message puis reconfiguration : le message disparaît dès l'écran de configuration
+        res = self.render([dict(base, setup={"active": False}), dict(base, setup=self.SETUP_HS)], [], delay=3000)
+        self.assertSetupClean(res, True, "home->hotspot")
+        self.assertNotIn("msg", res["geom"]["heroClass"])
+
+    FYMSG = {"note": "", "marks": {"m1": {"opinion": "like", "watchlist": True}}, "rows": [
+        {"id": "r1", "title": "Le choix de ce soir", "items": [
+            {"id": "m1", "title": "Un titre de film vraiment très long qui tiendrait sur deux lignes au moins",
+             "year": 2021, "genres": ["Drame", "Comédie", "Aventure"], "imdb": {"rating": 7.8}, "tmdb": {"rating": 7.1},
+             "reasons": [{"code": "taste", "text": "Parce que tu aimes les drames"}], "poster": "https://invalid.test/p.jpg",
+             "description": "Une longue description du film. " * 12},
+            {"id": "m2", "title": "Bravo"}]}] + FY["rows"][1:]}
+
+    def assertBannerReserved(self, g, where):
+        ids = g["ids"]
+        b = ids["banner"]
+        self.assertIsNotNone(b, where)
+        self.assertTrue(g["banner"]["inHtext"] and "msg" in g["heroClass"], (where, g))
+        self.assertTrue(self._inside(b, ids["hero"]) and self._inside(b, ids["main"]), (where, b, ids["hero"]))
+        for k in ("htitle", "hkicker", "hmeta", "hchips", "hposter", "hlogo", "remotebox", "rqr", "qr", "apqr", "panel"):
+            if ids.get(k):
+                self.assertFalse(self._inter(b, ids[k]), (where, k, b, ids[k]))  # jamais sur titre, affiche, QR
+        self.assertLessEqual(ids["htitle"][3] + 8, b[1], (where, ids["htitle"], b))   # sous le titre, espacé
+        self.assertEqual(g["top"]["htitle"], [True] * 5, where)                  # titre réellement au premier plan
+        self.assertEqual(g["top"]["banner"], [True] * 5, where)
+        lh = g["banner"]["lineH"]
+        self.assertLessEqual(g["banner"]["clientH"], 2 * lh + 0.5, (where, g["banner"]))   # au plus 2 lignes
+        self.assertGreaterEqual(g["banner"]["clientH"], lh - 0.5, (where, g["banner"]))
+        self.assertLessEqual(g["htitle"]["clientH"], g["htitle"]["lineH"] + 0.5, (where, g["htitle"]))  # titre 1 ligne
+
+    def test_home_assistant_message_has_reserved_slot_in_hero(self):
+        """Accueil 1920×1080 : le message occupe un emplacement réservé en bas du héros — jamais sur #htitle, l'affiche,
+        les puces ni le QR de la télécommande ; au plus 2 lignes ; masqué pendant tout panneau, puis de retour."""
+        st = dict(self.STATE, remote=self.REMOTE1, agents=["muse", "hermit", "hermes"], message=self.MSG)
+        steps = [["ArrowLeft", {"tag": "long"}], ["ArrowRight", {"tag": "short"}], ["ArrowDown", {"tag": "row1"}],
+                 ["ArrowUp", {"tag": "top"}], ["Enter", {"tag": "settings"}], ["Escape", {"tag": "closed"}],
+                 ["ArrowDown"], ["Enter", {"tag": "title"}], ["Escape", {"tag": "end"}]]
+        res = self.render(st, steps, fy=self.FYMSG)
+        s = {x["s"]: x for x in res["steps"]}
+        for t in ("ArrowLeft:long", "ArrowRight:short", "ArrowDown:row1", "ArrowUp:top", "Escape:closed",
+                  "Escape:end"):
+            self.assertBannerReserved(s[t]["geom"], t)
+            self.assertLayout(s[t]["layout"], t)
+        self.assertTrue(s["ArrowLeft:long"]["geom"]["ids"]["hchips"])            # puces présentes, non recouvertes
+        for t in ("Enter:settings", "Enter:title"):                              # panneau : message masqué
+            self.assertTrue(s[t]["panel"], t)
+            self.assertIsNone(s[t]["geom"]["ids"]["banner"], t)
+            self.assertEqual(s[t]["layout"]["panel_hidden_by"], [], t)
+        self.assertTrue(res["banner"].startswith("Message de Muse : Ce soir"))
+        # catalogue vide (logo du héros) et message court (1 ligne) : même emplacement réservé
+        short = dict(st, message={"from": "hermit", "text": "Bonne soirée !"})
+        for state, fy, tag in ((st, {"note": "", "marks": {}, "rows": []}, "empty"), (short, None, "short")):
+            res = self.render(state, [], fy=fy)
+            self.assertBannerReserved(res["geom"], tag)
+        self.assertLessEqual(res["geom"]["banner"]["clientH"], res["geom"]["banner"]["lineH"] + 0.5)
+        res = self.render(dict(st, message=None), [])                            # sans message : héros normal
+        self.assertIsNone(res["geom"]["ids"]["banner"])
+        self.assertNotIn("msg", res["geom"]["heroClass"])
 
 
 @unittest.skipUnless(find_chromium(), "Chromium introuvable")
@@ -1623,8 +2102,11 @@ class TestPhoneRemoteHttp(unittest.TestCase):
         a, s = self.configured()
         host = self.host(s, MDNS)
         tok = self.pair(a, s, host=host)
+        shots = os.environ.get("OPENTV_TEST_SHOTS") or tmpdir(self, "otvshots")
+        os.makedirs(shots, exist_ok=True)
         cfg = {"chromium": find_chromium(), "tv": "http://127.0.0.1:%d/tv" % s.web.tv_port(),
-               "port": s.web.remote_port(), "host": host, "cookie": tok, "csrf": self.csrf(s, tok, host=host)}
+               "port": s.web.remote_port(), "host": host, "cookie": tok, "csrf": self.csrf(s, tok, host=host),
+               "shots": shots}
         p = subprocess.run([NODE, os.path.join(PI4, "tests", "e2e_tv_remote.js"), os.environ["OPENTV_TEST_PLAYWRIGHT"],
                             json.dumps(cfg)], capture_output=True, timeout=180)
         self.assertEqual(p.returncode, 0, p.stderr.decode()[-2000:])
@@ -1645,6 +2127,85 @@ class TestPhoneRemoteHttp(unittest.TestCase):
         self.assertEqual(st["phone:ok"]["ptitle"], st["phone:right"]["focus"])
         self.assertFalse(st["phone:back"]["panel"])                              # téléphone : Retour
         self.assertLess(res["ok_latency_ms"], 1500)
+        # Réglages : un seul ↑ depuis la 1re et la 3e rangée (et depuis une fiche), OK ouvre, ← → choisit, Retour ferme
+        st = {x["s"]: x for x in res["settings"]}
+        for tag in ("set:up-row0", "set:up-row2", "set:up-from-title"):
+            self.assertTrue(st[tag]["settings"] and not st[tag]["panel"] and st[tag]["focus"] is None, st[tag])
+        self.assertEqual((st["set:open"]["panel"], st["set:open"]["ptitle"]), (True, "Réglages"))
+        self.assertEqual(res["settings_buttons"], ["Reconfigurer", "Oublier les téléphones", "Fermer"])
+        self.assertEqual(st["set:confirm"]["ptitle"], "Afficher un nouveau QR de configuration ?")
+        self.assertEqual(res["confirm_btn"], "Non")                              # confirmation : « Non » par défaut
+        self.assertEqual(st["set:back"]["ptitle"], "Réglages")                   # Retour : un niveau
+        self.assertTrue(st["set:close"]["settings"] and not st["set:close"]["panel"])
+        self.assertFalse(st["set:content"]["settings"])
+        self.assertTrue(st["set:title"]["panel"])
+        self.assertEqual(res["setup_posts"], 0)                                  # rien sans confirmation explicite
+        self.assertFalse(a.tv_state()["setup"]["active"])
+        self.assertEqual(a.remote.count(), 1)
+        for x in res["settings"]:
+            lay = x["layout"]
+            self.assertEqual(lay["viewport"], [1920, 1080])
+            self.assertTrue(lay["gear_top"], (x["s"], lay))                      # Réglages visibles en haut
+            self.assertEqual(lay["card_overlaps"], [], (x["s"], lay))            # QR jamais sur une carte
+            self.assertFalse(lay["panel_box_overlap"], (x["s"], lay))
+            self.assertTrue(lay["box_visible"] and lay["qr"] == "ok", (x["s"], lay))
+            if not x["panel"]:
+                self.assertTrue(lay["focus_in_view"] and lay["focus_ring"], (x["s"], lay))
+            self.assertEqual(lay["ring_clip"], [], (x["s"], lay))                # anneau complet, jamais rogné
+            self.assertEqual(lay["panel_hidden_by"], [], (x["s"], lay))
+            self.assertTrue(lay["qr_crisp"], (x["s"], lay))                      # QR : 1 px canvas = 1 px CSS
+        # Retour : une rangée à la fois, colonne gardée ; rangée 0 reste rangée 0 ; ↑ = Réglages en un geste
+        self.assertGreaterEqual(res["rows_count"], 3)
+        cl = {x["s"]: x for x in res["climb"]}
+        self.assertNotEqual(cl["climb:down2"]["focus"], cl["climb:right1"]["focus"])
+        self.assertEqual(cl["climb:back1"]["focus"], cl["climb:right1"]["focus"])
+        self.assertEqual(cl["climb:back0"]["focus"], cl["climb:0"]["focus"])
+        self.assertEqual(cl["climb:stay0"]["focus"], cl["climb:0"]["focus"])
+        self.assertEqual(cl["climb:again1"]["focus"], cl["climb:right1"]["focus"])
+        self.assertTrue(cl["climb:up"]["settings"] and not cl["climb:up"]["panel"])
+        self.assertEqual(cl["climb:ret"]["focus"], cl["climb:again1"]["focus"])
+        self.assertIn("Rangée précédente", cl["climb:back1"]["layout"]["hint"])
+        for x in res["climb"]:
+            self.assertEqual(x["url"], "/tv")
+            self.assertEqual(x["layout"]["ring_clip"], [], (x["s"], x["layout"]))
+        # message d'assistant + nom long + 3 assistants : barre d'une ligne, bandeau jamais sur un panneau
+        hd = res["message"]["header"]
+        self.assertLessEqual(hd["h"][3] - hd["h"][1], 96.5, hd)
+        self.assertTrue(all(k["lines"] == 1 for k in hd["kids"]), hd)
+        kids = {k["id"]: k for k in hd["kids"]}
+        self.assertTrue(kids["device"]["clipped"] and kids["agents"]["clipped"], hd)
+        self.assertFalse(kids["gear"]["clipped"] or kids["clock"]["clipped"] or kids["tab"]["clipped"], hd)
+        ms = {x["s"]: x for x in res["message"]["steps"]}
+        self.assertTrue(ms["msg:home"]["banner_visible"] and ms["msg:closed"]["banner_visible"])
+        self.assertEqual((ms["msg:confirm"]["ptitle"], ms["msg:confirm"]["btn"]),
+                         ("Afficher un nouveau QR de configuration ?", "Non"))
+        for t in ("msg:settings", "msg:confirm", "msg:back", "msg:title"):
+            self.assertTrue(ms[t]["panel"], ms[t])
+            self.assertFalse(ms[t]["banner_panel_overlap"], ms[t])
+            self.assertEqual(ms[t]["panel_hidden_by"], [], ms[t])
+        self.assertEqual(res["message"]["posts"], 0)
+        for t in ("msg:home", "msg:closed", "msg:rows", "msg:end"):              # bandeau : place réservée du héros
+            self.assertTrue(ms[t]["banner_visible"] and ms[t]["banner_in_hero"], ms[t])
+            self.assertEqual(ms[t]["banner_overlaps"], [], ms[t])                # jamais sur #htitle ni le QR
+            self.assertTrue(ms[t]["banner_lines_ok"], ms[t])                     # au plus 2 lignes
+        for t in ("msg:settings", "msg:confirm", "msg:back", "msg:title"):
+            self.assertFalse(ms[t]["banner_visible"], ms[t])                     # masqué pendant tout panneau
+        # configuration normale + hotspot (message en attente) : aucun bandeau, QR et titre jamais recouverts
+        self.assertEqual([x["hotspot"] for x in res["setup"]], [False, True])
+        for x in res["setup"]:
+            self.assertTrue(x["setup_visible"], x)
+            self.assertFalse(x["banner_visible"] or x["text_has_message"], x)
+            self.assertEqual((x["qr_covered"], x["text_bad"]), ([], []), x)
+            self.assertTrue(x["qr_in_view"] and not x["figs_overlap"], x)
+            self.assertTrue(x["phoneonly_visible"] and x["phoneonly_bottom"] <= 1080, x)   # « Tout se règle… » entier
+        self.assertTrue(res["empty"]["settings"] and res["empty"]["cards"] == 0)  # catalogue vide : Réglages au focus
+        self.assertIn("se prépare", res["empty"]["text"])
+        self.assertEqual(res["empty"]["ptitle"], "Réglages")
+        for name in ("tv-1920x1080-home.png", "tv-1920x1080-settings-focus.png", "tv-1920x1080-settings-panel.png",
+                     "tv-1920x1080-settings-confirm.png", "tv-1920x1080-title-panel.png", "tv-1920x1080-empty.png",
+                     "tv-1920x1080-message-header.png", "tv-1920x1080-message-confirm.png",
+                     "tv-1920x1080-setup.png", "tv-1920x1080-setup-hotspot.png"):
+            self.assertGreater(os.path.getsize(os.path.join(shots, name)), 10000, name)
 
     @unittest.skipUnless(find_chromium() and NODE and os.environ.get("OPENTV_TEST_PLAYWRIGHT"),
                          "bout en bout : OPENTV_TEST_PLAYWRIGHT=<module playwright> + Chromium + node")

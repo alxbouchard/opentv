@@ -1,71 +1,215 @@
-/* OpenTV Pi — 1920×1080, sombre, gros caractères, effets légers (pas de flou). */
+/* OpenTV Pi — accueil 1920×1080 « streaming » : profondeur par dégradés statiques (peints une fois), grande
+   typographie, focus télécommande très visible. Sobre en CPU : aucun filtre/flou, aucune animation continue, aucune
+   police ni ressource externe ; seules transitions courtes (transform/opacity) au changement de focus. */
 * { box-sizing: border-box; }
-html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #0d1117; color: #f0f3f6;
+html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #07080d; color: #f3f5fb;
   font-family: "Noto Sans", "DejaVu Sans", sans-serif; }
-#app { position: relative; width: 1920px; height: 1080px; padding: 32px 80px 20px; display: flex; flex-direction: column; }
-header { display: flex; align-items: center; gap: 32px; flex: 0 0 80px; }
-.brand { font-size: 40px; font-weight: 800; color: #58a6ff; }
-.device { font-size: 34px; flex: 1; }
-.badges { display: flex; gap: 16px; }
-.badge { font-size: 24px; padding: 6px 18px; border-radius: 999px; background: #21262d; }
+#app { position: relative; width: 1920px; height: 1080px; padding: 24px 72px 20px; display: flex; flex-direction: column;
+  background: radial-gradient(1300px 760px at 12% -18%, rgba(92, 112, 255, .26), rgba(92, 112, 255, 0) 62%),
+              radial-gradient(1000px 640px at 104% 112%, rgba(255, 128, 84, .13), rgba(255, 128, 84, 0) 60%),
+              linear-gradient(180deg, #0c0f1a 0%, #07080d 100%); }
+.kicker { margin: 0 0 10px; font-size: 22px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
+  color: #9fb2ff; }
+
+/* ---- barre du haut : marque, onglet, Réglages (toujours visibles), état */
+/* une seule ligne quoi qu'il arrive : marque, onglet, Réglages et heure ne rétrécissent jamais ; nom de l'appareil et
+   assistants rétrécissent puis s'ellipsent (jamais de retour à la ligne, jamais de chevauchement) */
+header { display: flex; align-items: center; gap: 28px; flex: 0 0 96px; height: 96px; min-width: 0; white-space: nowrap; }
+.brand { flex: 0 0 auto; display: flex; align-items: center; gap: 14px; font-size: 38px; font-weight: 800;
+  letter-spacing: -.01em; }
+.logo { display: inline-block; width: 52px; height: 52px; border-radius: 15px; text-align: center; line-height: 52px;
+  font-size: 24px; color: #fff; background: linear-gradient(135deg, #6d7dff 0%, #b05cff 55%, #ff7a59 100%); }
+.nav { flex: 0 0 auto; display: flex; align-items: center; gap: 22px; margin-left: 30px; }
+.tab { flex: 0 0 auto; white-space: nowrap; font-size: 30px; font-weight: 700; color: #c7cde0; padding: 10px 6px; }
+.tab.on { color: #fff; border-bottom: 4px solid #7c9cff; }
+.gear { flex: 0 0 auto; white-space: nowrap; display: flex; align-items: center; gap: 12px; height: 64px; padding: 0 22px 0 20px; border-radius: 999px;
+  font-size: 29px; font-weight: 700; color: #e9ecf5; background: rgba(255, 255, 255, .08);
+  border: 2px solid rgba(255, 255, 255, .16); transition: transform .12s ease-out, background-color .12s; }
+.gear[hidden] { display: none; }
+.gico { font-size: 32px; line-height: 1; }
+.gkey { font-size: 18px; font-weight: 700; padding: 2px 9px; border-radius: 8px; border: 2px solid rgba(255, 255, 255, .3);
+  color: #b9c1d8; }
+.gear.focused { background: #fff; color: #0b0d16; border-color: #fff; transform: scale(1.08);
+  box-shadow: 0 0 0 6px rgba(124, 156, 255, .55), 0 0 0 12px rgba(124, 156, 255, .18); }
+.gear.focused .gkey { border-color: #0b0d16; color: #0b0d16; }
+.spacer { flex: 1 1 0; min-width: 0; }
+.device { flex: 0 1 auto; min-width: 60px; max-width: 420px; font-size: 28px; color: #c7cde0; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.badges { flex: 0 1 auto; min-width: 0; display: flex; gap: 14px; }
+.badge { flex: 0 0 auto; font-size: 22px; padding: 7px 18px; border-radius: 999px; background: rgba(255, 255, 255, .08);
+  color: #dfe4f2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#agents { flex: 0 1 auto; min-width: 60px; max-width: 340px; }   /* « Assistants : Muse, Hermit, Hermes » : ellipsé */
 .badge[hidden] { display: none; }
-.badge.ethernet, .badge.wifi { background: #1f6f3f; }
-.badge.hotspot { background: #8a5a00; }
-.badge.offline { background: #8b1d1d; }
-.clock { font-size: 40px; font-variant-numeric: tabular-nums; }
-#setup { display: flex; gap: 80px; margin-top: 60px; flex: 1; min-height: 0; }
+.badge.ethernet, .badge.wifi { background: rgba(63, 185, 120, .2); color: #8ff0b8; }
+.badge.hotspot { background: rgba(255, 176, 32, .2); color: #ffd27a; }
+.badge.offline { background: rgba(255, 80, 80, .22); color: #ffb0b0; }
+.clock { flex: 0 0 auto; white-space: nowrap; font-size: 40px; font-weight: 300; font-variant-numeric: tabular-nums; }
+
+/* ---- configuration (QR, pilotée par le téléphone) */
+/* marges resserrées et légendes limitées à leur QR : en mode hotspot (2 QR) tout le texte tient dans la zone */
+#setup { display: flex; gap: 96px; margin-top: 40px; flex: 1; min-height: 0; }
 #home { flex: 1; min-height: 0; display: flex; flex-direction: row; align-items: stretch; }
-#home .main { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
-  padding: 0 16px; margin-left: -16px; }   /* marge pour la carte agrandie (focus), sans déplacer l'alignement */
 #setup[hidden], #home[hidden] { display: none; }
-.steps { flex: 1; }
-.steps h1 { font-size: 64px; margin: 0 0 40px; }
-.steps ol { font-size: 40px; line-height: 1.5; padding-left: 50px; }
-.setupmsg { font-size: 32px; color: #ffd166; }
-.url { font-size: 26px; color: #8b949e; }
-.qrs { display: flex; gap: 40px; align-items: flex-start; }
-.qrs figure { margin: 0; text-align: center; font-size: 28px; }
+.steps { flex: 1 1 0; min-width: 0; }
+.steps h1 { font-size: 76px; line-height: 1.05; margin: 0 0 30px; letter-spacing: -.02em; }
+.steps ol { font-size: 40px; line-height: 1.45; margin: 0 0 24px; padding-left: 54px; }
+.setupmsg { font-size: 30px; line-height: 1.35; margin: 0 0 16px; color: #ffd27a; }
+.url { font-size: 26px; margin: 0; color: #8b93a7; }
+.url:empty { display: none; }
+.qrs { flex: 0 0 auto; display: flex; gap: 40px; align-items: flex-start; }
+/* légende limitée à la largeur de son QR (retour à la ligne) : la colonne de texte garde sa place */
+.qrs figure { margin: 0; text-align: center; font-size: 28px; line-height: 1.3; color: #dfe4f2; max-width: 440px; }
+#apfig { max-width: 380px; }
 .qrs figure[hidden] { display: none; }
-.qrs canvas { background: #fff; border-radius: 16px; display: block; margin: 0 auto 16px; }
-.title { font-size: 52px; margin: 24px 0 4px; }
-.note { font-size: 24px; color: #8b949e; margin: 0 0 16px; }
-.samsung { font-size: 20px; color: #6e7681; margin: 0 0 12px; }
-#rows { flex: 1; min-height: 0; overflow: hidden; }
-.row h2 { font-size: 32px; margin: 18px 0 10px; }
-.strip { display: flex; gap: 24px; overflow: hidden; }
-.card { flex: 0 0 300px; height: 250px; border-radius: 16px; background: #161b22; overflow: hidden; position: relative;
-  border: 4px solid transparent; transition: transform .12s ease-out; }
-.card.focused { border-color: #58a6ff; transform: scale(1.04); }
-.card img, .card .ph { width: 100%; height: 120px; object-fit: cover; display: block; background: #21262d; }
-.card .ph { font-size: 64px; text-align: center; line-height: 120px; color: #8b949e; }
-.card.settings .ph { color: #ffd166; }
-.info { padding: 8px 12px; }
-.info .t { font-size: 24px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.info .y, .info .r { font-size: 18px; color: #8b949e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mark { display: inline-block; font-size: 16px; background: #1f6feb; border-radius: 8px; padding: 2px 8px; margin: 4px 4px 0 0; }
-.panel { position: absolute; left: 120px; right: 520px; bottom: 120px; background: #161b22; border: 3px solid #58a6ff;
-  border-radius: 24px; padding: 32px 48px; }
+canvas { image-rendering: pixelated; }   /* QR : modules nets même si l'écran met à l'échelle */
+.qrs canvas { background: #fff; border-radius: 20px; display: block; margin: 0 auto 18px;
+  box-shadow: 0 0 0 10px rgba(255, 255, 255, .06); }
+
+/* ---- accueil : colonne principale (héros + rangées) */
+#home .main { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
+  padding: 0 32px; margin-left: -32px; transition: opacity .15s; }   /* marge : carte agrandie au focus */
+#home .main.dim { opacity: .32; }
+.hero { position: relative; flex: 0 0 410px; border-radius: 32px; overflow: hidden; margin-top: 4px;
+  background: linear-gradient(135deg, #1b2140 0%, #121528 60%, #0d0f1b 100%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .07); }
+.hart { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
+.himg { position: absolute; right: 0; top: 0; width: 70%; height: 100%; object-fit: cover; object-position: 50% 22%;
+  opacity: .5; }
+.himg[hidden] { display: none; }
+.hshade { position: absolute; left: 0; top: 0; right: 0; bottom: 0;
+  background: linear-gradient(90deg, rgba(9, 11, 20, .97) 0%, rgba(9, 11, 20, .9) 38%, rgba(9, 11, 20, .35) 72%,
+                                     rgba(9, 11, 20, .55) 100%),
+              linear-gradient(0deg, rgba(9, 11, 20, .75) 0%, rgba(9, 11, 20, 0) 45%); }
+.htext { position: absolute; left: 60px; top: 44px; width: 860px; }
+/* message d'assistant présent : la colonne du héros devient une pile bornée (haut/bas fixes) ; le titre passe sur une
+   ligne, la description s'efface, et le message occupe en bas un emplacement réservé — jamais par-dessus le titre */
+.hero.msg .htext { top: 30px; bottom: 22px; display: flex; flex-direction: column; overflow: hidden; }
+.hero.msg .kicker, .hero.msg .htitle, .hero.msg .hmeta { flex: 0 0 auto; }
+.hero.msg .htitle { -webkit-line-clamp: 1; line-height: 1.16; }   /* une ligne, jambages jamais rognés */
+.hero.msg .hchips { flex: 0 1 auto; min-height: 0; overflow: hidden; }
+.hero.msg .hdesc { display: none; }
+.htitle { margin: 0 0 16px; font-size: 82px; line-height: 1.02; font-weight: 800; letter-spacing: -.025em;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.htitle.long { font-size: 62px; }
+.hmeta { margin: 0 0 18px; font-size: 30px; color: #d3d9ea; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hchips { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 18px; }
+.hchips:empty { display: none; }
+.chip { font-size: 22px; font-weight: 700; padding: 7px 16px; border-radius: 12px; background: rgba(255, 255, 255, .12);
+  color: #f3f5fb; }
+.chip.score { background: rgba(255, 210, 122, .16); color: #ffd98f; }
+.chip.mark { background: rgba(124, 156, 255, .22); color: #cfd9ff; }
+.hdesc { margin: 0; font-size: 27px; line-height: 1.4; color: #b9c1d8; max-width: 820px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.hposter { position: absolute; right: 64px; top: 25px; width: 240px; height: 360px; border-radius: 20px; overflow: hidden;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 255, 255, .12); }
+.hposter img { position: absolute; left: 0; top: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.hposter[hidden], .hlogo[hidden] { display: none; }
+
+/* ---- rangées : la rangée active s'aligne en haut, la suivante dépasse (rythme vertical) */
+.rows { flex: 1; min-height: 0; overflow: hidden; position: relative; margin: 10px -32px 0; padding: 0 32px; }
+/* ↑ la zone des rangées couvre aussi la marge de #main : l'anneau de focus de la 1re carte n'est jamais coupé */
+.rowsin { position: relative; transition: transform .18s ease-out; }
+.row { position: relative; transition: opacity .15s; opacity: .5; }
+.row.current { opacity: 1; }
+.zone-top .row.current { opacity: .75; }
+.row h2 { font-size: 34px; font-weight: 700; margin: 10px 0 0; letter-spacing: -.01em; }
+/* marges ≥ anneau complet : carte standard ×1,1 + 11 px ≈ 25 px en haut/bas, 21 px sur les côtés ; large ×1,05 ≈ 18 px */
+.lane { overflow: hidden; margin: 0 -32px; padding: 30px 32px 30px; }
+.strip { position: relative; display: flex; gap: 28px; transition: transform .18s ease-out; }
+.card { flex: 0 0 176px; width: 176px; height: 264px; border-radius: 18px; overflow: hidden; position: relative;
+  background: #161a2b; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .08); transition: transform .12s ease-out; }
+.card.focused { transform: scale(1.1); z-index: 2;
+  box-shadow: 0 0 0 5px #fff, 0 0 0 11px rgba(124, 156, 255, .5); }
+.row.few .card { flex-basis: 380px; width: 380px; }
+.row.few .card.focused { transform: scale(1.05); }   /* peu de titres : cartes larges, pas de vide central */
+.row.few .card img { object-position: 50% 20%; }
+.row.few .info .t { font-size: 30px; }
+.row.few .info .y { font-size: 20px; }
+.info .r { display: none; }
+.row.few .info .r { display: block; font-size: 19px; color: #ffd98f; margin-top: 4px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.card img { position: absolute; left: 0; top: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.art { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
+.art .letter { position: absolute; left: 18px; top: 6px; font-size: 128px; font-weight: 800; line-height: 1;
+  color: rgba(255, 255, 255, .22); }
+.info { position: absolute; left: 0; right: 0; bottom: 0; padding: 48px 16px 14px;
+  background: linear-gradient(180deg, rgba(5, 6, 12, 0) 0%, rgba(5, 6, 12, .9) 60%); }
+.info .t { font-size: 23px; font-weight: 700; line-height: 1.2;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.info .y { font-size: 18px; color: #b9c1d8; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.marks { position: absolute; left: 10px; top: 10px; right: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+.marks span { font-size: 15px; font-weight: 700; padding: 3px 9px; border-radius: 8px; background: rgba(9, 11, 20, .82);
+  color: #cfd9ff; }
+
+/* ---- catalogue vide : écran écrit et intentionnel, jamais des blocs « en chargement » */
+.empty { padding: 26px 4px 0; }
+.empty h2 { font-size: 36px; margin: 0 0 28px; }
+.empty ul { list-style: none; margin: 0; padding: 0; }
+.empty li { display: flex; align-items: center; gap: 24px; font-size: 31px; color: #d3d9ea; margin: 0 0 26px; }
+.empty .ico { flex: 0 0 64px; height: 64px; border-radius: 18px; text-align: center; line-height: 64px; font-size: 30px;
+  color: #fff; background: linear-gradient(135deg, rgba(124, 156, 255, .5), rgba(176, 92, 255, .35)); }
+.hlogo { position: absolute; right: 120px; top: 55px; width: 300px; height: 300px; border-radius: 80px; text-align: center;
+  line-height: 300px; font-size: 130px; color: rgba(255, 255, 255, .9);
+  background: linear-gradient(135deg, #6d7dff 0%, #b05cff 55%, #ff7a59 100%);
+  box-shadow: 0 30px 80px rgba(109, 125, 255, .35); }
+
+/* ---- panneau (titre, Réglages, confirmation) : jamais sur la colonne du QR */
+.panel { position: absolute; z-index: 20; left: 72px; right: 412px; bottom: 76px; border-radius: 30px; padding: 38px 52px 44px;
+  background: linear-gradient(180deg, #1c2238 0%, #11141f 100%); border: 1px solid rgba(255, 255, 255, .14);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, .65); }
+.panel.top { top: 128px; bottom: auto; right: auto; width: 1180px; }
 .panel[hidden], .banner[hidden], .toast[hidden], .offline[hidden], footer[hidden] { display: none; }
-.panel h2 { font-size: 44px; margin: 0 0 8px; }
-.pmeta { font-size: 24px; color: #c9d1d9; max-height: 100px; overflow: hidden; }
+.panel h2 { font-size: 52px; line-height: 1.1; margin: 0 0 12px; letter-spacing: -.015em; }
+.pmeta { font-size: 27px; line-height: 1.4; color: #c7cde0; margin: 0 0 28px; max-height: 120px; overflow: hidden; }
 .pbtns { display: flex; gap: 20px; flex-wrap: wrap; }
-.pbtns button { font: inherit; font-size: 30px; padding: 16px 28px; border-radius: 16px; border: 3px solid #30363d;
-  background: #21262d; color: #f0f3f6; }
-.pbtns button.on { background: #1f6f3f; }
-.pbtns button.focused { border-color: #58a6ff; background: #1f6feb; }
-.banner { flex: 0 0 auto; margin-top: 12px; font-size: 36px; background: #8a5a00; padding: 16px 32px; border-radius: 16px; }
-.toast.big { left: 50%; right: auto; top: 40%; bottom: auto; transform: translateX(-50%); font-size: 48px;
-  padding: 32px 56px; background: #1f6f3f; border: 3px solid #3fb950; text-align: center; }
-.toast { position: absolute; left: 80px; bottom: 80px; font-size: 28px; background: #21262d; padding: 16px 28px; border-radius: 16px; }
-.offline { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; background: rgba(13, 17, 23, .92);
+.pbtns button { font: inherit; font-size: 30px; font-weight: 700; padding: 18px 32px; border-radius: 18px;
+  border: 2px solid rgba(255, 255, 255, .16); background: rgba(255, 255, 255, .07); color: #f3f5fb;
+  transition: transform .1s ease-out; }
+.pbtns button.on { background: rgba(63, 185, 120, .22); color: #a6f3c6; }
+.pbtns button.focused { background: #fff; color: #0b0d16; border-color: #fff; transform: scale(1.06);
+  box-shadow: 0 0 0 6px rgba(124, 156, 255, .55); }
+.pbtns button.danger.focused { background: #ffdfdf; color: #5a0d0d; border-color: #ffdfdf;
+  box-shadow: 0 0 0 6px rgba(255, 100, 100, .5); }
+.pbtns button.tile { width: 340px; min-height: 168px; padding: 22px 26px; text-align: left; display: flex;
+  flex-direction: column; gap: 8px; }
+.tile .ti { font-size: 38px; line-height: 1; }
+.tile .tl { font-size: 30px; }
+.tile .ts { font-size: 20px; font-weight: 400; color: #aeb6cc; line-height: 1.3; }
+.tile.focused .ts { color: #3a4155; }
+
+/* ---- messages */
+/* message d'assistant : dans le flux du héros (#home seulement, donc jamais pendant la configuration), au plus
+   2 lignes, masqué pendant tout panneau (Réglages, confirmation, fiche) — un texte d'assistant ne peut jamais
+   recouvrir ni imiter ce que la télécommande valide, ni le titre, ni un QR */
+/* marge intérieure verticale = bordure transparente (le fond passe dessous) : la découpe overflow tombe pile après
+   la 2e ligne, aucune 3e ligne ne dépasse dans le bas du bandeau */
+.banner { position: relative; flex: 0 0 auto; margin-top: auto; max-height: 96px; font-size: 28px; line-height: 36px;
+  padding: 0 26px; border: solid transparent; border-width: 12px 0; border-radius: 16px; color: #fff;
+  background: linear-gradient(90deg, #6b4a00, #8a5a00); background-origin: border-box;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.has-panel .banner { display: none; }
+.toast { position: absolute; z-index: 15; left: 72px; bottom: 76px; font-size: 28px; background: #1c2238; padding: 18px 30px;
+  border-radius: 18px; border: 1px solid rgba(255, 255, 255, .14); }
+.toast.big { left: 160px; right: 500px; top: 36%; bottom: auto; font-size: 46px; line-height: 1.3; padding: 36px 56px;
+  background: linear-gradient(180deg, #1f6f3f, #175a33); border: 2px solid #3fb950; text-align: center; }
+.offline { position: absolute; z-index: 50; left: 0; top: 0; width: 1920px; height: 1080px; background: rgba(7, 8, 13, .93);
   font-size: 56px; display: flex; align-items: center; justify-content: center; }
-footer { flex: 0 0 auto; padding-top: 10px; font-size: 22px; color: #8b949e; }
-/* colonne fixe à droite de l'accueil (flex, pas de position absolue) : aucune carte en dessous */
-.remotebox { flex: 0 0 360px; width: 360px; margin: 24px 0 0 40px; align-self: flex-start; background: #161b22;
-  border: 2px solid #30363d; border-radius: 18px; padding: 18px 24px 16px; text-align: center; }
+footer { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 40px; padding-top: 12px;
+  font-size: 24px; color: #a9b1c6; }
+.hint { flex: 0 0 auto; white-space: nowrap; }
+.hk { display: inline-block; padding: 1px 10px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, .28);
+  font-size: 20px; font-weight: 700; color: #dfe4f2; }
+.samsung { flex: 0 1 auto; min-width: 0; font-size: 19px; color: #6f7790; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+
+/* ---- colonne fixe à droite (flex, pas de position absolue) : aucune carte en dessous ; discrète mais lisible */
+.remotebox { flex: 0 0 300px; width: 300px; margin: 4px 0 0 40px; align-self: flex-start; border-radius: 26px;
+  padding: 24px 26px 22px; text-align: center; background: rgba(255, 255, 255, .045);
+  border: 1px solid rgba(255, 255, 255, .09); }
 .remotebox[hidden] { display: none; }
-.remotebox b { display: block; font-size: 26px; margin-bottom: 12px; }
-.remotebox canvas { background: #fff; border-radius: 12px; width: 300px; height: 300px; display: block; margin: 0 auto; }
-.remotebox .rsteps { text-align: left; font-size: 22px; line-height: 1.45; color: #c9d1d9; margin: 14px 0 0;
-  padding-left: 32px; }
-.remotebox .rnote { font-size: 18px; color: #8b949e; margin: 10px 0 0; text-align: left; }
+.remotebox b { display: block; font-size: 24px; margin-bottom: 16px; color: #e9ecf5; }
+.remotebox canvas { background: #fff; border-radius: 14px; width: 232px; height: 232px; display: block; margin: 0 auto; }
+.remotebox .rsteps { text-align: left; font-size: 20px; line-height: 1.5; color: #b9c1d8; margin: 16px 0 0;
+  padding-left: 28px; }
+.remotebox .rnote { font-size: 17px; line-height: 1.4; color: #8b93a7; margin: 10px 0 0; text-align: left; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

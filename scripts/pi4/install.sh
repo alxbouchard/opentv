@@ -5,11 +5,12 @@
 #   ./install.sh --dry-run                 affiche le plan complet, n'écrit rien (macOS/Linux, sans root)
 #   ./install.sh --root /tmp/rfs --skip-preflight   construit un rootfs de test sans root (aucun systemctl)
 #
-# Rien n'est téléchargé ni flashé. 1080p : ajoute video=HDMI-A-1:1920x1080@60 à /boot/firmware/cmdline.txt (sauvegardé,
-# retiré par uninstall.sh). Mise à jour : fichiers de l'ancien manifeste absents du nouveau retirés (sauvegardés),
+# Rien n'est téléchargé ni flashé. cmdline.txt (sauvegardé, jetons ajoutés notés puis retirés exactement par
+# uninstall.sh) : 1080p (video=HDMI-A-1:1920x1080@60) et démarrage silencieux (quiet loglevel=3 logo.nologo
+# vt.global_cursor_default=0 systemd.show_status=false) ; écran OpenTV sur tty1 (opentv-splash), pas d'invite tty1
+# tant que le kiosque est activé. Mise à jour : fichiers de l'ancien manifeste absents du nouveau retirés (sauvegardés),
 # services redémarrés. Tout échec AVANT l'écriture du manifeste ⇒ retour automatique à l'état précédent. Après ce
-# point de non-retour (sysusers, tmpfiles, systemctl), un échec s'arrête avec un message explicite : pas de retour
-# automatique, la commande de retour arrière est affichée.
+# point de non-retour (sysusers, tmpfiles, systemctl), un échec s'arrête avec la commande de retour arrière.
 # Retour arrière : /opt/opentv/uninstall.sh (restaure les fichiers sauvegardés).
 set -Eeuo pipefail
 umask 022
@@ -22,7 +23,7 @@ SKIP_PREFLIGHT=0
 ENABLE=1
 
 usage() {
-  sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   echo "Options : --dry-run  --root <dossier absolu>  --skip-preflight (racine de test seulement)  --no-enable"
 }
 die() { echo "opentv-install: $*" >&2; exit 1; }
@@ -64,6 +65,18 @@ sha256() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
   else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
+# Écritures durables (carte SD, /boot/firmware en FAT, cache d'écriture) : fsync explicite des fichiers et dossiers
+# nommés (GNU coreutils « sync FICHIER… », Raspberry Pi OS) ; à défaut (sync sans argument : macOS, ancien sync),
+# sync global. Échec des deux ⇒ erreur (jamais de renommage d'un contenu non écrit).
+durable_sync() { sync -- "$@" 2>/dev/null || sync; }
+# replace_durably <temp> <cible> : temp complet synchronisé AVANT le renommage atomique (même dossier), puis cible et
+# dossier synchronisés APRÈS. Une coupure à tout instant laisse l'ancien contenu complet ou le nouveau, jamais un vide.
+replace_durably() {
+  durable_sync "$1" || return 1
+  mv -f -- "$1" "$2" || return 1
+  durable_sync "$2" "$(dirname "$2")"
+}
+put_durably() { printf '%s\n' "$2" > "$1.opentv-tmp" && replace_durably "$1.opentv-tmp" "$1"; }   # <chemin> <contenu>
 listed() {   # listed <ligne> <liste> : appartenance exacte, sans pipe (pas de faux négatif SIGPIPE sous pipefail)
   case $'\n'"$2"$'\n' in *$'\n'"$1"$'\n'*) return 0 ;; esac
   return 1
@@ -73,6 +86,7 @@ in_scope() {   # chemins qu'OpenTV a le droit de retirer (même périmètre que 
     /opt/opentv/*|/etc/systemd/system/opentv*|/etc/sysusers.d/opentv.conf|/etc/tmpfiles.d/opentv.conf|/etc/pam.d/opentv-kiosk) return 0 ;;
     /etc/systemd/logind.conf.d/opentv-kiosk.conf|/etc/chromium/policies/managed/opentv-kiosk.json) return 0 ;;
     /etc/chromium-browser/policies/managed/opentv-kiosk.json) return 0 ;;
+    /etc/systemd/system/getty@tty1.service.d/opentv-kiosk.conf) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -82,15 +96,20 @@ FILES=()
 add() { FILES+=("$1|$2|$3"); }
 for f in "$HERE"/opentv_pi/*.py; do add "$f" "/opt/opentv/lib/opentv_pi/$(basename "$f")" 644; done
 for b in opentv-pi opentv-mcp opentv-net-helper opentv-kiosk-browser; do add "$HERE/bin/$b" "/opt/opentv/bin/$b" 755; done
+# démarrage produit : écran OpenTV sur tty1 + contrôle en lecture seule après redémarrage
+add "$HERE/system/opentv-splash" /opt/opentv/bin/opentv-splash 755
+add "$HERE/system/opentv-boot-check" /opt/opentv/bin/opentv-boot-check 755
 for u in tv.html tv.js keys.js tv.css setup.css setup.js remote.css remote.js fallback.html; do add "$HERE/ui/$u" "/opt/opentv/share/ui/$u" 644; done
 add "$REPO/native/app/qrcode.js" /opt/opentv/share/ui/qrcode.js 644                  # réutilisé tel quel
 add "$REPO/scripts/nanopi/opentv_foryou.py" /opt/opentv/lib/foryou/opentv_foryou.py 644  # moteur « Pour toi »
 add "$REPO/scripts/nanopi/opentv_bridge.py" /opt/opentv/lib/foryou/opentv_bridge.py 644  # load_catalogue_meta
 for u in opentv.service opentv-kiosk.service opentv-net-helper.service opentv-net-helper.path \
          opentv-ap-guard.service opentv-ap-guard.timer opentv-cec.service opentv-cec.timer \
-         opentv-cec-announce.service; do
+         opentv-cec-announce.service opentv-splash.service; do
   add "$HERE/systemd/$u" "/etc/systemd/system/$u" 644
 done
+# aucune invite de connexion sur tty1 tant que opentv-kiosk.service est activé (condition seule, rien de masqué)
+add "$HERE/system/getty-tty1-opentv-kiosk.conf" /etc/systemd/system/getty@tty1.service.d/opentv-kiosk.conf 644
 add "$HERE/system/sysusers-opentv.conf" /etc/sysusers.d/opentv.conf 644
 add "$HERE/system/tmpfiles-opentv.conf" /etc/tmpfiles.d/opentv.conf 644
 add "$HERE/system/pam-opentv-kiosk" /etc/pam.d/opentv-kiosk 644
@@ -102,6 +121,7 @@ add "$HERE/system/chromium-policy-opentv-kiosk.json" /etc/chromium/policies/mana
 add "$HERE/system/chromium-policy-opentv-kiosk.json" /etc/chromium-browser/policies/managed/opentv-kiosk.json 644
 add "$HERE/uninstall.sh" /opt/opentv/uninstall.sh 755
 add "$HERE/README.md" /opt/opentv/README.md 644
+add "$HERE/CEC_COMPATIBILITY.md" /opt/opentv/CEC_COMPATIBILITY.md 644
 add "$HERE/opentv-pi.env.example" /opt/opentv/opentv-pi.env.example 644
 NEW_DSTS=""
 for e in "${FILES[@]}"; do
@@ -124,6 +144,10 @@ else
     die "préflight échoué : installation refusée, aucun fichier modifié (dépendances : sudo ./prepare-pi.sh --yes)"
   fi
 fi
+# cmdline.txt n'est jamais écrit dans le dossier /boot/firmware de la partition racine (partition de démarrage absente)
+if [ "$LIVE" = 1 ] && [ "$DRY" = 0 ] && command -v mountpoint >/dev/null 2>&1 && ! mountpoint -q /boot/firmware; then
+  die "/boot/firmware n'est pas monté : installation refusée, aucun fichier modifié (sudo mount /boot/firmware)"
+fi
 
 # ---------------------------------------------------------------- copie avec sauvegardes et retour arrière
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -132,6 +156,10 @@ MANIFEST="/opt/opentv/MANIFEST.sha256"
 CMDF="/boot/firmware/cmdline.txt"
 VIDEO_ARG="video=HDMI-A-1:1920x1080@60"
 VIDEO_REC="/var/lib/opentv-install/cmdline-video.added"
+# démarrage silencieux : affichage CONSOLE seulement (le journal persistant, dmesg et journalctl -k gardent tout ;
+# console=tty1, l'invite du mode de secours et SSH sont conservés). Aucune option udev/systemd.log_level (journal).
+BOOT_ARGS=(quiet loglevel=3 logo.nologo vt.global_cursor_default=0 systemd.show_status=false)
+BOOT_REC="/var/lib/opentv-install/cmdline-boot.added"
 OLD_LIST=""
 if [ -f "$(dest "$MANIFEST")" ]; then OLD_LIST="$(awk '{print $2}' "$(dest "$MANIFEST")")"; fi
 # dossiers système qu'OpenTV peut avoir à créer (hors /opt/opentv) : seuls ceux créés ici sont notés, et retirés
@@ -142,7 +170,8 @@ EXTRA_DIRS="/etc/systemd/logind.conf.d
 /etc/chromium/policies/managed
 /etc/chromium-browser
 /etc/chromium-browser/policies
-/etc/chromium-browser/policies/managed"
+/etc/chromium-browser/policies/managed
+/etc/systemd/system/getty@tty1.service.d"
 DIRS_REC="/var/lib/opentv-install/created-dirs.list"
 NEW_DIRS=()
 while IFS= read -r d; do
@@ -153,6 +182,8 @@ $EXTRA_DIRS
 EOF
 DIRS_REC_CHANGED=0
 DIRS_REC_OLD=""
+OPT_EXISTED=0   # /opt/opentv absent avant cette exécution ⇒ ses dossiers vides sont retirés par le retour arrière
+if [ -e "$(dest /opt/opentv)" ] || [ -L "$(dest /opt/opentv)" ]; then OPT_EXISTED=1; fi
 NEW=()
 SAVED=()
 REMOVED=()
@@ -160,6 +191,8 @@ STARTED=0
 CUR=""
 CMDLINE_CHANGED=0
 VIDEO_REC_NEW=0
+BOOT_REC_CHANGED=0
+BOOT_REC_OLD=""
 
 rollback() {
   set +e
@@ -169,18 +202,31 @@ rollback() {
     echo "opentv-install: échec — retour à l'état précédent" >&2
     local d
     [ -n "$CUR" ] && rm -f -- "$(dest "$CUR").opentv-tmp"
-    rm -f -- "$(dest "$MANIFEST").tmp" "$(dest "$CMDF").opentv-tmp"
+    rm -f -- "$(dest "$MANIFEST").tmp" "$(dest "$CMDF").opentv-tmp" "$(dest "$VIDEO_REC").opentv-tmp" \
+      "$(dest "$BOOT_REC").opentv-tmp"
     for d in ${NEW[@]+"${NEW[@]}"}; do rm -f -- "$(dest "$d")"; done
     for d in ${SAVED[@]+"${SAVED[@]}"} ${REMOVED[@]+"${REMOVED[@]}"}; do
       mkdir -p -- "$(dirname "$(dest "$d")")"
       cp -p -- "$(dest "$BK$d")" "$(dest "$d")" || echo "opentv-install: restauration impossible : $d" >&2
     done
-    if [ "$CMDLINE_CHANGED" = 1 ]; then
-      cp -p -- "$(dest "$BK$CMDF")" "$(dest "$CMDF")" || echo "opentv-install: restauration impossible : $CMDF" >&2
+    if [ "$CMDLINE_CHANGED" = 1 ]; then   # même écriture durable qu'à l'aller : jamais de cmdline.txt tronqué
+      if ! { cp -p -- "$(dest "$BK$CMDF")" "$(dest "$CMDF").opentv-tmp" &&
+             replace_durably "$(dest "$CMDF").opentv-tmp" "$(dest "$CMDF")"; }; then
+        rm -f -- "$(dest "$CMDF").opentv-tmp"
+        echo "opentv-install: restauration impossible : $CMDF (sauvegarde : $BK$CMDF)" >&2
+      fi
     fi
+    # marqueurs notés AVANT cmdline.txt : retirés/rétablis (aucun marqueur périmé après un échec)
     [ "$VIDEO_REC_NEW" = 1 ] && rm -f -- "$(dest "$VIDEO_REC")"
+    if [ "$BOOT_REC_CHANGED" = 1 ]; then
+      if [ -n "$BOOT_REC_OLD" ]; then put_durably "$(dest "$BOOT_REC")" "$BOOT_REC_OLD"; else rm -f -- "$(dest "$BOOT_REC")"; fi
+      rm -f -- "$(dest "$BOOT_REC").opentv-tmp"
+    fi
     if [ "$DIRS_REC_CHANGED" = 1 ]; then
       if [ -n "$DIRS_REC_OLD" ]; then printf '%s\n' "$DIRS_REC_OLD" > "$(dest "$DIRS_REC")"; else rm -f -- "$(dest "$DIRS_REC")"; fi
+    fi
+    if [ "$OPT_EXISTED" = 0 ] && [ -d "$(dest /opt/opentv)" ] && [ ! -L "$(dest /opt/opentv)" ]; then
+      find "$(dest /opt/opentv)" -depth -type d -empty -exec rmdir -- {} \; 2>/dev/null
     fi
     local i
     i=${#NEW_DIRS[@]}
@@ -192,6 +238,7 @@ rollback() {
   exit 1
 }
 trap rollback ERR
+fail() { echo "opentv-install: $*" >&2; rollback; }   # erreur détectée : même retour arrière qu'un échec de commande
 
 backup() {   # copie de sécurité d'un fichier existant dans $BK (même arborescence)
   act mkdir -p "$(dirname "$(dest "$BK$1")")"
@@ -240,31 +287,88 @@ done <<EOF
 $OLD_LIST
 EOF
 
-# ---------------------------------------------------------------- 1080p garanti (paramètre noyau, réversible)
+# ---------------------------------------------------------------- cmdline.txt : 1080p + démarrage silencieux (réversible)
+# Une seule ligne modifiée (la première, seule lue par le firmware), une seule écriture atomique, une seule sauvegarde.
+# Un jeton dont la clé est déjà présente (ex. loglevel=7 choisi localement) est respecté et jamais noté. Fin de ligne
+# (LF, CRLF ou absente) et lignes suivantes conservées octet pour octet.
+has_arg() {   # has_arg <ligne> <jeton> : même jeton, ou même clé (« clé=… » ou « clé » seule), quelle que soit la valeur
+  local k="${2%%=*}"
+  case " $1 " in *" $2 "*|*" $k "*|*" $k="*) return 0 ;; esac
+  return 1
+}
+local_verbosity() {   # debug / loglevel=… déjà présents : quiet ou loglevel=3 ajoutés en fin de ligne les écraseraient
+  local w v=""
+  set -f
+  for w in $1; do case "$w" in debug|loglevel=*) v="${v:+$v }$w" ;; esac; done
+  set +f
+  printf '%s' "$v"
+}
 C="$(dest "$CMDF")"
+ADD_ARGS=()
 if [ ! -f "$C" ]; then
-  if [ "$LIVE" = 1 ] && [ "$DRY" = 0 ]; then die "$CMDF introuvable : Raspberry Pi OS Bookworm requis"; fi
-  say "cmdline.txt absent ($ROOT) : 1080p non appliqué"
-elif grep -q 'video=HDMI-A-1:' "$C"; then
-  say "cmdline.txt : video=HDMI-A-1 déjà présent, inchangé"
-elif [ "$DRY" = 1 ]; then
-  say "[dry-run] ajouter $VIDEO_ARG à $CMDF (sauvegarde $BK$CMDF ; retiré par uninstall.sh)"
+  if [ "$LIVE" = 1 ] && [ "$DRY" = 0 ]; then fail "$CMDF introuvable : Raspberry Pi OS Bookworm requis"; fi
+  say "cmdline.txt absent ($ROOT) : 1080p et démarrage silencieux non appliqués"
 else
-  STARTED=1
-  backup "$CMDF"
-  CMDLINE_CHANGED=1
-  {
-    printf '%s %s\n' "$(head -n 1 "$C")" "$VIDEO_ARG"
-    tail -n +2 "$C"
-  } > "$C.opentv-tmp"
-  chmod "$(stat -c %a "$C" 2>/dev/null || stat -f %Lp "$C")" "$C.opentv-tmp"
-  mv -f -- "$C.opentv-tmp" "$C"
-  if [ ! -f "$(dest "$VIDEO_REC")" ]; then
-    mkdir -p -- "$(dirname "$(dest "$VIDEO_REC")")"
-    printf '%s\n' "$VIDEO_ARG" > "$(dest "$VIDEO_REC")"
-    VIDEO_REC_NEW=1
+  CMD_FIRST=""
+  CMD_CR=""
+  IFS= read -r CMD_FIRST < "$C" || true
+  case "$CMD_FIRST" in *$'\r') CMD_CR=$'\r'; CMD_FIRST="${CMD_FIRST%$'\r'}" ;; esac
+  case " $CMD_FIRST " in *" root="*) ;; *) fail "$CMDF : première ligne sans root=… (fichier inattendu), non modifié" ;; esac
+  case " $CMD_FIRST " in
+    *" video=HDMI-A-1:"*) say "cmdline.txt : video=HDMI-A-1 déjà présent, inchangé" ;;
+    *) ADD_ARGS+=("$VIDEO_ARG") ;;
+  esac
+  VERBOSE="$(local_verbosity "$CMD_FIRST")"
+  for a in "${BOOT_ARGS[@]}"; do
+    if has_arg "$CMD_FIRST" "$a"; then say "cmdline.txt : ${a%%=*} déjà réglé, inchangé"
+    elif [ -n "$VERBOSE" ] && { [ "$a" = quiet ] || [ "$a" = loglevel=3 ]; }; then
+      say "cmdline.txt : verbosité locale ($VERBOSE) respectée, $a non ajouté (il l'écraserait)"
+    else ADD_ARGS+=("$a"); fi
+  done
+fi
+if [ ${#ADD_ARGS[@]} -gt 0 ]; then
+  NEW_FIRST="$CMD_FIRST"
+  for a in "${ADD_ARGS[@]}"; do NEW_FIRST="${NEW_FIRST:+$NEW_FIRST }$a"; done
+  [ ${#NEW_FIRST} -le 1024 ] || fail "$CMDF : ligne trop longue après ajout (${#NEW_FIRST} > 1024), non modifié"
+  if [ "$DRY" = 1 ]; then
+    say "[dry-run] ajouter ${ADD_ARGS[*]} à $CMDF (sauvegarde $BK$CMDF ; jetons notés, retirés par uninstall.sh)"
+  else
+    STARTED=1
+    backup "$CMDF"
+    durable_sync "$(dest "$BK$CMDF")"
+    # 1) jetons notés et synchronisés AVANT toute modification : une coupure ne laisse jamais un jeton OpenTV non noté
+    #    (un marqueur sans jeton est sans effet : uninstall.sh ne retire que des jetons exacts présents)
+    mkdir -p -- "$(dirname "$(dest "$BOOT_REC")")"
+    if [ -f "$(dest "$BOOT_REC")" ]; then BOOT_REC_OLD="$(cat "$(dest "$BOOT_REC")")"; fi
+    BOOT_REC_NEXT="$BOOT_REC_OLD"
+    for a in "${ADD_ARGS[@]}"; do
+      if [ "$a" = "$VIDEO_ARG" ]; then
+        if [ ! -f "$(dest "$VIDEO_REC")" ]; then
+          VIDEO_REC_NEW=1   # noté avant l'écriture : un échec en cours d'écriture est aussi annulé
+          put_durably "$(dest "$VIDEO_REC")" "$VIDEO_ARG"
+        fi
+      elif ! listed "$a" "$BOOT_REC_NEXT"; then
+        BOOT_REC_NEXT="${BOOT_REC_NEXT:+$BOOT_REC_NEXT$'\n'}$a"
+      fi
+    done
+    if [ "$BOOT_REC_NEXT" != "$BOOT_REC_OLD" ]; then
+      BOOT_REC_CHANGED=1
+      put_durably "$(dest "$BOOT_REC")" "$BOOT_REC_NEXT"
+    fi
+    # 2) nouvelle ligne dans un fichier temporaire du même dossier, synchronisé, renommé, puis cible + dossier synchronisés
+    CMD_NL=""
+    [ "$(wc -l < "$C" | tr -d ' ')" -gt 0 ] && CMD_NL=$'\n'
+    {
+      printf '%s%s%s' "$NEW_FIRST" "$CMD_CR" "$CMD_NL"
+      tail -n +2 "$C"
+    } > "$C.opentv-tmp"
+    chmod "$(stat -c %a "$C" 2>/dev/null || stat -f %Lp "$C")" "$C.opentv-tmp"
+    durable_sync "$C.opentv-tmp"
+    CMDLINE_CHANGED=1
+    mv -f -- "$C.opentv-tmp" "$C"
+    durable_sync "$C" "$(dirname "$C")"
+    say "cmdline.txt : ${ADD_ARGS[*]} ajouté(s) — effectif au prochain redémarrage (sudo reboot)"
   fi
-  say "cmdline.txt : $VIDEO_ARG ajouté — 1080p effectif au prochain redémarrage (sudo reboot)"
 fi
 
 # dossiers système créés par cette installation : notés pour une désinstallation exacte
@@ -305,6 +409,7 @@ else
   done
   chmod 644 "$tmp"
   mv -f -- "$tmp" "$(dest "$MANIFEST")"
+  sync   # fichiers livrés, marqueurs et manifeste sur le support avant les étapes système
   say "manifeste : $(wc -l < "$(dest "$MANIFEST")" | tr -d ' ') fichiers"
 fi
 trap - ERR
@@ -327,14 +432,16 @@ post systemctl daemon-reload
 if [ "$ENABLE" = 1 ]; then
   # opentv-ap-guard.timer : garde root du Wi-Fi temporaire, indépendante du service Python
   # opentv-cec.timer : déclaration Playback « OpenTV » + remappage OK, sans réveil ni changement d’entrée
+  # opentv-splash.service : écran OpenTV sur tty1 au démarrage (sysinit), jamais redémarré ici (Cage possède tty1)
   post systemctl enable opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
-    opentv-cec.timer
+    opentv-cec.timer opentv-splash.service
   post systemctl restart opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
     opentv-cec.timer
 fi
 if ! host python3 -I /opt/opentv/bin/opentv-pi health; then
   say "santé : à vérifier (sudo /opt/opentv/bin/opentv-pi health ; journalctl -u opentv -u opentv-kiosk)"
 fi
-if [ "$CMDLINE_CHANGED" = 1 ]; then say "1080p : redémarrer la boîte pour appliquer $VIDEO_ARG"; fi
+if [ "$CMDLINE_CHANGED" = 1 ]; then say "cmdline.txt : redémarrer la boîte pour appliquer ${ADD_ARGS[*]}"; fi
+say "démarrage : écran OpenTV sur tty1, sans terminal ni invite (effectif au prochain redémarrage ; contrôle : sudo /opt/opentv/bin/opentv-boot-check)"
 say "touche Power des télécommandes ignorée par la boîte (/etc/systemd/logind.conf.d/opentv-kiosk.conf) : effectif au prochain redémarrage (sudo reboot)"
 say "terminé. Retour arrière : sudo /opt/opentv/uninstall.sh   (ajouter --purge pour effacer l'état)"

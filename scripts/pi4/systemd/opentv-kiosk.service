@@ -15,7 +15,9 @@ PAMName=opentv-kiosk
 TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes
-TTYVTDisallocate=yes
+# pas d'effacement de tty1 au lancement : l'écran OpenTV (opentv-splash) reste affiché jusqu'à ce que Cage passe la
+# console en mode graphique, et réapparaît (au lieu d'un terminal) si le kiosque redémarre
+TTYVTDisallocate=no
 StandardInput=tty-fail
 StandardOutput=journal
 StandardError=journal

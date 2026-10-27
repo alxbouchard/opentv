@@ -1,0 +1,38 @@
+#!/bin/bash
+# OpenTV Pi : écran de démarrage minimal sur tty1, lancé très tôt par opentv-splash.service (stdout = /dev/tty1).
+# Séquences ANSI / console Linux seulement : fond sombre, « OpenTV », « Démarrage... », curseur masqué, puis Cage et
+# Chromium prennent le relais. Aucune entrée lue, aucun fichier écrit, aucun réseau. Police Terminus agrandie si la
+# distribution la fournit (console-setup/kbd, best effort borné à 2 s). Tout échec est toléré : code de sortie 0,
+# le démarrage n'attend jamais cet écran (unité oneshot bornée, aucune dépendance stricte).
+set -u
+
+FONT="/usr/share/consolefonts/Lat15-TerminusBold32x16.psf.gz"
+TTY="/dev/tty1"
+TITLE="OpenTV"
+SUB="Démarrage..."   # ASCII pour les points : présent dans toute police console (é : CP437 et Lat15)
+SUB_LEN=12
+
+# police agrandie (16x32) : uniquement sur la vraie console, si setfont et la police officielle existent
+if [ -t 1 ] && [ -r "$FONT" ] && command -v setfont >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+  timeout 2 setfont -C "$TTY" "$FONT" >/dev/null 2>&1 || true
+fi
+
+rows=24
+cols=80
+if [ -t 1 ]; then
+  size="$(stty size <&1 2>/dev/null)" || size=""
+  r="${size%% *}"
+  c="${size##* }"
+  case "$r" in ''|*[!0-9]*) ;; *) [ "$r" -ge 3 ] && [ "$r" -le 1000 ] && rows="$r" ;; esac
+  case "$c" in ''|*[!0-9]*) ;; *) [ "$c" -ge 16 ] && [ "$c" -le 1000 ] && cols="$c" ;; esac
+fi
+row=$((rows / 2))
+col_t=$(((cols - ${#TITLE}) / 2 + 1))
+col_s=$(((cols - SUB_LEN) / 2 + 1))
+
+# palette console Linux (ESC ] P n rrggbb) : 0 = fond sombre, 7 = gris du sous-titre, F = blanc du titre (gras)
+# ESC[9;0] : pas de mise en veille de la console ; ESC[?25l : curseur masqué ; ESC[2J : écran effacé au fond sombre
+printf '\033]P00b0f17\033]P7a3abbd\033]PFffffff\033[9;0]\033[?25l\033[0;37;40m\033[H\033[2J' 2>/dev/null || exit 0
+printf '\033[%d;%dH\033[1;37;40m%s' "$row" "$col_t" "$TITLE" 2>/dev/null || exit 0
+printf '\033[%d;%dH\033[0;37;40m%s\033[0;37;40m\033[%d;1H' "$((row + 2))" "$col_s" "$SUB" "$rows" 2>/dev/null || exit 0
+exit 0

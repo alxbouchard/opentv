@@ -90,8 +90,15 @@ systemd, comptes système (`opentv`, `opentv-kiosk`, groupe `opentv-agent`), PAM
 (sans secret, conservé s'il existe), sauvegarde de tout fichier remplacé, manifeste `/opt/opentv/MANIFEST.sha256`,
 **1080p garanti** : `video=HDMI-A-1:1920x1080@60` ajouté à `/boot/firmware/cmdline.txt` (sauvegardé, retiré exactement
 par `uninstall.sh` ; un `video=HDMI-A-1:` déjà présent est respecté ; effectif au prochain redémarrage de la boîte).
+**Démarrage produit silencieux** : OpenTV ajoute seulement les options d'affichage sûres absentes (`quiet`,
+`loglevel=3`, `logo.nologo`, `vt.global_cursor_default=0`, `systemd.show_status=false`) par écriture atomique et
+synchronisée de `cmdline.txt`; une valeur locale `debug`/`loglevel=` est respectée. Un splash tty1 affiche
+« OpenTV / Démarrage... » avant Cage, sans supprimer les journaux ni SSH. `opentv-boot-check` vérifie l'état après
+redémarrage. L'installation et la désinstallation conservent des marqueurs durables et refusent de continuer si la
+partition de démarrage ou `cmdline.txt` ne peut pas être restauré exactement.
 **Mise à jour** : les fichiers de l'ancien manifeste absents du nouveau sont retirés (sauvegardés ; jamais hors du
-périmètre OpenTV), puis `systemctl daemon-reload`, `enable` et **`restart`** des quatre unités (dont `opentv-ap-guard.timer`) (un `enable --now` ne
+périmètre OpenTV), puis `systemctl daemon-reload`, `enable` et **`restart`** des unités OpenTV (dont
+`opentv-ap-guard.timer` et `opentv-splash.service`) (un `enable --now` ne
 relancerait pas un service déjà actif). Tout échec **avant l'écriture du manifeste** (copie, retrait, cmdline, env,
 manifeste) ⇒ retour automatique à l'état précédent (fichiers remplacés, retirés et `cmdline.txt` restaurés ; nouveaux
 fichiers effacés). **Après ce point de non-retour** (`systemd-sysusers`, `systemd-tmpfiles`, `chown`, `systemctl`),
@@ -104,6 +111,7 @@ Services :
 |---|---|
 | `opentv.service` | service Python stdlib (utilisateur `opentv`, `Type=notify`, watchdog 30 s — tick borné : `nmcli` 3 s + `ip` 2 s, groupe de processus tué à l'échéance, découverte CEC en thread —, durci) : page TV loopback `127.0.0.1:8080` (réservée au compte `opentv-kiosk` par l'UID du pair TCP, `/proc/net/tcp`), formulaire LAN `:8081` **seulement pendant la configuration**, Agent Port `/run/opentv/agent.sock` ; **télécommande téléphone** `<adresse LAN actuelle>:8082/r` (jamais `0.0.0.0`) seulement configuré et en ligne, écoute relancée si l'adresse change |
 | `opentv-kiosk.service` | Cage (Wayland) sur tty1 **sans `-s`** (aucun changement de console Ctrl+Alt+Fn : un clavier branché n'atteint aucune invite de connexion ; maintenance par SSH) + Chromium Raspberry Pi OS en kiosque, sous la politique gérée dédiée `opentv-kiosk.json` (DevTools, impression, téléchargements, boîtes de fichiers, extensions, navigation privée et toute navigation hors de `http://127.0.0.1`/page de secours bloqués), `Restart=always`, `RestartSec=5`, `StartLimitIntervalSec=0` (jamais bloqué en « failed » après une série de plantages). Profil Chromium **persistant** dédié (`/var/lib/opentv-kiosk/chromium`, verrous `Singleton*` effacés au lancement ; aucun secret durable : la clé de page change à chaque démarrage du service). Le lanceur teste seulement que le **port TCP** 127.0.0.1:8080 accepte une connexion (20 s), sinon il ouvre la page de secours locale `file://…/fallback.html`, qui interroge `/healthz` et revient au tableau de bord |
+| `opentv-splash.service` | oneshot tty1 borné à 5 s, sans réseau et durci : fond sombre « OpenTV / Démarrage... » avant le kiosque. Le drop-in `getty@tty1` retire l'invite de connexion seulement tant que le kiosque est activé; rien n'est masqué et SSH reste le chemin de récupération. |
 | `opentv-net-helper.path` / `.service` | helper root déclenché par un job : écrit le profil NetworkManager (keyfile 0600) et lance `nmcli` en argv fixe, sans shell. Dossier des jobs ouvert une fois sans suivre de lien (`O_DIRECTORY|O_NOFOLLOW`), lectures/suppressions relatives à ce descripteur ; résultats écrits par descripteur (`fchown`/`fchmod`, jamais de `chown`/`chmod` par chemin). **Wi-Fi transactionnel** : profil candidat `opentv-wifi-candidate` (UUID neuf, `autoconnect=false`) activé d'abord ; l'ancien `opentv-wifi` n'est remplacé (rename atomique du keyfile, UUID du candidat) qu'après succès ; échec ou délai ⇒ candidat supprimé, ancien profil remonté (ou hotspot en configuration hors ligne), dans une réserve de budget de 51 s gardée avant l'essai. Tout résidu du dossier des jobs (fichier/dossier caché, nom invalide, lien, fifo) est supprimé sans action (sans suivre de lien) : `DirectoryNotEmpty=` ne peut pas boucler. **Budget réel** d'une activation : 120 s pour tous les jobs (`TimeoutStartSec=180`) ; `nmcli --wait` courts (AP down 10 s, Wi-Fi up 35 s, AP up 20 s) + délai d'exécution = attente + 5 s tronqué au budget restant, groupe de processus tué à l'échéance ; un job qui ne tient plus attend l'activation suivante ; un `wifi-apply` pris plus de 60 s après son dépôt est refusé (`expired`) |
 | `opentv-ap-guard.timer` / `.service` | garde root du Wi-Fi temporaire (voir §3), indépendante du service Python ; oneshot, budget 40 s (`TimeoutStartSec=60`), seules commandes : `systemctl is-active opentv.service`, `nmcli`/`ip` en lecture, `nmcli connection down/delete id opentv-setup-ap` |
 | `opentv-cec.timer` / `.service` | amorçage HDMI-CEC (20 s après le démarrage puis toutes les 60 s) : oneshot `opentv` (groupes `video`, `input`), sans capacité ni réseau, `DeviceAllow` CEC + entrée seulement, budget 40 s (`TimeoutStartSec=60`). Déclare Playback « OpenTV » et la touche OK seulement : **jamais** de réveil de la TV ni de changement d'entrée. Détails : §« Télécommande » |
@@ -118,7 +126,7 @@ dossier livré par la distribution n'est jamais supprimé. Aucune de ces règles
 
 Télécommande — trois niveaux, dans cet ordre de priorité :
 
-1. **Télécommande de la TV par HDMI-CEC (priorité 1, non validée sur la TV)** — `opentv-cec.timer` → `opentv-pi
+1. **Télécommande de la TV par HDMI-CEC (priorité 1, validée sur la Samsung terrain)** — `opentv-cec.timer` → `opentv-pi
    cec-bootstrap` (oneshot `opentv`, sans capacité ni réseau, budget 40 s). Énumère `/dev/cecN`, ne retient que le
    pilote `vc4` et le premier adaptateur dont l'adresse physique est valide (HDMI branché ; jamais d'adresse en dur).
    Déclare Playback « OpenTV » seulement si l'adaptateur est vierge (configuration étrangère jamais remplacée, la nôtre
@@ -141,6 +149,8 @@ Télécommande — trois niveaux, dans cet ordre de priorité :
      automatique ; `OPENTV_CEC_WAKE_TV` n'existe plus (ignorée si présente). Désactiver la déclaration :
      `OPENTV_CEC_BOOTSTRAP=0`. Retour arrière (fait par `uninstall.sh`) : `sudo /opt/opentv/bin/opentv-pi
      cec-bootstrap --release` (efface seulement « OpenTV », rétablit `KEY_OK`).
+   - Les six gestes Samsung et l'aller-retour Home Samsung → OpenTV sont prouvés. Le protocole multimarque, les codes
+     observés et les gates de reboot/alimentation sont dans [CEC_COMPATIBILITY.md](CEC_COMPATIBILITY.md).
    - Limite connue : beaucoup de TV n'envoient les touches qu'à la **source active**. Sans annonce automatique, il
      faudra peut-être choisir l'entrée OpenTV à la main ; répondre à `<Set Stream Path>`/`<Request Active Source>`
      (quand la TV le demande) est une évolution future explicite, non implémentée. Tant que les six touches ne sont pas
@@ -333,11 +343,12 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
   redémarrage et disparition du profil AP ont aussi été exercés ; `SO_PEERCRED` reste couvert par tests, pas sondé
   manuellement.
 - CEC : `opentv-cec` déclare seulement Playback « OpenTV » (aucune annonce automatique, aucune commande de
-  volume/standby). Le noyau seul produit les touches. Prouvé sur le Pi avant ce lot (avec une annonce manuelle) :
-  Haut/Bas/Gauche au niveau noyau. **Non prouvé** : que la TV Samsung route les touches à OpenTV **sans** annonce
-  (entrée choisie à la main), Droite, OK (Select → Entrée par la table du noyau), Retour (Samsung « Return » = CEC Exit
-  → `Close` ?), la persistance après redémarrage, et que la touche Power de la TV arrive bien en `KEY_POWER` ignoré.
-  Si une touche manque : repli téléphone, puis USB.
+  volume/standby). Sur la Samsung terrain, les six gestes ont été prouvés au bus, au noyau et visuellement après une
+  annonce active manuelle consentie : Haut 103, Bas 108, Gauche 105, Droite 106, Select remappé vers Entrée 28 et
+  Retour/Exit 174. Home ouvre la surcouche Samsung ; Home ou Retour la ferme, puis le contrôle revient à OpenTV. La TV
+  n'émet aucun événement CEC détectable pour l'ouverture/fermeture de cette surcouche : ne jamais ajouter de réannonce
+  périodique qui volerait le menu ou les applications Samsung. Restent à refaire sans annonce terrain : extinction/
+  rallumage complet et nouveau redémarrage du Pi. Protocole et matrice multimarque : [CEC_COMPATIBILITY.md](CEC_COMPATIBILITY.md).
 - Télécommande téléphone : HTTP en clair sur le LAN (prototype, pas de certificat d'appareil). Sur le Wi-Fi réel,
   l'appairage QR par nom `.local`, cinq commandes et la révocation ont été exercés par un client HTTP, sans session
   résiduelle. Non validée avec un vrai iPhone/Android (isolation client d'un routeur = téléphone ne joint pas la boîte).
@@ -390,7 +401,7 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
 ## 10. Développement
 
 ```sh
-python3 -m unittest discover -s scripts/pi4/tests -t scripts/pi4      # depuis la racine du dépôt (286 tests)
+python3 -m unittest discover -s scripts/pi4/tests -t scripts/pi4      # depuis la racine du dépôt (329 tests)
 python3.11 -m unittest discover -s scripts/pi4/tests -t scripts/pi4   # version de Bookworm
 # bouts en bout réels (Chromium headless, temps réel) et analyse ES5 :
 #   OPENTV_TEST_PLAYWRIGHT=<module playwright> OPENTV_TEST_ACORN=<module acorn> OPENTV_TEST_SHOTS=<dossier de captures>

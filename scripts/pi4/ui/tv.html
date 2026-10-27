@@ -11,7 +11,13 @@
 <body>
 <div id="app">
   <header>
-    <div class="brand">OpenTV</div>
+    <div class="brand"><span class="logo">▶</span>OpenTV</div>
+    <nav class="nav">
+      <span class="tab on">Pour toi</span>
+      <!-- Réglages : toujours en haut, atteints par un seul ↑ depuis n'importe où, puis OK -->
+      <div id="gear" class="gear" role="button" aria-label="Réglages"><span class="gico">⚙</span><span class="glabel">Réglages</span><span class="gkey">↑</span></div>
+    </nav>
+    <div class="spacer"></div>
     <div id="device" class="device"></div>
     <div class="badges"><span id="net" class="badge"></span><span id="agents" class="badge"></span></div>
     <div id="clock" class="clock"></div>
@@ -19,6 +25,7 @@
 
   <section id="setup" hidden>
     <div class="steps">
+      <p class="kicker">Première mise en route</p>
       <h1>Bienvenue ! Configurons ta TV</h1>
       <ol id="steps"></ol>
       <p id="setupmsg" class="setupmsg"></p>
@@ -35,30 +42,48 @@
 
   <section id="home" hidden>
     <div id="main" class="main">
-      <h1 class="title">Pour toi</h1>
-      <p id="note" class="note"></p>
-      <p class="samsung">Les applis Samsung (YouTube, Netflix…) restent sur la TV : ouvre-les depuis le menu de la TV.</p>
-      <div id="rows"></div>
+      <div id="hero" class="hero">
+        <div id="hart" class="hart"></div>
+        <img id="himg" class="himg" alt="" hidden>
+        <div class="hshade"></div>
+        <div id="hposter" class="hposter" hidden></div>
+        <div id="hlogo" class="hlogo" hidden>▶</div>
+        <div class="htext">
+          <p id="hkicker" class="kicker"></p>
+          <h1 id="htitle" class="htitle"></h1>
+          <p id="hmeta" class="hmeta"></p>
+          <div id="hchips" class="hchips"></div>
+          <p id="hdesc" class="hdesc"></p>
+          <!-- message d'assistant : accueil seulement (jamais en configuration), emplacement réservé en bas du héros,
+               sous le titre ; masqué pendant tout panneau -->
+          <div id="banner" class="banner" hidden></div>
+        </div>
+      </div>
+      <div id="rows" class="rows"><div id="rowsin" class="rowsin"></div></div>
     </div>
     <!-- colonne réservée : le QR de la télécommande ne recouvre jamais les cartes et reste visible sans naviguer -->
     <aside id="remotebox" class="remotebox" hidden>
       <b id="rtitle">Télécommande sur ton téléphone</b>
-      <canvas id="rqr" width="300" height="300" data-size="300" data-qr=""></canvas>
+      <canvas id="rqr" width="232" height="232" data-size="232" data-qr=""></canvas>
       <ol class="rsteps"><li>Même Wi-Fi que la TV</li><li>Appareil photo : vise ce QR</li><li>Touche « Oui »</li></ol>
       <p id="rnote" class="rnote"></p>
     </aside>
   </section>
 
   <div id="panel" class="panel" hidden>
+    <p id="pkicker" class="kicker"></p>
     <h2 id="ptitle"></h2>
     <p id="pmeta" class="pmeta"></p>
     <div id="pbtns" class="pbtns"></div>
   </div>
 
-  <div id="banner" class="banner" hidden></div>
   <div id="toast" class="toast" hidden></div>
   <div id="offline" class="offline" hidden>Reconnexion à OpenTV…</div>
-  <footer id="help">← → ↑ ↓ choisir · OK agir · Retour fermer · Accueil revenir au début</footer>
+  <footer id="help">
+    <!-- aide contextuelle (tv.js) : dans les rangées, Retour remonte d'une rangée, ↑ mène toujours aux Réglages -->
+    <span id="hint" class="hint"><span class="hk">← →</span> Parcourir · <span class="hk">↓</span> Rangée suivante · <span class="hk">Retour</span> Rangée précédente · <span class="hk">↑</span> Réglages · <span class="hk">OK</span> Ouvrir</span>
+    <span class="samsung">Les applis Samsung (YouTube, Netflix…) : depuis le menu de la TV.</span>
+  </footer>
 </div>
 <script src="/static/qrcode.js"></script>
 <script src="/static/keys.js"></script>

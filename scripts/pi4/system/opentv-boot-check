@@ -1,0 +1,122 @@
+#!/bin/bash
+# OpenTV Pi : contrôle en LECTURE SEULE du démarrage produit, à lancer après « sudo reboot » (par SSH) :
+#   sudo /opt/opentv/bin/opentv-boot-check
+# Vérifie : jetons noyau effectifs (/proc/cmdline ; loglevel=3 local sans quiet = info, silencieux), verbosité locale
+# signalée (debug/loglevel≠3 respectés ⇒ ÉCHEC « non silencieux »), aucune option systemd/udev qui amincit le journal, console=tty1 conservée, écran OpenTV exécuté
+# avec succès et avant le kiosque, getty@tty1 écarté par le drop-in OpenTV (ConditionResult=no), kiosque actif, SSH
+# actif (service ou socket), journal du noyau et des unités toujours complet.
+# Ne modifie rien, n'émet rien vers la TV (aucune commande CEC). Code 0 si tous les critères automatiques passent.
+# Le résultat VISUEL (écran noir puis « OpenTV / Démarrage... », jamais de texte Linux) reste à confirmer à l'écran.
+set -u
+
+PROC_CMDLINE="${OPENTV_PROC_CMDLINE:-/proc/cmdline}"
+OK=0
+KO=0
+pass() { printf 'OK     %s\n' "$*"; OK=$((OK + 1)); }
+bad() { printf 'ÉCHEC  %s\n' "$*"; KO=$((KO + 1)); }
+info() { printf 'info   %s\n' "$*"; }
+run() { timeout 10 "$@" 2>/dev/null; }   # chaque lecture bornée à 10 s
+prop() { run systemctl show -p "$2" --value "$1"; }
+
+cmd=""
+IFS= read -r cmd < "$PROC_CMDLINE" 2>/dev/null || true
+[ -n "$cmd" ] || bad "noyau : $PROC_CMDLINE illisible"
+# verbosité locale (debug, loglevel≠3) : respectée par install.sh, donc démarrage NON silencieux (dit comme tel) ;
+# options systemd/udev qui amincissent le journal : jamais ajoutées par OpenTV, signalées si présentes
+verbose=""
+thin=""
+set -f
+for w in $cmd; do
+  case "$w" in
+    debug) verbose="${verbose:+$verbose }$w" ;;
+    loglevel=3) ;;
+    loglevel=*) verbose="${verbose:+$verbose }$w" ;;
+    systemd.log_level=*|rd.systemd.log_level=*|udev.log_level=*|rd.udev.log_level=*|udev.log_priority=*|rd.udev.log_priority=*)
+      case "${w#*=}" in debug|info|7|6) ;; *) thin="${thin:+$thin }$w" ;; esac ;;
+    systemd.log_target=*|rd.systemd.log_target=*)
+      case "${w#*=}" in journal|journal-or-kmsg|kmsg|auto) ;; *) thin="${thin:+$thin }$w" ;; esac ;;
+  esac
+done
+set +f
+valof() {   # valof <clé> : premier « clé=valeur » (ou « clé » seule) de la ligne noyau
+  local w
+  set -f
+  for w in $cmd; do case "$w" in "$1"=*|"$1") set +f; printf '%s' "$w"; return 0 ;; esac; done
+  set +f
+}
+for t in quiet loglevel=3 logo.nologo vt.global_cursor_default=0 systemd.show_status=false video=HDMI-A-1:1920x1080@60; do
+  k="${t%%=*}"
+  case " $cmd " in
+    *" $t "*) pass "noyau : $t" ;;
+    *" $k="*|*" $k "*)
+      if [ "$k" = video ]; then info "noyau : mode HDMI local $(valof "$k") respecté (1080p OpenTV non imposé)"
+      elif [ "$k" = loglevel ]; then info "noyau : $(valof "$k") réglé localement (voir verbosité ci-dessous)"
+      else bad "noyau : $(valof "$k") réglé localement et respecté par OpenTV : $t absent, écran possiblement non silencieux"; fi ;;
+    *)
+      if [ -n "$verbose" ] && { [ "$t" = quiet ] || [ "$t" = loglevel=3 ]; }; then
+        info "noyau : $t non ajouté par OpenTV (il écraserait $verbose)"
+      elif [ "$t" = quiet ] && [ -z "$verbose" ] && case " $cmd " in *" loglevel=3 "*) true ;; *) false ;; esac; then
+        # loglevel=3 local préexistant : install.sh n'ajoute pas quiet (qui le remplacerait par loglevel=4, plus bavard)
+        info "noyau : quiet non ajouté par OpenTV, loglevel=3 local suffit (démarrage silencieux)"
+      else bad "noyau : $t absent de /proc/cmdline (redémarrage fait après installation ?)"; fi ;;
+  esac
+done
+if [ -n "$verbose" ]; then
+  bad "noyau : verbosité locale ($verbose) respectée par l'installation : démarrage non silencieux (messages noyau possibles à l'écran)"
+fi
+if [ -n "$thin" ]; then bad "noyau : journal aminci par $thin (jamais ajouté par OpenTV ; retirer pour un journal complet)"
+else pass "noyau : aucune option systemd/udev n'amincit le journal"; fi
+case " $cmd " in
+  *" console=tty1 "*) pass "noyau : console=tty1 conservée (mode de secours visible)" ;;
+  *) info "noyau : console=tty1 absente de la ligne de commande d'origine" ;;
+esac
+case " $cmd " in *" splash "*|*" plymouth."*) info "noyau : option Plymouth présente (non ajoutée par OpenTV)" ;; esac
+
+if [ "$(prop opentv-splash.service UnitFileState)" = enabled ]; then pass "écran OpenTV activé"; else bad "opentv-splash.service non activé"; fi
+res="$(prop opentv-splash.service Result)"
+st="$(prop opentv-splash.service ExecMainStatus)"
+if [ "$res" = success ] && [ "$st" = 0 ]; then pass "écran OpenTV exécuté (Result=success)"
+else bad "écran OpenTV : Result=${res:-?} ExecMainStatus=${st:-?} (journalctl -b -u opentv-splash)"; fi
+t_splash="$(prop opentv-splash.service ExecMainStartTimestampMonotonic)"
+t_kiosk="$(prop opentv-kiosk.service ExecMainStartTimestampMonotonic)"
+case "$t_splash$t_kiosk" in
+  ''|*[!0-9]*) info "chronologie indisponible" ;;
+  *)
+    info "écran OpenTV à $((t_splash / 1000)) ms, kiosque à $((t_kiosk / 1000)) ms après le noyau"
+    if [ "$t_splash" -gt 0 ] && [ "$t_splash" -le "$t_kiosk" ]; then pass "écran OpenTV avant le kiosque"
+    else bad "écran OpenTV non exécuté avant le kiosque"; fi ;;
+esac
+
+if [ "$(prop getty@tty1.service ActiveState)" != active ]; then pass "aucune invite de connexion sur tty1"
+else bad "getty@tty1 actif : invite de connexion sur l'écran"; fi
+# preuve que l'absence d'invite vient bien de la condition OpenTV (drop-in chargé + ConditionResult=no), pas d'un hasard
+dropin="/etc/systemd/system/getty@tty1.service.d/opentv-kiosk.conf"
+dp="$(prop getty@tty1.service DropInPaths)"
+cr="$(prop getty@tty1.service ConditionResult)"
+case " $dp " in
+  *" $dropin "*)
+    if [ "$cr" = no ]; then pass "getty@tty1 ignoré par la condition OpenTV (drop-in chargé, ConditionResult=no, rien de masqué)"
+    else bad "getty@tty1 : ConditionResult=${cr:-?} (attendu no : condition OpenTV non prouvée)"; fi ;;
+  *) bad "getty@tty1 : drop-in OpenTV non chargé ($dropin ; systemctl cat getty@tty1)" ;;
+esac
+if [ "$(prop opentv-kiosk.service ActiveState)" = active ]; then pass "kiosque actif"; else bad "opentv-kiosk.service inactif"; fi
+nr="$(prop opentv-kiosk.service NRestarts)"
+case "$nr" in ''|*[!0-9]*) ;; 0) pass "kiosque : aucun redémarrage depuis le boot" ;; *) info "kiosque : $nr redémarrage(s) depuis le boot" ;; esac
+ssh_ok=0
+for u in ssh.service sshd.service ssh.socket; do   # ssh.socket : SSH activé par socket (Debian/Raspberry Pi OS)
+  [ "$(prop "$u" ActiveState)" = active ] && ssh_ok=1
+done
+if [ "$ssh_ok" = 1 ]; then pass "SSH actif (récupération)"; else bad "SSH inactif"; fi
+
+kl="$(run journalctl -b -k -q --no-pager -o cat | wc -l | tr -d ' ')"
+case "$kl" in ''|*[!0-9]*) bad "journal noyau illisible" ;; *)
+  if [ "$kl" -ge 50 ]; then pass "journal noyau complet malgré quiet ($kl lignes ce boot)"; else bad "journal noyau court ($kl lignes)"; fi ;; esac
+sl="$(run journalctl -b -q --no-pager -o cat -u opentv-kiosk.service | wc -l | tr -d ' ')"
+case "$sl" in ''|*[!0-9]*|0) info "journal du kiosque vide ce boot" ;; *) pass "journal du kiosque présent ($sl lignes)" ;; esac
+if [ -d /var/log/journal ]; then pass "journal persistant (/var/log/journal), $(run journalctl --list-boots --no-pager | wc -l | tr -d ' ') démarrage(s)"
+else info "journal volatil (/run/log/journal) : configuration distribution inchangée par OpenTV"; fi
+failed="$(run systemctl --failed --no-legend --plain | wc -l | tr -d ' ')"
+if [ "${failed:-0}" = 0 ]; then pass "aucune unité en échec"; else info "$failed unité(s) en échec : systemctl --failed"; fi
+
+printf '%s\n' "boot-check : $OK OK, $KO échec(s) ; critère visuel à confirmer sur la TV (aucun texte Linux, OpenTV puis accueil)"
+[ "$KO" = 0 ]
