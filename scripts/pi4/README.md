@@ -203,9 +203,10 @@ Le produit reste volontairement en **1080p60** : la TV fait la mise à l'échell
 HDMI0 avec `hdmi_enable_4kp60=1`, mais au prix d'une fréquence GPU, d'une consommation et d'une température plus
 élevées. Ce réglage n'améliore pas le décodeur de Chromium.
 
-Vidéo validée sur le Pi réel avec Chromium Raspberry Pi OS 155 lancé par `/usr/bin/chromium` (le lanceur fournit
-`--use-angle=gles`) : une mire locale H.264 High@L4.2, 1920×1080, 60 i/s et 8 Mbit/s a ouvert `/dev/video10`, porté
-l'horloge H.264 à 500 MHz et perdu 7 images sur 2 254 (0,311 %), avec `hvs_underrun=0`, 38,9 °C et
+Vidéo validée pendant 30 min sur le Pi réel avec Chromium Raspberry Pi OS 155 lancé par `/usr/bin/chromium` (le
+lanceur fournit `--use-angle=gles`) : une mire locale H.264 High@L4.2, 1920×1080, 60 i/s et 8 Mbit/s a gardé
+`/dev/video10` ouvert pendant les 30 sondes, maintenu l'horloge H.264 entre 499 987 808 et 500 000 992 Hz et perdu au
+plus 0,372 % des images (rapport final : 299 sur 113 504), avec `hvs_underrun=0`, température maximale 41,3 °C et
 `get_throttled=0x0`. C'est donc un décodage V4L2 matériel réellement exercé, pas une inférence. Limite produit : H.264
 matériel jusqu'à 1080p ; le bloc HEVC 4K60 du BCM2711 n'est pas exposé au Chromium non-ChromeOS, et VP9/AV1 restent
 logiciels. Ne pas ajouter de drapeaux VA-API/V4L2 historiques, `--no-sandbox`, `--disable-gpu-sandbox` ou
@@ -382,7 +383,7 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
 | **Télécommande CEC** | entrée OpenTV choisie avec la télécommande Samsung (sans `--force-announce`) : Haut, Bas, Gauche, Droite, OK (ouvre le panneau), Retour (le ferme) ; puis **après `sudo reboot`**, sans intervention, de nouveau les six touches ; touche Power de la TV : la boîte reste allumée ; un ensemble partiel = critère CEC échoué (repli téléphone ; `--force-announce` seulement comme essai terrain consenti) |
 | **Télécommande téléphone** | iPhone et Android sur le même Wi-Fi : QR de la colonne de droite → « Oui, utiliser ce téléphone » → les 7 touches agissent en < 0,5 s ; l'URL ouverte est `<nom>.local:8082` (sinon noter le repli) ; ancien QR refusé ; « Oublier les téléphones » (Réglages) ⇒ le pavé demande de rescanner ; `systemctl restart opentv` puis `sudo reboot` (heure avant NTP) ⇒ téléphone toujours appairé ; nouvelle adresse DHCP ⇒ téléphone toujours appairé ; `ss -ltn` : `:8082` lié à l'adresse LAN (jamais `0.0.0.0`), absent pendant « Reconfigurer » ; ajout à l'écran d'accueil iOS fonctionnel ; aucun jeton dans `journalctl -u opentv` |
 | **Télécommande USB** | télécommande 2,4 GHz branchée : flèches, OK, Retour, Accueil sur l'écran OpenTV ; Accueil/BrowserBack ne quittent jamais `/tv` ; écran QR : aucune touche n'agit ; **touche Power : la boîte reste allumée** (après redémarrage) ; clavier : F12/Ctrl+Maj+I, Ctrl+P, Ctrl+S, Ctrl+Alt+F2 sans effet |
-| **Décodage** | H.264 local 1080p60 : `/dev/video10` ouvert, horloge H.264 ≈ 500 MHz, 7/2 254 images perdues (0,311 %), `hvs_underrun=0`, `get_throttled=0x0`. Refaire 30 min avec une vidéo autorisée avant promotion produit ; 4K/HEVC/VP9/AV1 Chromium hors cible. |
+| **Décodage** | H.264 local 1080p60 pendant 30 min : `/dev/video10` ouvert à chaque sonde, horloge H.264 ≈ 500 MHz, maximum 0,372 % d'images perdues, température maximale 41,3 °C, `hvs_underrun=0`, `get_throttled=0x0` ; kiosque restauré et résidus supprimés. 4K/HEVC/VP9/AV1 Chromium hors cible. |
 | **Rollback** | `uninstall.sh` ⇒ console tty1 de retour, `/opt/opentv` absent, fichiers d'origine restaurés ; réinstallation propre ; `--purge` sans perte du Wi-Fi |
 | **Agent** | `opentv-mcp` depuis le compte de l'agent : `tools/list` filtré par scopes, `recommend` sans URL, scope refusé, audit présent sans secret |
 
