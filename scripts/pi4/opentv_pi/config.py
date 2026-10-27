@@ -32,10 +32,12 @@ DEFAULTS = {
     "OPENTV_SERVICE_USER": "opentv",
     "OPENTV_TV_CLIENT_USER": "opentv-kiosk",
     "OPENTV_NM_DIR": "/etc/NetworkManager/system-connections",
-    # HDMI-CEC (opentv-cec.timer) : déclaration Playback « OpenTV » + touche OK seulement. Jamais d'<Image View On> ni
-    # d'<Active Source> automatique (aucun réveil, aucun changement d'entrée) : seulement `cec-bootstrap
-    # --force-announce`, tapé avec le consentement de l'utilisateur.
+    # HDMI-CEC (opentv-cec.timer) : déclaration Playback « OpenTV » + touche OK. Jamais de réveil de la TV ni de
+    # réannonce périodique.
     "OPENTV_CEC_BOOTSTRAP": "1",
+    # 1 = UNE annonce <Active Source> par démarrage de la boîte (fenêtre bornée après le boot, TV allumée seulement) :
+    # sans elle la télécommande Samsung ne pilote plus OpenTV après un redémarrage. 0 = jamais d'annonce automatique.
+    "OPENTV_CEC_BOOT_ANNOUNCE": "1",
     "OPENTV_CEC_KEYMAP": "1",       # 1 = touche CEC Select (KEY_OK, perdue dans Chromium) -> KEY_ENTER
     # télécommande sur téléphone (LAN, HTTP prototype) : ouverte seulement après la configuration, en ligne, sur
     # l'adresse LAN actuelle (jamais 0.0.0.0)
@@ -125,6 +127,7 @@ class Config:
         self.nm_dir = e["OPENTV_NM_DIR"]
         self.cec_bootstrap = _bool(e["OPENTV_CEC_BOOTSTRAP"], "OPENTV_CEC_BOOTSTRAP")
         self.cec_keymap = _bool(e["OPENTV_CEC_KEYMAP"], "OPENTV_CEC_KEYMAP")
+        self.cec_boot_announce = _bool(e["OPENTV_CEC_BOOT_ANNOUNCE"], "OPENTV_CEC_BOOT_ANNOUNCE")
         self.remote_enabled = _bool(e["OPENTV_REMOTE_ENABLED"], "OPENTV_REMOTE_ENABLED")
         self.remote_port = _port(e["OPENTV_REMOTE_PORT"], "OPENTV_REMOTE_PORT")
         self.remote_mdns = _bool(e["OPENTV_REMOTE_MDNS"], "OPENTV_REMOTE_MDNS")

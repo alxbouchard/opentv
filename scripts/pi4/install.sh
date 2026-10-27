@@ -431,7 +431,8 @@ post chown root:opentv "$ENVF"
 post systemctl daemon-reload
 if [ "$ENABLE" = 1 ]; then
   # opentv-ap-guard.timer : garde root du Wi-Fi temporaire, indépendante du service Python
-  # opentv-cec.timer : déclaration Playback « OpenTV » + remappage OK, sans réveil ni changement d’entrée
+  # opentv-cec.timer : déclaration Playback « OpenTV » + remappage OK + UNE annonce de source active par démarrage
+  # (fenêtre bornée, TV allumée seulement ; jamais de réveil ni de réannonce). Réactivation : opentv-pi cec --activate
   # opentv-splash.service : écran OpenTV sur tty1 au démarrage (sysinit), jamais redémarré ici (Cage possède tty1)
   post systemctl enable opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
     opentv-cec.timer opentv-splash.service

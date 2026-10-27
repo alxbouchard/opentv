@@ -100,9 +100,28 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { t.hidden = true; }, big ? 10000 : 4000);
   }
+  // horloge et date d'OpenTV v23 : « 21:05 » et « mardi 27 octobre » (majuscule par le CSS)
+  var DAYS = ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"];
+  var MONTHS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre",
+                "novembre", "décembre"];
+  function two(n) { return (n < 10 ? "0" : "") + n; }
+  // « eyebrow » du héros v23 : salut + contexte ; seul le salut suit l'horloge (aucun nouveau rendu du héros/des cartes)
+  var kickerHi = null, kickerRest = null;
+  function greetingFor(h) { return h < 12 ? "Bonjour" : h < 18 ? "Bon après-midi" : "Bonsoir"; }
+  function greeting() { return greetingFor(new Date().getHours()); }
+  function setKicker(rest) {
+    kickerHi = greeting();
+    kickerRest = rest;
+    $("hkicker").textContent = kickerHi + " · " + rest;
+  }
   function clock() {
-    var d = new Date();
-    $("clock").textContent = d.toLocaleTimeString("fr-CA", { hour: "2-digit", minute: "2-digit" });
+    var d = new Date(), hi = greetingFor(d.getHours());
+    $("clock").textContent = two(d.getHours()) + ":" + two(d.getMinutes());
+    $("date").textContent = DAYS[d.getDay()] + " " + d.getDate() + " " + MONTHS[d.getMonth()];
+    if (kickerRest !== null && hi !== kickerHi) {   // changement de tranche (12 h, 18 h, minuit) : texte seul
+      kickerHi = hi;
+      $("hkicker").textContent = hi + " · " + kickerRest;
+    }
   }
 
   // ---- configuration (QR)
@@ -128,10 +147,10 @@
     if (s.url && s.url !== lastQr) { lastQr = s.url; drawQR($("qr"), s.url); }
   }
 
-  // ---- Pour toi : héros (titre au focus) + rangées. Réglages vivent dans la barre du haut (zone « top ») :
+  // ---- Pour toi : héros (titre au focus) + rangées. Réglages = cercle en haut à droite (zone « top ») :
   // un seul ↑ y mène depuis n'importe quelle rangée ou fiche, OK ouvre, Retour ferme — jamais une rangée cachée.
   // Rangées : ↓ descend, Retour remonte d'une seule rangée (colonne mémorisée par rangée), Accueil = tout début.
-  var ROWS = [], grid = [], heroTimer = null, heroId = null;
+  var ROWS = [], grid = [], heroId = null;
   function loadForYou(force) {
     if (!force && fy && Date.now() - fyAt < 120000) { return; }
     fyAt = Date.now();
@@ -195,7 +214,7 @@
     if (state && state.remote && state.remote.enabled) {
       lines.push(["▣", "Ton téléphone peut aussi servir de télécommande : vise le QR à droite."]);
     }
-    lines.push(["⚙", "Réglages toujours en haut de l'écran : ↑ puis OK."]);
+    lines.push(["⚙", "Réglages : le cercle en haut à droite de l'écran (↑ puis OK)."]);
     lines.forEach(function (x) {
       var li = el("li");
       li.appendChild(el("span", "ico", x[0])); li.appendChild(el("span", null, x[1]));
@@ -244,7 +263,7 @@
       focus.cols[focus.row] = Math.max(0, Math.min(col(), ROWS[focus.row].items.length - 1));
     }
     var top = focus.zone === "top";
-    $("gear").className = "gear" + (top ? (panel ? " active" : " focused") : "");
+    $("gear").className = "qbtn" + (top ? (panel ? " active" : " focused") : "");
     // panneau ouvert : le message d'assistant s'efface (couche dédiée, jamais sur Réglages/confirmation/fiche)
     $("app").className = (top ? "zone-top" : "") + (panel ? " has-panel" : "");
     $("main").className = "main" + (panel ? " dim" : "");
@@ -256,7 +275,7 @@
         if (Math.abs(ri - focus.row) <= 1 && ci <= c + 8) { poster(card, ROWS[ri].items[ci]); }   // affiches proches seulement
       });
       // défilement horizontal par transform (pas de scrollIntoView) : la carte au focus garde une marge à droite
-      var last = g.cards[g.cards.length - 1], lw = g.strip.parentNode.clientWidth - 64, x = 0;
+      var last = g.cards[g.cards.length - 1], lw = g.strip.parentNode.clientWidth - 76, x = 0;
       var need = fc.offsetLeft + fc.offsetWidth + 120 - lw, max = Math.max(0, last.offsetLeft + last.offsetWidth - lw);
       if (need > 0) { x = Math.min(need, max); }
       g.strip.style.transform = x ? "translateX(" + (-x) + "px)" : "";
@@ -273,7 +292,7 @@
     top: [["OK", "Ouvrir les Réglages"], ["↓ ou Retour", "Revenir aux titres"]],
     topEmpty: [["OK", "Ouvrir les Réglages"]],
     item: [["← →", "Choisir"], ["OK", "Valider"], ["Retour", "Fermer"], ["↑", "Réglages"]],
-    panel: [["← →", "Choisir"], ["OK", "Valider"], ["Retour", "Revenir"]]
+    panel: [["↑ ↓", "Choisir"], ["OK", "Valider"], ["Retour", "Revenir"]]
   }, helpKey = "";
   function help() {
     var k = panel ? (panel.kind === "item" ? "item" : "panel") : (focus.zone === "top" ? (ROWS.length ? "top" : "topEmpty") : "rows");
@@ -293,13 +312,13 @@
     var chips = $("hchips");
     chips.textContent = "";
     if (!it) {
-      $("hkicker").textContent = "Pour toi";
+      setKicker("Pour toi");
       $("htitle").textContent = "Ta soirée se prépare";
       $("htitle").className = "htitle";
       $("hmeta").textContent = "OpenTV choisit pour toi dans le catalogue disponible.";
       $("hdesc").textContent = (fy && fy.note) || "Tes suggestions apparaîtront ici dès que le catalogue sera prêt : rien à faire de ton côté.";
     } else {
-      $("hkicker").textContent = r.title;
+      setKicker(r.title);
       $("htitle").textContent = it.title;
       $("htitle").className = "htitle" + (String(it.title || "").length > 24 ? " long" : "");
       $("hmeta").textContent = meta(it, false);
@@ -310,19 +329,7 @@
       badges(((fy && fy.marks) || {})[it.id]).forEach(function (b) { chips.appendChild(el("span", "chip mark", b)); });
       $("hdesc").textContent = it.description || "";
     }
-    clearTimeout(heroTimer);   // image différée : rien à décoder pendant la répétition d'une flèche
-    heroTimer = setTimeout(function () { heroImage(it); }, 160);
-  }
-  function heroImage(it) {
-    var hp = $("hposter"), bg = $("himg");
-    hp.textContent = ""; hp.removeAttribute("data-img");
-    hp.hidden = !it; $("hlogo").hidden = !!it;
-    if (!it) { bg.hidden = true; bg.removeAttribute("src"); $("hart").style.background = ""; return; }
-    hp.appendChild(artFor(it)); poster(hp, it);
-    $("hart").style.background = "radial-gradient(1000px 560px at 78% 30%, hsla(" + hue(it.id || it.title) +
-                                 ", 60%, 42%, .5), rgba(0, 0, 0, 0) 70%)";
-    bg.hidden = true;   // montré seulement une fois chargé (jamais d'icône d'image cassée)
-    if (isHttps(it.poster)) { bg.src = it.poster; } else { bg.removeAttribute("src"); }
+    // v23 : le héros est du texte posé sur la photo ; l'affiche vit dans la carte au focus (aucune image ici)
   }
   // ---- télécommande sur téléphone (repli de la télécommande CEC) : QR d'appairage toujours visible sur l'accueil,
   // dans sa propre colonne (jamais sur les cartes), même après un premier appairage : un téléphone perdu se remplace
@@ -367,7 +374,7 @@
     $("pmeta").textContent = text || "";
     panel = extra || {};
     panel.kind = kind; panel.btn = btn;
-    $("panel").className = "panel" + (kind === "item" ? "" : " top");
+    $("panel").className = "panel" + (kind === "item" ? "" : " sheet");   // Réglages : feuille latérale v23
     $("panel").hidden = false;
     paintPanel(); paint(); renderRemote();
   }
@@ -391,11 +398,12 @@
     list.push(["close", "✕", "Fermer", "Revenir à l'accueil"]);
     var idx = 0;
     showPanel("settings", (state && state.device) || "OpenTV", "Réglages",
-              "← → choisir · OK ouvrir · Retour fermer. Rien ne change sans ta confirmation.",
+              "↑ ↓ choisir · OK ouvrir · Retour fermer. Rien ne change sans ta confirmation.",
               list.map(function (x, i) {
-                var b = button("", "tile");
+                var b = button("", "lrow"), t = el("span", "lt");
                 b.setAttribute("data-label", x[2]);
-                b.appendChild(el("span", "ti", x[1])); b.appendChild(el("span", "tl", x[2])); b.appendChild(el("span", "ts", x[3]));
+                t.appendChild(el("span", "tl", x[2])); t.appendChild(el("span", "ts", x[3]));
+                b.appendChild(el("span", "ic", x[1])); b.appendChild(t);
                 if (x[0] === sel) { idx = i; }
                 return b;
               }), idx, { actions: list.map(function (x) { return x[0]; }) });
@@ -405,7 +413,8 @@
     showPanel("confirm", "Réglages", forget ? "Oublier tous les téléphones ?" : "Afficher un nouveau QR de configuration ?",
               forget ? "Ils ne pourront plus servir de télécommande avant d'avoir rescanné le QR."
                      : "Le Wi-Fi actuel reste actif tant que tu ne le changes pas.",
-              [button(forget ? "Oui, oublier" : "Oui, reconfigurer", forget ? "danger" : ""), button("Non")], 1,
+              [button(forget ? "Oui, oublier" : "Oui, reconfigurer", forget ? "lrow danger" : "lrow"),
+               button("Non", "lrow")], 1,
               { what: what, actions: [what, "no"] });
   }
   function paintPanel() {
@@ -448,13 +457,14 @@
     if (!state || state.setup.active) { return false; }   // configuration : pilotée par le téléphone seulement
     if (REMOTE_ACTIONS[a] !== 1) { return false; }
     if (panel) {
-      if (a === "left") { panel.btn = Math.max(0, panel.btn - 1); paintPanel(); }
-      else if (a === "right") { panel.btn = Math.min(panel.actions.length - 1, panel.btn + 1); paintPanel(); }
+      var sheet = panel.kind !== "item";   // feuille v23 (Réglages, confirmation) : lignes verticales, ↑ ↓ aussi
+      if (a === "left" || (sheet && a === "up")) { panel.btn = Math.max(0, panel.btn - 1); paintPanel(); }
+      else if (a === "right" || (sheet && a === "down")) { panel.btn = Math.min(panel.actions.length - 1, panel.btn + 1); paintPanel(); }
       else if (a === "ok") { act(); }
       else if (a === "back") { panelBack(); }
       else if (a === "home") { closePanel(); goStart(); }
       else if (a === "up" && panel.kind === "item") { closePanel(); focus.zone = "top"; focus.auto = false; paint(); }
-      return true;                                         // ↑/↓ dans Réglages : sans effet, mais consommés
+      return true;                                         // ↓ sur une fiche : sans effet, mais consommé
     }
     if (focus.zone === "top") {
       if (a === "ok") { openSettings(); return true; }
@@ -510,6 +520,7 @@
     $("home").hidden = s.setup.active;
     $("help").hidden = s.setup.active;
     $("gear").hidden = s.setup.active;
+    $("glabel").hidden = s.setup.active;
     if (s.setup.active) { closePanel(); renderSetup(s.setup); }
     else {
       if (!fy && !heroId) { renderRows(); }   // avant « Pour toi » : écran d'attente écrit, Réglages au focus
@@ -530,8 +541,6 @@
     var st = reloadStore();
     document.documentElement.setAttribute("data-reloads", st ? String(recentReloads(st).length) : "na");
   })();
-  $("himg").addEventListener("load", function () { $("himg").hidden = !$("himg").getAttribute("src"); });
-  $("himg").addEventListener("error", function () { $("himg").hidden = true; });   // affiche absente : fond dessiné seul
   clock(); setInterval(clock, 10000);
   poll();
   remoteLoop();

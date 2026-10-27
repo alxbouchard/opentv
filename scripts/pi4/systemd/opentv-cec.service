@@ -1,5 +1,5 @@
 [Unit]
-Description=OpenTV Pi - amorcage HDMI-CEC borne (Playback OpenTV + touche OK ; jamais de reveil ni de changement d'entree)
+Description=OpenTV Pi - amorcage HDMI-CEC borne (Playback OpenTV + touche OK ; une seule annonce par demarrage, jamais de reveil)
 Documentation=file:///opt/opentv/README.md
 After=systemd-udevd.service opentv-kiosk.service
 ConditionPathExistsGlob=/dev/cec*
@@ -12,7 +12,8 @@ Group=opentv
 SupplementaryGroups=video input
 ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-pi cec-bootstrap
 TimeoutStartSec=60
-# temoin d'une annonce manuelle (--force-announce, lecture d'etat seulement) : tmpfs, efface au redemarrage
+# temoin de l'annonce de ce demarrage (boot_id ; ecrit apres succes seulement) : tmpfs, efface au redemarrage,
+# conserve entre passages de la minuterie et redemarrages du service (aucune reannonce)
 RuntimeDirectory=opentv-cec
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes

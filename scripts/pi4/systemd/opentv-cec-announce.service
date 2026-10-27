@@ -1,5 +1,5 @@
 [Unit]
-Description=OpenTV Pi - annonce HDMI-CEC manuelle et consentie (source active)
+Description=OpenTV Pi - reactivation HDMI-CEC explicite (source active ; opentv-pi cec --activate)
 Documentation=file:///opt/opentv/README.md
 After=systemd-udevd.service opentv-kiosk.service
 ConditionPathExistsGlob=/dev/cec*

@@ -300,7 +300,6 @@ class TestBootstrap(Base):
         self.assertEqual((res["ok"], res["result"], res["announce"]["result"]), (True, "ready", "done"))
         self.assertEqual(bus.transmits()[n:], [
             ["cec-ctl", "-d", "/dev/cec0", "-s", "-t", "0", "--give-device-power-status"],
-            ["cec-ctl", "-d", "/dev/cec0", "-s", "-t", "0", "--image-view-on"],
             ["cec-ctl", "-d", "/dev/cec0", "-s", "--active-source", "phys-addr=2.1.0.0"],
             ["cec-ctl", "-d", "/dev/cec0", "-s", "-t", "0", "--menu-status", "menu-state=activated"]])
         with open(os.path.join(self.state, cecboot.STATE_FILE)) as f:            # témoin (lecture d'état seulement)
@@ -355,7 +354,7 @@ class TestBootstrap(Base):
         lock = cecboot._lock(self.state)
         self.addCleanup(os.close, lock)
         res = self.boot(r, bus)
-        self.assertEqual((res["ok"], res["result"]), (True, "busy"))
+        self.assertEqual((res["ok"], res["result"]), (True, "busy"))     # minuterie : passage normal
         self.assertEqual(bus.calls, [])
 
     def test_corrupt_or_foreign_boot_marker_is_ignored(self):
@@ -828,10 +827,9 @@ HARNESS_DRIVER = r"""
       if (rs[j].top >= rs[i].bottom - 1) { n = 2; } } }
     return n;
   }
-  function header() {   // barre du haut 1920×1080 : une seule ligne, aucun chevauchement, rien hors écran
-    var hd = document.querySelector("header"), kids = [], ids = ["brand", "tab", "gear", "device", "net", "agents", "clock"];
-    var nodes = [document.querySelector(".brand"), document.querySelector(".tab"), $("gear"), $("device"), $("net"),
-                 $("agents"), $("clock")];
+  function header() {   // haut d'écran v23 1920×1080 : chaque élément sur une ligne, aucun chevauchement, rien hors écran
+    var hd = document.querySelector("header"), kids = [], ids = ["clock", "date", "gear", "glabel", "device", "net", "agents"];
+    var nodes = [$("clock"), $("date"), $("gear"), $("glabel"), $("device"), $("net"), $("agents")];
     nodes.forEach(function (e, i) {
       if (!vis(e)) { return; }
       kids.push({ id: ids[i], r: R(e), lines: lines(e), clipped: e.scrollWidth > e.clientWidth + 1,
@@ -884,8 +882,8 @@ HARNESS_DRIVER = r"""
   }
   function geom() {   // 1920×1080 : bandeau d'assistant, héros, écran de configuration (QR) — rectangles réels
     var o = { vp: [0, 0, 1920, 1080], ids: {} };
-    ["banner", "hero", "main", "htitle", "hkicker", "hmeta", "hchips", "hposter", "hlogo", "remotebox", "rqr", "setup",
-     "qr", "apqr", "qrfig", "apfig", "steps", "setupmsg", "phoneonly", "url", "panel"].forEach(function (id) {
+    ["banner", "hero", "main", "htitle", "hkicker", "hmeta", "hchips", "remotebox", "rqr", "setup", "qr",
+     "apqr", "qrfig", "apfig", "steps", "setupmsg", "phoneonly", "url", "panel"].forEach(function (id) {
       var e = $(id);
       o.ids[id] = vis(e) ? R(e) : null;
     });
@@ -925,6 +923,37 @@ HARNESS_DRIVER = r"""
     });
     return o;
   }
+  function v23() {   // identité OpenTV v23 : photo plein écran, horloge + date, cercle Réglages en haut à droite, verre
+    var o = {}, bg = $("bg"), g = $("gear"), gl = $("glabel"), cs = getComputedStyle(g), fc = document.querySelector(".card.focused");
+    o.bg = vis(bg) ? R(bg) : null;
+    o.bgImage = bg ? getComputedStyle(bg).backgroundImage.slice(0, 40) : "";
+    o.time = $("clock").textContent;
+    o.date = vis($("date")) ? $("date").textContent : null;
+    o.dateTransform = $("date") ? getComputedStyle($("date")).textTransform : null;
+    o.gear = { r: R(g), radius: cs.borderTopLeftRadius, w: g.offsetWidth, h: g.offsetHeight, bgc: cs.backgroundColor,
+               transform: cs.transform, focused: g.className.indexOf("focused") >= 0 };
+    o.glabel = vis(gl) ? { text: gl.textContent, r: R(gl) } : null;
+    if (fc) {
+      var c = getComputedStyle(fc);
+      o.card = { border: c.borderTopColor, bw: parseFloat(c.borderTopWidth), shadow: c.boxShadow, transform: c.transform,
+                 radius: parseFloat(c.borderTopLeftRadius) };
+    }
+    o.kicker = $("hkicker").textContent;
+    var pan = $("panel");
+    if (vis(pan)) {
+      o.panel = { r: R(pan), cls: pan.className, btns: Array.prototype.map.call($("pbtns").children, function (b) {
+        var s = getComputedStyle(b);
+        return { r: R(b), bgc: s.backgroundColor, focused: b.className.indexOf("focused") >= 0 }; }) };
+    }
+    var outside = [];   // tout ce qui est visible tient dans 1920×1080 (rien de rogné par l'écran)
+    ["clock", "date", "gear", "glabel", "device", "net", "agents", "hint", "remotebox", "panel", "hero", "htitle", "hmeta",
+     "hdesc", "toast", "help"].forEach(function (id) {
+      var e = $(id);
+      if (vis(e) && !inside(R(e), [0, 0, 1920, 1080])) { outside.push(id + " " + R(e).map(Math.round)); }
+    });
+    o.outside = outside;
+    return o;
+  }
   function snap(label, prevented) {
     var f = document.querySelector(".card.focused .t");
     out.push({ s: label, focus: f ? f.textContent : null, panel: !$("panel").hidden, prevented: prevented,
@@ -935,7 +964,7 @@ HARNESS_DRIVER = r"""
                btn: $("panel").hidden ? null : document.querySelector("#pbtns .focused") &&
                     (document.querySelector("#pbtns .focused").getAttribute("data-label") ||
                      document.querySelector("#pbtns .focused").textContent),
-               hint: $("help").innerText, layout: layout(), geom: geom() });
+               hint: $("help").innerText, layout: layout(), geom: geom(), v23: v23() });
   }
   setTimeout(function () {
     window.__STEPS__.forEach(function (st) {
@@ -949,12 +978,13 @@ HARNESS_DRIVER = r"""
                                      home: !$("home").hidden, focus: f ? f.textContent : null,
                                      panel: !$("panel").hidden, remotebox: !$("remotebox").hidden,
                                      settings: $("gear").className.indexOf("focused") >= 0, layout: layout(),
-                                     hint: $("help").innerText, header: header(), qrs: qrs(), geom: geom(),
+                                     hint: $("help").innerText, header: header(), qrs: qrs(), geom: geom(), v23: v23(),
                                      banner: $("banner").hidden ? null : $("banner").textContent,
                                      rqr: $("rqr").getAttribute("data-qr"),
                                      toast: $("toast").hidden ? null : $("toast").textContent,
                                      toastBig: $("toast").className.indexOf("big") >= 0,
-                                     text: document.body.innerText });
+                                     text: document.body.innerText,
+                                     extra: window.__EXTRA__ ? window.__EXTRA__() : null });
     document.body.appendChild(r);
   }, window.__DELAY__ || 1500);
 })();
@@ -972,7 +1002,7 @@ class TestTvKeysInChromium(unittest.TestCase):
         {"id": "r3", "title": "Encore", "items": [{"id": "f", "title": "Foxtrot"}, {"id": "g", "title": "Golf"},
                                                   {"id": "h", "title": "Hotel"}, {"id": "i", "title": "India"}]}]}
 
-    def render(self, state, steps, remote=None, delay=1500, fy=None):
+    def render(self, state, steps, remote=None, delay=1500, fy=None, inject=""):
         d = tmpdir(self, "otvkeys")
         with open(os.path.join(PI4, "ui", "tv.html"), encoding="utf-8") as f:
             page = f.read().replace("{{TV_KEY}}", "k")
@@ -987,6 +1017,7 @@ class TestTvKeysInChromium(unittest.TestCase):
                 "{ok:true,state:{opinion:'like'},message:'ok'}));"
                 "return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(d);}});};"
                 "</script>" % (delay, json.dumps(steps), json.dumps(state), json.dumps(fy), json.dumps(remote or [])))
+        stub += inject
         page = page.replace('<link rel="stylesheet" href="/static/tv.css">',
                             '<link rel="stylesheet" href="file://%s">' % os.path.join(PI4, "ui", "tv.css"))
         qr = os.path.join(os.path.dirname(os.path.dirname(PI4)), "native", "app", "qrcode.js")
@@ -1007,6 +1038,29 @@ class TestTvKeysInChromium(unittest.TestCase):
 
     STATE = {"device": "Salon", "network": {"mode": "ethernet"}, "agents": [], "message": None,
              "setup": {"active": False}}
+
+    # heure contrôlée (tests seulement) : getHours() suit window.__HOUR__, que le harnais change à t = __FLIP__ ms
+    HOUR_STUB = ("<script>window.__HOUR__=%d;Date.prototype.getHours=function(){return window.__HOUR__;};"
+                 "setTimeout(function(){window.__CARD__=document.querySelector('.card.focused');"
+                 "window.__TITLE__=document.getElementById('htitle').textContent;"
+                 "window.__K0__=document.getElementById('hkicker').textContent;window.__HOUR__=%d;},%d);"
+                 "window.__EXTRA__=function(){return {k0:window.__K0__,sameCard:!!window.__CARD__&&"
+                 "window.__CARD__===document.querySelector('.card.focused'),"
+                 "sameTitle:window.__TITLE__===document.getElementById('htitle').textContent};};</script>")
+
+    def test_greeting_follows_clock_bucket_without_rerender(self):
+        """Bonjour → Bon après-midi → Bonsoir au passage de 12 h / 18 h, par le tic de l'horloge (10 s), sans
+        recréer le héros ni les cartes (même nœud de carte au focus, même titre) ; jamais d'autre texte modifié."""
+        for before, after, k0, k1 in ((11, 12, "Bonjour", "Bon après-midi"), (17, 18, "Bon après-midi", "Bonsoir"),
+                                      (23, 0, "Bonsoir", "Bonjour"), (9, 10, "Bonjour", "Bonjour")):
+            with self.subTest(before=before, after=after):
+                res = self.render(self.STATE, [], delay=12500, inject=self.HOUR_STUB % (before, after, 4000))
+                self.assertEqual(res["extra"]["k0"], k0 + " · Le choix de ce soir")
+                self.assertEqual(res["steps"], [])
+                self.assertEqual(res["focus"], "Alpha")
+                self.assertEqual(res["v23"]["kicker"], k1 + " · Le choix de ce soir")
+                self.assertEqual((res["extra"]["sameCard"], res["extra"]["sameTitle"]), (True, True))
+                self.assertEqual(res["v23"]["time"][:2], "%02d" % after)
 
     def test_home_navigation_with_remote_aliases(self):
         steps = [["ArrowRight"], ["Right"], ["Unidentified", {"keyCode": 37, "tag": "kc37"}], ["ArrowDown"],
@@ -1146,14 +1200,14 @@ class TestTvKeysInChromium(unittest.TestCase):
         res = self.render(st, [["ArrowUp"]])
         hd = res["header"]
         self.assertEqual(hd["overlaps"], [], hd)
-        self.assertLessEqual(hd["h"][3] - hd["h"][1], 96.5, hd)
+        self.assertLessEqual(hd["h"][3] - hd["h"][1], 200.5, hd)               # haut v23 : horloge + date, cercles
         kids = {k["id"]: k for k in hd["kids"]}
-        self.assertEqual(set(kids), {"brand", "tab", "gear", "device", "net", "agents", "clock"})
+        self.assertEqual(set(kids), {"clock", "date", "gear", "glabel", "device", "net", "agents"})
         for k in hd["kids"]:
             self.assertEqual(k["lines"], 1, k)                                   # jamais de retour à la ligne
             self.assertTrue(k["r"][0] >= 0 and k["r"][2] <= 1920 and k["r"][1] >= 0 and k["r"][3] <= hd["h"][3] + 1, k)
-        for k in ("brand", "tab", "gear", "net", "clock"):
-            self.assertFalse(kids[k]["clipped"], kids[k])                        # Réglages, onglet, heure : entiers
+        for k in ("clock", "date", "gear", "glabel", "net"):
+            self.assertFalse(kids[k]["clipped"], kids[k])                        # Réglages, heure, date : entiers
         for k in ("device", "agents"):
             self.assertTrue(kids[k]["clipped"], kids[k])                         # textes longs : ellipsés
             self.assertEqual((kids[k]["ellipsis"], kids[k]["ws"]), ("ellipsis", "nowrap"), kids[k])
@@ -1217,7 +1271,7 @@ class TestTvKeysInChromium(unittest.TestCase):
         self.assertEqual([s[t]["btn"] for t in ("ArrowRight:r1", "ArrowRight:r2", "ArrowRight:r3", "ArrowLeft:l1",
                                                 "ArrowDown:down", "ArrowUp:up")],
                          ["Oublier les téléphones", "Fermer", "Fermer", "Oublier les téléphones",
-                          "Oublier les téléphones", "Oublier les téléphones"])
+                          "Fermer", "Oublier les téléphones"])                   # feuille v23 : ↑ ↓ aussi
         self.assertEqual(s["Enter:ask"]["ptitle"], "Oublier tous les téléphones ?")
         self.assertEqual(s["Enter:ask"]["btn"], "Non")                           # choix sûr par défaut
         self.assertEqual((s["Enter:no"]["ptitle"], s["Enter:no"]["btn"]), ("Réglages", "Oublier les téléphones"))
@@ -1260,6 +1314,78 @@ class TestTvKeysInChromium(unittest.TestCase):
         self.assertEqual(res["layout"]["card_box_overlaps"], [])
         self.assertTrue(res["layout"]["gear_visible"])
         self.assertTrue(res["remotebox"])
+
+    DAYS = ("dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi")
+
+    def assertV23Frame(self, v, where):
+        self.assertEqual(v["bg"], [0, 0, 1920, 1080], where)                     # photo plein écran (v23)
+        self.assertIn("data:image/jpeg", v["bgImage"], where)                    # embarquée : aucune ressource externe
+        self.assertRegex(v["time"], r"^\d\d:\d\d$", where)                       # horloge v23 « 21:05 »
+        self.assertIsNotNone(v["date"], where)
+        self.assertIn(v["date"].split(" ")[0], self.DAYS, where)                # « mardi 27 octobre »
+        self.assertEqual(v["dateTransform"], "capitalize", where)
+        g = v["gear"]
+        self.assertEqual((g["w"], g["radius"]), (g["h"], "50%"), (where, g))     # Réglages : un vrai cercle
+        self.assertGreaterEqual(g["w"], 64, (where, g))
+        self.assertGreaterEqual(g["r"][2], 1920 - 140, (where, g))               # en haut à droite
+        self.assertLessEqual(g["r"][1], 120, (where, g))
+        self.assertIsNotNone(v["glabel"], where)                                 # libellé lisible à côté du cercle
+        self.assertEqual(v["glabel"]["text"], "Réglages", where)
+        self.assertLessEqual(v["glabel"]["r"][2], g["r"][0] + 0.5, where)
+        self.assertEqual(v["outside"], [], where)                                # rien ne déborde de 1920×1080
+
+    @staticmethod
+    def _scale(t):
+        m = re.match(r"matrix\(([-\d.e]+)", t or "")
+        return float(m.group(1)) if m else 1.0
+
+    def test_v23_identity_frame_focus_and_settings_sheet(self):
+        """Identité OpenTV v23 portée sur le Pi : photo plein écran, horloge + date en haut à gauche, salutation, cercle
+        Réglages en haut à droite (↑ depuis la 1re carte), cartes en verre avec anneau blanc + agrandissement, Réglages en
+        feuille latérale verticale (lignes blanches au focus) sans jamais toucher la colonne du QR."""
+        st = dict(self.STATE, remote=self.REMOTE1)
+        steps = [["ArrowRight", {"tag": "card"}], ["ArrowLeft", {"tag": "first"}], ["ArrowUp", {"tag": "top"}],
+                 ["Enter", {"tag": "sheet"}], ["ArrowDown", {"tag": "down"}], ["ArrowDown", {"tag": "down2"}],
+                 ["ArrowUp", {"tag": "up"}], ["Escape", {"tag": "closed"}], ["Escape", {"tag": "back"}],
+                 ["Enter", {"tag": "title"}], ["Escape", {"tag": "end"}]]
+        res = self.render(st, steps)
+        s = {x["s"]: x for x in res["steps"]}
+        for x in res["steps"]:
+            self.assertV23Frame(x["v23"], x["s"])
+            self.assertLayout(x["layout"], x["s"])
+        self.assertV23Frame(res["v23"], "final")
+        self.assertTrue(s["ArrowLeft:first"]["v23"]["kicker"].split(" ")[0] in ("Bonjour", "Bon", "Bonsoir"),
+                        s["ArrowLeft:first"]["v23"]["kicker"])                   # salutation v23 au-dessus du titre
+        for t in ("ArrowRight:card", "ArrowLeft:first"):                          # carte : anneau blanc + agrandissement
+            c = s[t]["v23"]["card"]
+            self.assertEqual(c["border"], "rgb(255, 255, 255)", (t, c))
+            ring = c["bw"] + max([float(x) for x in re.findall(r"rgb\(255, 255, 255\) 0px 0px 0px ([\d.]+)px",
+                                                                 c["shadow"])] or [0])
+            self.assertGreaterEqual(ring, 4, (t, c))                              # anneau ≥ 4 px : lisible en 1080p
+            self.assertTrue(1.05 <= self._scale(c["transform"]) <= 1.1, (t, c))
+            self.assertGreaterEqual(c["radius"], 16, (t, c))
+        top = s["ArrowUp:top"]["v23"]["gear"]                                    # ↑ depuis la 1re carte : Réglages
+        self.assertTrue(top["focused"] and s["ArrowUp:top"]["settings"], top)
+        self.assertEqual(top["bgc"], "rgb(255, 255, 255)", top)                  # focus v23 : cercle blanc agrandi
+        self.assertGreaterEqual(self._scale(top["transform"]), 1.05, top)
+        sh = s["Enter:sheet"]["v23"]["panel"]                                    # feuille latérale pleine hauteur
+        self.assertIn("sheet", sh["cls"])
+        self.assertGreaterEqual(sh["r"][3] - sh["r"][1], 900, sh)
+        self.assertTrue(560 <= sh["r"][2] - sh["r"][0] <= 680, sh)
+        for a, b in zip(sh["btns"], sh["btns"][1:]):
+            self.assertGreaterEqual(b["r"][1], a["r"][3] - 0.5, sh)                # lignes empilées verticalement
+        self.assertEqual([b["bgc"] for b in sh["btns"] if b["focused"]], ["rgb(255, 255, 255)"], sh)
+        self.assertEqual([s[t]["btn"] for t in ("Enter:sheet", "ArrowDown:down", "ArrowDown:down2", "ArrowUp:up")],
+                         ["Reconfigurer", "Oublier les téléphones", "Fermer", "Oublier les téléphones"])
+        self.assertTrue(s["Escape:closed"]["settings"] and not s["Escape:closed"]["panel"])
+        self.assertEqual(s["Escape:back"]["focus"], "Alpha")
+        self.assertEqual(s["Enter:title"]["ptitle"], "Alpha")                    # fiche du titre : actions inchangées
+        self.assertEqual(s["Enter:title"]["btns"], ["J'aime", "Pas pour moi", "Déjà vu", "À voir plus tard",
+                                                    "Pas ce soir"])
+        self.assertFalse(s["Escape:end"]["panel"])
+        for jargon in ("terminal", "sudo", "http", "opentv-pi", "agent"):
+            self.assertNotIn(jargon, res["text"].lower())
+        self.assertEqual([c for c in res["calls"] if c.startswith("POST")], [])
 
     def test_setup_screen_is_phone_driven(self):
         st = dict(self.STATE, setup={"active": True, "url": "http://192.168.2.32:8081/setup?t=x", "hotspot": None,
@@ -1403,9 +1529,9 @@ class TestTvKeysInChromium(unittest.TestCase):
         self.assertIsNotNone(b, where)
         self.assertTrue(g["banner"]["inHtext"] and "msg" in g["heroClass"], (where, g))
         self.assertTrue(self._inside(b, ids["hero"]) and self._inside(b, ids["main"]), (where, b, ids["hero"]))
-        for k in ("htitle", "hkicker", "hmeta", "hchips", "hposter", "hlogo", "remotebox", "rqr", "qr", "apqr", "panel"):
+        for k in ("htitle", "hkicker", "hmeta", "hchips", "remotebox", "rqr", "qr", "apqr", "panel"):
             if ids.get(k):
-                self.assertFalse(self._inter(b, ids[k]), (where, k, b, ids[k]))  # jamais sur titre, affiche, QR
+                self.assertFalse(self._inter(b, ids[k]), (where, k, b, ids[k]))  # jamais sur titre, puces, QR
         self.assertLessEqual(ids["htitle"][3] + 8, b[1], (where, ids["htitle"], b))   # sous le titre, espacé
         self.assertEqual(g["top"]["htitle"], [True] * 5, where)                  # titre réellement au premier plan
         self.assertEqual(g["top"]["banner"], [True] * 5, where)
@@ -2154,6 +2280,9 @@ class TestPhoneRemoteHttp(unittest.TestCase):
             self.assertEqual(lay["ring_clip"], [], (x["s"], lay))                # anneau complet, jamais rogné
             self.assertEqual(lay["panel_hidden_by"], [], (x["s"], lay))
             self.assertTrue(lay["qr_crisp"], (x["s"], lay))                      # QR : 1 px canvas = 1 px CSS
+            self.assertTrue(lay["bg_full"] and lay["gear_circle"], (x["s"], lay))  # identité v23 sur la vraie page
+            self.assertTrue(lay["sheet_vertical"], (x["s"], lay))
+        self.assertIn("sheet", st["set:open"]["layout"]["panel_cls"])            # Réglages : feuille latérale v23
         # Retour : une rangée à la fois, colonne gardée ; rangée 0 reste rangée 0 ; ↑ = Réglages en un geste
         self.assertGreaterEqual(res["rows_count"], 3)
         cl = {x["s"]: x for x in res["climb"]}
@@ -2170,11 +2299,12 @@ class TestPhoneRemoteHttp(unittest.TestCase):
             self.assertEqual(x["layout"]["ring_clip"], [], (x["s"], x["layout"]))
         # message d'assistant + nom long + 3 assistants : barre d'une ligne, bandeau jamais sur un panneau
         hd = res["message"]["header"]
-        self.assertLessEqual(hd["h"][3] - hd["h"][1], 96.5, hd)
+        self.assertLessEqual(hd["h"][3] - hd["h"][1], 200.5, hd)
         self.assertTrue(all(k["lines"] == 1 for k in hd["kids"]), hd)
         kids = {k["id"]: k for k in hd["kids"]}
         self.assertTrue(kids["device"]["clipped"] and kids["agents"]["clipped"], hd)
-        self.assertFalse(kids["gear"]["clipped"] or kids["clock"]["clipped"] or kids["tab"]["clipped"], hd)
+        self.assertFalse(kids["gear"]["clipped"] or kids["clock"]["clipped"] or kids["date"]["clipped"] or
+                         kids["glabel"]["clipped"], hd)
         ms = {x["s"]: x for x in res["message"]["steps"]}
         self.assertTrue(ms["msg:home"]["banner_visible"] and ms["msg:closed"]["banner_visible"])
         self.assertEqual((ms["msg:confirm"]["ptitle"], ms["msg:confirm"]["btn"]),

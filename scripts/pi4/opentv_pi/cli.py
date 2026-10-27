@@ -268,11 +268,51 @@ def cmd_setup(a):
     return _out({"ok": True, "setup": "requested", "hotspot": "rearmed"})
 
 
+CEC_ANNOUNCE_UNIT = "opentv-cec-announce.service"
+CEC_ACTIVATE_TIMEOUT_S = 75   # > TimeoutStartSec=60 de l'unité : systemctl attend la fin du oneshot
+CEC_BUSY_EXIT = 75            # EX_TEMPFAIL : réactivation refusée, un passage de la minuterie tenait le verrou
+CEC_STATUS_TIMEOUT_S = 5
+CEC_RETRY_NOTE = ("Un passage CEC automatique était en cours : réessayer dans une minute avec "
+                  "sudo /opt/opentv/bin/opentv-pi cec --activate")
+
+
+def _announce_unit_busy():
+    """Le dernier échec de l'unité de réactivation vient-il du verrou ? Seul l'entier ExecMainStatus est lu (argv
+    fixe, borné) ; aucune sortie de systemctl n'est rapportée."""
+    rc, out = nethelper.default_runner(["systemctl", "show", "--property=ExecMainStatus", "--value",
+                                        CEC_ANNOUNCE_UNIT], CEC_STATUS_TIMEOUT_S)
+    v = (out or "").strip()
+    return rc == 0 and v.isdigit() and len(v) <= 3 and int(v) == CEC_BUSY_EXIT
+
+
 def cmd_cec(a):
-    """État CEC vérifiable sans émission : adaptateurs, configuration OpenTV, annonce de ce démarrage, touche OK."""
+    """État CEC vérifiable sans émission : adaptateurs, configuration OpenTV, annonce de ce démarrage, touche OK.
+
+    --activate (root) : réactivation explicite — démarre opentv-cec-announce.service (compte opentv, TV allumée
+    seulement, jamais de réveil, ignore le témoin de démarrage), puis relit l'état. Le code de sortie de systemctl ne
+    suffit pas (unité sautée sans /dev/cec*, amorçage désactivé, HDMI débranché, configuration étrangère… sortent en
+    0) : la réactivation n'est réussie que si le témoin du démarrage courant (même boot_id) a été réécrit pendant
+    l'appel, ce que cecboot ne fait qu'après une <Active Source> transmise. Aucune sortie brute de systemctl."""
+    state_dir = os.path.join(a.root, cecboot.STATE_DIR.lstrip("/"))
+    proc_root = os.path.join(a.root, "proc")
+    activation = None
+    if getattr(a, "activate", False):
+        if os.geteuid() != 0:
+            return _out({"ok": False, "error": "root_required",
+                         "note": "sudo /opt/opentv/bin/opentv-pi cec --activate"}, 2)
+        boot = cecboot.bootid.read(proc_root)
+        _, before = cecboot.marker_stamp(state_dir, boot)
+        rc, _ = nethelper.default_runner(["systemctl", "start", CEC_ANNOUNCE_UNIT], CEC_ACTIVATE_TIMEOUT_S)
+        _, after = cecboot.marker_stamp(state_dir, boot)
+        announced = bool(boot) and boot == cecboot.bootid.read(proc_root) and after is not None and after != before
+        activation = {"ok": rc == 0 and announced, "unit": CEC_ANNOUNCE_UNIT, "service_ok": rc == 0,
+                      "announced": announced}
+        if rc == 0 and not announced:
+            activation["result"] = "no_announcement" if boot else "boot_unknown"
+        elif rc != 0 and _announce_unit_busy():
+            activation["result"] = "busy"
     rep = cec.discover(a.root)
-    rep["bootstrap"] = cecboot.load_announced(os.path.join(a.root, cecboot.STATE_DIR.lstrip("/")),
-                                              cecboot.bootid.read(os.path.join(a.root, "proc")))
+    rep["bootstrap"] = cecboot.load_announced(state_dir, cecboot.bootid.read(proc_root))
     km = cecboot.KernelKeymap(a.root)
     for ad in rep["adapters"]:
         ad["announced_this_boot"] = rep["bootstrap"].get(ad["device"]) == ad.get("physical_address")
@@ -284,6 +324,12 @@ def cmd_cec(a):
                     code, "custom" if ev else "no_input_device")
             except OSError:
                 ad["select_key"] = "unreadable"
+    if activation is not None:
+        rep["activation"] = activation
+        if not activation["ok"]:
+            rep["note"] = (CEC_RETRY_NOTE if activation.get("result") == "busy"
+                           else "journalctl -b -u " + CEC_ANNOUNCE_UNIT + " -n 20 --no-pager")
+            return _out(rep, 1)
     return _out(rep)
 
 
@@ -305,8 +351,10 @@ def cmd_cec_bootstrap(a):
     cfg = config.Config.load(a.env)
     if not cfg.cec_bootstrap:
         return _line({"event": "cec_bootstrap", "ok": True, "result": "disabled"})
-    res = cecboot.bootstrap(a.root, state_dir=a.state_dir, keymap=cfg.cec_keymap, force_announce=a.force_announce)
-    return _line(dict(res, event="cec_bootstrap"), 0 if res["ok"] else 1)
+    res = cecboot.bootstrap(a.root, state_dir=a.state_dir, keymap=cfg.cec_keymap, force_announce=a.force_announce,
+                            boot_announce=cfg.cec_boot_announce)
+    code = 0 if res["ok"] else (CEC_BUSY_EXIT if res.get("result") == "busy" else 1)
+    return _line(dict(res, event="cec_bootstrap"), code)
 
 
 def cmd_manifest(a):
@@ -347,15 +395,21 @@ def build_parser():
     ag.add_argument("--force", action="store_true", help="dépasser la politique choisie au QR (sur la boîte)")
     st = sub.add_parser("setup", help="réafficher le QR de configuration")
     st.add_argument("action", choices=("reset",))
-    ce = sub.add_parser("cec", help="état CEC lu, sans émission (adaptateurs, OpenTV, annonce, touche OK)")
+    ce = sub.add_parser("cec", help="état CEC lu, sans émission sauf --activate (adaptateurs, OpenTV, annonce de ce "
+                                    "démarrage, touche OK)")
     ce.add_argument("--root", default="/")
-    cb = sub.add_parser("cec-bootstrap", help="déclare Playback « OpenTV » + touche OK (borné ; jamais de réveil ni "
-                                              "de changement d'entrée sans --force-announce)")
+    ce.add_argument("--activate", action="store_true",
+                    help="(root) réactivation explicite : OpenTV redevient la source active (TV allumée seulement, "
+                         "jamais de réveil) ; ok seulement si une annonce a réellement été transmise")
+    cb = sub.add_parser("cec-bootstrap", help="déclare Playback « OpenTV » + touche OK, puis UNE annonce <Active "
+                                              "Source> automatique par démarrage (fenêtre bornée, TV allumée "
+                                              "seulement ; jamais de réveil ni de réannonce)")
     cb.add_argument("--root", default="/")
     cb.add_argument("--state-dir", default=cecboot.STATE_DIR)
     cb.add_argument("--force-announce", action="store_true",
-                    help="(terrain, avec l'accord de l'utilisateur) TV allumée seulement : <Image View On> + "
-                         "<Active Source> — la TV peut passer sur l'entrée OpenTV")
+                    help="(opentv-cec-announce.service, via `opentv-pi cec --activate`) réactivation explicite, "
+                         "ignore le témoin de démarrage ; TV déjà allumée seulement : <Active Source> + <Menu Status>, "
+                         "jamais <Image View On> ni réveil — la TV passe sur l'entrée OpenTV")
     cb.add_argument("--release", action="store_true", help="(root) retour arrière : efface la configuration OpenTV")
     ma = sub.add_parser("manifest", help="vérifie le manifeste SHA-256")
     ma.add_argument("action", choices=("verify",))

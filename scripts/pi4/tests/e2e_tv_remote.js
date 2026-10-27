@@ -117,7 +117,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
                focus_in_view: !!fe && inside(R(fe), VP) && (box.hidden || !inter(R(fe), R(box))),
                focus_ring: !!cs && cs.boxShadow !== "none", card_overlaps: over,
                panel_box_overlap: !panel.hidden && !box.hidden && inter(R(panel), R(box)),
-               qr: document.getElementById("rqr").getAttribute("data-qr"), box_visible: !box.hidden };
+               qr: document.getElementById("rqr").getAttribute("data-qr"), box_visible: !box.hidden,
+               // identité v23 : photo plein écran embarquée, Réglages = cercle en haut à droite, feuille latérale verticale
+               bg_full: (() => { const b = document.getElementById("bg"); const r = R(b);
+                 return r.join() === "0,0,1920,1080" && getComputedStyle(b).backgroundImage.indexOf("data:image/jpeg") >= 0; })(),
+               gear_circle: gear.offsetWidth === gear.offsetHeight && getComputedStyle(gear).borderTopLeftRadius === "50%" &&
+                            R(gear)[2] >= 1780,
+               sheet_vertical: panel.hidden || panel.className.indexOf("sheet") < 0 || Array.from(document.querySelectorAll("#pbtns button"))
+                 .every((b, i, a) => i === 0 || R(b)[1] >= R(a[i - 1])[3] - 0.5),
+               panel_cls: panel.hidden ? null : panel.className };
     });
     const shot = async (name) => { if (cfg.shots) { await page.screenshot({ path: path.join(cfg.shots, name) }); } };
     const key = async (k, label) => { await page.keyboard.press(k); await sleep(350); const s = await snap(label); s.layout = await measure(); return s; };
@@ -179,8 +187,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       const lines = (e) => { const rg = document.createRange(); rg.selectNodeContents(e);
         const rs = Array.from(rg.getClientRects()).filter((x) => x.width > 0 && x.height > 0);
         return rs.some((a) => rs.some((b) => b.top >= a.bottom - 1)) ? 2 : 1; };
-      const ids = { brand: ".brand", tab: ".tab", gear: "#gear", device: "#device", net: "#net", agents: "#agents",
-                    clock: "#clock" };
+      const ids = { clock: "#clock", date: "#date", gear: "#gear", glabel: "#glabel", device: "#device", net: "#net",
+                    agents: "#agents" };
       const kids = Object.keys(ids).map((k) => { const e = document.querySelector(ids[k]);
         return { id: k, r: R(e), lines: lines(e), clipped: e.scrollWidth > e.clientWidth + 1 }; });
       return { h: R(document.querySelector("header")), kids };
@@ -199,10 +207,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
           });
         }
         const f = document.querySelector("#pbtns .focused");
-        // bandeau : emplacement réservé dans le héros, jamais sur le titre, l'affiche, les puces ni un QR
+        // bandeau : emplacement réservé dans le héros, jamais sur le titre, les puces ni un QR
         const bover = [];
         if (bvis) {
-          ["htitle", "hkicker", "hmeta", "hchips", "hposter", "hlogo", "remotebox", "rqr"].forEach((id) => {
+          ["htitle", "hkicker", "hmeta", "hchips", "remotebox", "rqr"].forEach((id) => {
             const e = document.getElementById(id);
             if (e && !e.hidden && e.getClientRects().length && inter(R(banner), R(e))) { bover.push(id); }
           });

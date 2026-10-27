@@ -4,11 +4,17 @@ Rôle : rendre la télécommande de la TV utilisable par OpenTV sans surveiller 
 (vc4-hdmi, rc-cec) transforme déjà les <User Control Pressed> reçus en événements d'entrée Linux ; il suffit que
 l'adaptateur soit déclaré comme lecteur (Playback « OpenTV »).
 
-Sûreté par défaut : la minuterie ne réveille JAMAIS la TV et ne lui prend JAMAIS son entrée — aucune <Image View On>,
-aucune <Active Source>, aucune question d'alimentation, quel que soit l'état de la TV (allumée, en veille, inconnue,
-réveil, redémarrage de la boîte). L'annonce comme source active n'existe que par la commande explicite
-`opentv-pi cec-bootstrap --force-announce` (terrain, avec l'accord de l'utilisateur), et seulement si la TV répond
-qu'elle est allumée.
+Activation CEC : une seule annonce par démarrage de la boîte. Sans <Active Source>, la Samsung terrain ne transmet pas
+les touches au Pi après un redémarrage (télécommande inerte, `announced_this_boot=false`). La minuterie fait donc UNE
+annonce par boot_id, seulement dans les BOOT_ANNOUNCE_WINDOW_S premières secondes du démarrage (horloge /proc/uptime),
+HDMI branché, adaptateur déclaré « OpenTV » avec son adresse logique, et seulement si la TV répond qu'elle est allumée
+(jamais de réveil : veille/transition/inconnu ⇒ seule la question d'alimentation est émise, nouvel essai au prochain
+passage dans la fenêtre). La source active que la TV annonce (autre appareil, inconnue) n'est pas consultée. Le témoin
+du démarrage n'est écrit qu'après une annonce réussie ; dès qu'il existe, les passages suivants de la minuterie et
+tout redémarrage de service n'émettent plus rien (pas de réannonce qui fermerait Samsung Home ou volerait une
+application native). Hors fenêtre, boot_id ou uptime illisible, dossier d'état non inscriptible ⇒ jamais d'annonce
+automatique (fail-closed). Réactivation explicite : `sudo opentv-pi cec --activate` (démarre
+opentv-cec-announce.service = `cec-bootstrap --force-announce`, qui ignore le témoin), TV allumée seulement.
 
 Une exécution (budget total RUN_BUDGET_S, chaque cec-ctl tronqué au budget restant, groupe de processus tué) :
 1. énumère /dev/cecN (jamais d'adresse en dur) et lit chaque adaptateur (`cec-ctl -d <dev>`, aucune émission) ;
@@ -20,11 +26,13 @@ Une exécution (budget total RUN_BUDGET_S, chaque cec-ctl tronqué au budget res
 3. choisit le premier adaptateur vc4 dont l'adresse physique est valide (≠ f.f.f.f : HDMI branché) ; rien n'est émis
    si aucun ne l'est ;
 4. si l'adaptateur n'a aucune configuration, le déclare Playback « OpenTV » ; une configuration étrangère n'est
-   jamais remplacée ; la nôtre n'est pas réécrite (idempotent) ; fin de l'exécution automatique ;
-5. seulement avec --force-announce : interroge l'état d'alimentation de la TV ; allumée (« on ») ⇒ <Image View On>,
-   <Active Source> avec l'adresse physique lue, <Menu Status activated> ; tout autre état (veille, transition,
-   inconnu) ⇒ refus, rien d'autre n'est émis. Le témoin de cette annonce vit dans /run/opentv-cec (tmpfs : remis à
-   zéro au redémarrage, jamais réutilisé pour réannoncer seul).
+   jamais remplacée ; la nôtre n'est pas réécrite (idempotent) ;
+5. annonce (--force-announce, ou annonce de démarrage unique ci-dessus) : interroge l'état d'alimentation de la TV ;
+   allumée (« on ») ⇒ <Active Source> avec l'adresse physique lue puis <Menu Status activated>, rien d'autre ; tout
+   autre état (veille, transition, inconnu) ⇒ refus, rien d'autre n'est émis. Aucun chemin (démarrage ou réactivation
+   explicite) n'émet <Image View On>, <Text View On> ni aucune commande d'alimentation/réveil (NEVER_EMIT, refusé par
+   _Run avant tout lancement de cec-ctl). Le témoin vit dans /run/opentv-cec (tmpfs : remis à zéro au redémarrage,
+   lié au boot_id).
 
 Journal : une ligne JSON construite ici (périphérique, adresse physique, résultats) — jamais la sortie brute de
 cec-ctl, jamais de nom OSD étranger. Aucun secret n'est manipulé.
@@ -55,6 +63,13 @@ READ_TIMEOUT_S = 5          # lecture d'un adaptateur (aucune émission)
 CLAIM_TIMEOUT_S = 10        # réclamation d'une adresse logique (sondage du bus)
 TX_TIMEOUT_S = 5            # un message (cec-ctl attend l'acquittement / la réponse ≤ 1 s par défaut)
 MIN_STEP_S = 1.0            # en dessous, une commande n'est plus lancée : l'exécution s'arrête proprement
+# réactivation explicite pendant un passage de la minuterie : attente bornée du verrou (un passage dure quelques
+# secondes), sinon « busy » non réussi — `opentv-pi cec --activate` propose alors de relancer
+LOCK_WAIT_S = 15.0
+LOCK_POLL_S = 0.5
+# annonce de démarrage : fenêtre après le boot (minuterie : 20 s puis toutes les 60 s ⇒ ~4 passages, assez pour
+# déclarer l'adresse logique puis annoncer ; au-delà, une TV allumée plus tard n'est jamais basculée sur OpenTV)
+BOOT_ANNOUNCE_WINDOW_S = 240.0
 
 ADAPTER_RE = re.compile(r"Adapter Name\s*:\s*([A-Za-z0-9_.-]{1,32})")
 MASK_RE = re.compile(r"Logical Address Mask\s*:\s*0x([0-9a-fA-F]{1,4})")
@@ -63,6 +78,13 @@ OSD_RE = re.compile(r"OSD Name\s*:\s*'([^'\n]{0,32})'")
 LA_COUNT_RE = re.compile(r"^[ \t]*Logical Addresses[ \t]*:[ \t]*([0-9]{1,2})", re.M)
 PLAYBACK_RE = re.compile(r"Primary Device Type\s*:\s*Playback\b")
 PWR_RE = re.compile(r"pwr-state:\s*(on|standby|to-on|to-standby)\b")
+
+# -- annonce : seuls messages émis, dans cet ordre, une fois la TV vue allumée (jamais de réveil)
+ANNOUNCE_OPTS = ("--active-source", "--menu-status")
+# options cec-ctl qui réveillent/allument/éteignent la TV ou simulent une touche : jamais émises par OpenTV, sur aucun
+# chemin (démarrage, réactivation explicite, retour arrière). _Run refuse l'argv avant de lancer quoi que ce soit.
+NEVER_EMIT = ("--image-view-on", "--text-view-on", "--standby", "--user-control-pressed",
+              "--user-control-released", "--set-power-state", "--wake")
 
 # -- clavier noyau (linux/input.h) : struct input_keymap_entry { u8 flags; u8 len; u16 index; u32 keycode;
 #    u8 scancode[32]; } = 40 octets ; EVIOC[GS]KEYCODE_V2 = _IO[RW]('E', 0x04, struct input_keymap_entry)
@@ -199,6 +221,18 @@ def load_announced(state_dir, boot):
     `opentv-pi cec` peut être lancé par root alors que RuntimeDirectory appartient à `opentv` : le fichier est donc
     une entrée non fiable. Exiger un fichier régulier non lié évite lecture arbitraire, FIFO et hardlink.
     """
+    return marker_stamp(state_dir, boot)[0]
+
+
+def marker_stamp(state_dir, boot):
+    """-> (témoin de ce démarrage, identité du fichier) ; ({}, None) si absent, d'un autre boot_id ou invalide.
+
+    save_announced remplace toujours le fichier par renommage (nouvel inode, nouvelle date) : comparer l'identité avant
+    et après `opentv-pi cec --activate` prouve qu'une annonce réussie a été écrite pendant la réactivation, sans
+    confondre avec le témoin laissé par l'annonce automatique du démarrage.
+    """
+    if not boot:
+        return {}, None
     try:
         dfd = os.open(state_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
                       getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
@@ -210,18 +244,19 @@ def load_announced(state_dir, boot):
         try:
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > 4096:
-                return {}
+                return {}, None
             raw = os.read(fd, 4097)
             if len(raw) > 4096:
-                return {}
+                return {}, None
             d = json.loads(raw.decode("utf-8"))
         finally:
             os.close(fd)
         if isinstance(d, dict) and d.get("boot_id") == boot and isinstance(d.get("done"), dict):
-            return {k: v for k, v in d["done"].items() if isinstance(k, str) and isinstance(v, str)}
+            done = {k: v for k, v in d["done"].items() if isinstance(k, str) and isinstance(v, str)}
+            return done, ((st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size) if done else None)
     except (OSError, ValueError, UnicodeError, RecursionError):
         pass
-    return {}
+    return {}, None
 
 
 def save_announced(state_dir, boot, done):
@@ -276,6 +311,8 @@ class _Run:
         self.calls = 0
 
     def __call__(self, argv, want):
+        if any(o in NEVER_EMIT for o in argv):
+            raise ValueError("cec_wake_or_power_command_forbidden")
         rem = self.deadline - self.mono() - KILL_GRACE_S
         if rem < MIN_STEP_S:
             raise BudgetExceeded()
@@ -287,6 +324,34 @@ class _Run:
         return parse_info(out) if rc == 0 else None
 
 
+def uptime(proc_root="/proc"):
+    """Secondes depuis le démarrage (CLOCK_BOOTTIME via /proc/uptime) ; None si illisible (⇒ pas d'annonce auto)."""
+    try:
+        with open(os.path.join(proc_root, "uptime"), encoding="ascii") as f:
+            v = float(f.read(64).split()[0])
+    except (OSError, ValueError, IndexError, UnicodeError):
+        return None
+    return v if v >= 0 and v == v and v != float("inf") else None
+
+
+def boot_gate(state_dir, proc_root):
+    """Annonce de démarrage autorisée ? -> (None, boot_id, témoin) ou (raison du refus, boot_id, témoin)."""
+    boot = bootid.read(proc_root)
+    if not boot:
+        return "boot_unknown", boot, {}
+    done = load_announced(state_dir, boot)
+    if done:
+        return "already_this_boot", boot, done
+    up = uptime(proc_root)
+    if up is None:
+        return "uptime_unknown", boot, done
+    if up > BOOT_ANNOUNCE_WINDOW_S:
+        return "boot_window_passed", boot, done
+    if not os.access(state_dir, os.W_OK | os.X_OK):    # sans témoin possible, chaque passage réannoncerait
+        return "state_not_writable", boot, done
+    return None, boot, done
+
+
 def power_state(run, dev):
     rc, out = run(["cec-ctl", "-d", dev, "-s", "-t", "0", "--give-device-power-status"], TX_TIMEOUT_S)
     m = PWR_RE.search(out or "") if rc == 0 else None
@@ -294,13 +359,15 @@ def power_state(run, dev):
 
 
 def announce(run, dev, pa):
-    """(--force-announce seulement) TV allumée ⇒ <Image View On>, <Active Source>, <Menu Status>. Veille, transition
-    ou état inconnu ⇒ refus sans autre émission (jamais de réveil). -> (résultat, ok)."""
+    """Annonce unique du démarrage (minuterie, boot_gate ouvert) ou réactivation explicite (--force-announce, via
+    `opentv-pi cec --activate`) : même séquence dans les deux cas. TV allumée ⇒ <Active Source>, <Menu Status>
+    (ANNOUNCE_OPTS) ; jamais <Image View On> ni commande de réveil/alimentation : la TV est déjà allumée, et une TV
+    qui passerait en veille entre la question et l'annonce ne doit pas être rallumée. Veille, transition ou état
+    inconnu ⇒ refus sans autre émission. -> (résultat, ok)."""
     pwr = power_state(run, dev)
     if pwr != "on":
         return {"result": "refused_tv_not_on", "tv_power": pwr}, False
     steps = {}
-    steps["image_view_on"] = run(["cec-ctl", "-d", dev, "-s", "-t", "0", "--image-view-on"], TX_TIMEOUT_S)[0] == 0
     steps["active_source"] = run(["cec-ctl", "-d", dev, "-s", "--active-source", "phys-addr=" + pa],
                                  TX_TIMEOUT_S)[0] == 0
     if not steps["active_source"]:
@@ -311,7 +378,8 @@ def announce(run, dev, pa):
 
 
 def bootstrap(root="/", runner=default_runner, mono=time.monotonic, keymap_io=None, state_dir=STATE_DIR,
-              keymap=True, force_announce=False, budget=RUN_BUDGET_S, proc_root="/proc"):
+              keymap=True, force_announce=False, budget=RUN_BUDGET_S, proc_root="/proc", boot_announce=False,
+              sleep=time.sleep):
     t0 = mono()
     res = {"ok": True, "result": None, "adapters": [], "selected": None}
     io = keymap_io if keymap_io is not None else KernelKeymap(root)
@@ -326,8 +394,13 @@ def bootstrap(root="/", runner=default_runner, mono=time.monotonic, keymap_io=No
             res.update(ok=False, result="state_dir_missing")
             return res
         lock = _lock(state_dir)
-        if lock is None:
-            res["result"] = "busy"
+        if lock is None and force_announce:     # geste explicite : attendre la fin du passage de la minuterie
+            wait_end = t0 + min(LOCK_WAIT_S, budget / 2.0)
+            while lock is None and mono() + LOCK_POLL_S <= wait_end:
+                sleep(LOCK_POLL_S)
+                lock = _lock(state_dir)
+        if lock is None:     # minuterie : passage normal ; réactivation : échec explicite, à relancer
+            res.update(ok=not force_announce, result="busy")
             return res
         infos = {}
         for dev in devs:
@@ -368,17 +441,30 @@ def bootstrap(root="/", runner=default_runner, mono=time.monotonic, keymap_io=No
             return res
         pa = info["physical_address"]
         res["physical_address"] = pa
-        if not force_announce:   # défaut sûr : ni réveil ni changement d'entrée, quel que soit l'état de la TV
-            res["announce"] = {"result": "not_requested"}
+        if force_announce:       # geste explicite (opentv-pi cec --activate) : ignore le témoin de démarrage
+            ann, ok = announce(run, sel, pa)
+            res["announce"] = ann
+            if not ok:
+                res.update(ok=False, result="tv_not_on" if ann["result"] == "refused_tv_not_on" else "announce_failed")
+                return res
+            boot = bootid.read(proc_root)
+            done = load_announced(state_dir, boot)
+        else:
             res["result"] = "ready"
-            return res
-        ann, ok = announce(run, sel, pa)
-        res["announce"] = ann
-        if not ok:
-            res.update(ok=False, result="tv_not_on" if ann["result"] == "refused_tv_not_on" else "announce_failed")
-            return res
-        boot = bootid.read(proc_root)
-        done = load_announced(state_dir, boot)
+            if not boot_announce:
+                res["announce"] = {"result": "not_requested"}
+                return res
+            refused, boot, done = boot_gate(state_dir, proc_root)
+            if refused:          # déjà annoncé ce démarrage, hors fenêtre ou état inconnu : rien n'est émis
+                res["announce"] = {"result": refused}
+                return res
+            ann, ok = announce(run, sel, pa)
+            res["announce"] = ann
+            if not ok:           # aucun témoin : nouvel essai au prochain passage, tant que la fenêtre est ouverte
+                if ann["result"] != "refused_tv_not_on":   # TV en veille/inconnue : passage normal, jamais de réveil
+                    res.update(ok=False, result="announce_failed")
+                return res
+            ann["result"] = "boot_done"
         done[sel] = pa
         try:
             save_announced(state_dir, boot, done)
