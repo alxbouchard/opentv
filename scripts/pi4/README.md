@@ -199,6 +199,19 @@ illisible ⇒ aucun téléphone autorisé (rescanner le QR) ; `uninstall.sh` san
 appairés pour une réinstallation, `--purge` les efface.
 
 Résolution : paramètre noyau `video=HDMI-A-1:1920x1080@60` (installé par `install.sh`) + `wlr-randr` dans Cage.
+Le produit reste volontairement en **1080p60** : la TV fait la mise à l'échelle. Le Pi 4 peut sortir un écran 4K60 sur
+HDMI0 avec `hdmi_enable_4kp60=1`, mais au prix d'une fréquence GPU, d'une consommation et d'une température plus
+élevées. Ce réglage n'améliore pas le décodeur de Chromium.
+
+Vidéo validée sur le Pi réel avec Chromium Raspberry Pi OS 155 lancé par `/usr/bin/chromium` (le lanceur fournit
+`--use-angle=gles`) : une mire locale H.264 High@L4.2, 1920×1080, 60 i/s et 8 Mbit/s a ouvert `/dev/video10`, porté
+l'horloge H.264 à 500 MHz et perdu 7 images sur 2 254 (0,311 %), avec `hvs_underrun=0`, 38,9 °C et
+`get_throttled=0x0`. C'est donc un décodage V4L2 matériel réellement exercé, pas une inférence. Limite produit : H.264
+matériel jusqu'à 1080p ; le bloc HEVC 4K60 du BCM2711 n'est pas exposé au Chromium non-ChromeOS, et VP9/AV1 restent
+logiciels. Ne pas ajouter de drapeaux VA-API/V4L2 historiques, `--no-sandbox`, `--disable-gpu-sandbox` ou
+`--disable-gpu`. Sources : [BCM2711](https://github.com/raspberrypi/documentation/blob/master/documentation/asciidoc/computers/processors/bcm2711.adoc),
+[configuration vidéo](https://github.com/raspberrypi/documentation/blob/master/documentation/asciidoc/computers/configuration/audio-display.adoc),
+[intégration Chromium RPi](https://github.com/RPi-Distro/chromium/issues/63).
 
 Reprise de l'écran : la clé de la page TV change à chaque démarrage du service. Après un redémarrage, l'API répond
 `403 {"error":"tv_key"}` ; la page sonde `/tv` puis se recharge (attente 2 s, 4 s, 8 s), au plus **3 fois par
@@ -315,27 +328,31 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
   `systemctl start opentv`. En cas d'échec : `systemctl restart opentv-kiosk` (le lanceur réessaie d'abord le port TCP
   pendant 20 s). Cas rare : le kiosque démarre après `opentv.service` (`Type=notify`, port ouvert avant READY).
 - Reprise de l'écran, hotspot borné, verrouillage par UID : prouvés en tests (Chromium headless réel, horloge simulée,
-  `LOCAL_PEERCRED` sur macOS) ; `SO_PEERCRED`, `boot_id` et NetworkManager réels non exercés sur Pi.
+  `LOCAL_PEERCRED` sur macOS). Sur le Pi réel, `boot_id`, NetworkManager, hotspot sans Ethernet, restauration Wi-Fi,
+  redémarrage et disparition du profil AP ont aussi été exercés ; `SO_PEERCRED` reste couvert par tests, pas sondé
+  manuellement.
 - CEC : `opentv-cec` déclare seulement Playback « OpenTV » (aucune annonce automatique, aucune commande de
   volume/standby). Le noyau seul produit les touches. Prouvé sur le Pi avant ce lot (avec une annonce manuelle) :
   Haut/Bas/Gauche au niveau noyau. **Non prouvé** : que la TV Samsung route les touches à OpenTV **sans** annonce
   (entrée choisie à la main), Droite, OK (Select → Entrée par la table du noyau), Retour (Samsung « Return » = CEC Exit
   → `Close` ?), la persistance après redémarrage, et que la touche Power de la TV arrive bien en `KEY_POWER` ignoré.
   Si une touche manque : repli téléphone, puis USB.
-- Télécommande téléphone : HTTP en clair sur le LAN (prototype, pas de certificat d'appareil). Non validée sur un
-  vrai iPhone/Android ni sur le Wi-Fi d'Alex (isolation client d'un routeur = téléphone ne joint pas la boîte).
+- Télécommande téléphone : HTTP en clair sur le LAN (prototype, pas de certificat d'appareil). Sur le Wi-Fi réel,
+  l'appairage QR par nom `.local`, cinq commandes et la révocation ont été exercés par un client HTTP, sans session
+  résiduelle. Non validée avec un vrai iPhone/Android (isolation client d'un routeur = téléphone ne joint pas la boîte).
   Résolution `.local` : native sur iOS et macOS ; sur Android elle dépend de la version (non vérifié). La boîte ne
   peut pas savoir si **le téléphone** résout `.local` : s'il n'y arrive pas, le QR ne s'ouvre pas — contournement
   `OPENTV_REMOTE_MDNS=0` (QR par adresse ; l'appairage est alors à refaire si l'adresse DHCP change). À valider sur le
-  terrain. Résolution par
-  `getaddrinfo` dans le service (`nss-mdns` de Raspberry Pi OS) : non vérifiée sous le durcissement systemd.
-  Témoin d'heure synchronisée : `systemd-timesyncd` (défaut de Raspberry Pi OS) ; avec un autre démon NTP, aucune
+  terrain. Résolution par `getaddrinfo` dans le service (`nss-mdns` de Raspberry Pi OS) vérifiée sur le Pi sous le
+  durcissement systemd.
+- Témoin d'heure synchronisée : `systemd-timesyncd` (défaut de Raspberry Pi OS), confirmé sur le Pi après redémarrage ; avec un autre démon NTP, aucune
   expiration par inactivité n'a lieu (fail-safe : les téléphones restent jusqu'à révocation).
 - Politique Chromium : chemin réellement lu par le Chromium de Raspberry Pi OS (`/etc/chromium` ou
   `/etc/chromium-browser`), blocage effectif de DevTools (Ctrl+Maj+I, F12), de l'impression (Ctrl+P), des
   téléchargements et de la navigation externe, et affiches `https` toujours visibles (les listes d'URL ne visent que
   la navigation) : **non vérifiés sur la Pi**. Touche Power : drop-in logind effectif après redémarrage, non vérifié.
-- Décodage vidéo matériel : hors lot (pas de lecture). Ne jamais présenter un rendu logiciel comme accéléré.
+- Décodage vidéo : H.264 1080p60 matériel validé par `/dev/video10`, horloge H.264, compteurs d'images, thermique et
+  absence d'underrun. 4K dans Chromium, HEVC, VP9 et AV1 restent hors cible ; ne jamais les présenter comme accélérés.
 - Formulaire de configuration en **HTTP non chiffré** sur le LAN (voir §5) : par Ethernet, le mot de passe Wi-Fi
   traverse le réseau local en clair ; configurer seulement depuis un LAN de confiance ou par le Wi-Fi temporaire.
 - Kiosque **sans durcissement systemd** (pas de `NoNewPrivileges`/`ProtectSystem` : le sandbox setuid de Chromium en
@@ -343,8 +360,8 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
   kiosque. Atténué par la politique gérée (DevTools, impression, téléchargements, navigation externe bloqués), Cage
   sans changement de console et logind qui ignore Power ; pas de shell (`nologin`). Accès physique = confiance.
 - Promotion du candidat Wi-Fi (`nmcli connection load <final> <candidat>` : l'UUID actif passe sur `opentv-wifi`,
-  l'ancien UUID disparaît avec son fichier remplacé) : comportement NetworkManager 1.42 **non vérifié** sur Pi ; gate
-  terrain : `nmcli -f NAME,UUID connection show` après succès et après mauvais mot de passe.
+  l'ancien UUID disparaît avec son fichier remplacé) : chemin de succès vérifié avec NetworkManager réel sur le Pi.
+  Le mauvais mot de passe et sa restauration transactionnelle restent une gate terrain distincte.
 - Serveurs HTTP et Agent Port : 16 connexions servies au plus (503 / `busy` au-delà), échéance globale par connexion
   (15 s HTTP, 10 s Agent Port) ; l'écriture d'une réponse vers un client qui ne lit pas reste bornée par le délai du
   socket, pas par l'échéance globale.
@@ -365,14 +382,14 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
 | **Télécommande CEC** | entrée OpenTV choisie avec la télécommande Samsung (sans `--force-announce`) : Haut, Bas, Gauche, Droite, OK (ouvre le panneau), Retour (le ferme) ; puis **après `sudo reboot`**, sans intervention, de nouveau les six touches ; touche Power de la TV : la boîte reste allumée ; un ensemble partiel = critère CEC échoué (repli téléphone ; `--force-announce` seulement comme essai terrain consenti) |
 | **Télécommande téléphone** | iPhone et Android sur le même Wi-Fi : QR de la colonne de droite → « Oui, utiliser ce téléphone » → les 7 touches agissent en < 0,5 s ; l'URL ouverte est `<nom>.local:8082` (sinon noter le repli) ; ancien QR refusé ; « Oublier les téléphones » (Réglages) ⇒ le pavé demande de rescanner ; `systemctl restart opentv` puis `sudo reboot` (heure avant NTP) ⇒ téléphone toujours appairé ; nouvelle adresse DHCP ⇒ téléphone toujours appairé ; `ss -ltn` : `:8082` lié à l'adresse LAN (jamais `0.0.0.0`), absent pendant « Reconfigurer » ; ajout à l'écran d'accueil iOS fonctionnel ; aucun jeton dans `journalctl -u opentv` |
 | **Télécommande USB** | télécommande 2,4 GHz branchée : flèches, OK, Retour, Accueil sur l'écran OpenTV ; Accueil/BrowserBack ne quittent jamais `/tv` ; écran QR : aucune touche n'agit ; **touche Power : la boîte reste allumée** (après redémarrage) ; clavier : F12/Ctrl+Maj+I, Ctrl+P, Ctrl+S, Ctrl+Alt+F2 sans effet |
-| **Décodage** | hors lot : critère non évalué (aucune lecture vidéo dans ce MVP) |
+| **Décodage** | H.264 local 1080p60 : `/dev/video10` ouvert, horloge H.264 ≈ 500 MHz, 7/2 254 images perdues (0,311 %), `hvs_underrun=0`, `get_throttled=0x0`. Refaire 30 min avec une vidéo autorisée avant promotion produit ; 4K/HEVC/VP9/AV1 Chromium hors cible. |
 | **Rollback** | `uninstall.sh` ⇒ console tty1 de retour, `/opt/opentv` absent, fichiers d'origine restaurés ; réinstallation propre ; `--purge` sans perte du Wi-Fi |
 | **Agent** | `opentv-mcp` depuis le compte de l'agent : `tools/list` filtré par scopes, `recommend` sans URL, scope refusé, audit présent sans secret |
 
 ## 10. Développement
 
 ```sh
-python3 -m unittest discover -s scripts/pi4/tests -t scripts/pi4      # depuis la racine du dépôt (285 tests)
+python3 -m unittest discover -s scripts/pi4/tests -t scripts/pi4      # depuis la racine du dépôt (286 tests)
 python3.11 -m unittest discover -s scripts/pi4/tests -t scripts/pi4   # version de Bookworm
 # bouts en bout réels (Chromium headless, temps réel) et analyse ES5 :
 #   OPENTV_TEST_PLAYWRIGHT=<module playwright> OPENTV_TEST_ACORN=<module acorn> OPENTV_TEST_SHOTS=<dossier de captures>
