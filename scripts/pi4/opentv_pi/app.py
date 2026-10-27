@@ -4,12 +4,15 @@ Aucun privilège : les changements réseau passent par des jobs 0600 consommés 
 """
 import json
 import os
+import re
 import secrets
+import socket
 import string
 import threading
 import time
 
-from . import VERSION, agents, bootid, cec, config, fsutil, netjobs, netstate, nethelper, peeruid, validate, wifiscan
+from . import (VERSION, agents, bootid, cec, config, fsutil, netjobs, netstate, nethelper, peeruid, phoneremote,
+               validate, wifiscan)
 from .foryou import ForYou, EngineError
 from .setup_token import SetupToken
 
@@ -24,6 +27,11 @@ FORYOU_TTL_S = 120.0
 APPLY_DEADLINE_S = nethelper.WIFI_APPLY_PICKUP_MAX_S + nethelper.RUN_BUDGET_S + 30.0
 STALE_JOBS_MAX = 32
 CEC_REFRESH_S = 300.0
+# Télécommande téléphone : le QR vise <nom d'hôte>.local:8082 (stable si le DHCP change d'adresse, cookie conservé)
+# seulement si ce nom se résout par mDNS exactement vers l'adresse LAN liée ; sinon repli sur l'adresse liée (jamais
+# affichée en texte). Vérification dans un thread (getaddrinfo, nss-mdns/avahi), au plus une par MDNS_REFRESH_S.
+MDNS_REFRESH_S = 60.0
+HOST_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 SCAN_PRIME_S = 15.0           # hors ligne, avant le Wi-Fi temporaire : relevé des réseaux proches (thread, borné)
 # Soumissions avec un jeton faux (jamais émis) : sans effet sur le QR (256 bits, aucun essai à deviner), mais bornées
 # par adresse IP pour ne pas laisser un appareil du LAN occuper le service ; table bornée.
@@ -43,7 +51,7 @@ ERR_FORM_NET = "Choisis comment la TV se connecte."
 ERR_FORM_OFFLINE = "La TV n'a pas encore Internet : choisis ton Wi-Fi."
 ERR_FORM_SSID = "Nom du Wi-Fi invalide (1 à 32 caractères, sans « ; »)."
 ERR_FORM_PSK = "Mot de passe Wi-Fi invalide : il faut entre 8 et 63 caractères."
-ERR_FORM_AGENT = "Choix d'agent invalide."
+ERR_FORM_AGENT = "Choix invalide pour un assistant (Muse, Hermit ou Hermes)."
 MSG_NO_NETWORK = ("Branche un câble Ethernet à la boîte OpenTV (recommandé). Sans câble, un Wi-Fi temporaire "
                   "« OpenTV » apparaîtra dans une minute.")
 MSG_NO_NETWORK_NO_AP = "Branche un câble Ethernet à la boîte OpenTV pour la configurer."
@@ -57,6 +65,22 @@ def _noop_log(event, **fields):
     pass
 
 
+def resolve_ipv4(name):
+    """Nom -> ensemble d'adresses IPv4 (résolveur système : nss-mdns pour .local) ; vide en cas d'échec."""
+    try:
+        return {ai[4][0] for ai in socket.getaddrinfo(name, None, socket.AF_INET, socket.SOCK_STREAM)}
+    except (OSError, UnicodeError):
+        return set()
+
+
+def mdns_label(hostname):
+    """Nom d'hôte de la boîte -> étiquette mDNS valide (minuscules, première étiquette) ou None."""
+    if not isinstance(hostname, str):
+        return None
+    label = hostname.split(".")[0].strip().lower()
+    return label if HOST_LABEL_RE.fullmatch(label) and label != "localhost" else None
+
+
 def _boot_id(proc_root):
     """Identifiant du démarrage courant ; "" = inconnu ⇒ fail-closed (voir bootid.py)."""
     return bootid.read(proc_root)
@@ -64,7 +88,7 @@ def _boot_id(proc_root):
 
 class App:
     def __init__(self, cfg, runner=nethelper.default_runner, mono=time.monotonic, log=_noop_log, cec_root="/",
-                 proc_root="/proc"):
+                 proc_root="/proc", hostname=None, resolver=resolve_ipv4, clock_synced=None):
         self.cfg, self.runner, self.mono, self.log, self.cec_root = cfg, runner, mono, log, cec_root
         self.lock = threading.RLock()
         self.fy_lock = threading.Lock()   # « Pour toi » (SQLite, catalogue) : jamais sous self.lock, que tick() prend
@@ -92,6 +116,19 @@ class App:
         self.phase, self.phase_msg = "waiting", None
         self.message = None
         self.lan_port_actual = None
+        self.remote_port_actual = None
+        self.remote_ip_actual = None
+        # télécommande sur téléphone : repli immédiat de la télécommande CEC (état : empreintes seulement, 0600)
+        rkw = {"synced": clock_synced} if clock_synced is not None else {}
+        self.remote = phoneremote.PhoneRemote(cfg.remote_file, mono=mono, log=log, **rkw) if cfg.remote_enabled \
+            else None
+        self.mdns_name = None
+        if cfg.remote_mdns:
+            label = mdns_label(socket.gethostname() if hostname is None else hostname)
+            self.mdns_name = label + ".local" if label else None
+        self.resolver = resolver
+        self.mdns = {"ip": None, "ok": False}   # dernière vérification : le nom mDNS désigne-t-il l'adresse liée ?
+        self._mdns_thread, self.mdns_at = None, -1e9
         self.bad_token_ips = {}       # ip -> [horodatages monotones] des POST à jeton faux (borné)
         self.fy_session, self.fy_at = None, -1e9
         self.cec, self.cec_at = {"adapters": [], "discovery_only": True}, -1e9
@@ -320,6 +357,7 @@ class App:
             prime = self.setup_mode and net["mode"] == "offline" and net["wifi_present"] and \
                 not net.get("ap_active") and self.ap is None
         self._cec_refresh()
+        self._mdns_refresh()
         if prime:
             self._scan_prime()
 
@@ -352,6 +390,29 @@ class App:
                 self.cec = res
         self._cec_thread = threading.Thread(target=work, daemon=True, name="cec-discovery")
         self._cec_thread.start()
+
+    def _mdns_check(self):
+        """(thread) Le nom mDNS se résout-il exactement vers l'adresse LAN liée ? Conflit de nom (avahi renomme la
+        boîte en « -2 ») ou autre appareil ⇒ non : le QR revient à l'adresse liée."""
+        with self.lock:
+            ip = self.net.get("ip") if self.net.get("mode") in ("ethernet", "wifi") else None
+        ok = bool(ip and self.mdns_name) and self.resolver(self.mdns_name) == {ip}
+        with self.lock:
+            self.mdns = {"ip": ip, "ok": ok}
+
+    def _mdns_refresh(self):
+        if self.remote is None or not self.mdns_name:
+            return
+        with self.lock:
+            ip = self.net.get("ip") if self.net.get("mode") in ("ethernet", "wifi") else None
+            stale = ip != self.mdns["ip"]
+        if not ip or (not stale and self.mono() - self.mdns_at < MDNS_REFRESH_S):
+            return
+        if self._mdns_thread is not None and self._mdns_thread.is_alive():
+            return
+        self.mdns_at = self.mono()
+        self._mdns_thread = threading.Thread(target=self._mdns_check, daemon=True, name="mdns-check")
+        self._mdns_thread.start()
 
     def _submit(self, action, payload):
         jid = netjobs.submit(self.cfg.jobs_dir, self.cfg.jobs_tmp, action, payload)
@@ -412,6 +473,54 @@ class App:
     def want_lan(self):
         with self.lock:
             return self.setup_mode and self.net["mode"] != "offline"
+
+    # -- télécommande sur téléphone (LAN, après configuration seulement)
+    def want_remote(self):
+        with self.lock:
+            return self.remote is not None and not self.setup_mode and self.net["mode"] in ("ethernet", "wifi")
+
+    def remote_bind_ip(self):
+        """Adresse LAN actuelle sur laquelle écouter (jamais 0.0.0.0), ou None si la télécommande doit être fermée."""
+        with self.lock:
+            if self.remote is None or self.setup_mode or self.net["mode"] not in ("ethernet", "wifi"):
+                return None
+            return self.net["ip"] or None
+
+    def remote_hosts(self, bound_ip, port):
+        """En-têtes Host acceptés : l'adresse liée et le nom mDNS exact de la boîte (avec le port réel)."""
+        hosts = {"%s:%d" % (bound_ip, port)}
+        if self.mdns_name:
+            hosts.add("%s:%d" % (self.mdns_name, port))
+        return hosts
+
+    def remote_device_name(self):
+        with self.lock:
+            return (self.device or {}).get("name") or "OpenTV"
+
+    def _remote_view(self):
+        ip = self.net["ip"]
+        if self.remote is None or self.setup_mode or self.net["mode"] not in ("ethernet", "wifi") \
+                or not ip or not self.remote_port_actual or self.remote_ip_actual != ip:
+            return {"enabled": False}
+        pr = self.remote.pairing()
+        host = self.mdns_name if (self.mdns_name and self.mdns["ok"] and self.mdns["ip"] == ip) else ip
+        return {"enabled": True, "url": "http://%s:%d/r?p=%s" % (host, self.remote_port_actual, pr["secret"]),
+                "expires_in": pr["expires_in"], "phones": self.remote.count()}
+
+    def remote_pair_link(self):
+        """Lien d'appairage pour la page « C'est prêt » du téléphone de configuration (même QR que la TV)."""
+        with self.lock:
+            v = self._remote_view()
+        return v.get("url") if v.get("enabled") else None
+
+    def remote_revoke(self):
+        if self.remote is not None:
+            self.remote.revoke_all()
+
+    def remote_events(self, after):
+        if self.remote is None:
+            return {"seq": 0, "events": [], "idle": True}
+        return self.remote.wait_events(after)
 
     def setup_context(self):
         with self.lock:
@@ -564,7 +673,7 @@ class App:
                     "message": {"text": m["text"], "from": m["from"],
                                 "seconds_left": int(m["until"] - self.mono())} if m else None,
                     "agents": sorted(self.registry.list()), "cec": {"adapters": len(self.cec["adapters"])},
-                    "foryou": self.foryou is not None}
+                    "foryou": self.foryou is not None, "remote": self._remote_view()}
 
     def tv_foryou(self):
         if self.foryou is None:

@@ -1,5 +1,5 @@
 """opentv-pi : serve | preflight | health | net-helper | ap-guard | agent issue|list|revoke | setup reset | cec |
-manifest verify."""
+cec-bootstrap | manifest verify."""
 import argparse
 import json
 import os
@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 
-from . import VERSION, agents, apguard, cec, config, fsutil, health, nethelper, preflight
+from . import VERSION, agents, apguard, cec, cecboot, config, fsutil, health, nethelper, preflight
 
 # Boucle du service : un tick (au pire netstate.NMCLI_TIMEOUT_S + IP_TIMEOUT_S, CEC en thread) puis cette attente.
 # Le test de budget vérifie que (tick + attente) × 2 ≤ WatchdogSec de opentv.service.
@@ -269,7 +269,44 @@ def cmd_setup(a):
 
 
 def cmd_cec(a):
-    return _out(cec.discover(a.root))
+    """État CEC vérifiable sans émission : adaptateurs, configuration OpenTV, annonce de ce démarrage, touche OK."""
+    rep = cec.discover(a.root)
+    rep["bootstrap"] = cecboot.load_announced(os.path.join(a.root, cecboot.STATE_DIR.lstrip("/")),
+                                              cecboot.bootid.read(os.path.join(a.root, "proc")))
+    km = cecboot.KernelKeymap(a.root)
+    for ad in rep["adapters"]:
+        ad["announced_this_boot"] = rep["bootstrap"].get(ad["device"]) == ad.get("physical_address")
+        if ad.get("readable") and (ad.get("driver") or "").startswith("vc4"):
+            ev = cecboot.find_input(a.root, ad.get("adapter"))
+            try:
+                code = km.get(ev, 0x00) if ev else None
+                ad["select_key"] = {cecboot.KEY_ENTER: "enter", cecboot.KEY_OK: "kernel_default_ok"}.get(
+                    code, "custom" if ev else "no_input_device")
+            except OSError:
+                ad["select_key"] = "unreadable"
+    return _out(rep)
+
+
+def _line(obj, code=0):
+    """Une ligne JSON compacte (journal de la minuterie) ; uniquement des champs construits par cecboot."""
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
+    return code
+
+
+def cmd_cec_bootstrap(a):
+    """Amorçage CEC (opentv-cec.service, compte opentv) ou retour arrière --release (root, désinstallation)."""
+    if a.release:
+        res = cecboot.release(a.root)
+        return _line(dict(res, event="cec_release"), 0 if res["ok"] else 1)
+    if os.geteuid() == 0:   # root n'écrit jamais dans /run/opentv-cec (dossier du compte opentv)
+        unit = "opentv-cec-announce.service" if a.force_announce else "opentv-cec.service"
+        return _line({"event": "cec_bootstrap", "ok": False, "error": "run_via_systemd",
+                      "note": "sudo systemctl start " + unit}, 2)
+    cfg = config.Config.load(a.env)
+    if not cfg.cec_bootstrap:
+        return _line({"event": "cec_bootstrap", "ok": True, "result": "disabled"})
+    res = cecboot.bootstrap(a.root, state_dir=a.state_dir, keymap=cfg.cec_keymap, force_announce=a.force_announce)
+    return _line(dict(res, event="cec_bootstrap"), 0 if res["ok"] else 1)
 
 
 def cmd_manifest(a):
@@ -310,8 +347,16 @@ def build_parser():
     ag.add_argument("--force", action="store_true", help="dépasser la politique choisie au QR (sur la boîte)")
     st = sub.add_parser("setup", help="réafficher le QR de configuration")
     st.add_argument("action", choices=("reset",))
-    ce = sub.add_parser("cec", help="découverte CEC (aucune émission)")
+    ce = sub.add_parser("cec", help="état CEC lu, sans émission (adaptateurs, OpenTV, annonce, touche OK)")
     ce.add_argument("--root", default="/")
+    cb = sub.add_parser("cec-bootstrap", help="déclare Playback « OpenTV » + touche OK (borné ; jamais de réveil ni "
+                                              "de changement d'entrée sans --force-announce)")
+    cb.add_argument("--root", default="/")
+    cb.add_argument("--state-dir", default=cecboot.STATE_DIR)
+    cb.add_argument("--force-announce", action="store_true",
+                    help="(terrain, avec l'accord de l'utilisateur) TV allumée seulement : <Image View On> + "
+                         "<Active Source> — la TV peut passer sur l'entrée OpenTV")
+    cb.add_argument("--release", action="store_true", help="(root) retour arrière : efface la configuration OpenTV")
     ma = sub.add_parser("manifest", help="vérifie le manifeste SHA-256")
     ma.add_argument("action", choices=("verify",))
     ma.add_argument("--root", default="/")
@@ -324,4 +369,4 @@ def main(argv):
         return _out({"ok": False, "error": "id_required"}, 2)
     return {"serve": cmd_serve, "preflight": cmd_preflight, "health": cmd_health, "net-helper": cmd_net_helper,
             "ap-guard": cmd_ap_guard, "agent": cmd_agent, "setup": cmd_setup, "cec": cmd_cec,
-            "manifest": cmd_manifest}[a.cmd](a)
+            "cec-bootstrap": cmd_cec_bootstrap, "manifest": cmd_manifest}[a.cmd](a)

@@ -49,7 +49,7 @@ def _read(p):
         return f.read()
 
 
-def make_app(tc, net=None, proc_root=None, **env):
+def make_app(tc, net=None, proc_root=None, app_kw=None, **env):
     d = tempfile.mkdtemp(prefix="otv", dir="/tmp")
     tc.addCleanup(shutil.rmtree, d, True)
     cat = write_catalogue(os.path.join(d, "catalogue.json"))
@@ -57,7 +57,7 @@ def make_app(tc, net=None, proc_root=None, **env):
          "OPENTV_SHARE_DIR": os.path.join(PI4, "ui"), "OPENTV_FORYOU_ENGINE_DIR": NANOPI,
          "OPENTV_CATALOGUE_FILE": cat, "OPENTV_QRCODE_JS": os.path.join(os.path.dirname(os.path.dirname(PI4)),
                                                                           "native", "app", "qrcode.js"),
-         "OPENTV_TV_PORT": "0", "OPENTV_SETUP_PORT": "0", "OPENTV_HOTSPOT_GRACE_S": "60"}
+         "OPENTV_TV_PORT": "0", "OPENTV_SETUP_PORT": "0", "OPENTV_REMOTE_PORT": "0", "OPENTV_HOTSPOT_GRACE_S": "60"}
     e.update(env)
     cfg = config.Config(e)
     cfg.ensure_dirs()
@@ -69,7 +69,7 @@ def make_app(tc, net=None, proc_root=None, **env):
         with open(os.path.join(proc_root, "sys", "kernel", "random", "boot_id"), "w") as f:
             f.write("0badc0de-0000-4000-8000-000000000001\n")
     a = appmod.App(cfg, runner=net or Net(), mono=mono, log=lambda ev, **f: logs.append(dict(f, event=ev)),
-                   proc_root=proc_root)
+                   proc_root=proc_root, **(app_kw or {}))
     tc.addCleanup(a.close)
     a.mono_clock = mono
     a.test_logs = logs
@@ -77,8 +77,8 @@ def make_app(tc, net=None, proc_root=None, **env):
 
 
 class Servers:
-    def __init__(self, tc, app):
-        self.web = web.WebServers(app)
+    def __init__(self, tc, app, **web_kw):
+        self.web = web.WebServers(app, **web_kw)
         self.web.start_tv()
         app.tick()
         self.web.sync_lan()

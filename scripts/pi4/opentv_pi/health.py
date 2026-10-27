@@ -11,7 +11,7 @@ from .nethelper import default_runner
 MANIFEST = "/opt/opentv/MANIFEST.sha256"
 LINE_RE = re.compile(r"([0-9a-f]{64})  (/[^\n]+)")
 UNITS_REQUIRED = ("opentv.service", "opentv-net-helper.path", "opentv-ap-guard.timer")
-UNITS_OPTIONAL = ("opentv-kiosk.service",)
+UNITS_OPTIONAL = ("opentv-kiosk.service", "opentv-cec.timer")
 
 
 def sha256_file(path):

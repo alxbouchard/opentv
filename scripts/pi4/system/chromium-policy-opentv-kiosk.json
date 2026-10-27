@@ -1,0 +1,39 @@
+{
+  "AllowFileSelectionDialogs": false,
+  "AutofillAddressEnabled": false,
+  "AutofillCreditCardEnabled": false,
+  "BookmarkBarEnabled": false,
+  "BrowserAddPersonEnabled": false,
+  "BrowserGuestModeEnabled": false,
+  "BrowserSignin": 0,
+  "DefaultGeolocationSetting": 2,
+  "DefaultNotificationsSetting": 2,
+  "DefaultPopupsSetting": 2,
+  "DeveloperToolsAvailability": 2,
+  "DownloadRestrictions": 3,
+  "EditBookmarksEnabled": false,
+  "EnableMediaRouter": false,
+  "ExtensionInstallBlocklist": [
+    "*"
+  ],
+  "IncognitoModeAvailability": 1,
+  "MetricsReportingEnabled": false,
+  "PasswordManagerEnabled": false,
+  "PrintingEnabled": false,
+  "SearchSuggestEnabled": false,
+  "SpellcheckEnabled": false,
+  "SyncDisabled": true,
+  "TaskManagerEndProcessEnabled": false,
+  "TranslateEnabled": false,
+  "URLAllowlist": [
+    "http://127.0.0.1",
+    "file:///opt/opentv/share/ui/fallback.html",
+    "about:blank"
+  ],
+  "URLBlocklist": [
+    "*",
+    "chrome://*",
+    "chrome-untrusted://*",
+    "devtools://*"
+  ]
+}

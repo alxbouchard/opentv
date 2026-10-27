@@ -71,6 +71,8 @@ listed() {   # listed <ligne> <liste> : appartenance exacte, sans pipe (pas de f
 in_scope() {   # chemins qu'OpenTV a le droit de retirer (même périmètre que uninstall.sh)
   case "$1" in
     /opt/opentv/*|/etc/systemd/system/opentv*|/etc/sysusers.d/opentv.conf|/etc/tmpfiles.d/opentv.conf|/etc/pam.d/opentv-kiosk) return 0 ;;
+    /etc/systemd/logind.conf.d/opentv-kiosk.conf|/etc/chromium/policies/managed/opentv-kiosk.json) return 0 ;;
+    /etc/chromium-browser/policies/managed/opentv-kiosk.json) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -80,17 +82,24 @@ FILES=()
 add() { FILES+=("$1|$2|$3"); }
 for f in "$HERE"/opentv_pi/*.py; do add "$f" "/opt/opentv/lib/opentv_pi/$(basename "$f")" 644; done
 for b in opentv-pi opentv-mcp opentv-net-helper opentv-kiosk-browser; do add "$HERE/bin/$b" "/opt/opentv/bin/$b" 755; done
-for u in tv.html tv.js tv.css setup.css setup.js fallback.html; do add "$HERE/ui/$u" "/opt/opentv/share/ui/$u" 644; done
+for u in tv.html tv.js keys.js tv.css setup.css setup.js remote.css remote.js fallback.html; do add "$HERE/ui/$u" "/opt/opentv/share/ui/$u" 644; done
 add "$REPO/native/app/qrcode.js" /opt/opentv/share/ui/qrcode.js 644                  # réutilisé tel quel
 add "$REPO/scripts/nanopi/opentv_foryou.py" /opt/opentv/lib/foryou/opentv_foryou.py 644  # moteur « Pour toi »
 add "$REPO/scripts/nanopi/opentv_bridge.py" /opt/opentv/lib/foryou/opentv_bridge.py 644  # load_catalogue_meta
 for u in opentv.service opentv-kiosk.service opentv-net-helper.service opentv-net-helper.path \
-         opentv-ap-guard.service opentv-ap-guard.timer; do
+         opentv-ap-guard.service opentv-ap-guard.timer opentv-cec.service opentv-cec.timer \
+         opentv-cec-announce.service; do
   add "$HERE/systemd/$u" "/etc/systemd/system/$u" 644
 done
 add "$HERE/system/sysusers-opentv.conf" /etc/sysusers.d/opentv.conf 644
 add "$HERE/system/tmpfiles-opentv.conf" /etc/tmpfiles.d/opentv.conf 644
 add "$HERE/system/pam-opentv-kiosk" /etc/pam.d/opentv-kiosk 644
+# kiosque durci, fichiers dédiés et réversibles : touches Power/Reboot/Suspend ignorées par logind (la boîte ne
+# s'éteint pas sur la touche Power d'une télécommande), politique Chromium gérée (DevTools, impression,
+# téléchargements et navigation hors de 127.0.0.1 bloqués) aux deux emplacements possibles de Raspberry Pi OS
+add "$HERE/system/logind-opentv-kiosk.conf" /etc/systemd/logind.conf.d/opentv-kiosk.conf 644
+add "$HERE/system/chromium-policy-opentv-kiosk.json" /etc/chromium/policies/managed/opentv-kiosk.json 644
+add "$HERE/system/chromium-policy-opentv-kiosk.json" /etc/chromium-browser/policies/managed/opentv-kiosk.json 644
 add "$HERE/uninstall.sh" /opt/opentv/uninstall.sh 755
 add "$HERE/README.md" /opt/opentv/README.md 644
 add "$HERE/opentv-pi.env.example" /opt/opentv/opentv-pi.env.example 644
@@ -125,6 +134,25 @@ VIDEO_ARG="video=HDMI-A-1:1920x1080@60"
 VIDEO_REC="/var/lib/opentv-install/cmdline-video.added"
 OLD_LIST=""
 if [ -f "$(dest "$MANIFEST")" ]; then OLD_LIST="$(awk '{print $2}' "$(dest "$MANIFEST")")"; fi
+# dossiers système qu'OpenTV peut avoir à créer (hors /opt/opentv) : seuls ceux créés ici sont notés, et retirés
+# (s'ils sont vides) par uninstall.sh — un dossier livré par la distribution n'est jamais supprimé
+EXTRA_DIRS="/etc/systemd/logind.conf.d
+/etc/chromium
+/etc/chromium/policies
+/etc/chromium/policies/managed
+/etc/chromium-browser
+/etc/chromium-browser/policies
+/etc/chromium-browser/policies/managed"
+DIRS_REC="/var/lib/opentv-install/created-dirs.list"
+NEW_DIRS=()
+while IFS= read -r d; do
+  [ -n "$d" ] || continue
+  if [ ! -e "$(dest "$d")" ] && [ ! -L "$(dest "$d")" ]; then NEW_DIRS+=("$d"); fi
+done <<EOF
+$EXTRA_DIRS
+EOF
+DIRS_REC_CHANGED=0
+DIRS_REC_OLD=""
 NEW=()
 SAVED=()
 REMOVED=()
@@ -151,6 +179,15 @@ rollback() {
       cp -p -- "$(dest "$BK$CMDF")" "$(dest "$CMDF")" || echo "opentv-install: restauration impossible : $CMDF" >&2
     fi
     [ "$VIDEO_REC_NEW" = 1 ] && rm -f -- "$(dest "$VIDEO_REC")"
+    if [ "$DIRS_REC_CHANGED" = 1 ]; then
+      if [ -n "$DIRS_REC_OLD" ]; then printf '%s\n' "$DIRS_REC_OLD" > "$(dest "$DIRS_REC")"; else rm -f -- "$(dest "$DIRS_REC")"; fi
+    fi
+    local i
+    i=${#NEW_DIRS[@]}
+    while [ "$i" -gt 0 ]; do   # du plus profond au plus haut ; vides seulement
+      i=$((i - 1))
+      rmdir -- "$(dest "${NEW_DIRS[$i]}")" 2>/dev/null || true
+    done
   fi
   exit 1
 }
@@ -230,6 +267,21 @@ else
   say "cmdline.txt : $VIDEO_ARG ajouté — 1080p effectif au prochain redémarrage (sudo reboot)"
 fi
 
+# dossiers système créés par cette installation : notés pour une désinstallation exacte
+if [ ${#NEW_DIRS[@]} -gt 0 ]; then
+  if [ "$DRY" = 1 ]; then
+    say "[dry-run] dossiers créés (notés dans $DIRS_REC) : ${NEW_DIRS[*]}"
+  else
+    STARTED=1
+    mkdir -p -- "$(dirname "$(dest "$DIRS_REC")")"
+    if [ -f "$(dest "$DIRS_REC")" ]; then DIRS_REC_OLD="$(cat "$(dest "$DIRS_REC")")"; fi
+    DIRS_REC_CHANGED=1
+    for d in "${NEW_DIRS[@]}"; do
+      if ! listed "$d" "$DIRS_REC_OLD"; then printf '%s\n' "$d" >> "$(dest "$DIRS_REC")"; fi
+    done
+  fi
+fi
+
 ENVF="/etc/opentv/opentv.env"
 if [ ! -e "$(dest "$ENVF")" ]; then
   STARTED=1
@@ -274,11 +326,15 @@ post chown root:opentv "$ENVF"
 post systemctl daemon-reload
 if [ "$ENABLE" = 1 ]; then
   # opentv-ap-guard.timer : garde root du Wi-Fi temporaire, indépendante du service Python
-  post systemctl enable opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service
-  post systemctl restart opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service
+  # opentv-cec.timer : déclaration Playback « OpenTV » + remappage OK, sans réveil ni changement d’entrée
+  post systemctl enable opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
+    opentv-cec.timer
+  post systemctl restart opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
+    opentv-cec.timer
 fi
 if ! host python3 -I /opt/opentv/bin/opentv-pi health; then
   say "santé : à vérifier (sudo /opt/opentv/bin/opentv-pi health ; journalctl -u opentv -u opentv-kiosk)"
 fi
 if [ "$CMDLINE_CHANGED" = 1 ]; then say "1080p : redémarrer la boîte pour appliquer $VIDEO_ARG"; fi
+say "touche Power des télécommandes ignorée par la boîte (/etc/systemd/logind.conf.d/opentv-kiosk.conf) : effectif au prochain redémarrage (sudo reboot)"
 say "terminé. Retour arrière : sudo /opt/opentv/uninstall.sh   (ajouter --purge pour effacer l'état)"

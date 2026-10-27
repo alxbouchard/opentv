@@ -1,5 +1,7 @@
-"""HDMI-CEC : découverte seulement (lot MVP). `cec-ctl -d <dev>` sans option n'émet rien et ne configure rien ;
-aucune commande d'alimentation, de source ou de volume n'est envoyée."""
+"""HDMI-CEC : découverte seulement. `cec-ctl -d <dev>` sans option n'émet rien et ne configure rien ; aucune commande
+d'alimentation, de source ou de volume n'est envoyée ici. La déclaration Playback « OpenTV » et la source active sont
+le rôle séparé et borné de cecboot.py (opentv-cec.timer) ; ce module rapporte seulement l'état lu
+(configuration ours/empty/foreign, adresse logique obtenue)."""
 import glob
 import os
 import re
@@ -23,6 +25,13 @@ def discover(root="/", runner=default_runner, max_adapters=4):
         phys = PHYS_RE.search(out or "") if rc == 0 else None
         drv = DRIVER_RE.search(out or "") if rc == 0 else None
         pa = phys.group(1).lower() if phys else None
-        adapters.append({"device": dev, "readable": rc == 0, "driver": drv.group(1) if drv else None,
-                         "physical_address": pa, "tv_detected": bool(pa and pa != "f.f.f.f")})
+        entry = {"device": dev, "readable": rc == 0, "driver": drv.group(1) if drv else None,
+                 "physical_address": pa, "tv_detected": bool(pa and pa != "f.f.f.f")}
+        if rc == 0:   # état lu (aucune émission) : configuration Playback « OpenTV » posée par opentv-cec ?
+            from . import cecboot   # import tardif : cecboot dépend de ce module
+            info = cecboot.parse_info(out)
+            entry["configuration"] = cecboot.classify(info)
+            entry["logical_address_claimed"] = bool(info["mask"])
+            entry["adapter"] = info["adapter"]
+        adapters.append(entry)
     return {"adapters": adapters, "discovery_only": True}

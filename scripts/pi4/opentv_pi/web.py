@@ -4,6 +4,12 @@
   DNS rebinding, JSON borné). CSP stricte : aucun script en ligne, connexions vers soi uniquement.
 - LAN (0.0.0.0:OPENTV_SETUP_PORT, seulement pendant la configuration) : /setup (assistant en 3 étapes, utilisable
   sans JavaScript), /static/setup.css et /static/setup.js. Rien d'autre. Le jeton n'apparaît jamais dans un journal.
+- Télécommande sur téléphone (<adresse LAN actuelle>:OPENTV_REMOTE_PORT, jamais 0.0.0.0, seulement configuré et en
+  ligne ; écoute relancée si l'adresse change) : /r (appairage par QR seulement, puis pavé de navigation), POST
+  /r/pair, /r/cmd, /r/forget ; /static/remote.css|js. Host = adresse liée ou nom mDNS exact de la boîte (avec le
+  port) ; pairs IPv4 privés hors boucle locale ; pages en Referrer-Policy same-origin (le navigateur envoie alors
+  l'Origin réelle des formulaires ; « Origin: null » est toujours refusé). HTTP sur le LAN : prototype (aucun
+  certificat propre à l'appareil).
 """
 import hmac
 import html
@@ -11,11 +17,12 @@ import http.server
 import ipaddress
 import json
 import os
+import re
 import threading
 import time
 import urllib.parse
 
-from . import VERSION, bounded, validate, wifiscan
+from . import VERSION, bounded, phoneremote, validate, wifiscan
 from . import app as appmod   # constantes d'erreur du formulaire (app n'importe pas web : pas de cycle)
 
 TV_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; "
@@ -24,9 +31,17 @@ TV_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'sel
 # en ligne, aucune connexion (connect-src hérite de default-src 'none'), formulaires vers soi uniquement.
 SETUP_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; "
              "base-uri 'none'; frame-ancestors 'none'")
-TV_STATIC = {"tv.js": "application/javascript; charset=utf-8", "tv.css": "text/css; charset=utf-8",
+TV_STATIC = {"tv.js": "application/javascript; charset=utf-8", "keys.js": "application/javascript; charset=utf-8",
+             "tv.css": "text/css; charset=utf-8",
              "qrcode.js": "application/javascript; charset=utf-8", "setup.css": "text/css; charset=utf-8"}
 SETUP_STATIC = {"setup.css": "text/css; charset=utf-8", "setup.js": "application/javascript; charset=utf-8"}
+# Télécommande (téléphone) : un script de même origine (envoi sans rechargement), connexions vers soi seulement
+REMOTE_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
+              "form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+REMOTE_STATIC = {"remote.css": "text/css; charset=utf-8", "remote.js": "application/javascript; charset=utf-8"}
+REMOTE_COOKIE = "otv_remote"
+REMOTE_FORM_MAX = 512
+REMOTE_RETRY_S = 30.0   # écoute impossible (adresse pas encore prête) : nouvel essai au plus toutes les 30 s
 MAX_JSON = 2048
 TV_KEY_ERROR = "tv_key"   # 403 de /api/tv/* : clé de page périmée (service redémarré) -> tv.js recharge /tv, borné
 MAX_FORM = 4096
@@ -37,7 +52,7 @@ LEVEL_LABELS = (("none", "Aucun accès"), ("read", "Voir seulement"), ("feedback
 
 # Journal HTTP : erreurs et non-2xx toujours ; navigations de page (/tv, /setup) toujours (rares, bornées) ; succès
 # des requêtes répétitives (poll /api/tv/*, /static/*, /healthz) non journalisés, un échantillon agrégé tous les N.
-QUIET_OK_PREFIXES = ("/api/tv/", "/static/")
+QUIET_OK_PREFIXES = ("/api/tv/", "/static/", "/r/cmd")
 QUIET_OK_PATHS = ("/healthz",)
 HTTP_OK_SAMPLE = 600
 BUSY_LOG_INTERVAL_S = 60.0
@@ -63,11 +78,57 @@ class _Server(bounded.BoundedServerMixIn, http.server.HTTPServer):
             self.app.log("http_busy", port=self.server_address[1], refused=self.busy_count)
 
 
+class _PerIPServer(_Server):
+    """Serveur LAN permanent (télécommande) : en plus du plafond global, au plus max_per_ip connexions servies par
+    adresse source ; au-delà, 503 immédiat. Un appareil du LAN ne peut pas occuper tous les emplacements."""
+    max_per_ip = 4
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.ip_lock = threading.Lock()
+        self.ip_active = {}
+        self.req_ip = {}
+
+    def process_request(self, request, client_address):
+        ip = client_address[0]
+        with self.ip_lock:
+            if self.ip_active.get(ip, 0) >= self.max_per_ip:
+                refuse = True
+            else:
+                refuse = False
+                self.ip_active[ip] = self.ip_active.get(ip, 0) + 1
+                self.req_ip[id(request)] = ip
+        if refuse:
+            self._slots_sem()
+            self.busy_count += 1
+            try:
+                request.settimeout(bounded.BUSY_SEND_TIMEOUT_S)
+                request.sendall(self.busy_response)
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            self.on_busy()
+            return
+        super().process_request(request, client_address)
+
+    def shutdown_request(self, request):   # appelé une fois par connexion, sur tous les chemins
+        with self.ip_lock:
+            ip = self.req_ip.pop(id(request), None)
+            if ip is not None:
+                n = self.ip_active.get(ip, 1) - 1
+                if n > 0:
+                    self.ip_active[ip] = n
+                else:
+                    self.ip_active.pop(ip, None)
+        super().shutdown_request(request)
+
+
 class _Base(http.server.BaseHTTPRequestHandler):
     server_version = "OpenTV-Pi"
     sys_version = ""
     timeout = 10
     csp = TV_CSP
+    referrer_policy = "no-referrer"
 
     @property
     def app(self):
@@ -104,7 +165,7 @@ class _Base(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Content-Security-Policy", self.csp)
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Referrer-Policy", self.referrer_policy)
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
@@ -190,6 +251,11 @@ class TVHandler(_Base):
                 return self.send_json(200, self.app.tv_state())
             if path == "/api/tv/foryou":
                 return self.send_json(200, self.app.tv_foryou())
+            if path == "/api/tv/remote":   # longue requête bornée : touches du téléphone pour la page TV
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query, max_num_fields=1)
+                a = (q.get("after") or ["-1"])[0]
+                after = int(a) if re.fullmatch(r"-1|[0-9]{1,12}", a) else -1
+                return self.send_json(200, self.app.remote_events(after))
         self.send(404, "introuvable", "text/plain; charset=utf-8")
 
     def do_POST(self):
@@ -217,6 +283,9 @@ class TVHandler(_Base):
                                                                       "message": msg})
         if path == "/api/tv/setup":
             self.app.request_setup()
+            return self.send_json(200, {"ok": True})
+        if path == "/api/tv/remote/revoke":
+            self.app.remote_revoke()
             return self.send_json(200, {"ok": True})
         self.send_json(404, {"ok": False, "error": "not_found"})
 
@@ -364,8 +433,8 @@ def _agent_fields(ctx, values, plan):
     return "".join(simple), (
         "<details class=\"adv\"%s><summary>Plus d'options</summary>"
         "<label>Nom de la TV<input name=\"name\" maxlength=\"32\" required value=\"%s\" autocomplete=\"off\"></label>"
-        "%s<p class=\"hint\">Aucun agent n'a accès par défaut. Un accès choisi ici s'active ensuite sur la boîte "
-        "(<code>opentv-pi agent issue</code>). Aucun agent ne reçoit de mot de passe.</p></details>"
+        "%s<p class=\"hint\">Les assistants Hermit et Hermes n'ont aucun accès par défaut. Aucun assistant ne reçoit "
+        "ton mot de passe Wi-Fi.</p></details>"
         % (" open" if is_open else "", e(name or "", quote=True), "".join(adv)))
 
 
@@ -429,15 +498,33 @@ def setup_form(token, ctx, error=None, values=None, networks=None, choice=None, 
     return _page("Configurer OpenTV", inner, script=plan["step"] == 2)
 
 
-def setup_result(kind):
+REMOTE_LATER = ("<p class=\"hint\">Télécommande sur téléphone (facultatif) : quand OpenTV s'affiche, garde ce "
+                "téléphone sur le <strong>même Wi-Fi que la TV</strong> et scanne le QR «\u00a0Télécommande\u00a0» "
+                "à droite de l'écran.</p>")
+
+
+def setup_result(kind, remote_link=None, via_hotspot=False):
+    if kind == "done" and remote_link:   # télécommande proposée dans le parcours : un toucher, aucun code à copier
+        return _page("OpenTV", _progress(3) + "<h1>C'est prêt !</h1>"
+                     "<p class=\"lead\">OpenTV s'affiche maintenant sur la TV.</p>"
+                     "<a class=\"primary\" href=\"%s\">Utiliser ce téléphone comme télécommande</a>"
+                     "<p class=\"hint\">Facultatif. Ce téléphone doit rester sur le même Wi-Fi que la TV. Tu peux "
+                     "aussi fermer cette page.</p>" % html.escape(remote_link, quote=True))
     if kind == "applying":
+        if via_hotspot:   # le téléphone est sur le Wi-Fi temporaire, qui va disparaître : reprise expliquée
+            after = ("<p class=\"hint\">Ce téléphone va perdre le Wi-Fi temporaire «\u00a0OpenTV\u00a0» : c'est "
+                     "normal. Remets-le ensuite sur ton Wi-Fi habituel (le même que la TV) : la télécommande sur "
+                     "téléphone se trouve alors par le QR «\u00a0Télécommande\u00a0» à droite de l'écran.</p>")
+        else:
+            after = REMOTE_LATER
         return _page("OpenTV", _progress(3) + "<h1>C'est presque fini !</h1>"
                      "<p class=\"lead\">Regarde la TV : elle se connecte à ton Wi-Fi (moins d'une minute).</p>"
                      "<p>Si le mot de passe est refusé, la TV affiche un nouveau QR : scanne-le pour réessayer.</p>"
-                     "<p class=\"hint\">Ton téléphone peut perdre le Wi-Fi «\u00a0OpenTV\u00a0» : c'est normal.</p>")
+                     + after)
     if kind == "done":
         return _page("OpenTV", _progress(3) + "<h1>C'est prêt !</h1>"
-                     "<p class=\"lead\">OpenTV s'affiche maintenant sur la TV.</p><p>Tu peux fermer cette page.</p>")
+                     "<p class=\"lead\">OpenTV s'affiche maintenant sur la TV.</p><p>Tu peux fermer cette page.</p>"
+                     + REMOTE_LATER)
     if kind == "bad_request":
         return _page("OpenTV", "<h1>Adresse invalide</h1><p class=\"lead\">Scanne de nouveau le QR affiché sur la TV."
                                "</p>")
@@ -490,7 +577,15 @@ class LANHandler(_Base):
         except (ValueError, UnicodeDecodeError):
             return self.send(400, setup_result("denied"))
         form = {k: v[0] for k, v in q.items() if len(v) == 1}
+        via_hotspot = self.app.setup_context()["net_mode"] == "hotspot"
         code, kind, err = self.app.setup_submit(form, client=self.client_address[0])
+        if kind == "done":   # ouvrir tout de suite la télécommande pour que le bouton de la page fonctionne
+            ws = getattr(self.server, "webservers", None)
+            if ws is not None:
+                ws.sync_remote()
+            return self.send(code, setup_result(kind, self.app.remote_pair_link()))
+        if kind == "applying":
+            return self.send(code, setup_result(kind, via_hotspot=via_hotspot))
         if kind == "form":   # jamais le mot de passe : il n'est pas dans vals
             vals = {k: form.get(k) for k in ("name", "net", "ssid", "hidden", "agent_muse", "agent_hermit",
                                              "agent_hermes")}
@@ -504,16 +599,252 @@ class LANHandler(_Base):
         self.send(code, setup_result(kind))
 
 
+# --------------------------------------------------------------------------- télécommande sur téléphone (LAN)
+PAD = ((None, ("up", "▲", "Haut"), None),
+       (("left", "◀", "Gauche"), ("ok", "OK", "OK"), ("right", "▶", "Droite")),
+       (None, ("down", "▼", "Bas"), None))
+
+
+def _rpage(title, inner, script=False):
+    # zoom laissé libre (accessibilité) ; referrer same-origin : les formulaires envoient l'Origin réelle
+    return ("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            "<meta name=\"referrer\" content=\"same-origin\"><meta name=\"color-scheme\" content=\"dark\">"
+            "<title>%s</title><link rel=\"stylesheet\" href=\"/static/remote.css\">%s</head>"
+            "<body><main>%s</main></body></html>"
+            % (html.escape(title), "<script src=\"/static/remote.js\" defer></script>" if script else "", inner))
+
+
+def remote_scan_page(name, error=None):
+    """Téléphone non appairé : explication en 3 gestes, aucun champ, rien à recopier."""
+    e = html.escape
+    return _rpage("Télécommande OpenTV", (
+        "<h1>Télécommande</h1>%s<p class=\"lead\">Pour piloter la TV «\u00a0%s\u00a0» avec ce téléphone :</p>"
+        "<ol class=\"howto\"><li>Mets ce téléphone sur le <strong>même Wi-Fi que la TV</strong>.</li>"
+        "<li>Ouvre l'appareil photo et vise le QR «\u00a0Télécommande\u00a0» à droite de l'écran OpenTV.</li>"
+        "<li>Touche «\u00a0Oui, utiliser ce téléphone\u00a0».</li></ol>"
+        % ("<p class=\"err\" role=\"alert\">%s</p>" % e(error) if error else "", e(name))))
+
+
+def remote_confirm_page(name, secret):
+    e = html.escape
+    return _rpage("Télécommande OpenTV", (
+        "<h1>Télécommande</h1><p class=\"lead\">Utiliser ce téléphone pour la TV «\u00a0%s\u00a0» ?</p>"
+        "<form method=\"post\" action=\"/r/pair\"><input type=\"hidden\" name=\"p\" value=\"%s\">"
+        "<button type=\"submit\" class=\"primary\">Oui, utiliser ce téléphone</button></form>"
+        "<p class=\"hint\">Il restera connecté tant qu'il sert au moins une fois par mois. Pour l'oublier : bouton en "
+        "bas du pavé, ou Réglages sur la TV.</p>"
+        % (e(name), e(secret, quote=True))))
+
+
+def remote_pad_page(name, csrf):
+    e = html.escape
+    cells = []
+    for row in PAD:
+        for b in row:
+            cells.append("<span></span>" if b is None else
+                         "<button type=\"submit\" name=\"a\" value=\"%s\" class=\"k %s\" aria-label=\"%s\">%s</button>"
+                         % (b[0], b[0], e(b[2]), e(b[1])))
+    c = e(csrf, quote=True)
+    return _rpage("Télécommande OpenTV", (
+        "<h1 class=\"tv\">%s</h1>"
+        "<form method=\"post\" action=\"/r/cmd\" id=\"pad\"><input type=\"hidden\" name=\"c\" value=\"%s\">"
+        "<div class=\"dpad\">%s</div><div class=\"row2\">"
+        "<button type=\"submit\" name=\"a\" value=\"back\" class=\"k back\">↩ Retour</button>"
+        "<button type=\"submit\" name=\"a\" value=\"home\" class=\"k home\">⌂ Accueil</button></div></form>"
+        "<p id=\"status\" class=\"status\" role=\"status\" aria-live=\"polite\"></p>"
+        "<p class=\"hint\">Astuce : ajoute cette page à l'écran d'accueil (bouton Partager, puis «\u00a0Sur l'écran "
+        "d'accueil\u00a0») pour l'ouvrir comme une appli. Ce téléphone doit rester sur le même Wi-Fi que la TV.</p>"
+        "<p class=\"hint\">Volume et marche/arrêt : télécommande de la TV (pas sur ce téléphone).</p>"
+        "<form method=\"post\" action=\"/r/forget\" class=\"forget\"><input type=\"hidden\" name=\"c\" value=\"%s\">"
+        "<button type=\"submit\">Oublier ce téléphone</button></form>"
+        % (e(name), c, "".join(cells), c)), script=True)
+
+
+def remote_message_page(title, text, link=True):
+    e = html.escape
+    return _rpage("Télécommande OpenTV", "<h1>%s</h1><p class=\"lead\">%s</p>%s" % (
+        e(title), e(text), "<a class=\"primary\" href=\"/r\">Réessayer</a>" if link else ""))
+
+
+def lan_peer(ip_text):
+    """Pair accepté par défaut : IPv4 privée du réseau local, jamais la boucle locale ni le lien local."""
+    try:
+        ip = ipaddress.ip_address(ip_text)
+    except ValueError:
+        return False
+    return ip.version == 4 and ip.is_private and not (ip.is_loopback or ip.is_link_local or ip.is_unspecified or
+                                                      ip.is_multicast)
+
+
+class RemoteHandler(_Base):
+    """Téléphone -> /r. Contrôles : pair IPv4 privé (hors boucle locale), Host = adresse LAN liée ou nom mDNS exact de
+    la boîte, avec le port réel (DNS rebinding, Host étranger, loopback ou public refusés), POST seulement pour agir,
+    Origin exactement égale à http://<Host> (« null » toujours refusé ; sans Origin : Sec-Fetch-Site/Referer
+    cohérents), jeton CSRF par téléphone, cookie HttpOnly SameSite=Lax (Secure dès qu'un HTTPS propre à l'appareil
+    existera). Referrer-Policy same-origin pour que les vrais navigateurs envoient l'Origin des formulaires."""
+    csp = REMOTE_CSP
+    referrer_policy = "same-origin"
+
+    def _peer_host_ok(self):
+        srv = self.server
+        if not srv.peer_ok(self.client_address[0]):
+            self.send(403, "interdit", "text/plain; charset=utf-8")
+            return False
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host not in self.app.remote_hosts(srv.lan_ip, srv.server_address[1]):
+            self.send(421, "hôte refusé", "text/plain; charset=utf-8")
+            return False
+        self.origin = "http://" + host
+        return True
+
+    def _guard(self):
+        if not self._peer_host_ok():
+            return False
+        remote = self.app.remote
+        if remote is None or not self.app.want_remote():
+            self.send(503, remote_message_page("Télécommande indisponible",
+                                               "La TV est en configuration ou hors ligne. Vérifie que ce téléphone "
+                                               "est sur le même Wi-Fi que la TV, puis réessaie dans un moment."))
+            return False
+        self.remote = remote
+        return True
+
+    def _origin_ok(self):
+        o = self.headers.get("Origin")
+        if o is not None:   # « null » (politique no-referrer, contexte opaque) n'est jamais égal : refus
+            return o.strip().lower() == self.origin
+        sfs = self.headers.get("Sec-Fetch-Site")
+        if sfs is not None and sfs not in ("same-origin", "none"):
+            return False
+        ref = self.headers.get("Referer")
+        return not ref or ref.lower().startswith(self.origin + "/")
+
+    def _cookie_token(self):
+        raw = self.headers.get("Cookie") or ""
+        if len(raw) > 4096:
+            return None
+        for part in raw.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == REMOTE_COOKIE:
+                return v.strip()
+        return None
+
+    def _set_cookie(self, tok):
+        # HTTP LAN (prototype) : pas de « Secure » possible ; à ajouter avec le futur HTTPS propre à l'appareil
+        return "%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Lax" % (REMOTE_COOKIE, tok,
+                                                                      int(phoneremote.SESSION_IDLE_S))
+
+    def _clear_cookie(self):
+        return "%s=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax" % REMOTE_COOKIE
+
+    def _wants_json(self):
+        return "application/json" in (self.headers.get("Accept") or "")
+
+    def _redirect(self, cookie=None):
+        extra = {"Location": "/r"}
+        if cookie:
+            extra["Set-Cookie"] = cookie
+        self.send(303, "", "text/plain; charset=utf-8", extra)
+
+    def do_GET(self):
+        u = urllib.parse.urlsplit(self.path)
+        if u.path.startswith("/static/"):   # mêmes contrôles de pair et de Host que les pages
+            return self.send_static(u.path[len("/static/"):], REMOTE_STATIC) if self._peer_host_ok() else None
+        if not self._guard():
+            return
+        if u.path == "/":
+            return self._redirect()
+        if u.path != "/r":
+            return self.send(404, "introuvable", "text/plain; charset=utf-8")
+        try:
+            q = urllib.parse.parse_qs(u.query, max_num_fields=1)
+        except ValueError:
+            q = {}
+        name = self.app.remote_device_name()
+        phone = self.remote.session(self._cookie_token())
+        if phone is not None:   # déjà appairé : le pavé (un ?p= éventuel n'est jamais consommé)
+            return self.send(200, remote_pad_page(name, self.remote.csrf(phone)))
+        p = (q.get("p") or [""])[0]
+        if p:   # lecture seule : aucun appairage, aucun essai compté
+            if self.remote.check_pair_secret(p):
+                return self.send(200, remote_confirm_page(name, p))
+            return self.send(403, remote_scan_page(name, "Ce QR a expiré ou a déjà servi : scanne celui affiché "
+                                                         "maintenant sur la TV."))
+        self.send(200, remote_scan_page(name))
+
+    def _form(self):
+        if (self.headers.get("Content-Type") or "").split(";")[0].strip() != "application/x-www-form-urlencoded":
+            return None
+        raw = self.read_body(REMOTE_FORM_MAX)
+        if raw is None:
+            return None
+        try:
+            q = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True, max_num_fields=4)
+        except (ValueError, UnicodeDecodeError):
+            return None
+        return {k: v[0] for k, v in q.items() if len(v) == 1}
+
+    def do_POST(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if path not in ("/r/pair", "/r/cmd", "/r/forget"):
+            return self.send(404, "introuvable", "text/plain; charset=utf-8")
+        if not self._guard():
+            return
+        js = self._wants_json()
+        if not self._origin_ok():
+            return self.send_json(403, {"ok": False, "error": "origin"}) if js else \
+                self.send(403, remote_message_page("Refusé", "Requête venue d'une autre page."))
+        form = self._form()
+        if form is None:
+            return self.send_json(400, {"ok": False, "error": "bad_request"}) if js else \
+                self.send(400, remote_message_page("Requête invalide", "Recharge la page."))
+        ip = self.client_address[0]
+        if path == "/r/pair":
+            tok, err = self.remote.pair_phone(ip, form.get("p"))
+            if tok:
+                return self._redirect(self._set_cookie(tok))
+            if err == "limited":
+                return self.send(429, remote_message_page("Trop d'essais", "Attends quelques minutes puis scanne le "
+                                                                           "QR affiché sur la TV."))
+            return self.send(403, remote_scan_page(self.app.remote_device_name(),
+                                                   "Ce QR a expiré ou a déjà servi : scanne celui affiché maintenant "
+                                                   "sur la TV."))
+        phone = self.remote.session(self._cookie_token())
+        if phone is None:
+            return self.send_json(401, {"ok": False, "error": "not_paired"}) if js else self._redirect()
+        if not self.remote.check_csrf(phone, form.get("c")):   # jamais d'oubli : le pavé est simplement réaffiché
+            return self.send_json(403, {"ok": False, "error": "csrf"}) if js else self._redirect()
+        if path == "/r/forget":
+            self.remote.forget(phone["id"])
+            return self._redirect(self._clear_cookie())
+        res = self.remote.command(phone, ip, form.get("a"))
+        code = {"ok": 200, "limited": 429, "bad_action": 400}[res]
+        if js:
+            return self.send(code, json.dumps({"ok": res == "ok", "error": None if res == "ok" else res}),
+                             "application/json; charset=utf-8")
+        self._redirect()
+
+
 class WebServers:
-    def __init__(self, app, bind_lan="0.0.0.0"):
+    """remote_bind / remote_peer_ok : coutures de test seulement (le service réel écoute sur l'adresse LAN elle-même
+    et n'accepte que des pairs lan_peer)."""
+
+    def __init__(self, app, bind_lan="0.0.0.0", remote_bind=None, remote_peer_ok=lan_peer, mono=time.monotonic):
         self.app, self.bind_lan = app, bind_lan
-        self.tv = self.lan = None
+        self.remote_bind = remote_bind or (lambda ip: ip)
+        self.remote_peer_ok = remote_peer_ok
+        self.mono = mono
+        self.remote_retry = (None, -1e9)   # (adresse, instant) du dernier échec d'écoute
+        self.tv = self.lan = self.remote = None
         self.lock = threading.Lock()
 
-    @staticmethod
-    def _start(addr, handler, app):
-        srv = _Server(addr, handler)
+    def _start(self, addr, handler, app, cls=_Server, **attrs):
+        srv = cls(addr, handler)
         srv.app = app
+        srv.webservers = self
+        for k, v in attrs.items():
+            setattr(srv, k, v)
         t = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.5}, daemon=True)
         t.start()
         return srv
@@ -541,6 +872,33 @@ class WebServers:
                 self._stop(self.lan)
                 self.lan, self.app.lan_port_actual = None, None
                 self.app.log("setup_listener", state="closed")
+        self.sync_remote()
+
+    def sync_remote(self):
+        """Télécommande téléphone : ouverte seulement configuré + en ligne (Ethernet/Wi-Fi), jamais en configuration,
+        sur l'adresse LAN actuelle ; l'adresse change (DHCP, Ethernet ↔ Wi-Fi) ⇒ écoute relancée sur la nouvelle."""
+        ip = self.app.remote_bind_ip()
+        with self.lock:
+            if self.remote is not None and self.remote.lan_ip != ip:
+                self._stop(self.remote)
+                self.remote = None
+                self.app.remote_port_actual = self.app.remote_ip_actual = None
+                self.app.log("remote_listener", state="closed", reason="address_changed" if ip else "off")
+            if ip is None or self.remote is not None:
+                return
+            last_ip, at = self.remote_retry
+            if last_ip == ip and self.mono() - at < REMOTE_RETRY_S:
+                return
+            try:
+                srv = self._start((self.remote_bind(ip), self.app.cfg.remote_port), RemoteHandler,
+                                              self.app, _PerIPServer, lan_ip=ip, peer_ok=self.remote_peer_ok)
+            except OSError as e:
+                self.remote_retry = (ip, self.mono())
+                self.app.log("remote_listener_error", error=type(e).__name__)
+                return
+            self.remote, self.remote_retry = srv, (None, -1e9)
+            self.app.remote_port_actual, self.app.remote_ip_actual = srv.server_address[1], ip
+            self.app.log("remote_listener", state="open", port=self.app.remote_port_actual)
 
     def tv_port(self):
         return self.tv.server_address[1] if self.tv else None
@@ -548,9 +906,14 @@ class WebServers:
     def lan_port(self):
         return self.lan.server_address[1] if self.lan else None
 
+    def remote_port(self):
+        return self.remote.server_address[1] if self.remote else None
+
     def stop(self):
         with self.lock:
             self._stop(self.lan)
-            self.lan = None
+            self._stop(self.remote)
+            self.lan = self.remote = None
+            self.app.remote_port_actual = self.app.remote_ip_actual = None
         self._stop(self.tv)
         self.tv = None

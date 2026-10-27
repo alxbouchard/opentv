@@ -1,0 +1,42 @@
+[Unit]
+Description=OpenTV Pi - annonce HDMI-CEC manuelle et consentie (source active)
+Documentation=file:///opt/opentv/README.md
+After=systemd-udevd.service opentv-kiosk.service
+ConditionPathExistsGlob=/dev/cec*
+
+[Service]
+Type=oneshot
+User=opentv
+Group=opentv
+# Unité manuelle seulement : jamais activée par l'installateur ni par une minuterie.
+SupplementaryGroups=video input
+ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-pi cec-bootstrap --force-announce
+TimeoutStartSec=60
+RuntimeDirectory=opentv-cec
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+DevicePolicy=closed
+DeviceAllow=char-cec rw
+DeviceAllow=char-input rw
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

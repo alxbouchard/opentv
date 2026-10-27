@@ -45,7 +45,7 @@ input:focus, select:focus { border-color: #2f81f7; outline: none; }
   border: 2px solid #30363d; background: #161b22; font-weight: 600; cursor: pointer; }
 .check input { flex: none; width: 26px; height: 26px; margin: 1px 0 0; accent-color: #2f81f7; }
 .check small { display: block; font-weight: 400; font-size: 15px; color: #8b949e; margin-top: 2px; }
-.primary { display: block; width: 100%; min-height: 64px; font: inherit; font-size: 22px; font-weight: 700;
+.primary { display: block; text-align: center; text-decoration: none; box-sizing: border-box; width: 100%; min-height: 64px; font: inherit; font-size: 22px; font-weight: 700;
   padding: 16px; border-radius: 16px; border: 0; background: #1f6feb; color: #fff; margin: 22px 0 6px; cursor: pointer; }
 .primary:disabled { background: #30363d; color: #8b949e; }
 .adv { margin: 18px 0 0; border: 2px solid #30363d; border-radius: 14px; padding: 0 16px; }

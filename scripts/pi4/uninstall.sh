@@ -2,8 +2,10 @@
 # OpenTV Raspberry Pi 4 — désinstallation / retour arrière.
 #
 #   sudo /opt/opentv/uninstall.sh            arrête les services et la garde, ARRÊTE ET SUPPRIME le Wi-Fi temporaire
-#                                            OpenTV, retire les fichiers du manifeste, restaure les fichiers d'origine
-#                                            sauvegardés, retire video=… de cmdline.txt, rend tty1
+#                                            OpenTV, libère la CEC (Playback « OpenTV » effacé, touche OK du noyau
+#                                            rétablie), retire les fichiers du manifeste (dont le drop-in logind de
+#                                            la touche Power et la politique Chromium du kiosque), restaure les
+#                                            fichiers d'origine sauvegardés, retire video=… de cmdline.txt, rend tty1
 #   ... --purge                              efface aussi l'état (/var/lib/opentv*, /etc/opentv)
 #   ... --purge --forget-wifi                oublie aussi le Wi-Fi configuré par OpenTV (opentv-wifi)
 #   ... --dry-run | --root <dossier>         plan seul / rootfs de test
@@ -22,7 +24,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1; shift ;;
     --purge) PURGE=1; shift ;;
     --forget-wifi) FORGET_WIFI=1; shift ;;
-    -h|--help) sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "option inconnue : $1" ;;
   esac
 done
@@ -43,7 +45,7 @@ host() {
 MANIFEST="$(dest /opt/opentv/MANIFEST.sha256)"
 # 1) plus rien ne peut (re)lancer le point d'accès : service, helper et garde arrêtés
 host systemctl disable --now opentv-kiosk.service opentv.service opentv-net-helper.path opentv-net-helper.service \
-  opentv-ap-guard.timer opentv-ap-guard.service
+  opentv-ap-guard.timer opentv-ap-guard.service opentv-cec.timer opentv-cec.service opentv-cec-announce.service
 # 2) Wi-Fi temporaire OpenTV arrêté et supprimé AVANT tout retrait de fichier (normal comme --purge) ; argv fixes
 NM="/etc/NetworkManager/system-connections"
 AP_ID="opentv-setup-ap"
@@ -59,11 +61,19 @@ if [ -e "$(dest "$NM/$CAND_ID.nmconnection")" ] || [ -L "$(dest "$NM/$CAND_ID.nm
   act rm -f -- "$(dest "$NM/$CAND_ID.nmconnection")"
 fi
 host nmcli connection delete id "$CAND_ID"
-# 3) fichiers
+# 3) CEC : retour arrière borné AVANT le retrait des fichiers (le code est encore installé). N'efface que la
+#    configuration Playback « OpenTV » et ne rétablit que la touche Select modifiée par OpenTV ; témoin /run retiré.
+if [ -f "$(dest /opt/opentv/bin/opentv-pi)" ]; then
+  host python3 -I /opt/opentv/bin/opentv-pi cec-bootstrap --release
+fi
+if [ -e "$(dest /run/opentv-cec)" ] || [ -L "$(dest /run/opentv-cec)" ]; then act rm -rf -- "$(dest /run/opentv-cec)"; fi
+# 4) fichiers
 
 if [ -f "$MANIFEST" ]; then
   while read -r _ p; do
     case "$p" in /opt/opentv/*|/etc/systemd/system/opentv*|/etc/sysusers.d/opentv.conf|/etc/tmpfiles.d/opentv.conf|/etc/pam.d/opentv-kiosk) ;;
+      /etc/systemd/logind.conf.d/opentv-kiosk.conf|/etc/chromium/policies/managed/opentv-kiosk.json) ;;
+      /etc/chromium-browser/policies/managed/opentv-kiosk.json) ;;
       *) [ -z "$p" ] || say "ignoré (hors périmètre OpenTV) : $p"; continue ;; esac
     if [ -e "$(dest "$p")" ]; then act rm -f -- "$(dest "$p")"; fi
   done < "$MANIFEST"
@@ -90,6 +100,28 @@ if [ -f "$MANIFEST" ]; then
   done
 else
   say "manifeste absent : rien à retirer"
+fi
+
+# dossiers système créés par install.sh (liste fermée) : retirés seulement s'ils sont vides, du plus profond au plus haut
+DIRS_REC="$(dest /var/lib/opentv-install/created-dirs.list)"
+if [ -f "$DIRS_REC" ]; then
+  DIRS=()
+  while IFS= read -r d; do
+    case "$d" in
+      /etc/systemd/logind.conf.d|/etc/chromium|/etc/chromium/policies|/etc/chromium/policies/managed) DIRS+=("$d") ;;
+      /etc/chromium-browser|/etc/chromium-browser/policies|/etc/chromium-browser/policies/managed) DIRS+=("$d") ;;
+      *) [ -z "$d" ] || say "ignoré (hors périmètre OpenTV) : $d" ;;
+    esac
+  done < "$DIRS_REC"
+  i=${#DIRS[@]}
+  while [ "$i" -gt 0 ]; do
+    i=$((i - 1))
+    d="${DIRS[$i]}"
+    if [ -d "$(dest "$d")" ] && [ ! -L "$(dest "$d")" ]; then
+      if [ "$DRY" = 1 ]; then say "[dry-run] rmdir $(dest "$d")"; else rmdir -- "$(dest "$d")" 2>/dev/null || say "conservé (non vide) : $d"; fi
+    fi
+  done
+  act rm -f -- "$DIRS_REC"
 fi
 
 # 1080p : retire uniquement le paramètre ajouté par install.sh (le reste de cmdline.txt, même modifié depuis, est conservé)

@@ -30,6 +30,13 @@
         setTimeout(probe, 3000);
       });
   }
+  // télécommande : les touches de navigation du navigateur (Retour, Accueil…) ne quittent jamais cette page
+  document.addEventListener("keydown", function (e) {
+    var k = e.key || "", kc = e.keyCode || 0;
+    if (/^(BrowserBack|BrowserForward|BrowserHome|BrowserSearch|BrowserFavorites|GoBack|GoHome|Backspace)$/.test(k) ||
+        kc === 166 || kc === 167 || kc === 172) { e.preventDefault(); }
+  });
+  document.addEventListener("mouseup", function (e) { if (e.button === 3 || e.button === 4) { e.preventDefault(); } });
   probe();
 })();
 </script>

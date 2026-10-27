@@ -22,6 +22,7 @@
       <h1>Bienvenue ! Configurons ta TV</h1>
       <ol id="steps"></ol>
       <p id="setupmsg" class="setupmsg"></p>
+      <p id="phoneonly" class="setupmsg">Tout se règle sur le téléphone : la télécommande n'est pas nécessaire ici.</p>
       <p id="url" class="url"></p>
     </div>
     <div class="qrs">
@@ -33,10 +34,19 @@
   </section>
 
   <section id="home" hidden>
-    <h1 class="title">Pour toi</h1>
-    <p id="note" class="note"></p>
-    <p class="samsung">Les applis Samsung (YouTube, Netflix…) restent sur la TV : ouvre-les avec la télécommande de la TV.</p>
-    <div id="rows"></div>
+    <div id="main" class="main">
+      <h1 class="title">Pour toi</h1>
+      <p id="note" class="note"></p>
+      <p class="samsung">Les applis Samsung (YouTube, Netflix…) restent sur la TV : ouvre-les depuis le menu de la TV.</p>
+      <div id="rows"></div>
+    </div>
+    <!-- colonne réservée : le QR de la télécommande ne recouvre jamais les cartes et reste visible sans naviguer -->
+    <aside id="remotebox" class="remotebox" hidden>
+      <b id="rtitle">Télécommande sur ton téléphone</b>
+      <canvas id="rqr" width="300" height="300" data-size="300" data-qr=""></canvas>
+      <ol class="rsteps"><li>Même Wi-Fi que la TV</li><li>Appareil photo : vise ce QR</li><li>Touche « Oui »</li></ol>
+      <p id="rnote" class="rnote"></p>
+    </aside>
   </section>
 
   <div id="panel" class="panel" hidden>
@@ -48,9 +58,10 @@
   <div id="banner" class="banner" hidden></div>
   <div id="toast" class="toast" hidden></div>
   <div id="offline" class="offline" hidden>Reconnexion à OpenTV…</div>
-  <footer id="help">← → ↑ ↓ choisir · OK agir · Retour fermer</footer>
+  <footer id="help">← → ↑ ↓ choisir · OK agir · Retour fermer · Accueil revenir au début</footer>
 </div>
 <script src="/static/qrcode.js"></script>
+<script src="/static/keys.js"></script>
 <script src="/static/tv.js"></script>
 </body>
 </html>

@@ -8,12 +8,15 @@ header { display: flex; align-items: center; gap: 32px; flex: 0 0 80px; }
 .device { font-size: 34px; flex: 1; }
 .badges { display: flex; gap: 16px; }
 .badge { font-size: 24px; padding: 6px 18px; border-radius: 999px; background: #21262d; }
+.badge[hidden] { display: none; }
 .badge.ethernet, .badge.wifi { background: #1f6f3f; }
 .badge.hotspot { background: #8a5a00; }
 .badge.offline { background: #8b1d1d; }
 .clock { font-size: 40px; font-variant-numeric: tabular-nums; }
 #setup { display: flex; gap: 80px; margin-top: 60px; flex: 1; min-height: 0; }
-#home { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#home { flex: 1; min-height: 0; display: flex; flex-direction: row; align-items: stretch; }
+#home .main { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
+  padding: 0 16px; margin-left: -16px; }   /* marge pour la carte agrandie (focus), sans déplacer l'alignement */
 #setup[hidden], #home[hidden] { display: none; }
 .steps { flex: 1; }
 .steps h1 { font-size: 64px; margin: 0 0 40px; }
@@ -40,7 +43,7 @@ header { display: flex; align-items: center; gap: 32px; flex: 0 0 80px; }
 .info .t { font-size: 24px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .info .y, .info .r { font-size: 18px; color: #8b949e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mark { display: inline-block; font-size: 16px; background: #1f6feb; border-radius: 8px; padding: 2px 8px; margin: 4px 4px 0 0; }
-.panel { position: absolute; left: 160px; right: 160px; bottom: 120px; background: #161b22; border: 3px solid #58a6ff;
+.panel { position: absolute; left: 120px; right: 520px; bottom: 120px; background: #161b22; border: 3px solid #58a6ff;
   border-radius: 24px; padding: 32px 48px; }
 .panel[hidden], .banner[hidden], .toast[hidden], .offline[hidden], footer[hidden] { display: none; }
 .panel h2 { font-size: 44px; margin: 0 0 8px; }
@@ -51,7 +54,18 @@ header { display: flex; align-items: center; gap: 32px; flex: 0 0 80px; }
 .pbtns button.on { background: #1f6f3f; }
 .pbtns button.focused { border-color: #58a6ff; background: #1f6feb; }
 .banner { flex: 0 0 auto; margin-top: 12px; font-size: 36px; background: #8a5a00; padding: 16px 32px; border-radius: 16px; }
-.toast { position: absolute; right: 80px; bottom: 80px; font-size: 28px; background: #21262d; padding: 16px 28px; border-radius: 16px; }
+.toast.big { left: 50%; right: auto; top: 40%; bottom: auto; transform: translateX(-50%); font-size: 48px;
+  padding: 32px 56px; background: #1f6f3f; border: 3px solid #3fb950; text-align: center; }
+.toast { position: absolute; left: 80px; bottom: 80px; font-size: 28px; background: #21262d; padding: 16px 28px; border-radius: 16px; }
 .offline { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; background: rgba(13, 17, 23, .92);
   font-size: 56px; display: flex; align-items: center; justify-content: center; }
 footer { flex: 0 0 auto; padding-top: 10px; font-size: 22px; color: #8b949e; }
+/* colonne fixe à droite de l'accueil (flex, pas de position absolue) : aucune carte en dessous */
+.remotebox { flex: 0 0 360px; width: 360px; margin: 24px 0 0 40px; align-self: flex-start; background: #161b22;
+  border: 2px solid #30363d; border-radius: 18px; padding: 18px 24px 16px; text-align: center; }
+.remotebox[hidden] { display: none; }
+.remotebox b { display: block; font-size: 26px; margin-bottom: 12px; }
+.remotebox canvas { background: #fff; border-radius: 12px; width: 300px; height: 300px; display: block; margin: 0 auto; }
+.remotebox .rsteps { text-align: left; font-size: 22px; line-height: 1.45; color: #c9d1d9; margin: 14px 0 0;
+  padding-left: 32px; }
+.remotebox .rnote { font-size: 18px; color: #8b949e; margin: 10px 0 0; text-align: left; }

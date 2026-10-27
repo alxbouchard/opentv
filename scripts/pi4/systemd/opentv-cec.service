@@ -1,0 +1,43 @@
+[Unit]
+Description=OpenTV Pi - amorcage HDMI-CEC borne (Playback OpenTV + touche OK ; jamais de reveil ni de changement d'entree)
+Documentation=file:///opt/opentv/README.md
+After=systemd-udevd.service opentv-kiosk.service
+ConditionPathExistsGlob=/dev/cec*
+
+[Service]
+Type=oneshot
+User=opentv
+Group=opentv
+# video : /dev/cecN (root:video) ; input : table de touches du recepteur vc4-hdmi (EVIOCSKEYCODE_V2, aucune lecture)
+SupplementaryGroups=video input
+ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-pi cec-bootstrap
+TimeoutStartSec=60
+# temoin d'une annonce manuelle (--force-announce, lecture d'etat seulement) : tmpfs, efface au redemarrage
+RuntimeDirectory=opentv-cec
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+DevicePolicy=closed
+DeviceAllow=char-cec rw
+DeviceAllow=char-input rw
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

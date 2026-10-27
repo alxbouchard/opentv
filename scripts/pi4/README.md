@@ -19,7 +19,9 @@ ailleurs et copié sur la Pi) ; il n'y a pas de lecture vidéo dans ce lot.
   Ce port porte aussi la CEC (`/dev/cec0`).
 - Câble **Ethernet** vers la box/le routeur pour le premier démarrage (recommandé, voir §3).
 - Boîtier ventilé ou dissipateur (Chromium à 1080p chauffe le SoC).
-- Optionnel : clavier USB pour la navigation à l'écran (flèches, Entrée, Échap) en attendant la télécommande CEC.
+- Télécommande : celle de la TV par HDMI-CEC (priorité 1, **à valider sur le terrain**) ; repli : un téléphone sur le
+  **même Wi-Fi** que la TV (QR affiché sur la TV) ; accessoire : télécommande USB 2,4 GHz ou clavier USB, sans pilote
+  ni configuration (leur touche Power n'éteint pas la boîte).
 
 ## 2. Raspberry Pi Imager (préalable, sur le Mac)
 
@@ -100,10 +102,101 @@ Services :
 
 | Unité | Rôle |
 |---|---|
-| `opentv.service` | service Python stdlib (utilisateur `opentv`, `Type=notify`, watchdog 30 s — tick borné : `nmcli` 3 s + `ip` 2 s, groupe de processus tué à l'échéance, découverte CEC en thread —, durci) : page TV loopback `127.0.0.1:8080` (réservée au compte `opentv-kiosk` par l'UID du pair TCP, `/proc/net/tcp`), formulaire LAN `:8081` **seulement pendant la configuration**, Agent Port `/run/opentv/agent.sock` |
-| `opentv-kiosk.service` | Cage (Wayland) sur tty1 + Chromium Raspberry Pi OS en kiosque, `Restart=always`, `RestartSec=5`, `StartLimitIntervalSec=0` (jamais bloqué en « failed » après une série de plantages). Profil Chromium **persistant** dédié (`/var/lib/opentv-kiosk/chromium`, verrous `Singleton*` effacés au lancement ; aucun secret durable : la clé de page change à chaque démarrage du service). Le lanceur teste seulement que le **port TCP** 127.0.0.1:8080 accepte une connexion (20 s), sinon il ouvre la page de secours locale `file://…/fallback.html`, qui interroge `/healthz` et revient au tableau de bord |
+| `opentv.service` | service Python stdlib (utilisateur `opentv`, `Type=notify`, watchdog 30 s — tick borné : `nmcli` 3 s + `ip` 2 s, groupe de processus tué à l'échéance, découverte CEC en thread —, durci) : page TV loopback `127.0.0.1:8080` (réservée au compte `opentv-kiosk` par l'UID du pair TCP, `/proc/net/tcp`), formulaire LAN `:8081` **seulement pendant la configuration**, Agent Port `/run/opentv/agent.sock` ; **télécommande téléphone** `<adresse LAN actuelle>:8082/r` (jamais `0.0.0.0`) seulement configuré et en ligne, écoute relancée si l'adresse change |
+| `opentv-kiosk.service` | Cage (Wayland) sur tty1 **sans `-s`** (aucun changement de console Ctrl+Alt+Fn : un clavier branché n'atteint aucune invite de connexion ; maintenance par SSH) + Chromium Raspberry Pi OS en kiosque, sous la politique gérée dédiée `opentv-kiosk.json` (DevTools, impression, téléchargements, boîtes de fichiers, extensions, navigation privée et toute navigation hors de `http://127.0.0.1`/page de secours bloqués), `Restart=always`, `RestartSec=5`, `StartLimitIntervalSec=0` (jamais bloqué en « failed » après une série de plantages). Profil Chromium **persistant** dédié (`/var/lib/opentv-kiosk/chromium`, verrous `Singleton*` effacés au lancement ; aucun secret durable : la clé de page change à chaque démarrage du service). Le lanceur teste seulement que le **port TCP** 127.0.0.1:8080 accepte une connexion (20 s), sinon il ouvre la page de secours locale `file://…/fallback.html`, qui interroge `/healthz` et revient au tableau de bord |
 | `opentv-net-helper.path` / `.service` | helper root déclenché par un job : écrit le profil NetworkManager (keyfile 0600) et lance `nmcli` en argv fixe, sans shell. Dossier des jobs ouvert une fois sans suivre de lien (`O_DIRECTORY|O_NOFOLLOW`), lectures/suppressions relatives à ce descripteur ; résultats écrits par descripteur (`fchown`/`fchmod`, jamais de `chown`/`chmod` par chemin). **Wi-Fi transactionnel** : profil candidat `opentv-wifi-candidate` (UUID neuf, `autoconnect=false`) activé d'abord ; l'ancien `opentv-wifi` n'est remplacé (rename atomique du keyfile, UUID du candidat) qu'après succès ; échec ou délai ⇒ candidat supprimé, ancien profil remonté (ou hotspot en configuration hors ligne), dans une réserve de budget de 51 s gardée avant l'essai. Tout résidu du dossier des jobs (fichier/dossier caché, nom invalide, lien, fifo) est supprimé sans action (sans suivre de lien) : `DirectoryNotEmpty=` ne peut pas boucler. **Budget réel** d'une activation : 120 s pour tous les jobs (`TimeoutStartSec=180`) ; `nmcli --wait` courts (AP down 10 s, Wi-Fi up 35 s, AP up 20 s) + délai d'exécution = attente + 5 s tronqué au budget restant, groupe de processus tué à l'échéance ; un job qui ne tient plus attend l'activation suivante ; un `wifi-apply` pris plus de 60 s après son dépôt est refusé (`expired`) |
 | `opentv-ap-guard.timer` / `.service` | garde root du Wi-Fi temporaire (voir §3), indépendante du service Python ; oneshot, budget 40 s (`TimeoutStartSec=60`), seules commandes : `systemctl is-active opentv.service`, `nmcli`/`ip` en lecture, `nmcli connection down/delete id opentv-setup-ap` |
+| `opentv-cec.timer` / `.service` | amorçage HDMI-CEC (20 s après le démarrage puis toutes les 60 s) : oneshot `opentv` (groupes `video`, `input`), sans capacité ni réseau, `DeviceAllow` CEC + entrée seulement, budget 40 s (`TimeoutStartSec=60`). Déclare Playback « OpenTV » et la touche OK seulement : **jamais** de réveil de la TV ni de changement d'entrée. Détails : §« Télécommande » |
+
+Fichiers système dédiés (manifeste, sauvegarde d'un éventuel fichier existant, retirés/restaurés par `uninstall.sh`) :
+`/etc/systemd/logind.conf.d/opentv-kiosk.conf` (touches Power, Reboot, Suspend, Hibernate **ignorées** par logind :
+la touche Power d'une télécommande USB ou de la TV par CEC — `KEY_POWER` — éteindrait sinon la boîte ; effectif au
+prochain redémarrage) et la politique Chromium `opentv-kiosk.json` installée dans `/etc/chromium/policies/managed/` et
+`/etc/chromium-browser/policies/managed/` (le chemin lu par le Chromium de Raspberry Pi OS est à confirmer sur la Pi).
+Les dossiers créés pour eux sont notés (`/var/lib/opentv-install/created-dirs.list`) et retirés s'ils sont vides ; un
+dossier livré par la distribution n'est jamais supprimé. Aucune de ces règles ne touche aux 7 touches de navigation.
+
+Télécommande — trois niveaux, dans cet ordre de priorité :
+
+1. **Télécommande de la TV par HDMI-CEC (priorité 1, non validée sur la TV)** — `opentv-cec.timer` → `opentv-pi
+   cec-bootstrap` (oneshot `opentv`, sans capacité ni réseau, budget 40 s). Énumère `/dev/cecN`, ne retient que le
+   pilote `vc4` et le premier adaptateur dont l'adresse physique est valide (HDMI branché ; jamais d'adresse en dur).
+   Déclare Playback « OpenTV » seulement si l'adaptateur est vierge (configuration étrangère jamais remplacée, la nôtre
+   jamais réécrite). **Défaut sûr : rien d'autre n'est émis** — ni `<Image View On>` (réveil), ni `<Active Source>`
+   (changement d'entrée), ni question d'alimentation, quel que soit l'état de la TV (allumée, en veille, inconnue,
+   réveil, redémarrage de la boîte). OpenTV ne « vole » jamais l'entrée HDMI : l'utilisateur choisit l'entrée OpenTV
+   avec la télécommande de la TV. La touche CEC Select arrive en `KEY_OK`, qui n'a ni symbole XKB ni code Chromium
+   (perdue dans le kiosque) : si la table du noyau contient encore cette valeur par défaut, elle devient `KEY_ENTER`
+   (volatile, réappliquée à chaque passage ; une valeur personnalisée n'est jamais touchée). Exit (souvent « Retour »)
+   arrive en `XF86Close` → `Close`, géré par la page. Aucun démon ne lit ni n'injecte de touches. La touche Power de la
+   TV (`KEY_POWER` côté boîte) est ignorée par logind (drop-in ci-dessus).
+   - Vérifier : `sudo /opt/opentv/bin/opentv-pi cec` (lecture seule) → `configuration: "ours"`,
+     `logical_address_claimed: true`, `select_key: "enter"` ; `journalctl -u opentv-cec` → `"result":"ready"`,
+     `"announce":{"result":"not_requested"}`.
+   - **Annonce manuelle, terrain seulement, avec l'accord de l'utilisateur** (la TV peut passer sur l'entrée
+     OpenTV) : `sudo systemctl start opentv-cec-announce.service`, puis
+     `journalctl -u opentv-cec-announce.service -n 20 --no-pager`. Cette unité dédiée fournit les groupes et le
+     dossier d'exécution nécessaires sans lancer la commande en root. Refusée sans autre émission
+     si la TV ne répond pas « allumée » (`tv_not_on`) : jamais de réveil, même forcé. Aucune option ne la rend
+     automatique ; `OPENTV_CEC_WAKE_TV` n'existe plus (ignorée si présente). Désactiver la déclaration :
+     `OPENTV_CEC_BOOTSTRAP=0`. Retour arrière (fait par `uninstall.sh`) : `sudo /opt/opentv/bin/opentv-pi
+     cec-bootstrap --release` (efface seulement « OpenTV », rétablit `KEY_OK`).
+   - Limite connue : beaucoup de TV n'envoient les touches qu'à la **source active**. Sans annonce automatique, il
+     faudra peut-être choisir l'entrée OpenTV à la main ; répondre à `<Set Stream Path>`/`<Request Active Source>`
+     (quand la TV le demande) est une évolution future explicite, non implémentée. Tant que les six touches ne sont pas
+     prouvées sur la TV, le téléphone reste le repli.
+2. **Téléphone (repli immédiat)** — sans terminal, sans adresse, jeton ni code à copier. À la fin de la configuration
+   (Ethernet/Wi-Fi gardé), la page « C'est prêt » du téléphone propose « Utiliser ce téléphone comme télécommande » (un
+   toucher, puis « Oui ») ; après un nouveau Wi-Fi choisi depuis le Wi-Fi temporaire « OpenTV-… », la page explique
+   que le téléphone doit revenir sur le Wi-Fi habituel (le même que la TV) puis scanner le QR de la TV. L'accueil de
+   la TV réserve **une colonne à droite** au QR « Télécommande » (jamais par-dessus les cartes, prouvé à 1920×1080 en
+   Chromium réel) ; il reste affiché même après un appairage (« Ajouter un téléphone » : un téléphone perdu se
+   remplace sans aucune touche), avec « Même Wi-Fi que la TV ». Aucune adresse n'est affichée en texte sur la TV.
+   - **Appairage : QR seulement.** Secret aléatoire de 256 bits en mémoire (jamais écrit, jamais journalisé), qui
+     tourne toutes les 5 min et aussitôt après chaque appairage réussi. Ouvrir le lien (GET) n'appaire jamais et ne
+     compte aucun essai ; seul le bouton « Oui, utiliser ce téléphone » (POST) appaire. Aucun code court : rien à
+     deviner. Erreurs limitées à 5 par IP / 10 min (bruit seulement).
+   - **Adresse :** le serveur écoute sur l'adresse LAN actuelle (jamais `0.0.0.0`) et est relancé si elle change. Le QR
+     vise `http://<nom d'hôte>.local:8082/r?p=…` quand ce nom se résout par mDNS (avahi/nss-mdns) **exactement** vers
+     cette adresse (vérifié en tâche de fond toutes les 60 s ; conflit de nom ⇒ non) : le cookie du téléphone survit
+     alors à un changement d'adresse DHCP. Sinon (avahi absent, conflit, `OPENTV_REMOTE_MDNS=0`) : repli sur l'adresse
+     LAN liée, seulement dans le QR. `Host` accepté : cette adresse ou ce nom exact, avec le port ; loopback, adresse
+     publique, autre IP privée, autre nom ⇒ 421. Pairs : IPv4 privées hors boucle locale.
+   - **Session :** jeton 256 bits en cookie `HttpOnly` `SameSite=Lax`, **stable** jusqu'à 30 jours d'inactivité ou la
+     révocation (aucune rotation : ni réponse perdue ni refus CSRF ne déconnectent le téléphone). Seule son empreinte
+     SHA-256 est stockée (`/var/lib/opentv/remote.json`, 0600, écrit hors des verrous) ; 4 téléphones au plus (le moins
+     récemment utilisé est oublié). L'inactivité n'est jugée qu'entre deux heures **synchronisées** (NTP, témoin
+     `/run/systemd/timesync/synchronized`) : heure reculée ou pas encore synchronisée au démarrage ⇒ aucun téléphone
+     n'est jamais oublié.
+   - **Requêtes :** pages en `Referrer-Policy: same-origin` (en-tête et `<meta>`), pour que les vrais navigateurs
+     envoient l'`Origin` des formulaires ; `Origin` doit valoir exactement `http://<Host>` ; `Origin: null` est
+     **toujours** refusé (403) ; sans `Origin`, `Sec-Fetch-Site`/`Referer` doivent être cohérents ; jeton CSRF par
+     téléphone. Pavé : Haut, Bas, Gauche, Droite, OK, Retour, Accueil — rien d'autre (ni volume ni marche/arrêt, ni
+     URL, ni texte, ni shell). Fonctionne **sans JavaScript** (vrais formulaires POST, prouvé en Chromium réel JS
+     désactivé : confirmation, touches, oubli) ; `remote.js` évite seulement le rechargement. Zoom laissé libre. Astuce
+     « ajouter à l'écran d'accueil » sur le pavé. 10 touches/s par téléphone, 20/s par IP, 4 connexions simultanées par
+     IP ; file vers la TV de 16 touches périmées après 3 s (jamais rejouées), lue par une longue requête loopback
+     bornée (8 s, 2 attentes) ; la clé TV et l'API kiosque ne sont jamais exposées au téléphone.
+   - Révoquer : TV → Réglages → « Oublier les téléphones », ou « Oublier ce téléphone » sur le pavé. Désactiver :
+     `OPENTV_REMOTE_ENABLED=0`.
+   **HTTP en clair sur le LAN : prototype.** Aucun certificat propre à l'appareil n'existe ; ne rien présenter comme
+   HTTPS. Le cookie n'est donc pas `Secure` ; l'ajout d'un domaine/certificat par appareil n'exigera que l'origine
+   publique et le drapeau `Secure` (l'API, le CSRF et le contrôle d'origine restent identiques).
+3. **Télécommande USB 2,4 GHz / clavier (dernier recours, accessoire)** — aucune configuration. `ui/keys.js`
+   normalise flèches (`ArrowUp`/`Up`…), OK (`Enter`, Entrée du pavé, `Select`, `Accept`), Retour (`Escape`,
+   `Backspace`, `BrowserBack`, `GoBack`, `Close`, `Exit`), Accueil (`BrowserHome`, `Home`, `GoHome` : retour au début),
+   avec repli sur les anciens `keyCode`. Touches média : aucune action OpenTV aujourd'hui (pas de lecteur), non
+   captées. Les touches de navigation du navigateur et le bouton « précédent » d'une souris-télécommande ne quittent
+   jamais `/tv` (ni la page de secours).
+
+Dans tous les cas, l'écran QR de configuration reste piloté par le téléphone de configuration : aucune touche n'y agit.
+
+Récupération : redémarrage du service ⇒ téléphones conservés (empreintes sur disque), page TV resynchronisée sans
+rejouer d'anciennes touches ; redémarrage de la boîte ⇒ déclaration Playback et table `KEY_ENTER` réappliquées (aucune
+annonce, aucun réveil), téléphones conservés même si l'heure recule avant NTP ; nouvelle adresse DHCP ⇒ écoute relancée,
+téléphone appairé par le nom `.local` conservé ; « Reconfigurer » ⇒ télécommande téléphone fermée jusqu'à la fin de la configuration ; `remote.json`
+illisible ⇒ aucun téléphone autorisé (rescanner le QR) ; `uninstall.sh` sans `--purge` conserve les téléphones
+appairés pour une réinstallation, `--purge` les efface.
 
 Résolution : paramètre noyau `video=HDMI-A-1:1920x1080@60` (installé par `install.sh`) + `wlr-randr` dans Cage.
 
@@ -223,14 +316,32 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
   pendant 20 s). Cas rare : le kiosque démarre après `opentv.service` (`Type=notify`, port ouvert avant READY).
 - Reprise de l'écran, hotspot borné, verrouillage par UID : prouvés en tests (Chromium headless réel, horloge simulée,
   `LOCAL_PEERCRED` sur macOS) ; `SO_PEERCRED`, `boot_id` et NetworkManager réels non exercés sur Pi.
-- CEC : découverte (`cec-ctl -d /dev/cecN` sans émission). Aucune commande d'alimentation/volume/source ; pas de
-  télécommande CEC → navigation au clavier USB pour l'instant.
+- CEC : `opentv-cec` déclare seulement Playback « OpenTV » (aucune annonce automatique, aucune commande de
+  volume/standby). Le noyau seul produit les touches. Prouvé sur le Pi avant ce lot (avec une annonce manuelle) :
+  Haut/Bas/Gauche au niveau noyau. **Non prouvé** : que la TV Samsung route les touches à OpenTV **sans** annonce
+  (entrée choisie à la main), Droite, OK (Select → Entrée par la table du noyau), Retour (Samsung « Return » = CEC Exit
+  → `Close` ?), la persistance après redémarrage, et que la touche Power de la TV arrive bien en `KEY_POWER` ignoré.
+  Si une touche manque : repli téléphone, puis USB.
+- Télécommande téléphone : HTTP en clair sur le LAN (prototype, pas de certificat d'appareil). Non validée sur un
+  vrai iPhone/Android ni sur le Wi-Fi d'Alex (isolation client d'un routeur = téléphone ne joint pas la boîte).
+  Résolution `.local` : native sur iOS et macOS ; sur Android elle dépend de la version (non vérifié). La boîte ne
+  peut pas savoir si **le téléphone** résout `.local` : s'il n'y arrive pas, le QR ne s'ouvre pas — contournement
+  `OPENTV_REMOTE_MDNS=0` (QR par adresse ; l'appairage est alors à refaire si l'adresse DHCP change). À valider sur le
+  terrain. Résolution par
+  `getaddrinfo` dans le service (`nss-mdns` de Raspberry Pi OS) : non vérifiée sous le durcissement systemd.
+  Témoin d'heure synchronisée : `systemd-timesyncd` (défaut de Raspberry Pi OS) ; avec un autre démon NTP, aucune
+  expiration par inactivité n'a lieu (fail-safe : les téléphones restent jusqu'à révocation).
+- Politique Chromium : chemin réellement lu par le Chromium de Raspberry Pi OS (`/etc/chromium` ou
+  `/etc/chromium-browser`), blocage effectif de DevTools (Ctrl+Maj+I, F12), de l'impression (Ctrl+P), des
+  téléchargements et de la navigation externe, et affiches `https` toujours visibles (les listes d'URL ne visent que
+  la navigation) : **non vérifiés sur la Pi**. Touche Power : drop-in logind effectif après redémarrage, non vérifié.
 - Décodage vidéo matériel : hors lot (pas de lecture). Ne jamais présenter un rendu logiciel comme accéléré.
 - Formulaire de configuration en **HTTP non chiffré** sur le LAN (voir §5) : par Ethernet, le mot de passe Wi-Fi
   traverse le réseau local en clair ; configurer seulement depuis un LAN de confiance ou par le Wi-Fi temporaire.
 - Kiosque **sans durcissement systemd** (pas de `NoNewPrivileges`/`ProtectSystem` : le sandbox setuid de Chromium en
   dépend) ; le compte `opentv-kiosk` possède tty1 et le groupe `input` : un clavier branché pilote Chromium en
-  kiosque (raccourcis navigateur possibles, pas de shell : `nologin`). Accès physique = confiance.
+  kiosque. Atténué par la politique gérée (DevTools, impression, téléchargements, navigation externe bloqués), Cage
+  sans changement de console et logind qui ignore Power ; pas de shell (`nologin`). Accès physique = confiance.
 - Promotion du candidat Wi-Fi (`nmcli connection load <final> <candidat>` : l'UUID actif passe sur `opentv-wifi`,
   l'ancien UUID disparaît avec son fichier remplacé) : comportement NetworkManager 1.42 **non vérifié** sur Pi ; gate
   terrain : `nmcli -f NAME,UUID connection show` après succès et après mauvais mot de passe.
@@ -250,7 +361,10 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
 | **Configuré** | `sudo /opt/opentv/bin/opentv-pi preflight --text` OK ; `install.sh` sans erreur ; `opentv-pi health` → `ok:true`, manifeste OK, `opentv.service` et `opentv-net-helper.path` actifs, `NRestarts=0` (`systemctl show -p NRestarts opentv`) |
 | **QR / réseau** | QR visible ; formulaire ouvert sur le téléphone ; second envoi du même QR refusé ; Ethernet puis Wi-Fi (`nmcli -t device status`) ; mot de passe absent de `journalctl -u opentv -u opentv-net-helper` et de `/var/lib/opentv` ; port 8081 fermé après configuration (`ss -ltn`) ; hotspot sans Ethernet : réseau `OpenTV-XXXX` visible puis disparu après succès ; hotspot laissé sans configuration : disparu après 20 min et absent de `nmcli connection show` ; hotspot + Ethernet + « garder » : AP supprimé ; **hotspot actif puis `systemctl stop opentv`** : AP disparu en ≤ 60 s (`journalctl -u opentv-ap-guard` : `ap_guard_stop`) ; mauvais mot de passe Wi-Fi : nouveau QR en ≤ 210 s ; `systemctl show -p ExecMainStartTimestamp,ActiveEnterTimestamp opentv-net-helper` < 120 s par activation ; `uninstall.sh` avec hotspot actif : AP absent ensuite |
 | **UI visible** | photo/vidéo de la TV : tableau de bord 1920×1080 net (`wlr-randr` ou `/sys/class/drm/card*-HDMI-A-1/modes`), « Pour toi » navigable au clavier, message d'agent affiché ; `kill` de Chromium ⇒ retour automatique du kiosque ; `systemctl restart opentv` ⇒ « Reconnexion… » puis rechargement automatique et données de retour ; mode 1920×1080 effectif après redémarrage de la boîte |
-| **CEC** | `sudo /opt/opentv/bin/opentv-pi cec` liste `/dev/cec0` avec une adresse physique ≠ `f.f.f.f` TV allumée ; aucune commande émise (`cec-ctl --monitor` sur une autre session) |
+| **CEC** | `sudo /opt/opentv/bin/opentv-pi cec` liste `/dev/cec0` avec une adresse physique ≠ `f.f.f.f` TV allumée ; `journalctl -u opentv-cec` : `"result":"ready"`, `"announce":{"result":"not_requested"}` ; `cec-ctl -d /dev/cec0` : OSD `'OpenTV'`, masque ≠ `0x0000` ; après **redémarrage** : idem sans intervention ; TV en veille au démarrage de la boîte, puis allumée : **la TV ne se rallume pas et ne change pas d'entrée** à cause d'OpenTV (`cec-ctl -d /dev/cec0 -m` : aucune `IMAGE_VIEW_ON`/`ACTIVE_SOURCE` émise par OpenTV) |
+| **Télécommande CEC** | entrée OpenTV choisie avec la télécommande Samsung (sans `--force-announce`) : Haut, Bas, Gauche, Droite, OK (ouvre le panneau), Retour (le ferme) ; puis **après `sudo reboot`**, sans intervention, de nouveau les six touches ; touche Power de la TV : la boîte reste allumée ; un ensemble partiel = critère CEC échoué (repli téléphone ; `--force-announce` seulement comme essai terrain consenti) |
+| **Télécommande téléphone** | iPhone et Android sur le même Wi-Fi : QR de la colonne de droite → « Oui, utiliser ce téléphone » → les 7 touches agissent en < 0,5 s ; l'URL ouverte est `<nom>.local:8082` (sinon noter le repli) ; ancien QR refusé ; « Oublier les téléphones » (Réglages) ⇒ le pavé demande de rescanner ; `systemctl restart opentv` puis `sudo reboot` (heure avant NTP) ⇒ téléphone toujours appairé ; nouvelle adresse DHCP ⇒ téléphone toujours appairé ; `ss -ltn` : `:8082` lié à l'adresse LAN (jamais `0.0.0.0`), absent pendant « Reconfigurer » ; ajout à l'écran d'accueil iOS fonctionnel ; aucun jeton dans `journalctl -u opentv` |
+| **Télécommande USB** | télécommande 2,4 GHz branchée : flèches, OK, Retour, Accueil sur l'écran OpenTV ; Accueil/BrowserBack ne quittent jamais `/tv` ; écran QR : aucune touche n'agit ; **touche Power : la boîte reste allumée** (après redémarrage) ; clavier : F12/Ctrl+Maj+I, Ctrl+P, Ctrl+S, Ctrl+Alt+F2 sans effet |
 | **Décodage** | hors lot : critère non évalué (aucune lecture vidéo dans ce MVP) |
 | **Rollback** | `uninstall.sh` ⇒ console tty1 de retour, `/opt/opentv` absent, fichiers d'origine restaurés ; réinstallation propre ; `--purge` sans perte du Wi-Fi |
 | **Agent** | `opentv-mcp` depuis le compte de l'agent : `tools/list` filtré par scopes, `recommend` sans URL, scope refusé, audit présent sans secret |
@@ -258,7 +372,10 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
 ## 10. Développement
 
 ```sh
-python3 -m unittest discover -s scripts/pi4/tests -t scripts/pi4      # depuis la racine du dépôt (176 tests)
+python3 -m unittest discover -s scripts/pi4/tests -t scripts/pi4      # depuis la racine du dépôt (285 tests)
 python3.11 -m unittest discover -s scripts/pi4/tests -t scripts/pi4   # version de Bookworm
+# bouts en bout réels (Chromium headless, temps réel) et analyse ES5 :
+#   OPENTV_TEST_PLAYWRIGHT=<module playwright> OPENTV_TEST_ACORN=<module acorn> OPENTV_TEST_SHOTS=<dossier de captures>
+#   (formulaires du téléphone sans JavaScript, Origin: null refusé, écran TV 1920×1080 sans chevauchement du QR)
 ./scripts/pi4/install.sh --dry-run ; ./scripts/pi4/install.sh --root /tmp/rfs --skip-preflight
 ```

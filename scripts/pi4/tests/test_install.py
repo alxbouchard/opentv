@@ -20,7 +20,7 @@ UNINSTALL = os.path.join(PI4, "uninstall.sh")
 PREPARE = os.path.join(PI4, "prepare-pi.sh")
 SHELL_SCRIPTS = (INSTALL, UNINSTALL, PREPARE, os.path.join(PI4, "bin", "opentv-kiosk-browser"))
 UNITS = ("opentv.service", "opentv-kiosk.service", "opentv-net-helper.service", "opentv-net-helper.path",
-         "opentv-ap-guard.service", "opentv-ap-guard.timer")
+         "opentv-ap-guard.service", "opentv-ap-guard.timer", "opentv-cec.service", "opentv-cec.timer")
 
 
 def sha(p):

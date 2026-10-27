@@ -32,6 +32,16 @@ DEFAULTS = {
     "OPENTV_SERVICE_USER": "opentv",
     "OPENTV_TV_CLIENT_USER": "opentv-kiosk",
     "OPENTV_NM_DIR": "/etc/NetworkManager/system-connections",
+    # HDMI-CEC (opentv-cec.timer) : déclaration Playback « OpenTV » + touche OK seulement. Jamais d'<Image View On> ni
+    # d'<Active Source> automatique (aucun réveil, aucun changement d'entrée) : seulement `cec-bootstrap
+    # --force-announce`, tapé avec le consentement de l'utilisateur.
+    "OPENTV_CEC_BOOTSTRAP": "1",
+    "OPENTV_CEC_KEYMAP": "1",       # 1 = touche CEC Select (KEY_OK, perdue dans Chromium) -> KEY_ENTER
+    # télécommande sur téléphone (LAN, HTTP prototype) : ouverte seulement après la configuration, en ligne, sur
+    # l'adresse LAN actuelle (jamais 0.0.0.0)
+    "OPENTV_REMOTE_ENABLED": "1",
+    "OPENTV_REMOTE_PORT": "8082",
+    "OPENTV_REMOTE_MDNS": "1",      # 1 = QR vers <nom d'hôte>.local si ce nom désigne bien la boîte ; 0 = adresse
 }
 
 
@@ -113,6 +123,11 @@ class Config:
         self.service_user = e["OPENTV_SERVICE_USER"]
         self.tv_client_user = e["OPENTV_TV_CLIENT_USER"]
         self.nm_dir = e["OPENTV_NM_DIR"]
+        self.cec_bootstrap = _bool(e["OPENTV_CEC_BOOTSTRAP"], "OPENTV_CEC_BOOTSTRAP")
+        self.cec_keymap = _bool(e["OPENTV_CEC_KEYMAP"], "OPENTV_CEC_KEYMAP")
+        self.remote_enabled = _bool(e["OPENTV_REMOTE_ENABLED"], "OPENTV_REMOTE_ENABLED")
+        self.remote_port = _port(e["OPENTV_REMOTE_PORT"], "OPENTV_REMOTE_PORT")
+        self.remote_mdns = _bool(e["OPENTV_REMOTE_MDNS"], "OPENTV_REMOTE_MDNS")
         s = self.state_dir
         self.device_file = os.path.join(s, "device.json")
         self.setup_flag = os.path.join(s, "setup-requested")
@@ -125,6 +140,7 @@ class Config:
         self.registry_file = os.path.join(s, "agents.json")
         self.audit_file = os.path.join(s, "audit.jsonl")
         self.foryou_state = os.path.join(s, "foryou")
+        self.remote_file = os.path.join(s, "remote.json")
 
     @classmethod
     def load(cls, path=ENV_FILE, environ=None):

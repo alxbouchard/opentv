@@ -23,7 +23,9 @@ UtmpIdentifier=tty1
 UtmpMode=user
 EnvironmentFile=-/etc/opentv/opentv.env
 Environment=XDG_SESSION_TYPE=wayland
-ExecStart=/usr/bin/cage -d -s -- /opt/opentv/bin/opentv-kiosk-browser
+# Cage sans « -s » : le changement de console (Ctrl+Alt+Fn) est désactivé, un clavier branché ne mène à aucune
+# invite de connexion ; la maintenance passe par SSH.
+ExecStart=/usr/bin/cage -d -- /opt/opentv/bin/opentv-kiosk-browser
 Restart=always
 RestartSec=5
 
