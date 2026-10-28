@@ -250,6 +250,13 @@ Chromium headless). Tout autre refus
 (compte non autorisé, service arrêté) n'entraîne aucun rechargement : « Reconnexion… ». L'écran rappelle discrètement
 que les applis Samsung (YouTube, Netflix…) restent sur la TV.
 
+Navigation de l'accueil (retour terrain) : ↑ remonte d'une rangée en gardant la colonne mémorisée de cette rangée, ↓
+descend ; seul ↑ depuis la **première** rangée mène aux Réglages ; dans une fiche ouverte, ↑ et ↓ sont consommés sans
+effet (jamais de saut vers Réglages depuis un film ; Retour ferme la fiche sur la même carte) ; Retour remonte aussi
+d'une rangée. L'en-tête affiche « Connectés : … » = identités réellement installées (jamais une simple autorisation). OK sur une carte ouvre sa fiche (J'aime, Pas pour moi, Déjà vu, À voir plus tard, Pas ce soir). **Aucune
+action « Regarder »** : la Pi n'a ni lecteur ni ouverture de titre autorisée (voir « Lecture : phase bloquée » §8) ; un
+bouton factice n'est jamais affiché.
+
 ## 5. QR de configuration
 
 1. La TV affiche « Bienvenue ! Configurons ta TV » et un QR (valable 10 min, **une seule fois**, 5 essais de
@@ -279,6 +286,58 @@ que les applis Samsung (YouTube, Netflix…) restent sur la TV.
    jetons faux sont limités à 30/min par adresse IP (429).
 4. Ensuite le port 8081 se ferme et la TV affiche « Pour toi ». Reconfigurer : tuile « Réglages → Reconfigurer » à
    l'écran, ou `sudo /opt/opentv/bin/opentv-pi setup reset`.
+
+### 5 bis. Réglages → « Gérer les assistants » (sans refaire la configuration)
+
+Action dédiée, distincte de « Reconfigurer » : **ni Wi-Fi, ni nom, ni hotspot, ni job réseau, ni étape de première
+mise en route**. La ligne affiche deux nombres distincts : « Autorisés : N · Connectés : M ».
+
+1. TV : Réglages → « Gérer les assistants » → confirmation (« Non » au focus par défaut ; Retour = un niveau) →
+   « Oui, afficher le QR ». La feuille Réglages montre un QR dédié (la colonne « Télécommande » est masquée : un seul
+   QR à l'écran) ; OK sur « Annuler », Retour ou Accueil annulent sans rien changer.
+2. Téléphone (même Wi-Fi), 3 étapes courtes rendues par le serveur, **sans aucun script** :
+   1. « Assistants de la TV » : pour Muse, Hermit et Hermes, deux lignes séparées — **Autorisé** (plafond choisi) et
+      **Connecté** (identité réellement installée sur la boîte par l'administrateur, avec « actif il y a … » seulement
+      après un vrai appel authentifié à l'Agent Port depuis ce démarrage) ; un choix par assistant, pré-rempli. Un
+      assistant installé avec **plus** de droits que son autorisation (émis avec `--force`) est signalé et son choix
+      par défaut est « Ne rien changer pour lui » : il n'est jamais réduit ni révoqué sans un choix explicite ;
+   2. « Confirmer » : avant → après, avec la conséquence réelle (« Pas installé sur la boîte : cette autorisation ne
+      le connecte pas », « Il perd tout de suite les droits retirés », « Il sera déconnecté ») ; « Oui, enregistrer »
+      est le seul POST qui écrit ; « Terminer sans rien changer » si rien ne change ;
+   3. « C'est enregistré » (chaque assistant marqué « Modifié » ou « Inchangé », état réel relu) ; la TV revient au
+      début de l'accueil et affiche « C'est enregistré ! Assistants autorisés : N · connectés : M ». Les pages
+      finales (enregistré, annulé, erreurs) portent leurs styles **en ligne** : l'écoute se ferme juste après la
+      réponse, avant que le navigateur ne puisse demander `/static/setup.css`. Ces styles sont un sous-ensemble mot
+      pour mot de `setup.css` (test), autorisés par leur seule empreinte `'sha256-…'` dans la CSP (aucun
+      `'unsafe-inline'`, aucun script, aucune écoute prolongée).
+3. Sécurité : écoute ouverte **seulement** pendant ce mode, configuré et en ligne, sur l'adresse LAN actuelle (jamais
+   `0.0.0.0`), même port que la configuration mais serveur distinct qui ne sert que `/assistants` et
+   `/static/setup.css` (aucun `/setup`, aucun balayage Wi-Fi) ; pairs IPv4 privés, Host = adresse liée ; jeton QR
+   distinct du jeton Wi-Fi, usage unique, 10 min, 5 essais de soumission (un GET n'en use aucun ; jeton faux limité à
+   30/min par adresse) ; POST : Origin exacte (`null` refusé), jeton CSRF lié au QR (HMAC d'une clé par démarrage),
+   `Referrer-Policy: same-origin`, CSP sans script. Rejeu, QR expiré, perte du réseau ou « Reconfigurer » ferment le
+   mode ; la TV annonce « expiré » ou « annulé : rien n'a changé ».
+4. Effet : **seules les lignes réellement modifiées** sont écrites (même règle pour la page et pour le serveur :
+   niveau différent, ou identité installée au-delà du niveau choisi explicitement). La confirmation envoie « keep »
+   pour toute ligne « Inchangé » et une empreinte de l'état affiché ; si l'état a changé entre-temps (ex.
+   `agent issue` par l'administrateur), l'envoi est refusé (409, rien d'écrit, aucun essai usé) et l'état réel est
+   réaffiché. L'écriture reste atomique et complète : agent modifié ⇒ nouveau plafond **et**, dans la même écriture,
+   son identité réduite (scopes retirés tout de suite ; « Aucun accès » ⇒ révoquée) ; agent connu non modifié ⇒ sa
+   lecture validée actuelle (absente/invalide ⇒ `[]`, déjà affichée « Aucun accès ») et son identité **jamais
+   touchée** ; entrées étrangères conservées. Aucun choix modifiant ⇒ aucune écriture (« Rien n'a changé »).
+   **Aucun jeton ni fichier client n'est jamais émis** : autoriser un assistant absent ne l'installe pas
+   (l'administrateur garde `agent issue`, §6) ; une élévation ne change pas les droits d'une identité existante avant
+   sa réémission. Registre illisible ou écriture impossible ⇒ « Rien n'a changé », fichier intact, nouvel essai
+   possible. L'Agent Port reste un socket Unix local : ce mode ne l'ouvre ni ne l'expose.
+   **QR indisponible** : si l'écoute `/assistants` ne peut pas s'ouvrir (port pris, adresse perdue), le service ferme
+   aussitôt le mode (résultat `unavailable`) ; côté TV, une feuille sans adresse de QR affiche « QR indisponible,
+   réessaie. » à la place du QR après 2,5 s, puis se ferme et annule le mode à 8 s (« Rien n'a changé »). Une seule
+   tentative : aucune relance automatique, l'utilisateur rouvre depuis Réglages.
+   **Fichier client après révocation** : le jeton est invalidé immédiatement (son hash quitte le registre), mais le
+   fichier `/etc/opentv/agents/agent-<id>-<uid>.json` (root, §6) reste sur la boîte avec un **jeton mort**. Le service
+   web tourne sans privilège et n'obtient aucun droit sur ce dossier root ; aucune suppression n'est faite depuis ce
+   parcours (et `agent revoke` ne la fait pas non plus aujourd'hui). Nettoyage par l'administrateur :
+   `sudo rm /etc/opentv/agents/agent-<id>-<uid>.json`.
 
 ## 6. Agent MCP (Muse, Hermit, Hermes sur la boîte)
 
@@ -310,6 +369,28 @@ inscriptible), nommé `agent-<id>-<uid>.json`, propriétaire root, groupe = grou
 sous root (`out_forbidden_as_root`) ; sans privilège, `--out`/`~/.config/opentv/agent-<id>.json` (0600) restent
 possibles pour le compte courant seulement. Si le fichier ne peut pas être écrit, le jeton émis est annulé (l'entrée
 précédente du registre est restaurée). L'agent lance lui-même `opentv-mcp --config <ce fichier>`.
+
+**Écritures concurrentes et registre illisible.** Toute écriture du registre (`agent issue`/`revoke`, retour arrière,
+QR de configuration, « Gérer les assistants ») relit puis réécrit `agents.json` sous un verrou partagé entre le service
+et la CLI root : `flock` sur `/var/lib/opentv/agents.json.lock` (fichier vide `opentv:opentv` 0600 ; ouvert
+relativement au dossier, sans suivre de lien ni bloquer sur une FIFO, lien unique exigé ; créé par root ⇒ rendu au
+compte du service par `fchown` sur le descripteur). Création sans course : `O_EXCL|O_CREAT` d'abord, sinon ouverture
+de l'existant sans `O_CREAT` (au plus 10 essais si le fichier disparaît entre les deux ⇒ `registry_busy`, jamais
+« chemin dangereux ») ; seul le processus qui vient de le créer le rend au service par `fchown` — un verrou root
+préexistant inattendu est refusé, à supprimer par l'administrateur. Attente bornée à 5 s ⇒ `registry_busy`, rien
+d'écrit. Cette attente a lieu dans la requête qui écrit (QR de configuration ou « Gérer les assistants »), sous le
+verrou du service : pendant une écriture admin concurrente (rare : `agent issue`/`revoke` au même instant), le
+rafraîchissement de l'état TV (`/api/tv/state`, toutes les 2 s) peut donc rester suspendu jusqu'à 5 s, puis reprend
+seul ; rien n'est perdu, l'écriture refusée se réessaie. Une
+sauvegarde du téléphone et un `agent revoke`/`issue` simultanés ne se perdent donc jamais : le second relit l'état du
+premier (une révocation ne ressuscite jamais ; un état changé depuis l'affichage du téléphone ⇒ 409). Registre
+présent mais illisible, invalide ou non régulier ⇒ **toute** écriture est refusée (`registry_unreadable`, CLI : code
+2), fichier intact octet pour octet ; le QR de configuration applique quand même le Wi-Fi et le nom (les assistants
+restent refusés, la TV affiche « État illisible »), sans jamais remplacer le fichier. Ce succès partiel (registre
+illisible, verrou occupé ou écriture impossible) n'est jamais présenté comme complet : la page finale du téléphone
+(« C'est prêt » ou « C'est presque fini »), l'écran TV pendant la connexion et l'annonce TV finale disent « Les
+assistants n'ont pas été enregistrés : rien n'a changé pour eux. Réessaie depuis Réglages → Gérer les assistants. »
+(état TV : `setup.agents_saved=false`).
 
 Configuration MCP stdio de l'agent (même machine) :
 
@@ -399,6 +480,14 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
 - « Pour toi » TV : la sélection est recalculée (catalogue relu + `Bridge.session`) toutes les 120 s ; coût CPU/mémoire de ce rechargement sur Pi 4 **à mesurer sur le terrain** (gros catalogue).
 - Journal HTTP : erreurs et non-2xx toujours ; succès des polls (`/api/tv/*`, `/static/*`, `/healthz`) non
   journalisés, un échantillon agrégé `http_ok_sample` toutes les 600 requêtes.
+- **Lecture : phase bloquée** (aucun bouton « Regarder »). Exigence produit : « Regarder » lance directement le
+  lecteur plein écran du film (jamais la page du site), Retour revient à OpenTV. Manque sur la Pi : (1) décision
+  humaine que la source et son mode d'accès sont autorisés (le pont NanoPi garde `SOURCE_APPROVED=0` par défaut) ;
+  (2) résolution typée et bornée titre → page de lecture (époque/route validées, comme `detail_url` du pont NanoPi),
+  sans extraction ni réécriture d'URL de flux ; (3) une session navigateur séparée et bornée pour le lecteur, avec au
+  plus une action utilisateur ordinaire, retour garanti à `/tv` sur Retour/échec/inactivité — la politique gérée du
+  kiosque bloque volontairement toute navigation externe (`URLBlocklist: *`). Sans ces trois éléments, l'action reste
+  absente.
 - Catalogue : à copier dans `/var/lib/opentv/catalogue.json` (propriétaire `opentv`, 0600) depuis la chaîne acceptée ;
   sans lui « Pour toi » affiche une sélection vide.
 
@@ -415,15 +504,17 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
 | **Télécommande USB** | télécommande 2,4 GHz branchée : flèches, OK, Retour, Accueil sur l'écran OpenTV ; Accueil/BrowserBack ne quittent jamais `/tv` ; écran QR : aucune touche n'agit ; **touche Power : la boîte reste allumée** (après redémarrage) ; clavier : F12/Ctrl+Maj+I, Ctrl+P, Ctrl+S, Ctrl+Alt+F2 sans effet |
 | **Décodage** | H.264 local 1080p60 pendant 30 min : `/dev/video10` ouvert à chaque sonde, horloge H.264 ≈ 500 MHz, maximum 0,372 % d'images perdues, température maximale 41,3 °C, `hvs_underrun=0`, `get_throttled=0x0` ; kiosque restauré et résidus supprimés. 4K/HEVC/VP9/AV1 Chromium hors cible. |
 | **Rollback** | `uninstall.sh` ⇒ console tty1 de retour, `/opt/opentv` absent, fichiers d'origine restaurés ; réinstallation propre ; `--purge` sans perte du Wi-Fi |
+| **Assistants (Réglages)** | TV : Réglages → « Gérer les assistants » → « Non » au focus → « Oui » → QR dans la feuille, colonne Télécommande masquée ; iPhone (appareil photo) : 3 étapes, « Autorisé » et « Connecté » distincts, « Oui, enregistrer » ; TV : accueil + « C'est enregistré ! Assistants autorisés : N · connectés : M » ; `ss -ltn` : `:8081` lié à l'adresse LAN pendant le mode seulement, puis fermé ; Wi-Fi/nom inchangés (`nmcli -t device status`, `device.json`) ; aucun nouveau fichier dans `/etc/opentv/agents` ; second envoi du même QR refusé ; photo d'Alex |
 | **Agent** | `opentv-mcp` depuis le compte de l'agent : `tools/list` filtré par scopes, `recommend` sans URL, scope refusé, audit présent sans secret |
 
 ## 10. Développement
 
 ```sh
-python3 -m unittest discover -s scripts/pi4/tests -t scripts/pi4      # depuis la racine du dépôt (365 tests)
+python3 -m unittest discover -s scripts/pi4/tests -t scripts/pi4      # depuis la racine du dépôt
 python3.11 -m unittest discover -s scripts/pi4/tests -t scripts/pi4   # version de Bookworm
 # bouts en bout réels (Chromium headless, temps réel) et analyse ES5 :
 #   OPENTV_TEST_PLAYWRIGHT=<module playwright> OPENTV_TEST_ACORN=<module acorn> OPENTV_TEST_SHOTS=<dossier de captures>
-#   (formulaires du téléphone sans JavaScript, Origin: null refusé, écran TV 1920×1080 sans chevauchement du QR)
+#   (formulaires du téléphone sans JavaScript, Origin: null refusé, écran TV 1920×1080 sans chevauchement du QR,
+#    « Gérer les assistants » de bout en bout : tests/e2e_agents.js, captures tv-agents-*.png / phone-agents-*.png)
 ./scripts/pi4/install.sh --dry-run ; ./scripts/pi4/install.sh --root /tmp/rfs --skip-preflight
 ```

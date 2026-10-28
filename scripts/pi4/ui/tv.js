@@ -6,6 +6,12 @@
   var state = null, fy = null, fyAt = 0, fails = 0, lastQr = "", lastApQr = "", lastRemoteQr = "";
   var REMOTE_ACTIONS = { up: 1, down: 1, left: 1, right: 1, ok: 1, back: 1, home: 1 };
   var remoteSeq = -1, remoteFails = 0;
+  // « Gérer les assistants » : dernier résultat déjà vu (aucune annonce d'un résultat antérieur au chargement)
+  var agentsSeq = null, lastAgentsQr = "", skipCancelToast = false;
+  // QR des assistants absent (écoute impossible, adresse perdue) : rien pendant AGENTS_QR_WAIT_MS (le QR arrive
+  // normalement au premier état), puis « QR indisponible, réessaie » ; à AGENTS_QR_GIVEUP_MS la feuille se ferme et
+  // le mode est annulé — une seule fois, jamais de nouvel essai automatique (pas de boucle, jamais 10 min de vide)
+  var AGENTS_QR_WAIT_MS = 2500, AGENTS_QR_GIVEUP_MS = 8000, MSG_AGENTS_QR = "QR indisponible, réessaie.";
   var focus = { zone: "rows", row: 0, cols: [], auto: false }, panel = null, toastTimer = null;
   var LABELS = { like: "J'aime", dislike: "Pas pour moi", seen: "Déjà vu", watchlist: "À voir plus tard",
                  "not-tonight": "Pas ce soir" };
@@ -137,6 +143,9 @@
                             "Tape le mot de passe : la TV affiche ensuite OpenTV."];
     list.forEach(function (x) { steps.appendChild(el("li", null, x)); });
     $("setupmsg").textContent = s.message || (s.expires_in ? "Ce QR est valable " + Math.max(1, Math.round(s.expires_in / 60)) + " min, une seule fois." : "");
+    // connexion Wi-Fi en cours mais assistants non enregistrés : dit tout de suite, en clair (aucun détail technique)
+    $("agentsnote").hidden = !(s.phase === "applying" && s.agents_saved === false && s.agents_message);
+    $("agentsnote").textContent = $("agentsnote").hidden ? "" : s.agents_message;
     $("apfig").hidden = !s.hotspot;
     if (s.hotspot) {
       $("apssid").textContent = s.hotspot.ssid;
@@ -147,9 +156,10 @@
     if (s.url && s.url !== lastQr) { lastQr = s.url; drawQR($("qr"), s.url); }
   }
 
-  // ---- Pour toi : héros (titre au focus) + rangées. Réglages = cercle en haut à droite (zone « top ») :
-  // un seul ↑ y mène depuis n'importe quelle rangée ou fiche, OK ouvre, Retour ferme — jamais une rangée cachée.
-  // Rangées : ↓ descend, Retour remonte d'une seule rangée (colonne mémorisée par rangée), Accueil = tout début.
+  // ---- Pour toi : héros (titre au focus) + rangées. Navigation verticale normale : ↑ remonte d'une rangée
+  // (colonne mémorisée par rangée), ↓ descend ; seul ↑ depuis la première rangée (ou depuis une fiche) mène aux
+  // Réglages = cercle en haut à droite (zone « top »), OK ouvre, Retour ferme — jamais une rangée cachée.
+  // Retour remonte aussi d'une seule rangée, Accueil = tout début.
   var ROWS = [], grid = [], heroId = null;
   function loadForYou(force) {
     if (!force && fy && Date.now() - fyAt < 120000) { return; }
@@ -287,15 +297,18 @@
   }
   // aide du bas : toujours celle du contexte courant (rangées, Réglages en haut, panneau)
   var HELP = {
-    rows: [["← →", "Parcourir"], ["↓", "Rangée suivante"], ["Retour", "Rangée précédente"], ["↑", "Réglages"],
+    rows: [["← →", "Parcourir"], ["↑", "Rangée précédente"], ["↓", "Rangée suivante"], ["Retour", "Rangée précédente"],
            ["OK", "Ouvrir"]],
+    rows0: [["← →", "Parcourir"], ["↓", "Rangée suivante"], ["↑", "Réglages"], ["OK", "Ouvrir"]],
     top: [["OK", "Ouvrir les Réglages"], ["↓ ou Retour", "Revenir aux titres"]],
     topEmpty: [["OK", "Ouvrir les Réglages"]],
-    item: [["← →", "Choisir"], ["OK", "Valider"], ["Retour", "Fermer"], ["↑", "Réglages"]],
+    item: [["← →", "Choisir"], ["OK", "Valider"], ["Retour", "Fermer"]],
+    agents: [["Téléphone", "Scanne le QR"], ["OK ou Retour", "Annuler"]],
     panel: [["↑ ↓", "Choisir"], ["OK", "Valider"], ["Retour", "Revenir"]]
   }, helpKey = "";
   function help() {
-    var k = panel ? (panel.kind === "item" ? "item" : "panel") : (focus.zone === "top" ? (ROWS.length ? "top" : "topEmpty") : "rows");
+    var k = panel ? (panel.kind === "item" ? "item" : panel.kind === "agents" ? "agents" : "panel") : (focus.zone === "top" ? (ROWS.length ? "top" : "topEmpty") :
+                                                                       (focus.row > 0 ? "rows" : "rows0"));
     if (k === helpKey) { return; }
     helpKey = k;
     var h = $("hint");
@@ -336,7 +349,8 @@
   // sans aucune touche. Rien à recopier : ni adresse, ni code.
   function renderRemote() {
     var r = state && state.remote, box = $("remotebox");
-    var show = !!(r && r.enabled && r.url && !state.setup.active);
+    // QR des assistants affiché : un seul QR à l'écran (jamais deux codes à confondre)
+    var show = !!(r && r.enabled && r.url && !state.setup.active) && !(panel && panel.kind === "agents");
     box.hidden = !show;
     if (!show) { return; }
     if (r.url !== lastRemoteQr) { lastRemoteQr = r.url; drawQR($("rqr"), r.url); }
@@ -375,6 +389,7 @@
     panel = extra || {};
     panel.kind = kind; panel.btn = btn;
     $("panel").className = "panel" + (kind === "item" ? "" : " sheet");   // Réglages : feuille latérale v23
+    $("pqrfig").hidden = kind !== "agents";
     $("panel").hidden = false;
     paintPanel(); paint(); renderRemote();
   }
@@ -390,8 +405,25 @@
       return button((on ? "✓ " : "") + LABELS[a], on ? "on" : "");
     }), 0, { it: it, actions: actions });
   }
+  // assistants : « autorisés » (ce que la TV permet) et « connectés » (vraiment installés sur la boîte) restent
+  // deux nombres distincts ; une autorisation n'est jamais présentée comme une connexion
+  // en-tête « Connectés : … » : la même liste canonique que les compteurs (assistants connus vraiment connectés),
+  // jamais une entrée étrangère du registre ; « agents » seulement pour un service plus ancien sans cette liste
+  function connectedAgents(s) {
+    var l = s.assistants && s.assistants.list, out = [], i;
+    if (!(l instanceof Array)) { return s.agents || []; }
+    for (i = 0; i < l.length; i++) { if (l[i] && l[i].connected && AGENTS.hasOwnProperty(l[i].id)) { out.push(l[i].id); } }
+    return out;
+  }
+  function agentsCounts() {
+    var a = state && state.assistants;
+    if (!a || typeof a.authorized !== "number") { return "Muse, Hermit, Hermes"; }
+    if (a.unreadable) { return "État illisible : rien ne sera changé"; }
+    return "Autorisés : " + a.authorized + " · Connectés : " + a.connected;
+  }
   function openSettings(sel) {
-    var list = [["setup", "⟳", "Reconfigurer", "Nouveau QR : Wi-Fi, nom, assistants"]];
+    var list = [["setup", "⟳", "Reconfigurer", "Nouveau QR : Wi-Fi, nom, assistants"],
+                ["agents", "◎", "Gérer les assistants", agentsCounts()]];
     if (state && state.remote && state.remote.enabled && state.remote.phones > 0) {
       list.push(["remote-forget", "▣", "Oublier les téléphones", "Ils devront rescanner le QR"]);
     }
@@ -409,6 +441,12 @@
               }), idx, { actions: list.map(function (x) { return x[0]; }) });
   }
   function openConfirm(what) {   // choix sûr (« Non ») au focus par défaut
+    if (what === "agents") {
+      showPanel("confirm", "Réglages", "Gérer les assistants ?",
+                "Un QR s'affiche : choisis sur ton téléphone ce que Muse, Hermit et Hermes peuvent faire. Le Wi-Fi et le nom de la TV ne changent pas.",
+                [button("Oui, afficher le QR", "lrow"), button("Non", "lrow")], 1, { what: what, actions: [what, "no"] });
+      return;
+    }
     var forget = what === "remote-forget";
     showPanel("confirm", "Réglages", forget ? "Oublier tous les téléphones ?" : "Afficher un nouveau QR de configuration ?",
               forget ? "Ils ne pourront plus servir de télécommande avant d'avoir rescanné le QR."
@@ -424,9 +462,77 @@
       b[i].className = base + (i === panel.btn ? (base ? " " : "") + "focused" : "");
     }
   }
-  function closePanel() { panel = null; $("panel").hidden = true; paint(); if (state) { renderRemote(); } }
+  function closePanel() { panel = null; $("panel").hidden = true; $("pqrfig").hidden = true; paint(); if (state) { renderRemote(); } }
   function panelBack() {
-    if (panel.kind === "confirm") { openSettings(panel.what); } else { closePanel(); }
+    if (panel.kind === "agents") { cancelAgents(); }
+    else if (panel.kind === "confirm") { openSettings(panel.what); } else { closePanel(); }
+  }
+  // ---- « Gérer les assistants » : QR dédié, téléphone seulement ; Retour/OK (« Annuler ») ferme sans rien changer
+  function openAgents(seq) {
+    lastAgentsQr = "";
+    // nouveau parcours : une annulation TV précédente (POST perdu) ne doit jamais masquer une annulation téléphone ;
+    // tout résultat déjà émis par le service avant cette ouverture (seq de la réponse) n'est jamais annoncé
+    skipCancelToast = false;
+    if (typeof seq === "number" && (agentsSeq === null || seq > agentsSeq)) { agentsSeq = seq; }
+    var now = Date.now();
+    showPanel("agents", "Réglages", "Gérer les assistants",
+              "Sur ton téléphone, même Wi-Fi que la TV. Le Wi-Fi et le nom de la TV ne changent pas.",
+              [button("Annuler", "lrow")], 0, { actions: ["cancel"], openedAt: now, noQrSince: now });
+    $("aqrmsg").hidden = true;
+    var ol = $("psteps");
+    ol.textContent = "";
+    ["Scanne ce QR avec l'appareil photo.", "Choisis pour Muse, Hermit et Hermes.", "Confirme sur le téléphone."]
+      .forEach(function (x) { ol.appendChild(el("li", null, x)); });
+    renderAgents();
+  }
+  function renderAgents() {
+    if (!panel || panel.kind !== "agents") { return; }
+    var m = state && state.assistants && state.assistants.manage, c = $("aqr"), now = Date.now();
+    if (m && m.active && m.url) {
+      if (m.url !== lastAgentsQr) { lastAgentsQr = m.url; drawQR(c, m.url); }
+      c.style.visibility = "";
+      $("aqrmsg").hidden = true;
+      panel.noQrSince = null; panel.noQrTimers = false;
+      return;
+    }
+    c.style.visibility = "hidden";   // jamais un ancien QR (adresse périmée) laissé à l'écran
+    if (panel.noQrSince === null || panel.noQrSince === undefined) { panel.noQrSince = now; }
+    if (!panel.noQrTimers) {   // 2 contrôles différés par absence de QR (pas de boucle) : échéances tenues sans poll
+      panel.noQrTimers = true;
+      var p = panel;
+      [AGENTS_QR_WAIT_MS, AGENTS_QR_GIVEUP_MS].forEach(function (ms) {
+        setTimeout(function () { if (panel === p) { renderAgents(); } }, Math.max(0, p.noQrSince + ms - now) + 20);
+      });
+    }
+    var waited = now - panel.noQrSince;
+    $("aqrmsg").hidden = waited < AGENTS_QR_WAIT_MS;
+    if (waited >= AGENTS_QR_GIVEUP_MS) { giveUpAgents(); }
+  }
+  function giveUpAgents() {   // feuille fermée + mode annulé côté service ; annonce honnête, aucune relance
+    closePanel();
+    skipCancelToast = true;
+    toast(MSG_AGENTS_QR + "\nRien n'a changé.");
+    api("POST", "/api/tv/agents/cancel", {}).catch(onApiError);
+  }
+  function cancelAgents() {
+    closePanel();
+    skipCancelToast = true;
+    toast("Annulé : rien n'a changé.");
+    api("POST", "/api/tv/agents/cancel", {}).catch(onApiError);
+  }
+  function onAgentsResult(kind) {
+    var cancelled = kind === "cancelled";
+    if (cancelled && skipCancelToast) { skipCancelToast = false; return; }
+    skipCancelToast = false;
+    if (panel && panel.kind !== "item") { closePanel(); }
+    if (kind === "saved") {
+      goStart();   // retour à l'accueil, confirmation claire et chiffrée (autorisés ≠ connectés)
+      var n = agentsCounts();
+      toast("C'est enregistré !\n" + (n.indexOf("Autorisés") === 0 ?
+            "Assistants a" + n.slice(1).replace("Connectés", "connectés") : n), true);
+    } else if (kind === "expired") { toast("QR des assistants expiré : rien n'a changé."); }
+    else if (kind === "unavailable") { toast(MSG_AGENTS_QR + "\nRien n'a changé."); }
+    else if (cancelled) { toast("Annulé sur le téléphone : rien n'a changé."); }
   }
   function goStart() {
     focus.row = 0; focus.cols = [];
@@ -436,8 +542,33 @@
   function act() {
     var a = panel.actions[panel.btn], it = panel.it;
     if (panel.kind === "settings") { if (a === "close") { closePanel(); } else { openConfirm(a); } return; }
+    if (panel.kind === "agents") { cancelAgents(); return; }
     if (panel.kind === "confirm") {
       if (a === "no") { openSettings(panel.what); return; }
+      if (a === "agents") {
+        api("POST", "/api/tv/agents", {}).then(function (j) {
+          var base = j && typeof j.seq === "number" ? j.seq : null, last = j && j.last;
+          // l'issue de CETTE ouverture est déjà lue (un poll arrivé avant la réponse l'a annoncée) : jamais rouvrir la
+          // feuille, jamais d'annulation inutile ni de seconde annonce
+          if (base !== null && agentsSeq !== null && agentsSeq > base) {
+            if (panel && panel.kind === "confirm") { closePanel(); }
+            return;
+          }
+          // la boîte a déjà fermé le mode pendant l'ouverture (écoute impossible…) : une annonce, aucune feuille
+          if (base !== null && last && typeof last.seq === "number" && last.seq > base) {
+            agentsSeq = last.seq;
+            skipCancelToast = false;
+            if (panel && panel.kind === "confirm") { closePanel(); }
+            onAgentsResult(last.kind);
+            return;
+          }
+          openAgents(base);
+          api("GET", "/api/tv/state").then(render).catch(onApiError);   // QR tout de suite, sans attendre le poll
+        }).catch(function (e) {
+          if (!onApiError(e)) { closePanel(); toast("Impossible pour l'instant : la TV doit être connectée au réseau."); }
+        });
+        return;
+      }
       closePanel();
       if (a === "setup") { api("POST", "/api/tv/setup", {}).then(function () { toast("Nouveau QR en préparation…"); }).catch(onApiError); }
       if (a === "remote-forget") { api("POST", "/api/tv/remote/revoke", {}).then(function () { toast("Téléphones oubliés."); }).catch(onApiError); }
@@ -462,9 +593,9 @@
       else if (a === "right" || (sheet && a === "down")) { panel.btn = Math.min(panel.actions.length - 1, panel.btn + 1); paintPanel(); }
       else if (a === "ok") { act(); }
       else if (a === "back") { panelBack(); }
-      else if (a === "home") { closePanel(); goStart(); }
-      else if (a === "up" && panel.kind === "item") { closePanel(); focus.zone = "top"; focus.auto = false; paint(); }
-      return true;                                         // ↓ sur une fiche : sans effet, mais consommé
+      else if (a === "home") { if (panel.kind === "agents") { cancelAgents(); } else { closePanel(); } goStart(); }
+      // ↑ ↓ sur une fiche : sans effet, mais consommés — jamais de saut vers Réglages depuis un film ouvert
+      return true;
     }
     if (focus.zone === "top") {
       if (a === "ok") { openSettings(); return true; }
@@ -473,7 +604,9 @@
       paint();
       return true;
     }
-    if (a === "up") { focus.zone = "top"; focus.auto = false; }   // un seul ↑, depuis n'importe quelle rangée
+    if (a === "up") {   // rangée N > 0 : rangée N-1 (sa colonne mémorisée) ; rangée 0 seulement : Réglages
+      if (focus.row > 0) { focus.row -= 1; } else { focus.zone = "top"; focus.auto = false; }
+    }
     else if (a === "down") { focus.row = Math.min(ROWS.length - 1, focus.row + 1); }
     else if (a === "right") { focus.cols[focus.row] = Math.min(ROWS[focus.row].items.length - 1, col() + 1); }
     else if (a === "left") { focus.cols[focus.row] = Math.max(0, col() - 1); }
@@ -503,14 +636,19 @@
     var wasSetup = !!(state && state.setup.active);
     state = s;
     if (wasSetup && !s.setup.active) {   // succès confirmé sur la TV, sans terminal ni jargon
-      toast("C'est prêt ! OpenTV est configuré." + (s.remote && s.remote.enabled && !s.remote.phones ?
-            " Télécommande sur téléphone : mets-le sur le même Wi-Fi que la TV, puis scanne le QR à droite." : ""), true);
+      // succès partiel (Wi-Fi/nom appliqués, assistants non enregistrés) : jamais un « tout est prêt » à tort
+      var agentsNote = s.setup.agents_saved === false && s.setup.agents_message;
+      toast("C'est prêt ! OpenTV est configuré." + (agentsNote ? "\n" + agentsNote :
+            (s.remote && s.remote.enabled && !s.remote.phones ?
+             " Télécommande sur téléphone : mets-le sur le même Wi-Fi que la TV, puis scanne le QR à droite." : "")), true);
     }
     $("device").textContent = s.device;
     $("net").textContent = NET[s.network.mode] || s.network.mode;
-    $("net").className = "badge " + s.network.mode;
-    $("agents").textContent = s.agents.length ? "Assistants : " + s.agents.map(function (a) { return AGENTS[a] || a; }).join(", ") : "";
-    $("agents").hidden = !s.agents.length;
+    // préfixe « net- » : la classe « offline » est celle du voile plein écran « Reconnexion… » (jamais sur le badge)
+    $("net").className = "badge net-" + s.network.mode;
+    var conn = connectedAgents(s);
+    $("agents").textContent = conn.length ? "Connectés : " + conn.map(function (a) { return AGENTS[a] || a; }).join(", ") : "";
+    $("agents").hidden = !conn.length;
     // message d'assistant : accueil seulement, emplacement réservé dans le héros (jamais sur le titre ni un QR)
     var b = $("banner"), showMsg = !!s.message && !s.setup.active;
     if (showMsg) { b.textContent = "Message de " + (AGENTS[s.message.from] || s.message.from) + " : " + s.message.text; }
@@ -521,6 +659,17 @@
     $("help").hidden = s.setup.active;
     $("gear").hidden = s.setup.active;
     $("glabel").hidden = s.setup.active;
+    var am = s.assistants && s.assistants.manage;
+    if (am && am.last && typeof am.last.seq === "number") {
+      if (agentsSeq === null) { agentsSeq = am.last.seq; }
+      // seulement un résultat plus récent : un état lu avant l'ouverture (seq plus ancien) n'est jamais annoncé
+      else if (am.last.seq > agentsSeq) { agentsSeq = am.last.seq; if (!s.setup.active) { onAgentsResult(am.last.kind); } }
+    }
+    // fin du mode : annoncée par le changement de résultat ci-dessus ; un état sans QR (poll parti avant
+    // l'ouverture) est toléré quelques secondes, au-delà la feuille se ferme d'elle-même
+    if (panel && panel.kind === "agents") {
+      if ((am && am.active) || Date.now() - panel.openedAt < 6000) { renderAgents(); } else { closePanel(); }
+    }
     if (s.setup.active) { closePanel(); renderSetup(s.setup); }
     else {
       if (!fy && !heroId) { renderRows(); }   // avant « Pour toi » : écran d'attente écrit, Réglages au focus

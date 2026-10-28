@@ -1,10 +1,15 @@
 """Identité des agents locaux : registre (hash des jetons), politique de scopes, fichier client 0600, audit expurgé."""
+import contextlib
+import copy
+import errno
+import fcntl
 import hashlib
 import hmac
 import json
 import os
 import re
 import secrets
+import stat
 import threading
 import time
 
@@ -12,6 +17,104 @@ from . import fsutil, validate
 
 SAFE_ARG_RE = re.compile(r"[a-z0-9/-]{1,40}")
 SAFE_ARG_KEYS = ("action", "list", "id")
+# Attente bornée du verrou inter-processus (service ⇄ CLI root) : jamais de blocage infini. Le service l'attend sous
+# App.lock (QR de configuration, « Gérer les assistants ») : pendant une écriture admin concurrente — rare — le poll
+# d'état de la TV peut donc rester suspendu jusqu'à cette durée, puis reprend seul (README, « Écritures concurrentes »).
+LOCK_TIMEOUT_S = 5.0
+
+
+class RegistryBusy(OSError):
+    """Verrou du registre tenu trop longtemps par un autre processus : rien n'est écrit, nouvel essai possible."""
+
+    def __init__(self):
+        super().__init__(errno.EWOULDBLOCK, "registry_busy")
+
+
+LOCK_OPEN_TRIES = 10   # créations/suppressions concurrentes du verrou : nombre borné d'essais, puis registry_busy
+LOCK_OWNER_SETTLE_TRIES = 10   # verrou que root vient de créer : ≤ 50 ms pour voir son fchown vers le service
+
+
+def _open_lock_fd(dfd, name):
+    """Création exclusive OU ouverture de l'existant, sans course : O_EXCL|O_CREAT d'abord (lien, FIFO, dossier déjà
+    présents ⇒ EEXIST, jamais suivis ni créés à travers) ; EEXIST ⇒ ouverture SANS O_CREAT de ce qui existe ; disparu
+    entre les deux (ENOENT) ⇒ nouvel essai, au plus LOCK_OPEN_TRIES fois, puis RegistryBusy (réessayable, jamais
+    « chemin dangereux »). Toute autre erreur (ELOOP sur un lien, EACCES…) ⇒ UnsafePath. -> (fd, créé_par_moi).
+    (Sur macOS, l'ancien open(O_CREAT|O_NOFOLLOW) sans O_EXCL répondait ENOENT à plusieurs créateurs simultanés.)"""
+    base = os.O_RDONLY | fsutil.O_NOFOLLOW | fsutil.O_NONBLOCK | fsutil.O_CLOEXEC
+    for _ in range(LOCK_OPEN_TRIES):
+        try:
+            return os.open(name, base | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dfd), True
+        except FileExistsError:
+            pass
+        except FileNotFoundError:   # macOS : O_CREAT|O_NOFOLLOW concurrents peuvent répondre ENOENT ⇒ nouvel essai
+            continue
+        except OSError as e:
+            raise fsutil.UnsafePath("lock_open_refused:%s" % errno.errorcode.get(e.errno or 0, "?"))
+        try:
+            return os.open(name, base, dir_fd=dfd), False
+        except FileNotFoundError:   # supprimé entre les deux appels : on recommence (borné)
+            continue
+        except OSError as e:   # ELOOP (lien), EACCES…
+            raise fsutil.UnsafePath("lock_open_refused:%s" % errno.errorcode.get(e.errno or 0, "?"))
+    raise RegistryBusy()
+
+
+def open_lock(path, uid=None, gid=None):
+    """Fichier verrou latéral (« agents.json.lock ») partagé par le service et la CLI root, dans le dossier d'état
+    (0700 du compte du service ; root y entre par ses capacités). Créé de façon exclusive ou ouvert tel quel,
+    relativement au dossier, sans jamais suivre de lien ni bloquer (FIFO) ; plusieurs processus qui le créent en même
+    temps obtiennent tous le même fichier (course de création bornée : voir _open_lock_fd). Fichier régulier à lien
+    unique exigé. Propriétaire : un fichier préexistant doit appartenir au compte attendu (`uid`, compte du service
+    passé par root ; sinon le processus courant) — un fichier root préexistant inattendu est refusé, jamais
+    « récupéré ». Seul un verrou que CE processus vient de créer est rendu au compte du service par fchown sur le
+    descripteur ; mode 0600. Aucun contenu : seul compte le flock. -> descripteur."""
+    d, name = os.path.split(os.path.abspath(path))
+    dfd = fsutil.open_dir(d)
+    try:
+        fd, created = _open_lock_fd(dfd, name)
+    finally:
+        os.close(dfd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise fsutil.UnsafePath("lock_not_regular")
+        if st.st_nlink != 1:
+            raise fsutil.UnsafePath("lock_hardlinked")
+        want = os.geteuid() if uid is None else uid
+        if created:   # créé ici par O_EXCL (jamais un fichier d'autrui) : seul cas où il est rendu au service
+            if st.st_uid != want:
+                os.fchown(fd, want, -1 if gid is None else gid)
+        else:
+            # root peut être entre sa création exclusive et son fchown : brève attente bornée du transfert, puis refus
+            for _ in range(LOCK_OWNER_SETTLE_TRIES):
+                if st.st_uid == want:
+                    break
+                time.sleep(0.005)
+                st = os.fstat(fd)
+            if st.st_uid != want or not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                raise fsutil.UnsafePath("lock_unexpected_owner" if st.st_uid != want else "lock_hardlinked")
+        if stat.S_IMODE(st.st_mode) != 0o600:
+            os.fchmod(fd, 0o600)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def flock_bounded(fd, timeout, clock=time.monotonic, sleep=time.sleep):
+    """flock exclusif, essais non bloquants pendant au plus `timeout` s. -> None ; RegistryBusy sinon."""
+    deadline, delay = clock() + timeout, 0.002
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            pass
+        left = deadline - clock()
+        if left <= 0:
+            raise RegistryBusy()
+        sleep(min(delay, left))
+        delay = min(delay * 2, 0.05)
 
 
 def _sha(t):
@@ -24,6 +127,32 @@ def atomic_write_json(path, obj, mode=0o600, uid=None, gid=None):
     return fsutil.atomic_write_path(path, data, mode=mode, uid=uid, gid=gid)
 
 
+def _valid_scopes(v):
+    try:
+        return validate.scopes(v) if isinstance(v, list) else []
+    except ValueError:
+        return []
+
+
+def view_of(data, known):
+    """Lecture validée unique, la même pour l'affichage et pour l'écriture : {agent: {"allowed": [...],
+    "have": [...] | None}}. Entrée de politique absente/invalide ⇒ [] ; identité absente ⇒ None ; scopes d'identité
+    invalides ⇒ [] (l'Agent Port la refuse déjà)."""
+    pol = data.get("policy") if isinstance(data.get("policy"), dict) else {}
+    ags = data.get("agents") if isinstance(data.get("agents"), dict) else {}
+    out = {}
+    for a in known:
+        e = ags.get(a)
+        out[a] = {"allowed": _valid_scopes(pol.get(a)),
+                  "have": _valid_scopes(e.get("scopes")) if isinstance(e, dict) else None}
+    return out
+
+
+def view_fingerprint(view):
+    """Empreinte non secrète de l'état montré au téléphone (détecte un changement entre affichage et envoi)."""
+    return hashlib.sha256(json.dumps(view, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
 class Registry:
     """agents.json (0600, propriétaire opentv) : {"v":1, "agents": {id: {token_sha256, scopes, created_at}},
     "policy": {id: [scopes autorisés au QR]}, "policy_at": horodatage}. Rechargé quand le fichier change.
@@ -31,48 +160,142 @@ class Registry:
     Politique : tant que le QR n'a jamais été validé (policy_at absent et policy vide), l'administrateur local (root
     sur la boîte) peut émettre n'importe quel scope valide. Dès qu'une politique existe, elle est un plafond strict :
     agent absent/inconnu ⇒ « agent_not_in_policy », scope au-delà (y compris pour un agent « aucun accès », scopes
-    vides) ⇒ « scope_exceeds_policy », sauf --force explicite sur la boîte."""
+    vides) ⇒ « scope_exceeds_policy », sauf --force explicite sur la boîte.
 
-    def __init__(self, path, clock=time.time):
+    Toute écriture (issue, rollback_issue, revoke, set_policy, apply_policy_changes) est une lecture-modification-
+    écriture sérialisée entre processus (service ⇄ CLI root) par un flock sur `agents.json.lock`, pris TOUJOURS après
+    le verrou interne (ordre unique : App.lock → Registry.lock → flock ; aucun appel ne remonte) ; le registre est
+    relu sous ce verrou (jamais d'écrasement d'une écriture concurrente). Registre présent mais illisible / invalide
+    / non régulier ⇒ ValueError("registry_unreadable") : jamais remplacé, octets intacts."""
+
+    def __init__(self, path, clock=time.time, lock_timeout=LOCK_TIMEOUT_S):
         self.path, self.clock = path, clock
+        self.lock_path, self.lock_timeout = path + ".lock", lock_timeout
         self.lock = threading.Lock()
         self._sig, self.data = None, {"v": 1, "agents": {}, "policy": {}}
+        self.corrupt = False   # fichier présent mais illisible/invalide : lecture fail-closed, jamais réécrit
         self._reload()
 
     def _reload(self):
         try:
             st = os.lstat(self.path)
         except FileNotFoundError:
-            self._sig, self.data = None, {"v": 1, "agents": {}, "policy": {}}
+            self._sig, self.data, self.corrupt = None, {"v": 1, "agents": {}, "policy": {}}, False
             return
         sig = (st.st_mtime_ns, st.st_size, st.st_ino)
         if sig == self._sig:
             return
+        corrupt = False
         try:   # lien ou FIFO à la place du registre : illisible (O_NOFOLLOW, non bloquant) ⇒ fail-closed
             d = json.loads(fsutil.read_regular(self.path, 4 * 1024 * 1024).decode("utf-8"))
-            if not isinstance(d, dict) or d.get("v") != 1:
+            if not isinstance(d, dict) or d.get("v") != 1 or not isinstance(d.get("agents", {}), dict) or \
+                    not isinstance(d.get("policy", {}), dict):
                 raise ValueError
-        except (OSError, ValueError, UnicodeDecodeError):
-            d = {"v": 1, "agents": {}, "policy": {}}   # registre illisible : aucun agent (fail-closed)
+        except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+            d, corrupt = {"v": 1, "agents": {}, "policy": {}}, True   # registre illisible : aucun agent (fail-closed)
         d.setdefault("agents", {})
         d.setdefault("policy", {})
-        self._sig, self.data = sig, d
+        self._sig, self.data, self.corrupt = sig, d, corrupt
 
     def _save(self, uid=None, gid=None):
         atomic_write_json(self.path, self.data, uid=uid, gid=gid)
         self._sig = None
 
-    def set_policy(self, policy, uid=None, gid=None):
-        clean = {validate.agent_id(k): validate.scopes(v) for k, v in policy.items()}
+    @contextlib.contextmanager
+    def _mutating(self, uid=None, gid=None):
+        """Section critique d'écriture : verrou interne puis flock inter-processus (borné), relecture forcée du
+        fichier sous le flock, refus d'un registre illisible. Toute exception ⇒ la mémoire sera relue du disque."""
         with self.lock:
-            self._reload()
+            fd = open_lock(self.lock_path, uid, gid)
+            try:
+                flock_bounded(fd, self.lock_timeout)
+                self._sig = None   # jamais de cache : un autre processus a pu écrire juste avant
+                self._reload()
+                if self.corrupt:
+                    raise ValueError("registry_unreadable")
+                yield
+            except BaseException:
+                self._sig = None
+                raise
+            finally:
+                os.close(fd)   # libère le flock
+
+    def set_policy(self, policy, uid=None, gid=None, revoke_exceeding=False):
+        """Politique complète (QR de configuration). revoke_exceeding : dans la MÊME écriture, toute identité dont
+        les scopes dépassent sa nouvelle autorisation (ou étrangère à la politique) est révoquée. -> [révoqués]."""
+        clean = {validate.agent_id(k): validate.scopes(v) for k, v in policy.items()}
+        with self._mutating(uid, gid):
             self.data["policy"] = clean
             self.data["policy_at"] = round(self.clock(), 3)
+            gone = []
+            if revoke_exceeding:
+                for a, e in sorted(self.data["agents"].items()):
+                    sc = e.get("scopes", []) if isinstance(e, dict) else None   # entrée non-objet ⇒ révoquée
+                    if not isinstance(sc, list) or not set(map(str, sc)) <= set(clean.get(a, [])):
+                        gone.append(a)
+                for a in gone:
+                    del self.data["agents"][a]
             self._save(uid, gid)
+        return gone
 
     def _policy_defined(self):
         pol = self.data.get("policy")
         return isinstance(pol, dict) and (bool(pol) or self.data.get("policy_at") is not None)
+
+    def snapshot(self, known):
+        """-> (vue validée, empreinte, illisible) en une seule lecture sous verrou (voir view_of)."""
+        with self.lock:
+            self._reload()
+            v = view_of(self.data, known)
+            return v, view_fingerprint(v), self.corrupt
+
+    def apply_policy_changes(self, changes, known, expect, uid=None, gid=None):
+        """Gestion des assistants depuis la TV : `changes` = {agent: scopes} pour les SEULES lignes réellement
+        modifiées par l'utilisateur. Sous un seul verrou : registre illisible ⇒ ValueError("registry_unreadable") ;
+        état différent de l'empreinte `expect` montrée au téléphone ⇒ ValueError("stale") ; rien n'est écrit.
+
+        Écriture atomique d'une politique complète et sûre : agent modifié ⇒ nouveaux scopes et, dans la même
+        écriture, son identité déjà émise est réduite au nouveau plafond (plus aucun scope ⇒ révoquée) ; agent connu
+        non modifié ⇒ sa lecture validée actuelle (absente/invalide ⇒ [] = « Aucun accès » déjà affiché) et son
+        identité n'est JAMAIS touchée ; entrées étrangères conservées telles quelles. N'émet jamais de jeton ni
+        d'identité. Aucun changement ⇒ aucune écriture. Échec d'écriture ⇒ OSError, état mémoire rétabli.
+        -> {agent: "policy"|"restricted"|"revoked"} pour chaque agent modifié."""
+        known = tuple(validate.agent_id(k) for k in known)
+        clean = {validate.agent_id(k): validate.scopes(v) for k, v in changes.items()}
+        if not set(clean) <= set(known):
+            raise ValueError("unknown_agent")
+        with self._mutating(uid, gid):   # registre illisible ⇒ ValueError("registry_unreadable")
+            cur = view_of(self.data, known)
+            if not isinstance(expect, str) or not hmac.compare_digest(view_fingerprint(cur), expect):
+                raise ValueError("stale")
+            if not clean:
+                return {}
+            old = copy.deepcopy(self.data)
+            pol = dict(self.data.get("policy") or {})
+            for a in known:
+                pol[a] = list(clean[a]) if a in clean else list(cur[a]["allowed"])
+            self.data["policy"] = pol
+            self.data["policy_at"] = round(self.clock(), 3)
+            out = {}
+            for a, allowed in clean.items():
+                out[a] = "policy"
+                e = self.data["agents"].get(a)
+                if not isinstance(e, dict):
+                    continue
+                have = cur[a]["have"] or []   # déjà validé et trié ; invalide ⇒ [] ⇒ révoquée (fail-closed)
+                keep = [x for x in have if x in allowed]
+                if not keep:
+                    del self.data["agents"][a]
+                    out[a] = "revoked"
+                elif keep != have:
+                    e["scopes"] = keep
+                    out[a] = "restricted"
+            try:
+                self._save(uid, gid)
+            except BaseException:
+                self.data = old
+                raise
+        return out
 
     def policy_defined(self):
         with self.lock:
@@ -89,8 +312,7 @@ class Registry:
         agent_id, scopes = validate.agent_id(agent_id), validate.scopes(scopes)
         if not scopes:
             raise ValueError("bad_scopes")
-        with self.lock:
-            self._reload()
+        with self._mutating(uid, gid):
             if self._policy_defined() and not force:
                 pol = self.data["policy"].get(agent_id)
                 if not isinstance(pol, list):
@@ -109,8 +331,7 @@ class Registry:
     def rollback_issue(self, agent_id, token, previous, uid=None, gid=None):
         """Annule une émission dont le fichier client n'a pas pu être écrit : si l'entrée courante est encore celle de
         `token`, l'entrée précédente est restaurée (ou l'agent retiré). -> True si annulé."""
-        with self.lock:
-            self._reload()
+        with self._mutating(uid, gid):
             cur = self.data["agents"].get(agent_id)
             if not isinstance(cur, dict) or not hmac.compare_digest(str(cur.get("token_sha256")), _sha(token)):
                 return False
@@ -122,8 +343,7 @@ class Registry:
         return True
 
     def revoke(self, agent_id, uid=None, gid=None):
-        with self.lock:
-            self._reload()
+        with self._mutating(uid, gid):
             gone = self.data["agents"].pop(agent_id, None) is not None
             self._save(uid, gid)
         return gone

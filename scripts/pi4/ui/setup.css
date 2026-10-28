@@ -55,3 +55,22 @@ input:focus, select:focus { border-color: #2f81f7; outline: none; }
 .more a { color: #58a6ff; font-size: 18px; display: inline-block; padding: 12px 8px; min-height: 48px; }
 .hint { color: #8b949e; font-size: 15px; }
 code { font-size: 14px; }
+/* Gestion des assistants (Réglages TV -> QR) : un bloc par assistant, « Autorisé » et « Connecté » sur deux lignes
+   distinctes, grandes cibles ; aucune ligne de script. */
+.agents h2 { font-size: 22px; margin: 0 0 6px; }
+.agent { margin: 16px 0 0; padding: 14px 16px 16px; border: 2px solid #30363d; border-radius: 16px; background: #161b22; }
+.agent label { margin: 12px 0 0; font-size: 17px; }
+.status { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.st { display: flex; gap: 10px; align-items: baseline; font-size: 16px; color: #c9d1d9; }
+.st b { flex: 0 0 92px; font-size: 15px; font-weight: 700; padding: 2px 8px; border-radius: 8px; text-align: center; }
+.st.yes b { background: #12361f; color: #7ee2a0; }
+.st.no b { background: #2d333b; color: #adbac7; }
+.secondary { display: block; width: 100%; min-height: 58px; font: inherit; font-size: 19px; font-weight: 600;
+  padding: 14px; border-radius: 16px; border: 2px solid #30363d; background: transparent; color: #f0f3f6;
+  margin: 6px 0 0; cursor: pointer; }
+.recap { list-style: none; padding: 0; margin: 14px 0 0; display: grid; gap: 10px; }
+.recap li { padding: 14px 16px; border-radius: 14px; border: 2px solid #30363d; background: #161b22; font-size: 18px; }
+.recap li > b { display: block; font-size: 20px; margin-bottom: 4px; }
+.recap li > span { display: block; }
+.recap small { display: block; color: #e3b341; font-size: 15px; margin-top: 6px; }
+.recap.final .status { margin-top: 6px; }

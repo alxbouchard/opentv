@@ -344,6 +344,15 @@ class TestAtomicWritesFd(unittest.TestCase):
         fc = FchownLog()
         r = agents.Registry(path)
         with mock.patch.object(os, "fchown", fc), no_path_perms():
+            # registre non régulier (lien) = illisible : chaque écriture est refusée, le lien et sa cible intacts
+            for call in (lambda: r.set_policy({"muse": ["read"]}, uid=os.getuid(), gid=os.getgid()),
+                         lambda: r.issue("muse", ["read"], uid=os.getuid(), gid=os.getgid()),
+                         lambda: r.revoke("muse", uid=os.getuid(), gid=os.getgid())):
+                with self.assertRaisesRegex(ValueError, "registry_unreadable"):
+                    call()
+            self.assertEqual(os.readlink(path), victim)
+            self.assertEqual(fc.calls, [])
+            os.unlink(path)                                   # registre régulier : écritures par descripteur seulement
             r.set_policy({"muse": ["read"]}, uid=os.getuid(), gid=os.getgid())
             tok = r.issue("muse", ["read"], uid=os.getuid(), gid=os.getgid())
             r.revoke("muse", uid=os.getuid(), gid=os.getgid())

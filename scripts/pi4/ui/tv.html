@@ -35,6 +35,7 @@
       <h1>Bienvenue ! Configurons ta TV</h1>
       <ol id="steps"></ol>
       <p id="setupmsg" class="setupmsg"></p>
+      <p id="agentsnote" class="setupmsg" role="status" hidden></p>
       <p id="phoneonly" class="setupmsg">Tout se règle sur le téléphone : la télécommande n'est pas nécessaire ici.</p>
       <p id="url" class="url"></p>
     </div>
@@ -76,14 +77,18 @@
     <p id="pkicker" class="kicker"></p>
     <h2 id="ptitle"></h2>
     <p id="pmeta" class="pmeta"></p>
+    <!-- « Gérer les assistants » seulement : QR dédié (jamais le Wi-Fi ni le nom), dans la feuille Réglages -->
+    <figure id="pqrfig" class="pqr" hidden><canvas id="aqr" width="300" height="300" data-size="300" data-qr=""></canvas>
+      <p id="aqrmsg" class="aqrmsg" role="status" hidden>QR indisponible, réessaie.</p>
+      <ol id="psteps" class="psteps"></ol></figure>
     <div id="pbtns" class="pbtns"></div>
   </div>
 
   <div id="toast" class="toast" hidden></div>
   <div id="offline" class="offline" hidden>Reconnexion à OpenTV…</div>
   <footer id="help">
-    <!-- aide contextuelle (tv.js) : dans les rangées, Retour remonte d'une rangée, ↑ mène toujours aux Réglages -->
-    <span id="hint" class="hint"><span class="hk">← →</span> Parcourir · <span class="hk">↓</span> Rangée suivante · <span class="hk">Retour</span> Rangée précédente · <span class="hk">↑</span> Réglages · <span class="hk">OK</span> Ouvrir</span>
+    <!-- aide contextuelle (tv.js) : ↑ et Retour remontent d'une rangée ; ↑ depuis la 1re rangée mène aux Réglages -->
+    <span id="hint" class="hint"><span class="hk">← →</span> Parcourir · <span class="hk">↓</span> Rangée suivante · <span class="hk">↑</span> Réglages · <span class="hk">OK</span> Ouvrir</span>
     <span class="samsung">Les applis Samsung (YouTube, Netflix…) : depuis le menu de la TV.</span>
     <span class="brand">OpenTV</span>
   </footer>

@@ -1101,31 +1101,62 @@ class TestTvKeysInChromium(unittest.TestCase):
             self.assertTrue(lay["focus_in_view"], (where, lay))                  # focus entièrement visible
             self.assertTrue(lay["focus_ring"], (where, lay))                     # anneau de focus évident
 
-    def test_up_reaches_settings_from_any_row_in_one_press(self):
+    def test_up_climbs_one_row_and_only_first_row_reaches_settings(self):
+        """Navigation verticale normale (retour terrain) : ↑ depuis la rangée N > 0 va à la rangée N-1 en gardant la
+        colonne mémorisée de cette rangée ; seul ↑ depuis la rangée 0 mène aux Réglages ; ↓ = rangée suivante."""
         st = dict(self.STATE, remote=self.REMOTE1)
-        steps = [["ArrowUp", {"tag": "row0"}], ["ArrowDown", {"tag": "ret0"}],
-                 ["ArrowDown"], ["ArrowRight"], ["ArrowUp", {"tag": "row1"}], ["ArrowDown", {"tag": "ret1"}],
-                 ["ArrowDown"], ["ArrowRight"], ["ArrowRight"], ["ArrowRight"], ["ArrowRight", {"tag": "end"}],
-                 ["ArrowDown", {"tag": "last"}], ["ArrowUp", {"tag": "row2"}], ["Enter", {"tag": "open"}],
-                 ["Escape", {"tag": "close"}], ["Escape", {"tag": "leave"}], ["Escape", {"tag": "start"}]]
+        steps = [["ArrowUp", {"tag": "row0"}], ["ArrowDown", {"tag": "ret0"}], ["ArrowRight", {"tag": "b"}],
+                 ["ArrowDown", {"tag": "d1"}], ["ArrowRight", {"tag": "e"}], ["ArrowDown", {"tag": "d2"}],
+                 ["ArrowRight"], ["ArrowRight"], ["ArrowRight", {"tag": "end"}], ["ArrowDown", {"tag": "last"}],
+                 ["ArrowUp", {"tag": "up2"}], ["ArrowUp", {"tag": "up1"}], ["ArrowUp", {"tag": "up0"}],
+                 ["ArrowDown", {"tag": "back1"}], ["ArrowDown", {"tag": "back2"}], ["ArrowUp", {"tag": "again1"}],
+                 ["ArrowLeft", {"tag": "left1"}], ["ArrowUp", {"tag": "again0"}], ["ArrowDown", {"tag": "keep1"}],
+                 ["ArrowUp"], ["ArrowUp", {"tag": "top"}], ["Enter", {"tag": "open"}], ["Escape", {"tag": "close"}],
+                 ["Escape", {"tag": "leave"}]]
         res = self.render(st, steps)
         s = {x["s"]: x for x in res["steps"]}
-        for tag in ("ArrowUp:row0", "ArrowUp:row1", "ArrowUp:row2"):             # un seul ↑ depuis chaque rangée
+        for tag in ("ArrowUp:row0", "ArrowUp:top"):                              # rangée 0 : ↑ = Réglages
             self.assertTrue(s[tag]["settings"] and s[tag]["focus"] is None and not s[tag]["panel"], s[tag])
             self.assertTrue(s[tag]["prevented"])
         self.assertEqual(s["ArrowDown:ret0"]["focus"], "Alpha")                  # ↓ : retour à la même carte
-        self.assertEqual(s["ArrowDown:ret1"]["focus"], "Echo")
-        self.assertEqual(s["ArrowRight:end"]["focus"], "India")                  # rangée longue : dernière carte
-        self.assertEqual(s["ArrowDown:last"]["focus"], "India")                  # dernière rangée : reste en place
+        self.assertEqual([s[t]["focus"] for t in ("ArrowRight:b", "ArrowDown:d1", "ArrowRight:e", "ArrowDown:d2",
+                                                  "ArrowRight:end", "ArrowDown:last")],
+                         ["Bravo", "Delta", "Echo", "Foxtrot", "India", "India"])  # ↓ : rangée suivante, dernière fixe
+        # ↑ remonte d'UNE rangée, colonne mémorisée de chaque rangée, jamais Réglages avant la rangée 0
+        self.assertEqual([s[t]["focus"] for t in ("ArrowUp:up2", "ArrowUp:up1", "ArrowUp:up0")],
+                         ["Echo", "Bravo", None])
+        self.assertFalse(s["ArrowUp:up2"]["settings"] or s["ArrowUp:up1"]["settings"])
+        self.assertTrue(s["ArrowUp:up0"]["settings"])
+        self.assertEqual([s[t]["focus"] for t in ("ArrowDown:back1", "ArrowDown:back2", "ArrowUp:again1",
+                                                  "ArrowLeft:left1", "ArrowUp:again0", "ArrowDown:keep1")],
+                         ["Bravo", "Echo", "Bravo", "Alpha", None, "Alpha"])
         self.assertEqual((s["Enter:open"]["ptitle"], s["Enter:open"]["btn"]), ("Réglages", "Reconfigurer"))
         self.assertFalse(s["Escape:close"]["panel"])                             # Retour ferme…
         self.assertTrue(s["Escape:close"]["settings"])                           # … et le focus reste sur Réglages
-        self.assertEqual(s["Escape:leave"]["focus"], "India")                    # Retour en haut : contenu retrouvé
-        self.assertEqual(s["Escape:start"]["focus"], "Echo")                     # Retour : une rangée plus haut
+        self.assertEqual(s["Escape:leave"]["focus"], "Alpha")                    # Retour en haut : contenu retrouvé
         for x in res["steps"]:
             self.assertLayout(x["layout"], x["s"])
-        self.assertIn("↑ Réglages", res["hint"])
+            self.assertFalse(x["panel"] and x["ptitle"] != "Réglages", x["s"])   # ↑ n'ouvre jamais rien
+        self.assertIn("Rangée précédente", s["ArrowUp:up2"]["hint"])             # aide : ↑ = rangée précédente…
+        self.assertIn("↑ Rangée précédente", s["ArrowUp:up2"]["hint"])
+        self.assertIn("↑ Réglages", s["ArrowDown:ret0"]["hint"])                 # … et Réglages en 1re rangée
+        self.assertNotIn("↑ Réglages", s["ArrowDown:d1"]["hint"])
         self.assertEqual([c for c in res["calls"] if c.startswith("POST")], [])
+
+    def test_ok_opens_item_panel_with_preferences_and_no_fake_play_action(self):
+        """OK sur une carte ouvre toujours la fiche et ses actions d'avis ; aucune action « Regarder » tant que la Pi
+        n'a pas de lecteur/ouverture autorisée réelle (jamais un bouton factice)."""
+        res = self.render(self.STATE, [["ArrowDown"], ["ArrowDown"], ["ArrowRight"], ["Enter", {"tag": "open"}],
+                                       ["ArrowRight", {"tag": "r"}], ["Enter", {"tag": "act"}]])
+        s = {x["s"]: x for x in res["steps"]}
+        self.assertEqual(s["Enter:open"]["ptitle"], "Golf")
+        self.assertEqual(s["Enter:open"]["btns"], ["J'aime", "Pas pour moi", "Déjà vu", "À voir plus tard",
+                                                   "Pas ce soir"])
+        self.assertEqual(s["Enter:open"]["btn"], "J'aime")
+        self.assertEqual(s["ArrowRight:r"]["btn"], "Pas pour moi")
+        for x in res["steps"]:
+            self.assertFalse(any("Regarder" in b or "Lire" in b for b in x["btns"]), x["btns"])
+        self.assertEqual([c for c in res["calls"] if c.startswith("POST")], ["POST /api/tv/feedback"])
 
     FY4 = {"note": "", "marks": {}, "rows": FY["rows"] + [
         {"id": "r4", "title": "Pour finir", "items": [{"id": "j", "title": "Juliett"}, {"id": "k", "title": "Kilo"},
@@ -1140,7 +1171,8 @@ class TestTvKeysInChromium(unittest.TestCase):
                  ["Escape", {"tag": "back3"}], ["Escape", {"tag": "back2"}], ["Escape", {"tag": "back1"}],
                  ["Escape", {"tag": "back0"}], ["GoBack", {"tag": "again0"}],
                  ["ArrowDown", {"tag": "down1"}], ["ArrowDown", {"tag": "down2"}], ["ArrowDown", {"tag": "down3"}],
-                 ["ArrowUp", {"tag": "settings"}], ["ArrowDown", {"tag": "ret"}],
+                 ["ArrowUp", {"tag": "up2"}], ["ArrowUp", {"tag": "up1"}], ["ArrowUp", {"tag": "up0"}],
+                 ["ArrowUp", {"tag": "settings"}], ["ArrowDown", {"tag": "ret"}], ["ArrowDown", {"tag": "d1"}],
                  ["Escape", {"tag": "b"}], ["ArrowUp", {"tag": "settings2"}], ["Escape", {"tag": "ret2"}]]
         res = self.render(st, steps, fy=self.FY4)
         s = {x["s"]: x for x in res["steps"]}
@@ -1155,14 +1187,17 @@ class TestTvKeysInChromium(unittest.TestCase):
             self.assertTrue(s[t]["prevented"] and not s[t]["panel"] and not s[t]["settings"], s[t])
         self.assertEqual([s[t]["focus"] for t in ("ArrowDown:down1", "ArrowDown:down2", "ArrowDown:down3")],
                          ["Echo", "Hotel", "Kilo"])                              # ↓ : colonne de chaque rangée gardée
-        self.assertTrue(s["ArrowUp:settings"]["settings"] and s["ArrowUp:settings2"]["settings"])  # ↑ : un geste
-        self.assertEqual(s["ArrowDown:ret"]["focus"], "Kilo")
-        self.assertEqual(s["Escape:b"]["focus"], "Hotel")
-        self.assertEqual(s["Escape:ret2"]["focus"], "Hotel")                     # Retour depuis Réglages : même carte
+        self.assertEqual([s[t]["focus"] for t in ("ArrowUp:up2", "ArrowUp:up1", "ArrowUp:up0")],
+                         ["Hotel", "Echo", "Alpha"])                              # ↑ : une rangée, colonne gardée
+        self.assertTrue(s["ArrowUp:settings"]["settings"] and s["ArrowUp:settings2"]["settings"])  # rangée 0 : Réglages
+        self.assertEqual(s["ArrowDown:ret"]["focus"], "Alpha")
+        self.assertEqual(s["ArrowDown:d1"]["focus"], "Echo")
+        self.assertEqual(s["Escape:b"]["focus"], "Alpha")
+        self.assertEqual(s["Escape:ret2"]["focus"], "Alpha")                     # Retour depuis Réglages : même carte
         for x in res["steps"]:
             self.assertLayout(x["layout"], x["s"])
         rows_hint = s["Escape:back2"]["hint"]                                    # aide explicite, dans les rangées
-        for want in ("↓", "Retour", "Rangée précédente", "↑ Réglages", "OK"):
+        for want in ("↓", "Retour", "Rangée précédente", "↑ Rangée précédente", "OK"):
             self.assertIn(want, rows_hint)
         self.assertIn("Rangée suivante", rows_hint)
         self.assertNotIn("Rangée précédente", s["ArrowUp:settings"]["hint"])    # en haut : aide propre aux Réglages
@@ -1267,10 +1302,11 @@ class TestTvKeysInChromium(unittest.TestCase):
                  ["ArrowLeft"], ["Enter", {"tag": "confirm"}]]
         res = self.render(st, steps)
         s = {x["s"]: x for x in res["steps"]}
-        self.assertEqual(s["Enter:open"]["btns"], ["Reconfigurer", "Oublier les téléphones", "Fermer"])
+        self.assertEqual(s["Enter:open"]["btns"], ["Reconfigurer", "Gérer les assistants", "Oublier les téléphones",
+                                                   "Fermer"])
         self.assertEqual([s[t]["btn"] for t in ("ArrowRight:r1", "ArrowRight:r2", "ArrowRight:r3", "ArrowLeft:l1",
                                                 "ArrowDown:down", "ArrowUp:up")],
-                         ["Oublier les téléphones", "Fermer", "Fermer", "Oublier les téléphones",
+                         ["Gérer les assistants", "Oublier les téléphones", "Fermer", "Oublier les téléphones",
                           "Fermer", "Oublier les téléphones"])                   # feuille v23 : ↑ ↓ aussi
         self.assertEqual(s["Enter:ask"]["ptitle"], "Oublier tous les téléphones ?")
         self.assertEqual(s["Enter:ask"]["btn"], "Non")                           # choix sûr par défaut
@@ -1285,18 +1321,34 @@ class TestTvKeysInChromium(unittest.TestCase):
         self.assertEqual([c for c in res["calls"] if c.startswith("POST")], ["POST /api/tv/setup"])
         for x in res["steps"]:
             self.assertLayout(x["layout"], x["s"])
-        res = self.render(st, [["ArrowUp"], ["Enter"], ["ArrowRight"], ["Enter"], ["ArrowLeft"], ["Enter"]])
+        res = self.render(st, [["ArrowUp"], ["Enter"], ["ArrowRight"], ["ArrowRight"], ["Enter"], ["ArrowLeft"],
+                               ["Enter"]])
         self.assertEqual([c for c in res["calls"] if c.startswith("POST")], ["POST /api/tv/remote/revoke"])
 
-    def test_settings_without_phones_and_from_title_panel(self):
+    def test_settings_without_phones_and_up_inside_title_panel_is_consumed(self):
+        """Fiche d'un titre ouverte : ↑ (et ↓) sont consommés sans effet — jamais de saut vers Réglages depuis un film
+        (retour de revue). Retour ferme la fiche sur la même carte ; seul ↑ depuis la rangée 0 atteint Réglages."""
         st = dict(self.STATE, remote=dict(self.REMOTE1, phones=0))
-        steps = [["ArrowDown"], ["Enter", {"tag": "title"}], ["ArrowUp", {"tag": "up"}], ["Enter", {"tag": "open"}],
-                 ["ArrowRight"], ["Enter", {"tag": "close"}]]
+        steps = [["ArrowDown"], ["Enter", {"tag": "title"}], ["ArrowRight", {"tag": "r"}],
+                 ["ArrowUp", {"tag": "up"}], ["ArrowUp", {"tag": "up2"}], ["ArrowDown", {"tag": "down"}],
+                 ["Escape", {"tag": "closed"}], ["ArrowUp", {"tag": "row0"}], ["ArrowUp", {"tag": "top"}],
+                 ["Enter", {"tag": "open"}], ["ArrowRight"], ["ArrowRight"], ["Enter", {"tag": "close"}]]
         res = self.render(st, steps)
         s = {x["s"]: x for x in res["steps"]}
         self.assertEqual(s["Enter:title"]["ptitle"], "Delta")
-        self.assertTrue(s["ArrowUp:up"]["settings"] and not s["ArrowUp:up"]["panel"])   # ↑ même depuis un titre
-        self.assertEqual(s["Enter:open"]["btns"], ["Reconfigurer", "Fermer"])    # aucun téléphone : rien à oublier
+        for t in ("ArrowUp:up", "ArrowUp:up2", "ArrowDown:down"):           # consommés, aucun effet
+            self.assertTrue(s[t]["panel"] and s[t]["ptitle"] == "Delta", s[t])
+            self.assertFalse(s[t]["settings"], s[t])
+            self.assertEqual(s[t]["btn"], s["ArrowRight:r"]["btn"], s[t])     # même action au focus
+            self.assertTrue(s[t]["prevented"], s[t])
+        self.assertNotIn("Réglages", s["Enter:title"]["hint"])                # aide de la fiche : pas de « ↑ Réglages »
+        self.assertIn("Retour Fermer", s["Enter:title"]["hint"])
+        self.assertFalse(s["Escape:closed"]["panel"])
+        self.assertEqual(s["Escape:closed"]["focus"], "Delta")                 # Retour : même carte
+        self.assertEqual(s["ArrowUp:row0"]["focus"], "Alpha")                  # rangée 1 -> rangée 0
+        self.assertFalse(s["ArrowUp:row0"]["settings"])
+        self.assertTrue(s["ArrowUp:top"]["settings"])                           # seule la rangée 0 mène aux Réglages
+        self.assertEqual(s["Enter:open"]["btns"], ["Reconfigurer", "Gérer les assistants", "Fermer"])   # rien à oublier
         self.assertFalse(s["Enter:close"]["panel"])
         self.assertEqual([c for c in res["calls"] if c.startswith("POST")], [])
 
@@ -1376,7 +1428,7 @@ class TestTvKeysInChromium(unittest.TestCase):
             self.assertGreaterEqual(b["r"][1], a["r"][3] - 0.5, sh)                # lignes empilées verticalement
         self.assertEqual([b["bgc"] for b in sh["btns"] if b["focused"]], ["rgb(255, 255, 255)"], sh)
         self.assertEqual([s[t]["btn"] for t in ("Enter:sheet", "ArrowDown:down", "ArrowDown:down2", "ArrowUp:up")],
-                         ["Reconfigurer", "Oublier les téléphones", "Fermer", "Oublier les téléphones"])
+                         ["Reconfigurer", "Gérer les assistants", "Oublier les téléphones", "Gérer les assistants"])
         self.assertTrue(s["Escape:closed"]["settings"] and not s["Escape:closed"]["panel"])
         self.assertEqual(s["Escape:back"]["focus"], "Alpha")
         self.assertEqual(s["Enter:title"]["ptitle"], "Alpha")                    # fiche du titre : actions inchangées
@@ -2253,12 +2305,24 @@ class TestPhoneRemoteHttp(unittest.TestCase):
         self.assertEqual(st["phone:ok"]["ptitle"], st["phone:right"]["focus"])
         self.assertFalse(st["phone:back"]["panel"])                              # téléphone : Retour
         self.assertLess(res["ok_latency_ms"], 1500)
-        # Réglages : un seul ↑ depuis la 1re et la 3e rangée (et depuis une fiche), OK ouvre, ← → choisit, Retour ferme
+        # ↑ : rangée 2 -> rangée 1 -> rangée 0 (jamais de saut), puis Réglages depuis la 1re rangée seulement ; dans
+        # une fiche, ↑ est consommé sans effet ; OK ouvre, ← → choisit, Retour ferme
         st = {x["s"]: x for x in res["settings"]}
-        for tag in ("set:up-row0", "set:up-row2", "set:up-from-title"):
+        for tag in ("set:up-to-row1", "set:up-to-row0"):
+            self.assertFalse(st[tag]["settings"] or st[tag]["panel"], st[tag])
+            self.assertIsNotNone(st[tag]["focus"], st[tag])
+        self.assertNotEqual(st["set:up-to-row1"]["focus"], st["set:up-to-row0"]["focus"])
+        self.assertIn("Rangée précédente", st["set:up-to-row1"]["layout"]["hint"])
+        for tag in ("set:up-row0", "set:up-row2"):
             self.assertTrue(st[tag]["settings"] and not st[tag]["panel"] and st[tag]["focus"] is None, st[tag])
+        ft = st["set:up-from-title"]                                             # fiche : ↑ consommé, fiche intacte
+        self.assertTrue(ft["panel"] and not ft["settings"], ft)
+        self.assertEqual(ft["ptitle"], st["set:title"]["ptitle"])
+        self.assertNotIn("Réglages", ft["layout"]["hint"])
+        self.assertEqual(st["set:end"]["focus"], st["set:row1"]["focus"])         # Retour : même carte
         self.assertEqual((st["set:open"]["panel"], st["set:open"]["ptitle"]), (True, "Réglages"))
-        self.assertEqual(res["settings_buttons"], ["Reconfigurer", "Oublier les téléphones", "Fermer"])
+        self.assertEqual(res["settings_buttons"], ["Reconfigurer", "Gérer les assistants", "Oublier les téléphones",
+                                                   "Fermer"])
         self.assertEqual(st["set:confirm"]["ptitle"], "Afficher un nouveau QR de configuration ?")
         self.assertEqual(res["confirm_btn"], "Non")                              # confirmation : « Non » par défaut
         self.assertEqual(st["set:back"]["ptitle"], "Réglages")                   # Retour : un niveau
@@ -2291,8 +2355,10 @@ class TestPhoneRemoteHttp(unittest.TestCase):
         self.assertEqual(cl["climb:back0"]["focus"], cl["climb:0"]["focus"])
         self.assertEqual(cl["climb:stay0"]["focus"], cl["climb:0"]["focus"])
         self.assertEqual(cl["climb:again1"]["focus"], cl["climb:right1"]["focus"])
-        self.assertTrue(cl["climb:up"]["settings"] and not cl["climb:up"]["panel"])
-        self.assertEqual(cl["climb:ret"]["focus"], cl["climb:again1"]["focus"])
+        self.assertEqual(cl["climb:up1"]["focus"], cl["climb:0"]["focus"])      # ↑ depuis la rangée 1 : rangée 0
+        self.assertFalse(cl["climb:up1"]["settings"])
+        self.assertTrue(cl["climb:up"]["settings"] and not cl["climb:up"]["panel"])   # ↑ depuis la rangée 0 : Réglages
+        self.assertEqual(cl["climb:ret"]["focus"], cl["climb:0"]["focus"])
         self.assertIn("Rangée précédente", cl["climb:back1"]["layout"]["hint"])
         for x in res["climb"]:
             self.assertEqual(x["url"], "/tv")

@@ -2,6 +2,8 @@
 
 Aucun privilège : les changements réseau passent par des jobs 0600 consommés par le helper root.
 """
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -17,8 +19,41 @@ from .foryou import ForYou, EngineError
 from .setup_token import SetupToken
 
 KNOWN_AGENTS = ("muse", "hermit", "hermes")
+AGENT_NAMES = {"muse": "Muse", "hermit": "Hermit", "hermes": "Hermes"}
 AGENT_LEVELS = {"none": [], "read": ["read"], "feedback": ["feedback", "read"],
                 "full": ["display", "feedback", "read"]}
+# « Gérer les assistants » (Réglages TV) : mode dédié, distinct de la configuration. Il n'ouvre que la page
+# /assistants sur l'adresse LAN (jamais 0.0.0.0, jamais en configuration ni hors ligne), avec son propre jeton à
+# usage unique ; il ne touche ni au Wi-Fi, ni au nom, ni au hotspot, ni aux jobs réseau, et n'émet aucune identité.
+AGENTS_RESULTS = ("saved", "cancelled", "expired", "unavailable")   # unavailable : écoute LAN impossible
+ERR_AGENTS_LEVEL = "Choix invalide pour un assistant : choisis une option dans chaque liste."
+ERR_AGENTS_REGISTRY = ("Les assistants de la boîte sont illisibles : rien n'a été changé. Redémarre la boîte "
+                       "OpenTV, puis réessaie depuis la TV.")
+# configuration QR réussie (Wi-Fi/nom) mais politique des assistants non enregistrée : vérité affichée au téléphone et
+# à la TV, sans détail technique (registre illisible, verrou occupé ou écriture impossible : rien n'a été écrit)
+MSG_AGENTS_NOT_SAVED = ("Les assistants n'ont pas été enregistrés : rien n'a changé pour eux. Réessaie depuis "
+                        "Réglages → Gérer les assistants.")
+ERR_AGENTS_WRITE = "L'enregistrement a échoué : rien n'a été changé. Réessaie dans un moment."
+ERR_AGENTS_STALE = ("Les assistants ont changé pendant ton choix : rien n'a été enregistré. Vérifie l'état ci-dessous, "
+                    "puis choisis de nouveau.")
+AGENT_KEEP = "keep"   # « Ne rien changer pour lui » : aucune écriture de sa ligne, son identité n'est jamais touchée
+
+
+def level_of(scopes):
+    """Scopes -> préréglage affiché (none|read|feedback|full) ; « display » = tout."""
+    sc = set(scopes or ())
+    return "full" if "display" in sc else "feedback" if "feedback" in sc else "read" if "read" in sc else "none"
+
+
+def choice_changes(x, new):
+    """Un choix du téléphone modifie-t-il réellement cet assistant ? (même règle pour la page et pour l'écriture)
+
+    « keep » ⇒ jamais. Sinon : changement si le niveau choisi diffère du niveau autorisé affiché, OU si une identité
+    installée dépasse ce niveau (elle serait alors réduite : c'est un vrai changement, annoncé à la confirmation).
+    Un assistant affiché « Inchangé » n'est donc jamais réduit ni révoqué."""
+    if new == AGENT_KEEP:
+        return False
+    return new != x["level"] or not set(x["have"] or ()) <= set(AGENT_LEVELS[new])
 AP_PSK_ALPHABET = "abcdefghijkmnopqrstuvwxyz23456789"
 AP_RETRY_S = 120.0
 FORYOU_TTL_S = 120.0
@@ -101,6 +136,16 @@ class App:
         self.token = SetupToken(clock=mono, ttl=cfg.token_ttl_s)
         self.wifi_scan = wifiscan.Scanner(runner, mono)   # réseaux proches (assistant QR) : borné, mis en cache
         self.registry = agents.Registry(cfg.registry_file)
+        # gestion des assistants (Réglages TV) : jeton distinct du QR de configuration, état mémoire seulement
+        self.agents_token = SetupToken(clock=mono, ttl=cfg.token_ttl_s)
+        self.agents_mode = False
+        self.agents_csrf_key = secrets.token_bytes(32)
+        self.agents_last = {"seq": 0, "kind": None}
+        # issue de la dernière soumission du QR de configuration pour les assistants : None (rien soumis dans ce
+        # parcours) ou {"saved": bool, "reason": None|"unreadable"|"busy"|"write"} — propagé à « done » comme à
+        # « applying » puis au résultat Wi-Fi, pour que la TV et le téléphone ne disent jamais « tout est prêt » à tort
+        self.setup_agents = None
+        self.agent_seen_at = {}       # agent -> dernier appel authentifié par l'Agent Port (depuis ce démarrage)
         self.audit = agents.Audit(cfg.audit_file)
         try:
             self.foryou = ForYou(cfg.engine_dir, cfg.foryou_state, cfg.catalogue_file, cfg.source_id, log=log)
@@ -345,6 +390,7 @@ class App:
             self._apply_deadline()
             if not self.setup_mode and os.path.exists(self.cfg.setup_flag):
                 self.setup_mode, self.phase, self.phase_msg = True, "waiting", None
+                self.setup_agents = None   # nouveau parcours : aucune issue antérieure n'est réannoncée
                 self.token.issue()
             if self.setup_mode:
                 if self.phase != "applying" and self.token.needs_rotation():
@@ -352,6 +398,13 @@ class App:
             self._hotspot_guard()
             if self.setup_mode:
                 self._hotspot()
+            if self.agents_mode:
+                if self.setup_mode:
+                    self._agents_end("cancelled", "setup")
+                elif self.net["mode"] not in ("ethernet", "wifi") or not self.net["ip"]:
+                    self._agents_end("expired", "offline")
+                elif self.agents_token.needs_rotation():
+                    self._agents_end("expired", "token")
             if self.message and self.mono() >= self.message["until"]:
                 self.message = None
             prime = self.setup_mode and net["mode"] == "offline" and net["wifi_present"] and \
@@ -471,8 +524,21 @@ class App:
 
     # -- page de configuration (LAN)
     def want_lan(self):
+        return self.lan_purpose() is not None
+
+    def lan_purpose(self):
+        """Écoute LAN voulue : "setup" (configuration, 0.0.0.0, hotspot compris), "agents" (gestion des assistants,
+        configuré et en ligne seulement, sur l'adresse LAN) ou None."""
         with self.lock:
-            return self.setup_mode and self.net["mode"] != "offline"
+            if self.setup_mode:
+                return "setup" if self.net["mode"] != "offline" else None
+            if self.agents_mode and self.net["mode"] in ("ethernet", "wifi") and self.net["ip"]:
+                return "agents"
+            return None
+
+    def lan_ip(self):
+        with self.lock:
+            return self.net["ip"] if self.net["mode"] in ("ethernet", "wifi") else None
 
     # -- télécommande sur téléphone (LAN, après configuration seulement)
     def want_remote(self):
@@ -564,8 +630,12 @@ class App:
                 del self.bad_token_ips[min(self.bad_token_ips, key=lambda k: self.bad_token_ips[k][-1])]
         return len(win) >= BAD_TOKEN_PER_IP
 
-    def setup_submit(self, form, client=None):
+    def setup_submit(self, form, client=None, outcome=None):
         """-> (code HTTP, page, message d'erreur). Le jeton n'est consommé que par une soumission valide.
+
+        `outcome` (dict, facultatif) reçoit {"agents_saved": bool, "agents_reason": None|"unreadable"|"busy"|
+        "write"} pour une soumission acceptée (« done » ou « applying ») : le Wi-Fi et le nom ne sont jamais bloqués
+        par le fichier des assistants, mais un échec de celui-ci est annoncé honnêtement (téléphone + TV).
 
         Un jeton faux (ou une soumission pendant « applying ») ne compte jamais comme essai : seul le formulaire
         invalide accompagné du **bon** jeton use le QR (5 essais). Les jetons faux sont limités par IP (429)."""
@@ -619,10 +689,19 @@ class App:
                 self._touch_setup_flag()
             config.save_device(self.cfg, {"name": name})
             self.device = config.load_device(self.cfg)
-            self.registry.set_policy(policy)
-            for a, info in self.registry.list().items():   # droits réduits au QR : l'ancien accès est révoqué
-                if not set(info["scopes"]) <= set(policy.get(a, [])):
-                    self.registry.revoke(a)
+            reason = None
+            try:   # droits réduits au QR : l'ancien accès est révoqué dans la MÊME écriture (verrou inter-processus)
+                self.registry.set_policy(policy, revoke_exceeding=True)
+            except (ValueError, OSError) as e:
+                # registre illisible (jamais remplacé : les assistants restent refusés, la TV l'affiche) ou verrou /
+                # écriture en échec : le Wi-Fi et le nom ne sont jamais bloqués par le fichier des assistants, mais
+                # l'échec est propagé (page du téléphone, état et annonce TV) — jamais un « tout est prêt » à tort
+                reason = "unreadable" if isinstance(e, ValueError) else \
+                    "busy" if isinstance(e, agents.RegistryBusy) else "write"
+                self.log("setup_agents_not_saved", error=str(e) if isinstance(e, ValueError) else type(e).__name__)
+            self.setup_agents = {"saved": reason is None, "reason": reason}
+            if isinstance(outcome, dict):
+                outcome.update(agents_saved=reason is None, agents_reason=reason)
             self.log("setup_submitted", network=net, agents=sum(1 for v in policy.values() if v))
             if payload is not None:
                 jid = self._submit("wifi-apply", payload)
@@ -634,11 +713,184 @@ class App:
             self._finish_setup()
             return 200, "done", None
 
+    # -- gestion des assistants (Réglages TV -> QR -> téléphone) : aucun effet réseau, aucune identité émise
+    def agent_seen(self, agent):
+        """Agent Port : appel authentifié réussi (preuve d'activité réelle, mémoire seulement)."""
+        if agent in KNOWN_AGENTS:
+            with self.lock:
+                self.agent_seen_at[agent] = self.mono()
+
+    def assistants(self):
+        return self._assistants_read()[0]
+
+    def assistants_state(self):
+        """-> (liste, empreinte) : voir _assistants_read."""
+        return self._assistants_read()[:2]
+
+    def _assistants_read(self):
+        """-> (liste, empreinte). État honnête de chaque assistant connu, lu en UNE fois : « autorisé » (plafond
+        choisi au QR) et « connecté » (identité réellement installée sur la boîte par l'administrateur, jeton valide)
+        sont deux informations distinctes ; « over » = installé avec plus de droits que son autorisation (état
+        hérité, ex. émis avec --force). Une autorisation seule ne connecte rien ; aucun secret n'est exposé.
+        L'empreinte (non secrète) permet de refuser un envoi si l'état a changé depuis la page de confirmation.
+        -> (liste, empreinte, illisible) : « illisible » vient de la MÊME lecture (jamais relu ensuite depuis
+        self.registry.corrupt, qu'un autre fil peut modifier entre-temps)."""
+        view, fp, corrupt = self.registry.snapshot(KNOWN_AGENTS)
+        out = []
+        now = self.mono()
+        with self.lock:
+            seen = dict(self.agent_seen_at)
+        for a in KNOWN_AGENTS:
+            allowed, have = view[a]["allowed"], view[a]["have"] or []
+            lvl = level_of(allowed)
+            t = seen.get(a)
+            out.append({"id": a, "name": AGENT_NAMES[a], "level": lvl, "authorized": bool(allowed),
+                        "allowed": list(allowed), "have": list(have),
+                        "connected": bool(have), "connected_level": level_of(have) if have else None,
+                        "over": bool(have) and not set(have) <= set(AGENT_LEVELS[lvl]),
+                        "seen_s": int(max(0, now - t)) if (have and t is not None) else None})
+        return out, fp, corrupt
+
+    def _assistants_summary(self):
+        lst, _fp, corrupt = self._assistants_read()
+        return {"authorized": sum(1 for x in lst if x["authorized"]),
+                "connected": sum(1 for x in lst if x["connected"]), "total": len(lst),
+                "list": [{"id": x["id"], "authorized": x["authorized"], "connected": x["connected"]} for x in lst],
+                "unreadable": corrupt}
+
+    def request_agents(self):
+        """Réglages TV « Gérer les assistants » (confirmé sur la TV) -> (ok, raison). Jamais en configuration ni
+        hors ligne ; aucun fichier de configuration, hotspot, job réseau ou nom touché."""
+        with self.lock:
+            if self.setup_mode or self.device is None:
+                return False, "setup"
+            if self.net["mode"] not in ("ethernet", "wifi") or not self.net["ip"]:
+                return False, "offline"
+            self.agents_token.issue()
+            self.agents_mode = True
+        self.log("agents_manage", state="open")
+        return True, None
+
+    def cancel_agents(self, origin):
+        with self.lock:
+            return self._agents_end("cancelled", origin)
+
+    def agents_seq(self):
+        with self.lock:
+            return self.agents_last["seq"]
+
+    def agents_last_result(self):
+        with self.lock:
+            return dict(self.agents_last)
+
+    def agents_unavailable(self, reason):
+        """Écoute /assistants impossible (bind refusé…) : le mode se ferme tout de suite, annoncé « unavailable » à
+        la TV (« QR indisponible, réessaie »). Aucun nouvel essai automatique : l'utilisateur rouvre depuis Réglages."""
+        with self.lock:
+            return self._agents_end("unavailable", reason)
+
+    def _agents_end(self, kind, reason):   # sous self.lock
+        if not self.agents_mode:
+            return False
+        self.agents_mode = False
+        self.agents_token.burn()
+        self.agents_last = {"seq": self.agents_last["seq"] + 1, "kind": kind}
+        self.log("agents_manage", state=kind, reason=reason)
+        return True
+
+    def agents_csrf(self, tok):
+        """Jeton anti-CSRF lié au QR courant (HMAC d'une clé tirée à chaque démarrage) : jamais stocké ni journalisé."""
+        return hmac.new(self.agents_csrf_key, ("agents:" + (tok or "")).encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+
+    def check_agents_token(self, tok, client=None):
+        """Affichage (GET) : lecture seule, n'use jamais un essai ; refusé hors du mode « assistants »."""
+        with self.lock:
+            if self._bad_token_limited(client, record=False):
+                return False
+            return self.agents_mode and not self.setup_mode and self.agents_token.check(tok)
+
+    def agents_submit(self, form, client=None):
+        """Phone POST /assistants -> (code HTTP, type, erreur, changements). Type : denied | form | saved | cancelled
+        | unchanged. Seules les lignes réellement modifiées (choice_changes) sont écrites ; « v » = empreinte de
+        l'état montré à la confirmation (état changé entre-temps ⇒ 409, rien d'écrit, aucun essai usé).
+
+        Le jeton n'est consommé que par un enregistrement réussi ou une annulation ; jeton faux = aucun essai (limité
+        par IP) ; bon jeton + formulaire invalide = un essai usé, politique inchangée. Un seul verrou couvre
+        vérification, écriture atomique et consommation : aucun rejeu possible."""
+        g = lambda k: form.get(k) if isinstance(form.get(k), str) else ""   # noqa: E731
+        with self.lock:
+            if self._bad_token_limited(client, record=False):
+                return 429, "denied", None, None
+            if not self.agents_mode or self.setup_mode:
+                return 403, "denied", None, None
+            tok = g("t")
+            if not self.agents_token.check(tok):
+                self._bad_token_limited(client, record=True)
+                return 403, "denied", None, None
+            if not hmac.compare_digest(g("c").encode("utf-8"), self.agents_csrf(tok).encode("utf-8")):
+                self.agents_token.fail_attempt()
+                return 403, "denied", None, None
+            action = g("action")
+            if action == "cancel":
+                self.agents_token.consume(tok)
+                self._agents_end("cancelled", "phone")
+                return 200, "cancelled", None, None
+            if action != "save":
+                self.agents_token.fail_attempt()
+                return 400, "form", ERR_AGENTS_LEVEL, None
+            lst, fp, corrupt = self._assistants_read()
+            if corrupt:   # registre illisible (même lecture que l'empreinte) : rien n'est écrit, nouvel essai possible
+                return 503, "form", ERR_AGENTS_REGISTRY, None
+            if g("v") != fp:   # état modifié depuis la confirmation (ou formulaire forgé) : rien n'est écrit
+                if not re.fullmatch(r"[0-9a-f]{16}", g("v")):
+                    self.agents_token.fail_attempt()
+                    return 400, "form", ERR_AGENTS_LEVEL, None
+                return 409, "form", ERR_AGENTS_STALE, None
+            changes = {}
+            for x in lst:   # chaque agent connu explicitement (aucune valeur par défaut implicite)
+                lvl = g("agent_" + x["id"])
+                if lvl not in AGENT_LEVELS and lvl != AGENT_KEEP:
+                    self.agents_token.fail_attempt()
+                    return 400, "form", ERR_AGENTS_LEVEL, None
+                if choice_changes(x, lvl):   # seules les lignes réellement modifiées sont écrites
+                    changes[x["id"]] = list(AGENT_LEVELS[lvl])
+            try:
+                changed = self.registry.apply_policy_changes(changes, KNOWN_AGENTS, fp)
+            except ValueError as e:
+                if str(e) == "stale":
+                    return 409, "form", ERR_AGENTS_STALE, None
+                return 503, "form", ERR_AGENTS_REGISTRY, None
+            except OSError as e:
+                self.log("agents_save_error", error=type(e).__name__)
+                return 503, "form", ERR_AGENTS_WRITE, None
+            self.agents_token.consume(tok)
+            if not changed:   # rien de réellement modifié : aucune écriture, annoncé comme tel
+                self._agents_end("cancelled", "unchanged")
+                return 200, "unchanged", None, {}
+            self._agents_end("saved", "phone")
+        self.log("agents_saved", changed=len(changed),
+                 restricted=sum(1 for v in changed.values() if v == "restricted"),
+                 revoked=sum(1 for v in changed.values() if v == "revoked"))
+        return 200, "saved", None, changed
+
+    def _agents_view(self):   # sous self.lock
+        last = dict(self.agents_last)
+        if not self.agents_mode:
+            return {"active": False, "url": None, "expires_in": None, "last": last}
+        cur = self.agents_token.current()
+        port = self.lan_port_actual
+        ip = self.net["ip"] if self.net["mode"] in ("ethernet", "wifi") else None
+        url = "http://%s:%d/assistants?t=%s" % (ip, port, cur[0]) if (cur and ip and port) else None
+        return {"active": True, "url": url, "expires_in": cur[1] if cur else None, "last": last}
+
     # -- vue TV (loopback)
     def _setup_view(self):
+        sa = self.setup_agents
+        agents_out = {"agents_saved": sa is None or sa["saved"], "agents_reason": sa["reason"] if sa else None,
+                      "agents_message": MSG_AGENTS_NOT_SAVED if (sa and not sa["saved"]) else None}
         if not self.setup_mode:
-            return {"active": False, "phase": self.phase, "message": None, "url": None, "token": None,
-                    "expires_in": None, "hotspot": None}
+            return dict({"active": False, "phase": self.phase, "message": None, "url": None, "token": None,
+                         "expires_in": None, "hotspot": None}, **agents_out)
         mode, ip = self.net["mode"], self.net["ip"]
         cur = self.token.current() if self.phase != "applying" else None
         url = None
@@ -659,20 +911,26 @@ class App:
                 msg = "Création du Wi-Fi temporaire OpenTV…"
             else:
                 msg = MSG_NO_NETWORK if (self.cfg.hotspot_enabled and self.net["wifi_present"]) else MSG_NO_NETWORK_NO_AP
-        return {"active": True, "phase": self.phase, "message": msg, "url": url,
-                "token": cur[0] if cur else None, "expires_in": cur[1] if cur else None, "hotspot": hs}
+        return dict({"active": True, "phase": self.phase, "message": msg, "url": url,
+                     "token": cur[0] if cur else None, "expires_in": cur[1] if cur else None, "hotspot": hs},
+                    **agents_out)
 
     def tv_state(self):
         with self.lock:
             m = self.message
             if m and self.mono() >= m["until"]:
                 m = self.message = None
+            # une seule lecture canonique : l'en-tête (« agents », compat.) et les compteurs viennent de la même liste
+            # d'assistants connus réellement connectés — jamais d'entrée étrangère ni d'identité aux scopes invalides
+            assistants = self._assistants_summary()
             return {"device": (self.device or {}).get("name") or "OpenTV", "configured": self.device is not None,
                     "version": VERSION, "network": {"mode": self.net["mode"], "ip": self.net["ip"]},
                     "setup": self._setup_view(),
                     "message": {"text": m["text"], "from": m["from"],
                                 "seconds_left": int(m["until"] - self.mono())} if m else None,
-                    "agents": sorted(self.registry.list()), "cec": {"adapters": len(self.cec["adapters"])},
+                    "agents": [x["id"] for x in assistants["list"] if x["connected"]],
+                    "cec": {"adapters": len(self.cec["adapters"])},
+                    "assistants": dict(assistants, manage=self._agents_view()),
                     "foryou": self.foryou is not None, "remote": self._remote_view()}
 
     def tv_foryou(self):

@@ -11,6 +11,15 @@ const path = require("path");
 const pw = require(process.argv[2]);
 const cfg = JSON.parse(process.argv[3]);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// 3 assistants connectés dans l'état réel du service : la liste canonique (« assistants.list », source de l'en-tête
+// et des compteurs) et le champ de compatibilité « agents » restent cohérents
+const connectAll = (j) => {
+  const ids = ["muse", "hermit", "hermes"];
+  j.agents = ids.slice();
+  j.assistants = Object.assign({}, j.assistants, { connected: ids.length,
+    list: ids.map((id) => ({ id: id, authorized: true, connected: true })) });
+  j.assistants.authorized = ids.length;
+};
 
 (async () => {
   const out = { steps: [] };
@@ -137,6 +146,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await key("ArrowDown", "set:down");
     await key("ArrowDown", "set:down2");
     await key("ArrowDown", "set:down3");
+    // navigation verticale normale : ↑ remonte rangée par rangée (colonne gardée) ; Réglages seulement depuis la 1re
+    out.settings.push(await key("ArrowUp", "set:up-to-row1"));
+    out.settings.push(await key("ArrowUp", "set:up-to-row0"));
     out.settings.push(await key("ArrowUp", "set:up-row2"));
     out.settings.push(await key("Enter", "set:open"));
     out.settings_buttons = await page.evaluate(() => Array.prototype.map.call(document.querySelectorAll("#pbtns button"),
@@ -150,17 +162,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     out.settings.push(await key("Escape", "set:back"));
     out.settings.push(await key("Escape", "set:close"));
     out.settings.push(await key("Escape", "set:content"));
-    await key("ArrowDown", "set:row1");
+    out.settings.push(await key("ArrowDown", "set:row1"));
     out.settings.push(await key("Enter", "set:title"));
     await shot("tv-1920x1080-title-panel.png");
-    out.settings.push(await key("ArrowUp", "set:up-from-title"));
-    await key("Escape", "set:end");
+    out.settings.push(await key("ArrowUp", "set:up-from-title"));   // fiche : ↑ consommé, jamais Réglages
+    out.settings.push(await key("Escape", "set:end"));
     // Retour dans les rangées : une seule rangée à la fois (jamais de saut à la rangée 0), ↑ reste un geste
     out.climb = [];
     for (const [k, label] of [["Home", "climb:0"], ["ArrowDown", "climb:down1"], ["ArrowRight", "climb:right1"],
                               ["ArrowDown", "climb:down2"], ["Escape", "climb:back1"], ["Escape", "climb:back0"],
-                              ["Escape", "climb:stay0"], ["ArrowDown", "climb:again1"], ["ArrowUp", "climb:up"],
-                              ["Escape", "climb:ret"]]) {
+                              ["Escape", "climb:stay0"], ["ArrowDown", "climb:again1"], ["ArrowUp", "climb:up1"],
+                              ["ArrowUp", "climb:up"], ["Escape", "climb:ret"]]) {
       out.climb.push(await key(k, label));
     }
     out.rows_count = await page.evaluate(() => document.querySelectorAll(".row").length);
@@ -174,7 +186,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       const resp = await r.fetch();
       const j = await resp.json();
       j.device = "Salon du sous-sol chez grand-maman Gertrude, télé principale";
-      j.agents = ["muse", "hermit", "hermes"];
+      connectAll(j);
       j.message = { from: "muse", text: "Ce soir, je te propose un film calme. Bonne soirée ! ".repeat(2) };
       await r.fulfill({ response: resp, body: JSON.stringify(j) });
     });
@@ -245,7 +257,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       await sp.route("**/api/tv/state", async (r) => {
         const resp = await r.fetch();
         const j = await resp.json();
-        j.agents = ["muse", "hermit", "hermes"];
+        connectAll(j);
         j.message = { from: "muse", text: "Ce soir, je te propose un film calme. Bonne soirée ! ".repeat(2) };
         j.setup = { active: true, url: "http://opentv-salon.local:8081/setup?t=" + "x".repeat(43), message: "",
                     expires_in: 600, hotspot: hot ? { ssid: "OpenTV-AB12", state: "active",

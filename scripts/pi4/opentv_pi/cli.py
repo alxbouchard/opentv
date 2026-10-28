@@ -183,12 +183,14 @@ def _issue_root(a, cfg, reg, ids, scopes):
             tok = reg.issue(a.id, scopes, force=a.force, previous=prev, **ids)
         except ValueError as e:
             return _out({"ok": False, "error": str(e)}, 2)
+        except OSError as e:
+            return _out({"ok": False, "error": _registry_os_error(e)}, 2)
         try:
             fsutil.atomic_write(dfd, name, agents.client_config_bytes(a.id, tok, cfg.agent_socket), mode=mode,
                                 uid=0, gid=gid)
         except OSError:
-            reg.rollback_issue(a.id, tok, prev[0] if prev else None, **ids)
-            return _out({"ok": False, "error": "client_write_failed"}, 2)
+            return _out(dict({"ok": False, "error": "client_write_failed"},
+                             **_rollback(reg, a.id, tok, prev, ids)), 2)
         finally:
             tok = None
     finally:
@@ -198,6 +200,22 @@ def _issue_root(a, cfg, reg, ids, scopes):
                  "mcp": {"command": "/opt/opentv/bin/opentv-mcp", "args": ["--config", path]},
                  "note": "Le compte %s doit être membre du groupe %s (sudo gpasswd -a %s %s) pour joindre le socket."
                          % (pw.pw_name, cfg.agent_group, pw.pw_name, cfg.agent_group)})
+
+
+def _registry_os_error(e):
+    return "registry_busy" if isinstance(e, agents.RegistryBusy) else "registry_write_failed"
+
+
+def _rollback(reg, agent_id, tok, prev, ids):
+    """Retour arrière d'une émission dont le fichier client n'a pu être écrit ; un registre devenu illisible ou
+    verrouillé n'est jamais forcé : l'échec est rapporté (le jeton émis n'a été écrit nulle part ailleurs)."""
+    try:
+        reg.rollback_issue(agent_id, tok, prev[0] if prev else None, **ids)
+        return {}
+    except ValueError as e:
+        return {"rollback": str(e)}
+    except OSError as e:
+        return {"rollback": _registry_os_error(e)}
 
 
 def cmd_agent(a):
@@ -213,7 +231,12 @@ def cmd_agent(a):
     if a.action == "list":
         return _out({"ok": True, "agents": reg.list(), "policy": reg.policy()})
     if a.action == "revoke":
-        gone = reg.revoke(a.id, **ids)
+        try:
+            gone = reg.revoke(a.id, **ids)
+        except ValueError as e:   # registre illisible : jamais remplacé par un registre vide
+            return _out({"ok": False, "error": str(e)}, 2)
+        except OSError as e:
+            return _out({"ok": False, "error": _registry_os_error(e)}, 2)
         return _out({"ok": True, "revoked": gone})
     scopes = [s for s in (a.scopes or "").split(",") if s]
     if root:
@@ -232,12 +255,13 @@ def cmd_agent(a):
         tok = reg.issue(a.id, scopes, force=a.force, previous=prev)
     except ValueError as e:
         return _out({"ok": False, "error": str(e)}, 2)
+    except OSError as e:
+        return _out({"ok": False, "error": _registry_os_error(e)}, 2)
     try:
         os.makedirs(os.path.dirname(out), mode=0o700, exist_ok=True)
         agents.write_client_config(out, a.id, tok, cfg.agent_socket)
     except OSError:
-        reg.rollback_issue(a.id, tok, prev[0] if prev else None)
-        return _out({"ok": False, "error": "client_write_failed"}, 2)
+        return _out(dict({"ok": False, "error": "client_write_failed"}, **_rollback(reg, a.id, tok, prev, ids)), 2)
     finally:
         tok = None
     return _out({"ok": True, "agent": a.id, "scopes": sorted(set(scopes)), "config": out,

@@ -81,6 +81,9 @@ class AgentService:
                     self.log("agent_port_locked", uid=uid, seconds=AUTH_LOCK_S)
                 self._prune(now)
             return self._deny(agent, tool, None, "unauthorized", t0)
+        seen = getattr(self.ctx, "agent_seen", None)   # activité réelle (Réglages TV : « connecté », jamais supposé)
+        if callable(seen):
+            seen(agent)
         if req["op"] == "whoami":
             return {"ok": True, "result": {"agent": agent, "scopes": scopes}}
         t = tools.TOOL_BY_NAME.get(tool) if isinstance(tool, str) else None
