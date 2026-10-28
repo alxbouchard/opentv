@@ -69,12 +69,24 @@ l'affiche https (vignette `w300`) comme la vue Films, jamais le chemin de fiche.
    tard ; « vu » seul est neutre) → **qualité** (palier de confiance par votes — IMDb ≥ 10 000 / ≥ 1 000 /
    > 0, TMDb apparié ≥ 1 000 / ≥ 100 / > 0 — puis note, puis votes ; IMDb sinon TMDb, jamais de moyenne) →
    **nouveauté** (ajout détecté par instantanés < 30 j, sinon année de sortie récente) → titre → identifiant.
+   Goût d'un film = somme des poids de ses genres (≤ 4, comparés sans casse ni accents). Le goût n'est appris
+   **que** des marques explicites : ouvrir/regarder un film, parcourir les rangées ou le temps écoulé ne le
+   modifient jamais. Ex. : 3 « Pas pour moi » d'animation ⇒ `Animation −3`, et tout autre film d'animation
+   passe sous les genres neutres ou aimés.
 3. **Diversité** : pas deux genres principaux identiques d'affilée si une alternative de même goût existe
    dans les 6 suivants.
 4. Rangées (≤ 12, chaque film une seule fois) : « Le choix de ce soir » (meilleur de la liste « À voir plus
    tard » s'il y en a, sinon tête du classement), « À voir plus tard », « Parce que tu as aimé « X » » (si un
    J'aime avec genre existe), « Nouveautés disponibles », « Les mieux notés que tu n'as pas vus » (palier ≥ 2),
    « Autres suggestions ».
+   Chaque rangée automatique choisit ses **membres** selon son critère, mais les **ordonne toujours** par goût
+   appris d'abord, puis par son critère propre, puis par la clé globale : Nouveautés = goût → date d'ajout
+   (sinon goût → qualité → année), Mieux notés = goût → note → votes, Parce que tu as aimé = goût → qualité
+   (uniquement des films partageant un genre avec X **et** de goût net > 0, pour que l'explication reste
+   vraie), Autres = classement global. Un genre rejeté ne passe donc jamais devant un genre neutre ou aimé.
+   Seule exception volontaire : « À voir plus tard » est un choix explicite film par film — ses films restent
+   proposés (ordre d'ajout) et « Le choix de ce soir » prend le mieux classé (par goût) de cette liste.
+   « Pas pour moi » exclut ce film précis de toutes les rangées et pèse −1 sur chacun de ses genres.
 5. Explications : valeurs brutes par fournisseur (`IMDb 8,2/10 · 584 479 votes`, `TMDb 7,9/10 · 4 200 votes`),
    `Parce que tu as aimé « X »`, `Dans ta liste « À voir plus tard »`, `Ajouté au catalogue le JJ/MM/AAAA` ou
    `Sorti en AAAA`. Profil vide : note honnête « Ton profil est encore vide : sélection d'après les notes IMDb
@@ -92,7 +104,8 @@ l'affiche https (vignette `w300`) comme la vue Films, jamais le chemin de fiche.
 | panneau | Retour | ferme le panneau |
 | lecteur | Retour | revient à la vue Pour toi, même position |
 
-« Pas pour moi » (préférence durable, exclut le film et pèse sur le genre) est distinct de « Pas ce soir »
+« Pas pour moi » (préférence durable, exclut le film et pèse −1 sur chacun de ses genres dans toutes les
+rangées automatiques) est distinct de « Pas ce soir »
 (mis de côté 12 h, aucun effet sur le goût). Pendant une séance, rien ne disparaît : le film est grisé et
 marqué (♥ ✕ ✓ + ☾) ; la sélection est recalculée à la séance suivante. Ouvrir un film ne le marque jamais vu.
 
@@ -139,7 +152,7 @@ existant sans `APPS` hérite du défaut ; `APPS=catalogue` désactive la tuile c
 ## Tests
 
 ```sh
-python3 -m unittest -v native.test.test_opentv_foryou   # 70 : schéma, idempotence, moteur, Nav, CLI (aucune URL),
+python3 -m unittest -v native.test.test_opentv_foryou   # 80 : schéma, idempotence, moteur, Nav, CLI (aucune URL),
                                                         #      identité stable fakrov→wadrox, pont, contention
                                                         #      SQLite (RESERVED/EXCLUSIVE/corrompue), Chromium réel
 cd native/test && node ext.js && node bridge_e2e.js      # tuile Pour toi ↔ faux NanoPi / vrai pont

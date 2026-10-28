@@ -486,6 +486,179 @@ class EngineTests(Tmp):
         self.assertEqual((r["rows"], r["ranked"], r["cold_start"]), ([], [], True))
 
 
+# ----------------------------------------------------------------------------- goût appris : toutes les rangées
+ANIM = "Animation, Comédie, Famille"
+TOY = [
+    # trois « Pas pour moi » d'animation (dont Toy Story 3, comme sur le Pi réel)
+    it(31, "Toy Story 3", ANIM, 2010, 8.3, 900000),
+    it(32, "Les Minions", "Animation, Comédie", 2015, 6.4, 250000),
+    it(33, "Cars 3", "Animation, Aventure", 2017, 6.7, 120000),
+    # animation non marquée : excellente note, récente, ajoutée en dernier → dominait new/top
+    it(41, "Toy Story 2", ANIM, 1999, 7.9, 650000),
+    it(42, "Toy Story 4", ANIM, 2026, 7.7, 300000),
+    it(43, "Vaiana 3", "Animation, Aventure", 2026, 7.5, 40000),
+    it(44, "Kung Fu Panda 5", "Animation", 2025, 7.0, 20000),
+    # genres neutres : notes plus basses, ajouts plus anciens
+    it(51, "Polar de minuit", "Policier", 1995, 7.4, 400000),
+    it(52, "Drame d'hiver", "Drame", 2026, 6.6, 8000),
+    it(53, "Thriller nordique", "Thriller", 2025, 6.3, 5000),
+    it(54, "Western sec", "Western", 1968, 7.2, 90000),
+    it(55, "Docu océan", "Documentaire", 2026, 6.9, 3000),
+]
+TOY_ANIMATED = {uid(s) for s in (41, 42, 43, 44)}
+AUTOMATIC_ROWS = ("tonight", "because", "new", "top", "more")
+
+
+class LearnedTasteRowTests(Tmp):
+    """Régression Pi réel : 10 « Pas pour moi » dont Toy Story 3, et pourtant Toy Story 2/4 en tête des rangées
+    « Nouveautés » et « Les mieux notés » (triées par date/note en ignorant le goût appris)."""
+
+    def profile(self, *acts, items=TOY):
+        s = self.store()
+        cat = {uid(x["site_id"]): x for x in items}
+        for i, (sid, a) in enumerate(acts):
+            self.now[0] = NOW - 1000 + i
+            s.apply(uid(sid), a, origin="tv", title=cat[uid(sid)]["title"], genre=cat[uid(sid)]["genre"])
+        self.now[0] = NOW
+        return s
+
+    def dislikes(self):
+        return self.profile((31, "dislike"), (32, "dislike"), (33, "dislike"))
+
+    def novelty(self):
+        """Ajouts détectés par instantanés : l'animation est la plus récente (cas le plus défavorable)."""
+        s = self.store(NOW - 20 * DAY)
+        base = [uid(x["site_id"]) for x in TOY if x["site_id"] not in ("41", "42", "43", "52", "55")]
+        s.observe_catalogue(base)
+        self.now[0] = NOW - 10 * DAY
+        s.observe_catalogue(base + [uid(52), uid(55)])
+        self.now[0] = NOW - 1 * DAY
+        s.observe_catalogue([uid(x["site_id"]) for x in TOY])
+        return s.novelty()
+
+    def assert_animation_after_neutral(self, r, rid, animated=TOY_ANIMATED):
+        w = row(r, rid)
+        if not w:
+            return
+        got = ids(w["items"])
+        flags = [u in animated for u in got]
+        if True in flags:
+            self.assertNotIn(False, flags[flags.index(True):], "%s : %s" % (rid, got))
+
+    def test_dislike_excludes_exact_film_and_weighs_minus_one_per_genre(self):
+        s = self.profile((31, "dislike"))
+        r = rec(items=TOY, profile=s.profile())
+        self.assertEqual(r["profile"]["genres"], {"Animation": -1.0, "Comédie": -1.0, "Famille": -1.0})
+        every = set(ids(r["ranked"]))
+        for w in r["rows"]:
+            every |= set(ids(w["items"]))
+        self.assertNotIn(uid(31), every)
+        r3 = rec(items=TOY, profile=self.dislikes().profile())
+        self.assertEqual(r3["profile"]["genres"],
+                         {"Animation": -3.0, "Aventure": -1.0, "Comédie": -2.0, "Famille": -1.0})
+
+    def test_animation_dislikes_demote_animation_in_every_automatic_row_release_year_fallback(self):
+        r = rec(items=TOY, profile=self.dislikes().profile())
+        self.assertFalse(r["cold_start"])
+        self.assertNotIn(uid(41), ids(row(r, "tonight")["items"]))
+        self.assertNotIn(ids(row(r, "tonight")["items"])[0], TOY_ANIMATED)
+        for rid in AUTOMATIC_ROWS:
+            self.assert_animation_after_neutral(r, rid)
+        # bogue d'origine : « Nouveautés » (année) et « Mieux notés » (note) commençaient par l'animation
+        self.assertNotIn(ids(row(r, "new")["items"])[0], TOY_ANIMATED)
+        self.assertNotIn(ids(row(r, "top")["items"])[0], TOY_ANIMATED)
+        ranked = ids(r["ranked"])
+        last_neutral = max(ranked.index(uid(s)) for s in (51, 52, 53, 54, 55))
+        self.assertTrue(all(ranked.index(u) > last_neutral for u in TOY_ANIMATED), ranked)
+
+    def test_animation_dislikes_demote_animation_even_when_most_recently_added(self):
+        r = rec(items=TOY, profile=self.dislikes().profile(), novelty=self.novelty())
+        new = ids(row(r, "new")["items"])
+        for rid in AUTOMATIC_ROWS:
+            self.assert_animation_after_neutral(r, rid)
+        # goût d'abord (0 > -4 > -6), puis le critère propre de la rangée (date d'ajout), puis la qualité
+        self.assertEqual(new, [uid(55), uid(52), uid(43), uid(41), uid(42)])
+
+    def test_row_specific_criterion_still_orders_films_of_equal_taste(self):
+        r = rec(items=TOY, profile=self.dislikes().profile())
+        top = row(r, "top")["items"]
+        neutral = [x for x in top if x["id"] not in TOY_ANIMATED]
+        self.assertEqual([x["imdb"]["rating"] for x in neutral],
+                         sorted([x["imdb"]["rating"] for x in neutral], reverse=True))
+        for x in top:                                          # libellés fournisseurs intacts
+            self.assertIn(x["imdb"]["rating"], [y["imdb_rating"] for y in TOY])
+            self.assertTrue([y for y in x["reasons"] if y["code"] == "quality" and y["text"].startswith("IMDb ")])
+
+    def test_cold_start_rows_keep_their_own_criterion(self):
+        r = rec(items=TOY)
+        self.assertTrue(r["cold_start"])
+        top = row(r, "top")["items"]
+        self.assertEqual([x["imdb"]["rating"] for x in top], sorted([x["imdb"]["rating"] for x in top], reverse=True))
+        self.assertEqual(ids(row(r, "tonight")["items"]), [uid(31)])     # meilleure note, profil vide
+        rn = rec(items=TOY, novelty=self.novelty())
+        firsts = [x["added_at"] for x in row(rn, "new")["items"]]
+        self.assertEqual(firsts, sorted(firsts, reverse=True))
+
+    def test_because_row_only_shows_positive_taste_and_explains_it(self):
+        items = TOY + [it(61, "Comédie du dimanche", "Comédie", 2019, 6.5, 30000),
+                       it(62, "Comédie de bureau", "Comédie", 2021, 6.2, 20000),
+                       it(63, "Grande comédie", "Comédie", 2003, 7.8, 500000)]
+        # Animation -3, Aventure -2, Comédie +1 : Toy Story 3 (8,3) partage « Comédie » mais reste négatif (-2)
+        s = self.profile((33, "dislike"), (43, "dislike"), (44, "dislike"), (61, "like"), items=items)
+        r = rec(items=items, profile=s.profile())
+        self.assertEqual(ids(row(r, "tonight")["items"]), [uid(63)])
+        because = row(r, "because")
+        self.assertEqual(because["title"], "Parce que tu as aimé « Comédie du dimanche »")
+        self.assertEqual(ids(because["items"]), [uid(62)])
+        for x in because["items"]:
+            self.assertIn("Parce que tu as aimé « Comédie du dimanche »", [y["text"] for y in x["reasons"]])
+        animated = {uid(x) for x in (31, 32, 41, 42)}
+        for rid in AUTOMATIC_ROWS:
+            self.assert_animation_after_neutral(r, rid, animated)
+
+    def test_explicit_watchlist_survives_genre_penalty(self):
+        s = self.profile((31, "dislike"), (32, "dislike"), (33, "dislike"), (42, "watchlist"))
+        r = rec(items=TOY, profile=s.profile())
+        self.assertEqual(ids(row(r, "tonight")["items"]), [uid(42)])     # choix explicite pour ce film précis
+        self.assertIn("Dans ta liste « À voir plus tard »",
+                      [y["text"] for y in row(r, "tonight")["items"][0]["reasons"]])
+        s2 = self.profile((43, "watchlist"))                   # même base : 42 et 43 dans la liste
+        r2 = rec(items=TOY, profile=s2.profile())
+        self.assertEqual(ids(row(r2, "tonight")["items"]), [uid(43)])    # le moins pénalisé de la liste
+        self.assertEqual(ids(row(r2, "watchlist")["items"]), [uid(42)])
+        for rid in ("new", "top", "more"):
+            self.assert_animation_after_neutral(r2, rid)
+
+    def test_browsing_opening_and_elapsed_time_never_change_taste(self):
+        s = self.dislikes()
+        before = rec(items=TOY, profile=s.profile())
+        for _ in range(30):
+            s.record_signal(uid(41), "opened", app="pourtoi")
+            s.record_signal(uid(51), "opened", app="catalogue")
+        self.now[0] = NOW + 5 * DAY
+        after = rec(items=TOY, profile=s.profile(), now=NOW + 5 * DAY)
+        self.assertEqual(json.dumps(after, sort_keys=True), json.dumps(before, sort_keys=True))
+        s.apply(uid(41), "seen")                                # « Déjà vu » : exclu, mais neutre pour le goût
+        self.assertEqual(rec(items=TOY, profile=s.profile(), now=NOW + 5 * DAY)["profile"], before["profile"])
+
+    def test_genre_matching_ignores_case_and_accents(self):
+        s = self.store()
+        s.apply(uid(31), "dislike", origin="tv", title="Toy Story 3", genre="animation, comedie")
+        r = rec(items=TOY, profile=s.profile())
+        self.assertEqual(r["profile"]["genres"], {"animation": -1.0, "comedie": -1.0})
+        animated = {uid(x) for x in (32, 33, 41, 42, 43, 44)}
+        for rid in AUTOMATIC_ROWS:
+            self.assert_animation_after_neutral(r, rid, animated)
+
+    def test_deterministic_and_input_order_independent_with_learned_taste(self):
+        p, nv = self.dislikes().profile(), self.novelty()
+        base = json.dumps(rec(items=TOY, profile=p, novelty=nv), sort_keys=True)
+        for seed in range(6):
+            shuffled = list(TOY)
+            random.Random(seed).shuffle(shuffled)
+            self.assertEqual(json.dumps(rec(items=shuffled, profile=p, novelty=nv), sort_keys=True), base)
+
+
 # ----------------------------------------------------------------------------- navigation télécommande
 class NavTests(unittest.TestCase):
     def nav(self, marks=None):

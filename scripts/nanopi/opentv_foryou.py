@@ -488,14 +488,18 @@ def recommend(items, source, profile, novelty, now, absent=frozenset(), row_max=
             by_uid[u] = x
 
     # goût appris : poids par genre (+1 J'aime, -1 Pas pour moi, +0,5 À voir plus tard). Vu seul : neutre.
-    weights, liked = {}, []
+    # Uniquement des marques explicites : ouvrir, parcourir ou le temps écoulé ne changent jamais le goût.
+    # Genres rapprochés sans casse ni accents (« animation » = « Animation ») ; libellé = 1re forme rencontrée.
+    weights, labels, liked = {}, {}, []
     for u in sorted(profile):
         p = profile[u]
         g = genres_of(p.get("genre") or (by_uid.get(u) or {}).get("genre"))
         w = (1.0 if p.get("opinion") == "like" else -1.0 if p.get("opinion") == "dislike" else 0.0) + \
             (0.5 if p.get("watchlist") else 0.0)
         for gg in g:
-            weights[gg] = weights.get(gg, 0.0) + w
+            k = norm(gg)
+            labels.setdefault(k, gg)
+            weights[k] = weights.get(k, 0.0) + w
         if p.get("opinion") == "like" and g:
             liked.append((-(p.get("opinion_at") or 0), u,
                           clean_text(p.get("title") or (by_uid.get(u) or {}).get("title"), 200), g))
@@ -512,7 +516,7 @@ def recommend(items, source, profile, novelty, now, absent=frozenset(), row_max=
             continue
         x = by_uid[u]
         g = genres_of(x.get("genre"))
-        taste = round(sum(weights.get(gg, 0.0) for gg in g), 3)
+        taste = round(sum(weights.get(k, 0.0) for k in set(norm(gg) for gg in g)), 3)
         tier, rating, votes, prov = quality(x)
         nv = novelty.get(u) or {}
         is_new = bool(nv.get("new")) and now - (nv.get("first_seen") or 0) <= NEW_WINDOW_S
@@ -522,8 +526,9 @@ def recommend(items, source, profile, novelty, now, absent=frozenset(), row_max=
         if p.get("watchlist"):
             reasons.append({"code": "watchlist", "text": "Dans ta liste « À voir plus tard »"})
         if taste > 0:
+            gk = set(norm(gg) for gg in g)
             for _, lu, lt, lg in liked:
-                if lu != u and set(lg) & set(g):
+                if lu != u and gk & set(norm(x) for x in lg):
                     reasons.append({"code": "taste", "text": "Parce que tu as aimé « %s »" % lt})
                     break
         if prov:
@@ -572,20 +577,27 @@ def recommend(items, source, profile, novelty, now, absent=frozenset(), row_max=
         if out:
             rows.append({"id": rid, "title": title, "items": [pub(c) for c in out]})
 
+    # Chaque rangée choisit ses membres selon son critère, mais l'ordre est TOUJOURS : goût appris d'abord,
+    # puis le critère propre de la rangée, puis la clé globale. Une rangée automatique ne peut donc jamais
+    # placer un genre rejeté devant un genre neutre ou aimé. Seule exception : la liste « À voir plus
+    # tard », choix explicite film par film (son meilleur élément, par goût, reste « Le choix de ce soir »).
     wl = [c for c in ranked if c["wl"]]
     add_row("tonight", ROW_TITLES["tonight"], (wl or ranked)[:1], 1)
     add_row("watchlist", ROW_TITLES["watchlist"], sorted(wl, key=lambda c: (-c["wl_at"], c["key"])), row_max)
     for _, lu, lt, lg in liked:
-        seq = [c for c in cands if c["uid"] != lu and set(c["g"]) & set(lg) and c["uid"] not in used]
+        # même genre qu'un J'aime ET goût net positif (sinon l'explication « Parce que tu as aimé » serait fausse)
+        lk = set(norm(x) for x in lg)
+        seq = [c for c in cands if c["uid"] != lu and c["taste"] > 0 and lk & set(norm(x) for x in c["g"])
+               and c["uid"] not in used]
         if seq:
-            seq.sort(key=lambda c: (-c["tier"], -c["rating"], -c["votes"], c["key"]))
+            seq.sort(key=lambda c: c["key"])
             add_row("because", "Parce que tu as aimé « %s »" % lt, seq, row_max)
             break
-    new = sorted([c for c in cands if c["new"]], key=lambda c: (-c["first_seen"], c["key"][1:]))
+    new = sorted([c for c in cands if c["new"]], key=lambda c: (-c["taste"], -c["first_seen"], c["key"][1:]))
     if not new:
-        new = sorted([c for c in cands if c["recent"]], key=lambda c: (-c["tier"], -c["rating"], -c["votes"], c["key"]))
+        new = sorted([c for c in cands if c["recent"]], key=lambda c: c["key"])
     add_row("new", ROW_TITLES["new"], new, row_max)
-    top = sorted([c for c in cands if c["tier"] >= 2], key=lambda c: (-c["rating"], -c["votes"], c["key"]))
+    top = sorted([c for c in cands if c["tier"] >= 2], key=lambda c: (-c["taste"], -c["rating"], -c["votes"], c["key"]))
     add_row("top", ROW_TITLES["top"], top, row_max)
     add_row("more", ROW_TITLES["more"], ranked, row_max)
 
@@ -595,7 +607,7 @@ def recommend(items, source, profile, novelty, now, absent=frozenset(), row_max=
     else:
         note = "Sélection d'après tes « J'aime » et « Pas pour moi », puis les notes IMDb ou TMDb et les nouveautés."
     return {"rows": rows, "ranked": [pub(c) for c in ranked], "cold_start": cold, "note": note,
-            "profile": {"genres": {k: weights[k] for k in sorted(weights) if weights[k]}}}
+            "profile": {"genres": {labels[k]: weights[k] for k in sorted(weights) if weights[k]}}}
 
 
 def ui_data(r, items, source):
