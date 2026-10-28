@@ -407,7 +407,12 @@ def cmd_player_daemon(a):
         signal.signal(s, lambda *_: stop.set())
     playerd.serve(cfg.player_socket, allowed_uids=sorted(uids), log=log, stop=stop,
                   run_dir=os.path.dirname(cfg.player_socket), alsa_card=card,
-                  gate=lambda: promotion.promoted(cfg.playback_marker, manifest=cfg.install_manifest),
+                  # Le namespace du lecteur monte sa politique Chromium sur /etc/chromium/policies/managed :
+                  # il ne voit donc volontairement pas les mêmes octets que le manifeste à ce chemin. Le service
+                  # OpenTV et la CLI vérifient chaque fichier ; le contrôleur indépendant compare le témoin root au
+                  # hash du manifeste root (une mise à jour change ce hash), sans revalider les chemins masqués.
+                  gate=lambda: promotion.promoted(cfg.playback_marker, manifest=cfg.install_manifest,
+                                                   verify_files=False),
                   keys_ok=lambda: keys_ping(cfg.player_keys_socket, server_uids=keys_uids),
                   keys_kw={"path": cfg.player_keys_socket, "server_uids": keys_uids})
     return 0

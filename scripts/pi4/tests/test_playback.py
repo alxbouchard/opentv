@@ -560,6 +560,16 @@ class TestPromotionMarker(unittest.TestCase):
             f.write(new)
         self.assertEqual(self.check(), "stale")
 
+    def test_controller_can_validate_manifest_hash_inside_policy_mount_namespace(self):
+        """Le lecteur masque la politique kiosque par sa politique dédiée. La porte indépendante compare encore le
+        témoin root au manifeste root, tandis que le service principal conserve la vérification de chaque fichier."""
+        self.write()
+        full = os.path.join(self.root, "opt/opentv/share/ui/tv.js")
+        with open(full, "ab") as f:
+            f.write(b"\n// chemin masque ou different dans le namespace\n")
+        self.assertEqual(self.check(), "stale")
+        self.assertEqual(self.check(verify_files=False), "promoted")
+
     def test_manifest_must_be_complete_safe_and_present(self):
         self.write()
         with open(self.man) as f:

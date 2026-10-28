@@ -104,7 +104,7 @@ def _sha_file(path):
     return d
 
 
-def code_digest(manifest=MANIFEST, uid_ok=None, root="/"):
+def code_digest(manifest=MANIFEST, uid_ok=None, root="/", verify_files=True):
     """Empreinte de la livraison installée : SHA-256 du manifeste, seulement si le manifeste est sûr, liste tous les
     fichiers REQUIRED et si chaque fichier listé a toujours l'empreinte annoncée. Sinon None (=> « stale »)."""
     data, err = _open_checked(manifest, _trusted(uid_ok), MANIFEST_CAP)
@@ -127,13 +127,14 @@ def code_digest(manifest=MANIFEST, uid_ok=None, root="/"):
     for req in REQUIRED:
         if not any(p.endswith("/" + req) for _, p in entries):
             return None
-    for want, p in entries:
-        if _sha_file(os.path.join(root, p.lstrip("/"))) != want:
-            return None
+    if verify_files:
+        for want, p in entries:
+            if _sha_file(os.path.join(root, p.lstrip("/"))) != want:
+                return None
     return hashlib.sha256(b"opentv-delivery\0" + data).hexdigest()
 
 
-def check(path=MARKER, uid_ok=None, manifest=MANIFEST, version=VERSION, root="/"):
+def check(path=MARKER, uid_ok=None, manifest=MANIFEST, version=VERSION, root="/", verify_files=True):
     """-> statut ∈ STATUSES ; seul « promoted » ouvre la lecture."""
     data, err = _open_checked(path, _trusted(uid_ok), CAP)
     if err or data is None:
@@ -144,14 +145,14 @@ def check(path=MARKER, uid_ok=None, manifest=MANIFEST, version=VERSION, root="/"
         return "invalid"
     if not isinstance(doc, dict) or doc.get("promoted") is not True or doc.get("field_validated") is not True:
         return "invalid"
-    want = code_digest(manifest, uid_ok, root)
+    want = code_digest(manifest, uid_ok, root, verify_files=verify_files)
     if want is None or doc.get("version") != version or doc.get("code") != want:
         return "stale"
     return "promoted"
 
 
-def promoted(path=MARKER, uid_ok=None, manifest=MANIFEST):
-    return check(path, uid_ok, manifest) == "promoted"
+def promoted(path=MARKER, uid_ok=None, manifest=MANIFEST, verify_files=True):
+    return check(path, uid_ok, manifest, verify_files=verify_files) == "promoted"
 
 
 def document(manifest=MANIFEST, now=None, version=VERSION, uid_ok=None, root="/"):
