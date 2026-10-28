@@ -13,7 +13,14 @@
   // le mode est annulé — une seule fois, jamais de nouvel essai automatique (pas de boucle, jamais 10 min de vide)
   var AGENTS_QR_WAIT_MS = 2500, AGENTS_QR_GIVEUP_MS = 8000, MSG_AGENTS_QR = "QR indisponible, réessaie.";
   var focus = { zone: "rows", row: 0, cols: [], auto: false }, panel = null, toastTimer = null;
-  var LABELS = { like: "J'aime", dislike: "Pas pour moi", seen: "Déjà vu", watchlist: "À voir plus tard",
+  // « Regarder » : contexte de la lecture en cours (carte d'origine), sondage rapide de l'état typé du service
+  var play = null, playEndSeq = -1, PLAY_POLL_MS = 250, MSG_PLAY_KO = "Lecture indisponible";
+  // Retour/Accueil encore tenus quand le lecteur se ferme (la télécommande CEC répète l'appui) : ignorés au moins
+  // RETURN_GUARD_MS après le retour, puis tant que les répétitions continuent (fenêtre glissante) — la fiche et la
+  // carte d'origine restent en place
+  var RETURN_GUARD_MS = 600, guardUntil = 0;
+  var MSG_PLAY_LOADING = "Chargement…", MSG_PLAY_RETURN = "Retour à OpenTV…";
+  var LABELS = { watch: "Regarder", like: "J'aime", dislike: "Pas pour moi", seen: "Déjà vu", watchlist: "À voir plus tard",
                  "not-tonight": "Pas ce soir" };
   var TOGGLE = { like: ["opinion", "like", "clear-opinion"], dislike: ["opinion", "dislike", "clear-opinion"],
                  seen: ["seen", true, "unseen"], watchlist: ["watchlist", true, "unwatchlist"],
@@ -398,12 +405,89 @@
     b.setAttribute("data-base", base || "");
     return b;
   }
-  function openItem(it, row) {
-    var m = ((fy && fy.marks) || {})[it.id] || {}, actions = Object.keys(LABELS);
+  function canWatch() { return !!(state && state.playback && state.playback.available); }
+  function openItem(it, row) {   // « Regarder » en premier, seulement si une lecture réelle est possible
+    var m = ((fy && fy.marks) || {})[it.id] || {}, actions = Object.keys(LABELS).filter(function (a) {
+      return a !== "watch" || canWatch();
+    });
     showPanel("item", row ? row.title : "", it.title, it.description || meta(it, false), actions.map(function (a) {
+      if (a === "watch") { return button(LABELS[a], "play"); }
       var on = m[TOGGLE[a][0]] === TOGGLE[a][1];
       return button((on ? "✓ " : "") + LABELS[a], on ? "on" : "");
     }), 0, { it: it, actions: actions });
+  }
+  // ---- « Regarder » : écran OpenTV pendant la préparation cachée ; retour sur la même carte, fiche rouverte
+  function showPlayOverlay(title, msg) {
+    $("playtitle").textContent = title || "";
+    $("playmsg").textContent = msg || MSG_PLAY_LOADING;
+    $("playov").hidden = false;
+  }
+  function restoreCard(p) {   // même rangée, même carte, fiche du film rouverte sur « Regarder »
+    focus.zone = "rows"; focus.row = p.row; focus.cols[p.row] = p.col;
+    paint();
+    openItem(p.it, ROWS[p.row]);
+  }
+  // lecteur révélé ou fermeture demandée : la page /tv (sous la fenêtre du lecteur) montre DÉJÀ la destination du
+  // retour — jamais un « Chargement… » périmé quand le lecteur disparaît
+  function restoreUnder() {
+    if (!play || play.restored) { return; }
+    play.restored = true;
+    if (play.it) { $("playov").hidden = true; restoreCard(play); }
+    else { showPlayOverlay("", MSG_PLAY_RETURN); }   // page rechargée en cours de lecture : aucune carte à rouvrir
+  }
+  function guardReturn() { guardUntil = Date.now() + RETURN_GUARD_MS; }
+  function guarded(a) {   // -> true : appui Retour/Accueil tenu depuis la fermeture du lecteur, ignoré
+    if ((a !== "back" && a !== "home") || Date.now() >= guardUntil) { return false; }
+    guardUntil = Date.now() + RETURN_GUARD_MS;
+    return true;
+  }
+  function startPlay(it) {
+    play = { it: it, row: focus.row, col: col(), seq: -1, done: false, restored: false };
+    closePanel();
+    showPlayOverlay(it.title);
+    api("POST", "/api/tv/play", { id: it.id }).then(function (r) {
+      if (!play) { return; }
+      if (!r.ok) { endPlay({ state: "unavailable", seq: r.playback ? r.playback.seq : -1 }, true); return; }
+      pollPlay();
+    }).catch(function (e) { if (!onApiError(e) && play) { endPlay({ state: "unavailable", seq: -1 }, true); } });
+  }
+  function pollPlay() {
+    if (!play) { return; }
+    api("GET", "/api/tv/play").then(function (v) {
+      if (!play) { return; }
+      if (v.state === "closed" || v.state === "unavailable") { endPlay(v, false); return; }
+      if (v.state === "idle" && v.seq !== play.seq) { endPlay(v, false); return; }
+      if (v.state === "playing" || v.state === "closing") { restoreUnder(); }
+      setTimeout(pollPlay, PLAY_POLL_MS);
+    }).catch(function (e) { if (!onApiError(e)) { setTimeout(pollPlay, 1000); } });
+  }
+  function closePlay() {   // Retour/Accueil vus par /tv (avant l'ouverture de la fenêtre du lecteur)
+    api("POST", "/api/tv/play/close", {}).catch(onApiError);
+  }
+  function endPlay(v, local) {
+    var p = play;
+    play = null;
+    guardReturn();
+    if (typeof v.seq === "number" && v.seq > playEndSeq) { playEndSeq = v.seq; }
+    $("playov").hidden = true;
+    if (p && p.it && !p.restored) { restoreCard(p); }
+    if (v.state === "unavailable") { toast(MSG_PLAY_KO, true); }   // grand message centré : jamais sur la fiche
+    if (!local && typeof v.seq === "number" && v.seq >= 0) {   // repeint d'abord, puis acquittement au service
+      requestAnimationFrame(function () { requestAnimationFrame(function () {
+        api("POST", "/api/tv/play/ack", { seq: v.seq }).catch(onApiError);
+      }); });
+    }
+  }
+  function resumePlay(v) {   // page /tv rechargée pendant une lecture : écran de chargement ou acquittement
+    if (play || !v || (typeof v.seq === "number" && v.seq <= playEndSeq)) { return; }
+    if (v.state === "loading" || v.state === "playing" || v.state === "closing") {
+      play = { it: null, row: focus.row, col: col(), seq: -1, restored: false };
+      showPlayOverlay("", v.state === "loading" ? MSG_PLAY_LOADING : MSG_PLAY_RETURN);
+      if (v.state !== "loading") { play.restored = true; }
+      pollPlay();
+    } else if (v.state === "closed" || v.state === "unavailable") {
+      endPlay(v, false);
+    }
   }
   // assistants : « autorisés » (ce que la TV permet) et « connectés » (vraiment installés sur la boîte) restent
   // deux nombres distincts ; une autorisation n'est jamais présentée comme une connexion
@@ -541,6 +625,7 @@
   }
   function act() {
     var a = panel.actions[panel.btn], it = panel.it;
+    if (a === "watch") { startPlay(it); return; }
     if (panel.kind === "settings") { if (a === "close") { closePanel(); } else { openConfirm(a); } return; }
     if (panel.kind === "agents") { cancelAgents(); return; }
     if (panel.kind === "confirm") {
@@ -587,6 +672,7 @@
   function handle(a) {   // -> true si l'action a été consommée
     if (!state || state.setup.active) { return false; }   // configuration : pilotée par le téléphone seulement
     if (REMOTE_ACTIONS[a] !== 1) { return false; }
+    if (play) { if (a === "back" || a === "home") { closePlay(); } return true; }   // lecture : rien d'autre
     if (panel) {
       var sheet = panel.kind !== "item";   // feuille v23 (Réglages, confirmation) : lignes verticales, ↑ ↓ aussi
       if (a === "left" || (sheet && a === "up")) { panel.btn = Math.max(0, panel.btn - 1); paintPanel(); }
@@ -623,12 +709,16 @@
     // navigation du navigateur (Retour, Accueil…) : toujours empêchée, configuration comprise — le kiosque reste sur /tv
     if (KEYS.isBrowserNav(e) || a === "back" || a === "home") { e.preventDefault(); }
     if (!a) { return; }
+    if (!play && guarded(a)) { e.preventDefault(); return; }   // Retour/Accueil tenus depuis la fermeture du lecteur
     if (e.repeat && (a === "ok" || a === "back" || a === "home")) { e.preventDefault(); return; }   // pas de rafale
     if (handle(a)) { e.preventDefault(); }
   });
   // boutons « précédent/suivant » d'une télécommande souris (air mouse) : jamais d'historique ; précédent = Retour
   document.addEventListener("mouseup", function (e) {
-    if (e.button === 3 || e.button === 4) { e.preventDefault(); if (e.button === 3) { handle("back"); } }
+    if (e.button === 3 || e.button === 4) {
+      e.preventDefault();
+      if (e.button === 3 && (play || !guarded("back"))) { handle("back"); }
+    }
   });
 
   // ---- état global
@@ -676,6 +766,7 @@
       loadForYou(false);
     }
     renderRemote();
+    resumePlay(s.playback);
   }
   function poll() {
     api("GET", "/api/tv/state").then(function (s) { fails = 0; $("offline").hidden = true; render(s); })

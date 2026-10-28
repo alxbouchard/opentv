@@ -90,6 +90,9 @@ class PhoneRemote:
         self.events = collections.deque(maxlen=QUEUE_MAX)
         self.seq = 0
         self.waiters = 0
+        # « Regarder » : pendant une lecture, la page /tv est sous le lecteur ; le service consomme alors les actions
+        # (Retour/Accueil ferment la lecture) au lieu de les mettre en file pour une page invisible
+        self.interceptor = None
 
     def __repr__(self):   # jamais de secret dans une trace
         return "<PhoneRemote phones=%d>" % len(self.phones)
@@ -284,6 +287,9 @@ class PhoneRemote:
             if not (self._allow("ip:" + str(ip), IP_BURST, IP_RATE, now) and
                     self._allow("p:" + phone["id"], CMD_BURST, CMD_RATE, now)):
                 return "limited"
+        if self.interceptor is not None and self.interceptor(action):
+            return "ok"
+        with self.cond:
             self.seq += 1
             self.events.append((self.seq, action, now))
             self.cond.notify_all()

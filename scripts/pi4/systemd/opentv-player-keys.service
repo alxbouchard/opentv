@@ -1,0 +1,50 @@
+[Unit]
+Description=OpenTV Pi - touches de fermeture du lecteur « Regarder » (seul détenteur du groupe input, lecture seule)
+Documentation=file:///opt/opentv/README.md
+# Séparation des privilèges : ni le contrôleur du lecteur ni aucun Chromium n'ont le groupe input. Cette aide lit
+# evdev (sans saisie exclusive) SEULEMENT pendant une séance, quand le contrôleur est abonné, et ne transmet que
+# back/exit/home/devtools par socket Unix authentifié (SO_PEERCRED dans les deux sens).
+PartOf=opentv-player.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=opentv-keys
+Group=opentv-keys
+SupplementaryGroups=input
+EnvironmentFile=-/etc/opentv/opentv.env
+ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-player-keys
+Restart=always
+RestartSec=2
+RuntimeDirectory=opentv-player-keys
+RuntimeDirectoryMode=0755
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+# périphériques d'entrée en LECTURE seulement ; aucun autre périphérique
+DevicePolicy=closed
+DeviceAllow=char-input r
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

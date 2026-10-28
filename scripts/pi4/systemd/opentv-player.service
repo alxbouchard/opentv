@@ -1,0 +1,76 @@
+[Unit]
+Description=OpenTV Pi - contrôleur du lecteur « Regarder » (Chromium séparé caché puis révélé, CDP par tube)
+Documentation=file:///opt/opentv/README.md
+# La fenêtre du lecteur s'empile au-dessus du kiosque /tv sous Cage (même compte, même session Wayland) ; le kiosque
+# n'est jamais arrêté. Arrêter ce service tue tout son groupe (navigateur du lecteur compris).
+# Touches de fermeture (CEC/HID/clavier) reçues de l'aide opentv-player-keys par socket authentifié : ce service et
+# son Chromium n'ont JAMAIS le groupe input (compte opentv-kiosk hors du groupe input, voir sysusers ; seul
+# opentv-kiosk.service le rajoute pour Cage).
+Wants=opentv-player-keys.service
+After=opentv-kiosk.service opentv-player-keys.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=opentv-kiosk
+Group=opentv-kiosk
+SupplementaryGroups=video render
+EnvironmentFile=-/etc/opentv/opentv.env
+ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-player
+Restart=always
+RestartSec=2
+KillMode=control-group
+TimeoutStopSec=10
+# profils temporaires (tmpfs) supprimés à chaque fin de séance et à l'arrêt du service
+RuntimeDirectory=opentv-player
+RuntimeDirectoryMode=0711
+UMask=0077
+# politique Chromium gérée du LECTEUR (téléchargements, fenêtres surgissantes, fichiers locaux, view-source: et pages
+# devtools:// bloqués), montée à la place de celle du kiosque, pour ce service seulement.
+# DeveloperToolsAvailability=1 : la valeur 2 coupe aussi le tube CDP (mesuré sur le Pi). Sûr car aucun port de
+# débogage n'existe (tube détenu par ce seul processus), devtools:// est bloqué, le contrôleur ferme toute cible
+# DevTools/page inconnue dès son apparition et termine la séance si elle persiste, et F12/Ctrl+Maj+I/J/C signalés par
+# l'aide des touches ferment la séance (README §6 bis).
+BindReadOnlyPaths=/opt/opentv/share/chromium-player-policy:/etc/chromium/policies/managed
+BindReadOnlyPaths=-/opt/opentv/share/chromium-player-policy:/etc/chromium-browser/policies/managed
+ProtectSystem=strict
+# lecture seule (pas « yes ») : la session Wayland de Cage vit dans /run/user/<uid du kiosque>
+ProtectHome=read-only
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# réseau : jamais la boîte elle-même ni le lien local (API /tv en boucle locale réservée à l'UID du kiosque = même
+# compte que ce lecteur ; mDNS/SSDP du réseau local). 127.0.0.53/54 : résolveur local éventuel (systemd-resolved).
+# Le réseau privé (RFC 1918) reste joignable au niveau IP car le serveur DNS du routeur s'y trouve : le contrôleur
+# refuse toute cible locale/privée/de la boîte (résolution comprise), toute navigation du cadre principal hors de
+# l'origine validée est bloquée (Fetch) et la politique du lecteur bloque http://, localhost, .local, .lan… et
+# applique les restrictions d'accès au réseau privé/local de Chromium.
+IPAddressDeny=localhost link-local multicast
+IPAddressAllow=127.0.0.53/32 127.0.0.54/32
+# aucun traçage ni lecture mémoire d'un autre processus (ptrace, process_vm_*, perf, pidfd_getfd…) : EPERM
+SystemCallFilter=~@debug
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+# périphériques : politique PRÉCISE. Décodage et affichage conservés (DRM/KMS + rendu V3D, V4L2 M2M du décodeur H.264
+# /dev/video1x et média /dev/media*, tas dma-buf, son HDMI ALSA) ; aucun accès CEC (/dev/cec*), evdev (/dev/input),
+# uinput, hidraw, vchiq, série ni bloc — le lecteur et son Chromium ne peuvent ni lire la télécommande ni injecter
+# de touches ni piloter la TV (le groupe input n'est de toute façon jamais hérité, voir plus haut).
+DevicePolicy=closed
+DeviceAllow=char-drm rw
+DeviceAllow=char-video4linux rw
+DeviceAllow=char-media rw
+DeviceAllow=char-dma_heap rw
+DeviceAllow=char-alsa rw
+InaccessiblePaths=-/dev/input -/dev/uinput -/dev/cec0 -/dev/cec1 -/dev/vchiq -/dev/hidraw0 -/dev/hidraw1
+
+[Install]
+WantedBy=multi-user.target

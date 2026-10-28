@@ -7,8 +7,10 @@ checklist terrain ci-dessous n'est pas entièrement cochée sur une vraie Pi 4.
 La Pi est une **source HDMI** qui affiche le tableau de bord OpenTV (« Pour toi », état, messages d'agents). Elle ne
 remplace pas les applis Samsung (YouTube, Netflix…) qui restent lancées par OpenTV Tizen sur la TV, et elle ne
 touche ni à `native/` (Tizen v23) ni au NanoPi (`scripts/nanopi/`). Aucun flux média n'est extrait, relayé ou
-reconstruit : le MVP n'affiche que des métadonnées du catalogue accepté (`/var/lib/opentv/catalogue.json`, produit
-ailleurs et copié sur la Pi) ; il n'y a pas de lecture vidéo dans ce lot.
+reconstruit : l'accueil n'affiche que des métadonnées du catalogue accepté (`/var/lib/opentv/catalogue.json`, produit
+ailleurs et copié sur la Pi). « Regarder » (§6 bis) réutilise le lecteur du site autorisé, sans jamais lire, extraire ni
+relayer l'adresse du média ; il est **livré désactivé** et n'apparaît qu'après approbation de la source ET promotion
+terrain explicite (porte de production, §6 bis).
 
 ## 1. Matériel et câbles
 
@@ -86,7 +88,8 @@ marqueur `/proc/device-tree/model` Pi 4 Model B, `/etc/rpi-issue`, Bookworm, arm
 Ce que fait `install.sh` : préflight strict (Pi 4 Model B, Raspberry Pi OS Bookworm **arm64**, `dtoverlay=vc4-kms-v3d`,
 DRM HDMI, pilote vc4, NetworkManager actif, `nmcli`, `cage`, `chromium`), copie sous `/opt/opentv` (dont le moteur
 « Pour toi » `scripts/nanopi/opentv_foryou.py` + `opentv_bridge.py` **inchangés** et `native/app/qrcode.js`), unités
-systemd, comptes système (`opentv`, `opentv-kiosk`, groupe `opentv-agent`), PAM du kiosque, `/etc/opentv/opentv.env`
+systemd, comptes système (`opentv`, `opentv-kiosk`, `opentv-keys`, groupe `opentv-agent` ; l'ancienne appartenance
+`opentv-kiosk` ∈ `input` est retirée, Cage reçoit `input` par son unité seulement), PAM du kiosque, `/etc/opentv/opentv.env`
 (sans secret, conservé s'il existe), sauvegarde de tout fichier remplacé, manifeste `/opt/opentv/MANIFEST.sha256`,
 **1080p garanti** : `video=HDMI-A-1:1920x1080@60` ajouté à `/boot/firmware/cmdline.txt` (sauvegardé, retiré exactement
 par `uninstall.sh` ; un `video=HDMI-A-1:` déjà présent est respecté ; effectif au prochain redémarrage de la boîte).
@@ -114,6 +117,8 @@ Services :
 | `opentv-splash.service` | oneshot tty1 borné à 5 s, sans réseau et durci : fond sombre « OpenTV / Démarrage... » avant le kiosque. Le drop-in `getty@tty1` retire l'invite de connexion seulement tant que le kiosque est activé; rien n'est masqué et SSH reste le chemin de récupération. |
 | `opentv-net-helper.path` / `.service` | helper root déclenché par un job : écrit le profil NetworkManager (keyfile 0600) et lance `nmcli` en argv fixe, sans shell. Dossier des jobs ouvert une fois sans suivre de lien (`O_DIRECTORY|O_NOFOLLOW`), lectures/suppressions relatives à ce descripteur ; résultats écrits par descripteur (`fchown`/`fchmod`, jamais de `chown`/`chmod` par chemin). **Wi-Fi transactionnel** : profil candidat `opentv-wifi-candidate` (UUID neuf, `autoconnect=false`) activé d'abord ; l'ancien `opentv-wifi` n'est remplacé (rename atomique du keyfile, UUID du candidat) qu'après succès ; échec ou délai ⇒ candidat supprimé, ancien profil remonté (ou hotspot en configuration hors ligne), dans une réserve de budget de 51 s gardée avant l'essai. Tout résidu du dossier des jobs (fichier/dossier caché, nom invalide, lien, fifo) est supprimé sans action (sans suivre de lien) : `DirectoryNotEmpty=` ne peut pas boucler. **Budget réel** d'une activation : 120 s pour tous les jobs (`TimeoutStartSec=180`) ; `nmcli --wait` courts (AP down 10 s, Wi-Fi up 35 s, AP up 20 s) + délai d'exécution = attente + 5 s tronqué au budget restant, groupe de processus tué à l'échéance ; un job qui ne tient plus attend l'activation suivante ; un `wifi-apply` pris plus de 60 s après son dépôt est refusé (`expired`) |
 | `opentv-ap-guard.timer` / `.service` | garde root du Wi-Fi temporaire (voir §3), indépendante du service Python ; oneshot, budget 40 s (`TimeoutStartSec=60`), seules commandes : `systemctl is-active opentv.service`, `nmcli`/`ip` en lecture, `nmcli connection down/delete id opentv-setup-ap` |
+| `opentv-player.service` | contrôleur du lecteur « Regarder » (`playerd`, compte `opentv-kiosk`, groupes effectifs `opentv-kiosk video render` — **jamais `input`**) ; Chromium séparé, CDP par tube seulement ; activé par l'installation mais **sans capacité de lecture** tant que la source n'est pas approuvée et la lecture promue sur le terrain (§6 bis) |
+| `opentv-player-keys.service` | aide des touches de fermeture (compte `opentv-keys`, seul détenteur de `input` côté lecture, `DeviceAllow=char-input r`, sans réseau `PrivateNetwork=yes`, sans capacité, `ProtectSystem=strict`) : lit evdev seulement pendant une séance abonnée, n'envoie que `back/exit/home/devtools` au contrôleur par `/run/opentv-player-keys/keys.sock` (SO_PEERCRED vérifié dans les deux sens) |
 | `opentv-cec.timer` / `.service` | amorçage HDMI-CEC (20 s après le démarrage puis toutes les 60 s) : oneshot `opentv` (groupes `video`, `input`), sans capacité ni réseau, `DeviceAllow` CEC + entrée seulement, budget 40 s (`TimeoutStartSec=60`). Déclare Playback « OpenTV », remappe la touche OK et fait **une seule annonce `<Active Source>` par démarrage** de la boîte (fenêtre de 240 s après le boot, TV allumée seulement) : jamais de réveil de la TV, jamais de réannonce. Détails : §« Télécommande » |
 
 Fichiers système dédiés (manifeste, sauvegarde d'un éventuel fichier existant, retirés/restaurés par `uninstall.sh`) :
@@ -253,9 +258,9 @@ que les applis Samsung (YouTube, Netflix…) restent sur la TV.
 Navigation de l'accueil (retour terrain) : ↑ remonte d'une rangée en gardant la colonne mémorisée de cette rangée, ↓
 descend ; seul ↑ depuis la **première** rangée mène aux Réglages ; dans une fiche ouverte, ↑ et ↓ sont consommés sans
 effet (jamais de saut vers Réglages depuis un film ; Retour ferme la fiche sur la même carte) ; Retour remonte aussi
-d'une rangée. L'en-tête affiche « Connectés : … » = identités réellement installées (jamais une simple autorisation). OK sur une carte ouvre sa fiche (J'aime, Pas pour moi, Déjà vu, À voir plus tard, Pas ce soir). **Aucune
-action « Regarder »** : la Pi n'a ni lecteur ni ouverture de titre autorisée (voir « Lecture : phase bloquée » §8) ; un
-bouton factice n'est jamais affiché.
+d'une rangée. L'en-tête affiche « Connectés : … » = identités réellement installées (jamais une simple autorisation). OK sur une carte ouvre sa fiche (J'aime, Pas pour moi, Déjà vu, À voir plus tard, Pas ce soir). « Regarder » n'y
+figure (en premier) que si la lecture est réellement possible : source approuvée, lecture promue sur le terrain,
+contrôleur et aide des touches joignables (§6 bis) ; sinon aucun bouton factice n'est affiché.
 
 ## 5. QR de configuration
 
@@ -407,6 +412,131 @@ Toutes les sorties passent par le nettoyage du moteur « Pour toi » : **aucune 
 pas d'accès brut à la base. Relais sortant (agent distant) : **non implémenté** ; `status` répond
 `relay: not_implemented`. Il devra être sortant, authentifié et réutiliser ces mêmes outils.
 
+## 6 bis. « Regarder » (lecteur du site autorisé, plein écran direct)
+
+Parcours : carte → fiche (« Regarder » en premier) → OK → écran OpenTV « Chargement… » → seul le lecteur dominant du
+site, plein écran, avec au plus UN clic central hérité du OK → Retour/Quitter/Accueil (télécommande de la TV par
+HDMI-CEC, télécommande USB, téléphone) → même carte, fiche rouverte sur « Regarder ». Aucun lecteur, lecteurs ambigus,
+calque par-dessus, délai, plantage : « Lecture indisponible », la page du site n'est jamais montrée.
+
+**Porte de production (fail-closed).** « Regarder » n'apparaît que si TOUT est vrai :
+1. source approuvée : `/etc/opentv/source.env` (root:opentv 0640, hors Git, jamais livré ni écrasé) avec
+   `OPENTV_SOURCE_APPROVED=1` et une racine de confiance `https://hôte/` valide ;
+2. **lecture promue sur le terrain** : témoin `/etc/opentv/playback-promoted` (root:root 0644, JSON
+   `{promoted, field_validated, version, code}`), jamais livré, jamais listé dans le manifeste, jamais écrit par
+   `install.sh`. Il est lié à la version ET à l'empreinte de la **livraison installée entière** : SHA-256 du manifeste
+   `/opt/opentv/MANIFEST.sha256` (root:root), après vérification que chaque fichier listé a toujours l'empreinte
+   annoncée et que tous les fichiers dont dépend la lecture y figurent (modules, `tv.js`/`tv.html`/`tv.css`/`keys.js`,
+   unités, politique du lecteur, lanceurs, résolveur). Toute livraison ou modification locale d'un fichier livré le
+   rend caduc (`stale`) jusqu'à une nouvelle validation ; lien, FIFO, lien dur, propriétaire **non root** (partout :
+   service, contrôleur, CLI), mode inscriptible, JSON invalide, manifeste absent/incomplet ⇒ refus ;
+3. contrôleur joignable, qui relit lui-même le témoin à chaque ouverture (`not_promoted` sinon) **et toutes les 2 s
+   pendant la lecture** (démotion ⇒ séance fermée), et dont l'aide des touches répond avec **au moins une
+   télécommande physique capable réellement ouverte** (`devices ≥ 1`, sinon `keys_unavailable` : EACCES ou aucun
+   périphérique exposant Retour/Quitter/Accueil ⇒ bouton absent et jamais de révélation). Le téléphone reste une
+   sortie complémentaire, jamais la seule ;
+4. remise à zéro de démarrage du service terminée (close_all d'une séance orpheline) : aucun close_all tardif ne peut
+   fermer la première séance d'un service qui vient de démarrer.
+
+`source.env` seul ne montre donc jamais « Regarder ». L'installation peut activer les deux services : ils restent
+inertes. Promotion, **seulement après** la validation HDMI réelle (Regarder → lecture visible → Retour même carte,
+décodage et rollback) :
+
+```sh
+sudo /opt/opentv/bin/opentv-pi playback status                      # promotion + source, lecture seule
+sudo /opt/opentv/bin/opentv-pi playback promote --field-validated   # écrit le témoin (root)
+sudo /opt/opentv/bin/opentv-pi playback demote                      # retire le témoin ET ferme la séance en cours
+```
+
+`uninstall.sh` retire toujours le témoin (même sans `--purge`) : une réinstallation exige une nouvelle promotion.
+
+Architecture (aucune modification du kiosque /tv, jamais arrêté) :
+
+- `opentv.service` (compte `opentv`) : porte de la source et de la promotion, résolveur d'adresse changeante du NanoPi
+  (`opentv_bridge.Resolver`/`RouteMap`, chargés tels quels), automate typé `playback.py`, API `/api/tv/play*`
+  (états `idle|loading|playing|closing|closed|unavailable`, jamais d'URL). Retour/Accueil du téléphone pendant une
+  lecture : consommés et traités par le service.
+- `opentv-player.service` (compte `opentv-kiosk`, même session Wayland que Cage, **sans groupe `input`**) :
+  `playerd.py`. Socket Unix `/run/opentv-player/player.sock` accepté seulement pour l'UID du service OpenTV et root
+  (SO_PEERCRED). Chromium séparé lancé par `/usr/bin/chromium` (wrapper Raspberry Pi OS), CDP par tube
+  (`--remote-debugging-pipe`, aucun port), profil temporaire tmpfs supprimé à chaque fin, politique gérée **du
+  lecteur** montée par systemd à la place de celle du kiosque (`/opt/opentv/share/chromium-player-policy`),
+  téléchargements refusés. Cibles : jamais la boîte, la boucle locale, le réseau privé (RFC 1918, lien local, CGNAT)
+  ni un nom local (`.local`, `.lan`, …) — refusées à l'ouverture puis après résolution DNS, avant tout lancement ;
+  chaque requête de document du cadre principal est mise en pause (CDP `Fetch`, armé avant la première navigation) et
+  seule l'origine validée est poursuivie avant la révélation, rien après (navigation bloquée ⇒ fin de séance) ; les
+  documents des sous-cadres sont poursuivis sans lire leur URL. Unité : `IPAddressDeny=localhost link-local multicast`,
+  `SystemCallFilter=~@debug` (`EPERM` : ni ptrace ni lecture mémoire d'un autre processus), `DevicePolicy=closed` +
+  `DeviceAllow` DRM/V4L2/média/dma-heap/ALSA (décodage et affichage conservés), `/dev/input`, `/dev/uinput`,
+  `/dev/cec*` inaccessibles. Politique du lecteur : `http://`, `localhost`, `127.0.0.1`, `[::1]`, `.local`, `.lan`…
+  bloqués, restrictions d'accès au réseau privé/local de Chromium actives.
+- `opentv-player-keys.service` (compte `opentv-keys`) : seul composant de lecture qui détient `input`. Il n'ouvre les
+  périphériques evdev (lecture seule, sans saisie exclusive) que tant que le contrôleur est abonné, et ne transmet que
+  des raisons typées (`back`, `exit`, `home`, `devtools`) et le **nombre réel** de périphériques capables ouverts
+  (`devices`, mis à jour au branchement/débranchement ; 0 ⇒ abonnement refusé `no_device`, liaison désarmée). Le
+  thread de surveillance est seul propriétaire de ses descripteurs (fermés dans son `finally`, jamais par `stop()`). Les groupes effectifs des unités sont prouvés par test
+  (`TestEffectiveGroups`) : `input` seulement pour Cage (`opentv-kiosk.service`, comportement du kiosque inchangé) et
+  pour cette aide.
+- Cage n'a pas d'API « cacher/montrer » : la fenêtre du lecteur s'empile au-dessus de /tv avec un onglet local
+  « Chargement… » (data:, aucun réseau) ; la fiche du site est préparée dans un onglet **d'arrière-plan** jamais peint,
+  le lecteur est agrandi sur la page parente (monde isolé, aucune entrée dans l'iframe, aucune lecture de src).
+  L'onglet n'est activé que si le lecteur couvre toute la fenêtre, qu'une grille de 25 points ne touche que lui ET
+  qu'aucun calque de la page parente ne peut être peint au-dessus : `elementFromPoint` ignorant `pointer-events: none`,
+  les styles calculés sont aussi vérifiés (élément ou pseudo-élément positionné au z-index maximal, couche supérieure
+  `:modal`/`:popover-open`/plein écran étranger, lecteur ou ancêtre translucide, filtré, découpé ou masqué ; DOM trop
+  grand pour être validé ⇒ refus). Le lecteur doit être dans le contexte d'empilement **racine** : l'agrandissement
+  neutralise les contextes d'empilement de ses ancêtres, puis tout ancêtre qui en crée encore un (z-index positionné
+  ou de flex/grid, position fixed/sticky, opacity, transform/perspective, filter/backdrop-filter, clip/mask, blend,
+  isolation, will-change, contain, container-type, content-visibility…) ⇒ refus ; un conteneur de taille nulle à
+  z-index maximal dont un descendant peut peindre (débordement, texte, ombre) ⇒ refus. Prouvé dans un vrai Chromium
+  avec captures (`e2e_assist.js` : « prêt » ⇒ 100 % des pixels échantillonnés sont le lecteur). Pendant la lecture :
+  contrôle rapide (couverture, empilement, transparence, couche supérieure, grille de 25 points) toutes les 0,5 s,
+  balayage complet du DOM seulement après une mutation (au plus toutes les 1 s) et au moins toutes les 4 s.
+- Fenêtres surgissantes : auto-attachement CDP avec `waitForDebuggerOnStart` — toute nouvelle page est mise en pause
+  avant son premier script ou sa navigation, jamais relancée ; l'onglet attendu est réactivé (« Chargement… » avant la
+  révélation, le lecteur après) **avant** la fermeture, la fiche non validée n'est donc jamais sélectionnée ; fermeture
+  impossible ⇒ fin de séance. Mesuré sur Chromium réel (headless, vrai tube CDP, clic unique réel) : la surgissante
+  en pause ne demande même pas sa page et n'exécute aucun script ; la fiche n'est chargée qu'une fois.
+  **Limite restante du navigateur** : Chromium active lui-même un onglet demandé par la page à sa création ; pendant
+  l'aller-retour CDP un onglet **vide** peut être peint quelques millisecondes. Aucune API CDP n'empêche cette
+  création : gate terrain (mesure vidéo sur la TV). Autre constat réel : l'accusé du relâchement de la souris peut ne
+  jamais revenir quand ce clic ouvre une surgissante ; il est attendu au plus 2 s, le clic compte comme livré et n'est
+  jamais renvoyé.
+- DevTools : `DeveloperToolsAvailability=1` dans la politique du lecteur, car la valeur 2 coupe aussi le tube CDP
+  (mesuré sur le Pi). C'est sûr parce que : aucun port de débogage n'existe (seul le contrôleur détient le tube) ;
+  `devtools://`, `chrome://`, `view-source:` et `file://` sont bloqués ; toute cible DevTools ou page inconnue est
+  fermée dès son apparition (événements CDP + balayage toutes les 0,5 s) et la séance s'arrête si elle persiste ;
+  F12, Ctrl+Maj+I/J/C et Ctrl+U, signalés par l'aide des touches, **ferment la séance** (retour OpenTV, même carte) —
+  l'aide ne retient aucune touche, donc la fermeture est la seule garantie ; sur la page parente, un écouteur du monde
+  isolé empêche aussi ces raccourcis tant qu'elle a le focus. Les télécommandes CEC/HID n'ont ni F12 ni Ctrl.
+- Retour : fermeture = SIGKILL du groupe du lecteur, profil supprimé, puis `closed`. La fermeture n'attend jamais un
+  clic en cours (un navigateur figé pendant le clic ne la retarde pas : < 2 s) ; création des ressources (abonnement
+  aux touches, profil, Chromium, CDP) et démontage sont mutuellement exclusifs : une fermeture concurrente d'un
+  lancement ne laisse ni navigateur, ni profil, ni abonnement orphelin. Dès que le lecteur est révélé, la
+  page /tv rouvre la fiche sur la même carte **sous** la fenêtre du lecteur (jamais un « Chargement… » périmé quand il
+  disparaît) ; après le retour, Retour/Accueil encore tenus (répétitions CEC) sont ignorés au moins 600 ms puis tant
+  que les répétitions continuent. /tv se repeint (deux images) et acquitte avant le retour à `idle`.
+
+Source (hors Git, jamais livrée par l'installation, jamais affichée) :
+
+```sh
+sudo install -m 0640 -o root -g opentv /dev/stdin /etc/opentv/source.env <<'EOF2'
+OPENTV_SOURCE_APPROVED=1
+OPENTV_SOURCE_TRUST_ANCHOR=https://<racine de confiance stable>/
+EOF2
+sudo systemctl restart opentv.service
+```
+
+Sans ce fichier, avec un fichier lisible par tous, sans approbation explicite ou sans racine de confiance : « Regarder »
+n'apparaît pas. `OPENTV_SOURCE_KIND=official-stream` est réservé à une API/un flux HLS-DASH documenté fourni par
+l'ayant droit ; aucun n'est configuré, ce mode reste refusé (`direct_mode_unconfigured`) et aucun flux n'est jamais
+découvert, extrait ni relayé depuis le lecteur du site. Plafond de lecture : `OPENTV_PLAYER_MAX_S` (4 h par défaut).
+
+Retour arrière : `sudo /opt/opentv/bin/opentv-pi playback demote` (séance en cours fermée, bouton retiré en ≤ 10 s) ;
+complet :
+`sudo systemctl disable --now opentv-player.service opentv-player-keys.service && sudo rm /etc/opentv/source.env &&
+sudo systemctl restart opentv.service` (ou `uninstall.sh`, qui arrête aussi le contrôleur et retire la promotion).
+
 ## 7. Retour arrière
 
 ```sh
@@ -468,8 +598,11 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
 - Formulaire de configuration en **HTTP non chiffré** sur le LAN (voir §5) : par Ethernet, le mot de passe Wi-Fi
   traverse le réseau local en clair ; configurer seulement depuis un LAN de confiance ou par le Wi-Fi temporaire.
 - Kiosque **sans durcissement systemd** (pas de `NoNewPrivileges`/`ProtectSystem` : le sandbox setuid de Chromium en
-  dépend) ; le compte `opentv-kiosk` possède tty1 et le groupe `input` : un clavier branché pilote Chromium en
-  kiosque. Atténué par la politique gérée (DevTools, impression, téléchargements, navigation externe bloqués), Cage
+  dépend) ; le compte `opentv-kiosk` possède tty1 et `opentv-kiosk.service` donne `input` à Cage (le compte lui-même
+  n'en est plus membre ; le lecteur « Regarder » ne l'a jamais) : un clavier branché pilote Chromium en kiosque.
+  **Gate terrain** de cette séparation : après `install.sh` puis redémarrage, `id opentv-kiosk` sans `input`,
+  `/proc/<pid>/status` (Groups) de Cage avec `input`, de `playerd`/Chromium du lecteur sans `input`, et les sept
+  touches CEC/USB toujours actives sur /tv. Atténué par la politique gérée (DevTools, impression, téléchargements, navigation externe bloqués), Cage
   sans changement de console et logind qui ignore Power ; pas de shell (`nologin`). Accès physique = confiance.
 - Promotion du candidat Wi-Fi (`nmcli connection load <final> <candidat>` : l'UUID actif passe sur `opentv-wifi`,
   l'ancien UUID disparaît avec son fichier remplacé) : chemin de succès vérifié avec NetworkManager réel sur le Pi.
@@ -480,14 +613,13 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
 - « Pour toi » TV : la sélection est recalculée (catalogue relu + `Bridge.session`) toutes les 120 s ; coût CPU/mémoire de ce rechargement sur Pi 4 **à mesurer sur le terrain** (gros catalogue).
 - Journal HTTP : erreurs et non-2xx toujours ; succès des polls (`/api/tv/*`, `/static/*`, `/healthz`) non
   journalisés, un échantillon agrégé `http_ok_sample` toutes les 600 requêtes.
-- **Lecture : phase bloquée** (aucun bouton « Regarder »). Exigence produit : « Regarder » lance directement le
-  lecteur plein écran du film (jamais la page du site), Retour revient à OpenTV. Manque sur la Pi : (1) décision
-  humaine que la source et son mode d'accès sont autorisés (le pont NanoPi garde `SOURCE_APPROVED=0` par défaut) ;
-  (2) résolution typée et bornée titre → page de lecture (époque/route validées, comme `detail_url` du pont NanoPi),
-  sans extraction ni réécriture d'URL de flux ; (3) une session navigateur séparée et bornée pour le lecteur, avec au
-  plus une action utilisateur ordinaire, retour garanti à `/tv` sur Retour/échec/inactivité — la politique gérée du
-  kiosque bloque volontairement toute navigation externe (`URLBlocklist: *`). Sans ces trois éléments, l'action reste
-  absente.
+- **« Regarder » : vérifié hors matériel seulement.** Livré désactivé (porte de production §6 bis). Avant
+  `playback promote --field-validated` : sur la TV réelle, Regarder → lecteur seul plein écran (jamais la page du site)
+  → Retour CEC/USB/téléphone → même carte ; « Lecture indisponible » sans lecteur ; tenue de Retour pendant la
+  fermeture sans effet sur la fiche ; vidéo de l'apparition éventuelle d'un onglet vide lors d'une surgissante
+  (limite Chromium) ; F12/Ctrl+Maj+I sur un clavier branché ⇒ retour OpenTV sans DevTools visible ; `Target.getTargets`
+  liste bien la cible DevTools et `Target.closeTarget` la ferme sur le Chromium de Raspberry Pi OS ; décodage et
+  thermique pendant la lecture ; `uninstall.sh` puis réinstallation ⇒ bouton absent jusqu'à nouvelle promotion.
 - Catalogue : à copier dans `/var/lib/opentv/catalogue.json` (propriétaire `opentv`, 0600) depuis la chaîne acceptée ;
   sans lui « Pour toi » affiche une sélection vide.
 
@@ -505,6 +637,7 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
 | **Décodage** | H.264 local 1080p60 pendant 30 min : `/dev/video10` ouvert à chaque sonde, horloge H.264 ≈ 500 MHz, maximum 0,372 % d'images perdues, température maximale 41,3 °C, `hvs_underrun=0`, `get_throttled=0x0` ; kiosque restauré et résidus supprimés. 4K/HEVC/VP9/AV1 Chromium hors cible. |
 | **Rollback** | `uninstall.sh` ⇒ console tty1 de retour, `/opt/opentv` absent, fichiers d'origine restaurés ; réinstallation propre ; `--purge` sans perte du Wi-Fi |
 | **Assistants (Réglages)** | TV : Réglages → « Gérer les assistants » → « Non » au focus → « Oui » → QR dans la feuille, colonne Télécommande masquée ; iPhone (appareil photo) : 3 étapes, « Autorisé » et « Connecté » distincts, « Oui, enregistrer » ; TV : accueil + « C'est enregistré ! Assistants autorisés : N · connectés : M » ; `ss -ltn` : `:8081` lié à l'adresse LAN pendant le mode seulement, puis fermé ; Wi-Fi/nom inchangés (`nmcli -t device status`, `device.json`) ; aucun nouveau fichier dans `/etc/opentv/agents` ; second envoi du même QR refusé ; photo d'Alex |
+| **Regarder** | `opentv-pi playback status` → `promotion: missing` après installation (bouton absent même avec `source.env`) ; après les essais HDMI ci-dessus et `playback promote --field-validated` : bouton présent ; `playback demote` pendant une lecture ⇒ lecteur fermé, retour même carte, bouton absent en ≤ 10 s ; télécommande USB débranchée et CEC absent ⇒ bouton absent (`devices: 0`) ; unité du lecteur : décodage H.264 matériel toujours actif (`/dev/video10` tenu) avec `DevicePolicy=closed` + `SystemCallFilter=~@debug`, `systemd-analyze security opentv-player` relu, `/dev/cec0`/`/dev/input` inaccessibles depuis le lecteur, `curl http://127.0.0.1:<port TV>` refusé depuis l'unité ; groupes effectifs (`/proc/<pid>/status`) : Cage avec `input`, `playerd`/Chromium du lecteur sans `input`, `opentv-player-keys` avec `input` seulement ; photo/vidéo d'Alex |
 | **Agent** | `opentv-mcp` depuis le compte de l'agent : `tools/list` filtré par scopes, `recommend` sans URL, scope refusé, audit présent sans secret |
 
 ## 10. Développement
@@ -515,6 +648,8 @@ python3.11 -m unittest discover -s scripts/pi4/tests -t scripts/pi4   # version 
 # bouts en bout réels (Chromium headless, temps réel) et analyse ES5 :
 #   OPENTV_TEST_PLAYWRIGHT=<module playwright> OPENTV_TEST_ACORN=<module acorn> OPENTV_TEST_SHOTS=<dossier de captures>
 #   (formulaires du téléphone sans JavaScript, Origin: null refusé, écran TV 1920×1080 sans chevauchement du QR,
-#    « Gérer les assistants » de bout en bout : tests/e2e_agents.js, captures tv-agents-*.png / phone-agents-*.png)
+#    « Gérer les assistants » de bout en bout : tests/e2e_agents.js, captures tv-agents-*.png / phone-agents-*.png ;
+#    « Regarder » : tests/e2e_play.js, captures item/loading/playing/held/returned/unavailable.png ;
+#    validation des calques du lecteur dans un vrai Chromium : tests/e2e_assist.js)
 ./scripts/pi4/install.sh --dry-run ; ./scripts/pi4/install.sh --root /tmp/rfs --skip-preflight
 ```

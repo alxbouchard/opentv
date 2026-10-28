@@ -11,6 +11,9 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 User=opentv-kiosk
+# input : donné à Cage par cette unité seulement (comportement du kiosque inchangé) ; le compte opentv-kiosk n'est
+# PAS membre du groupe input, si bien que opentv-player.service (même compte) ne l'hérite jamais
+SupplementaryGroups=input
 PAMName=opentv-kiosk
 TTYPath=/dev/tty1
 TTYReset=yes

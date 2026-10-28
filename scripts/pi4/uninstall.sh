@@ -7,7 +7,8 @@
 #                                            la touche Power et la politique Chromium du kiosque), restaure les
 #                                            fichiers d'origine sauvegardés, retire de cmdline.txt exactement les
 #                                            jetons ajoutés (video=…, démarrage silencieux), retire l'écran OpenTV et
-#                                            la condition getty de tty1, rend tty1
+#                                            la condition getty de tty1, rend tty1, retire la promotion
+#                                            terrain de « Regarder » (/etc/opentv/playback-promoted)
 #   ... --purge                              efface aussi l'état (/var/lib/opentv*, /etc/opentv)
 #   ... --purge --forget-wifi                oublie aussi le Wi-Fi configuré par OpenTV (opentv-wifi)
 #   ... --dry-run | --root <dossier>         plan seul / rootfs de test
@@ -122,9 +123,13 @@ done
 
 MANIFEST="$(dest /opt/opentv/MANIFEST.sha256)"
 # 1) plus rien ne peut (re)lancer le point d'accès : service, helper et garde arrêtés
-host systemctl disable --now opentv-kiosk.service opentv.service opentv-net-helper.path opentv-net-helper.service \
-  opentv-ap-guard.timer opentv-ap-guard.service opentv-cec.timer opentv-cec.service opentv-cec-announce.service \
-  opentv-splash.service
+host systemctl disable --now opentv-player.service opentv-player-keys.service opentv-kiosk.service opentv.service \
+  opentv-net-helper.path opentv-net-helper.service opentv-ap-guard.timer opentv-ap-guard.service opentv-cec.timer \
+  opentv-cec.service opentv-cec-announce.service opentv-splash.service
+# « Regarder » : la promotion terrain ne survit jamais à une désinstallation (même sans --purge) — une réinstallation
+# exige une nouvelle validation HDMI ; la source approuvée (source.env, configuration locale) reste jusqu'à --purge
+PROMO="$(dest /etc/opentv/playback-promoted)"
+if [ -e "$PROMO" ] || [ -L "$PROMO" ]; then act rm -f -- "$PROMO"; say "« Regarder » : promotion retirée"; fi
 # 2) Wi-Fi temporaire OpenTV arrêté et supprimé AVANT tout retrait de fichier (normal comme --purge) ; argv fixes
 NM="/etc/NetworkManager/system-connections"
 AP_ID="opentv-setup-ap"
@@ -172,7 +177,7 @@ if [ -f "$MANIFEST" ]; then
   done
   act rm -f -- "$MANIFEST"
   act rm -rf -- "$(dest /opt/opentv/lib/opentv_pi/__pycache__)" "$(dest /opt/opentv/lib/foryou/__pycache__)"
-  for d in /opt/opentv/lib/opentv_pi /opt/opentv/lib/foryou /opt/opentv/lib /opt/opentv/share/ui /opt/opentv/share \
+  for d in /opt/opentv/lib/opentv_pi /opt/opentv/lib/foryou /opt/opentv/lib /opt/opentv/share/ui /opt/opentv/share/chromium-player-policy /opt/opentv/share \
            /opt/opentv/bin /opt/opentv; do
     if [ -d "$(dest "$d")" ]; then
       if [ "$DRY" = 1 ]; then say "[dry-run] rmdir $(dest "$d")"; else rmdir -- "$(dest "$d")" 2>/dev/null || say "conservé (non vide) : $d"; fi
@@ -231,6 +236,6 @@ if [ "$PURGE" = 1 ]; then
     act rm -f -- "$(dest "$NM/opentv-wifi.nmconnection")"
   fi
   host nmcli connection reload
-  say "comptes système conservés (sans effet) : sudo userdel opentv; sudo userdel opentv-kiosk; sudo groupdel opentv-agent"
+  say "comptes système conservés (sans effet) : sudo userdel opentv; sudo userdel opentv-kiosk; sudo userdel opentv-keys; sudo groupdel opentv-agent"
 fi
 say "désinstallation terminée"

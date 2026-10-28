@@ -44,6 +44,18 @@ DEFAULTS = {
     "OPENTV_REMOTE_ENABLED": "1",
     "OPENTV_REMOTE_PORT": "8082",
     "OPENTV_REMOTE_MDNS": "1",      # 1 = QR vers <nom d'hôte>.local si ce nom désigne bien la boîte ; 0 = adresse
+    # « Regarder » : source approuvée hors Git (root:opentv 0640, voir source.py) et contrôleur du lecteur
+    # (opentv-player.service, compte opentv-kiosk) joint par socket Unix authentifié
+    "OPENTV_SOURCE_FILE": "/etc/opentv/source.env",
+    "OPENTV_PLAYER_SOCKET": "/run/opentv-player/player.sock",
+    # porte de production (promotion.py) : témoin root:root écrit seulement après la validation terrain, jamais livré
+    "OPENTV_PLAYBACK_MARKER": "/etc/opentv/playback-promoted",
+    # manifeste de la livraison installée (root:root) : la promotion est liée à son empreinte (livraison entière)
+    "OPENTV_INSTALL_MANIFEST": "/opt/opentv/MANIFEST.sha256",
+    # aide des touches (seul détenteur du groupe input, compte opentv-keys) et compte du contrôleur du lecteur
+    "OPENTV_PLAYER_KEYS_SOCKET": "/run/opentv-player-keys/keys.sock",
+    "OPENTV_PLAYER_USER": "opentv-kiosk",
+    "OPENTV_PLAYER_KEYS_USER": "opentv-keys",
 }
 
 
@@ -118,7 +130,8 @@ class Config:
         if not os.path.isabs(e["OPENTV_AGENT_CLIENTS_DIR"]):
             raise ValueError("config: OPENTV_AGENT_CLIENTS_DIR doit être absolu")
         self.agent_clients_dir = e["OPENTV_AGENT_CLIENTS_DIR"]
-        for k in ("OPENTV_AGENT_GROUP", "OPENTV_SERVICE_USER", "OPENTV_TV_CLIENT_USER"):
+        for k in ("OPENTV_AGENT_GROUP", "OPENTV_SERVICE_USER", "OPENTV_TV_CLIENT_USER", "OPENTV_PLAYER_USER",
+                  "OPENTV_PLAYER_KEYS_USER"):
             if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", e[k]):
                 raise ValueError("config: %s invalide" % k)
         self.agent_group = e["OPENTV_AGENT_GROUP"]
@@ -131,6 +144,13 @@ class Config:
         self.remote_enabled = _bool(e["OPENTV_REMOTE_ENABLED"], "OPENTV_REMOTE_ENABLED")
         self.remote_port = _port(e["OPENTV_REMOTE_PORT"], "OPENTV_REMOTE_PORT")
         self.remote_mdns = _bool(e["OPENTV_REMOTE_MDNS"], "OPENTV_REMOTE_MDNS")
+        self.source_file = e["OPENTV_SOURCE_FILE"]
+        self.player_socket = e["OPENTV_PLAYER_SOCKET"]
+        self.playback_marker = e["OPENTV_PLAYBACK_MARKER"]
+        self.install_manifest = e["OPENTV_INSTALL_MANIFEST"]
+        self.player_keys_socket = e["OPENTV_PLAYER_KEYS_SOCKET"]
+        self.player_user = e["OPENTV_PLAYER_USER"]
+        self.player_keys_user = e["OPENTV_PLAYER_KEYS_USER"]
         s = self.state_dir
         self.device_file = os.path.join(s, "device.json")
         self.setup_flag = os.path.join(s, "setup-requested")
@@ -144,6 +164,7 @@ class Config:
         self.audit_file = os.path.join(s, "audit.jsonl")
         self.foryou_state = os.path.join(s, "foryou")
         self.remote_file = os.path.join(s, "remote.json")
+        self.source_state = os.path.join(s, "source")
 
     @classmethod
     def load(cls, path=ENV_FILE, environ=None):

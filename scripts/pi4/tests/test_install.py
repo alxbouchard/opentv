@@ -24,7 +24,7 @@ BOOT_CHECK = os.path.join(PI4, "system", "opentv-boot-check")
 SHELL_SCRIPTS = (INSTALL, UNINSTALL, PREPARE, os.path.join(PI4, "bin", "opentv-kiosk-browser"), SPLASH, BOOT_CHECK)
 UNITS = ("opentv.service", "opentv-kiosk.service", "opentv-net-helper.service", "opentv-net-helper.path",
          "opentv-ap-guard.service", "opentv-ap-guard.timer", "opentv-cec.service", "opentv-cec.timer",
-         "opentv-splash.service")
+         "opentv-splash.service", "opentv-player.service", "opentv-player-keys.service")
 
 
 def sha(p):
@@ -177,6 +177,103 @@ class TestInstaller(Base):
         self.assertFalse(os.path.exists(os.path.join(r, "var/lib/opentv")))
         p = sh([UNINSTALL, "--root", r, "--purge", "--forget-wifi"])
         self.assertEqual(sorted(os.listdir(nm)), ["Maison.nmconnection"])
+
+
+class TestPlaybackGateInstall(Base):
+    """« Regarder » : services livrés et activés, mais jamais la capacité de lecture — le témoin de promotion n'est ni
+    livré, ni écrit, ni listé ; la désinstallation le retire toujours ; source.env reste une configuration locale."""
+    PROMO = "etc/opentv/playback-promoted"
+
+    def test_install_ships_player_and_keys_helper_without_promotion(self):
+        r = self.root()
+        p = sh([INSTALL, "--root", r, "--skip-preflight"])
+        out = p.stdout.decode()
+        self.assertEqual(p.returncode, 0, out + p.stderr.decode())
+        j = lambda *a: os.path.join(r, *a)   # noqa: E731
+        for rel, mode in (("opt/opentv/bin/opentv-player", 0o755), ("opt/opentv/bin/opentv-player-keys", 0o755),
+                          ("etc/systemd/system/opentv-player.service", 0o644),
+                          ("etc/systemd/system/opentv-player-keys.service", 0o644),
+                          ("opt/opentv/share/chromium-player-policy/opentv-player.json", 0o644),
+                          ("opt/opentv/lib/opentv_pi/playerkeys.py", 0o644),
+                          ("opt/opentv/lib/opentv_pi/promotion.py", 0o644)):
+            self.assertEqual(stat.S_IMODE(os.stat(j(rel)).st_mode), mode, rel)
+        self.assertFalse(os.path.lexists(j(self.PROMO)))
+        self.assertFalse(os.path.lexists(j("etc/opentv/source.env")))
+        with open(j("opt/opentv/MANIFEST.sha256")) as f:
+            man = f.read()
+        for rel in ("/opt/opentv/bin/opentv-player-keys", "/etc/systemd/system/opentv-player-keys.service",
+                    "/opt/opentv/share/chromium-player-policy/opentv-player.json"):
+            self.assertIn(rel, man)
+        self.assertNotIn("playback-promoted", man)
+        self.assertNotIn("source.env", man)
+        # la politique du lecteur n'est jamais posée dans /etc (elle remplacerait celle du kiosque)
+        self.assertFalse(os.path.exists(j("etc/chromium/policies/managed/opentv-player.json")))
+        enable = [l for l in out.splitlines() if "systemctl enable" in l][0]
+        restart = [l for l in out.splitlines() if "systemctl restart" in l][0]
+        for u in ("opentv-player.service", "opentv-player-keys.service"):
+            self.assertIn(u, enable)
+            self.assertIn(u, restart)
+        self.assertIn("drop_kiosk_input", out)                     # ancienne appartenance input retirée
+        self.assertIn("« Regarder » : NON promu", out)
+        self.assertTrue(health.verify_manifest(r)["ok"])
+        # le lanceur installé de l'aide des touches démarre hors du dépôt (aide sans argument : usage)
+        q = subprocess.run([sys.executable, "-I", j("opt/opentv/bin/opentv-pi"), "playback", "status", "--env",
+                            j("etc/opentv/opentv.env")], capture_output=True, timeout=30,
+                           env=dict(os.environ, OPENTV_PLAYBACK_MARKER=j(self.PROMO),
+                                    OPENTV_SOURCE_FILE=j("etc/opentv/source.env")))
+        self.assertEqual(q.returncode, 0, q.stderr)
+        self.assertIn(b'"promotion": "missing"', q.stdout)
+
+    def test_reinstall_never_writes_promotion_and_uninstall_always_removes_it(self):
+        r = self.root()
+        self.assertEqual(sh([INSTALL, "--root", r, "--skip-preflight"]).returncode, 0)
+        promo, src = os.path.join(r, self.PROMO), os.path.join(r, "etc/opentv/source.env")
+        for path, text in ((promo, '{"promoted": true}\n'), (src, "OPENTV_SOURCE_APPROVED=1\n")):
+            with open(path, "w") as f:
+                f.write(text)
+        with open(promo, "rb") as f:
+            before = f.read()
+        p = sh([INSTALL, "--root", r, "--skip-preflight"])          # mise à jour : témoin jamais réécrit ni créé
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with open(promo, "rb") as f:
+            self.assertEqual(f.read(), before)
+        self.assertIn("témoin de promotion présent", p.stdout.decode())
+        p = sh([UNINSTALL, "--root", r, "--dry-run"])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(os.path.exists(promo))                     # à blanc : rien ne bouge
+        p = sh([UNINSTALL, "--root", r])
+        out = p.stdout.decode()
+        self.assertEqual(p.returncode, 0, out + p.stderr.decode())
+        self.assertFalse(os.path.lexists(promo))                   # même sans --purge
+        self.assertTrue(os.path.exists(src))                       # configuration locale conservée
+        self.assertIn("opentv-player-keys.service", [l for l in out.splitlines() if "disable --now" in l][0])
+        with open(UNINSTALL) as f:
+            self.assertIn("userdel opentv-keys", f.read())
+        for u in ("opentv-player.service", "opentv-player-keys.service"):
+            self.assertFalse(os.path.exists(os.path.join(r, "etc/systemd/system", u)))
+        self.assertFalse(os.path.exists(os.path.join(r, "opt/opentv")))
+
+    def test_uninstall_removes_a_promotion_symlink_without_following_it(self):
+        r = self.root()
+        self.assertEqual(sh([INSTALL, "--root", r, "--skip-preflight"]).returncode, 0)
+        victim = os.path.join(r, "victim")
+        with open(victim, "w") as f:
+            f.write("x")
+        os.symlink(victim, os.path.join(r, self.PROMO))
+        self.assertEqual(sh([UNINSTALL, "--root", r]).returncode, 0)
+        self.assertFalse(os.path.lexists(os.path.join(r, self.PROMO)))
+        self.assertTrue(os.path.exists(victim))
+
+    def test_sysusers_and_units_split_input(self):
+        with open(os.path.join(PI4, "system", "sysusers-opentv.conf")) as f:
+            su = [l.split() for l in f if l.strip() and not l.startswith("#")]
+        self.assertNotIn(["m", "opentv-kiosk", "input"], su)
+        self.assertIn("opentv-keys", [w[1] for w in su if w[0] == "u"])
+        self.assertFalse(any(w[0] == "m" and w[1] == "opentv-keys" for w in su))
+        k = unit(os.path.join(PI4, "systemd", "opentv-kiosk.service"))["Service"]
+        self.assertEqual(k["SupplementaryGroups"], "input")
+        pl = unit(os.path.join(PI4, "systemd", "opentv-player.service"))["Service"]
+        self.assertEqual(pl["SupplementaryGroups"].split(), ["video", "render"])
 
 
 class TestPrepare(Base):

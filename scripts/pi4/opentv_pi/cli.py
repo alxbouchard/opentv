@@ -381,6 +381,85 @@ def cmd_cec_bootstrap(a):
     return _line(dict(res, event="cec_bootstrap"), code)
 
 
+def _uids(*users):
+    import pwd
+    out = {0}
+    for u in users:
+        try:
+            out.add(pwd.getpwnam(u).pw_uid)
+        except KeyError:
+            log("player_user_missing", user=u)
+    return out
+
+
+def cmd_player_daemon(a):
+    """Contrôleur du lecteur (opentv-kiosk, SANS groupe input) : socket réservé au service OpenTV et à root ;
+    touches de fermeture reçues de l'aide opentv-player-keys (UID vérifié) ; porte de promotion relue à chaque open."""
+    from . import playerd, promotion
+    from .playerkeys import ping as keys_ping
+    cfg = config.Config.load(a.env)
+    uids = _uids(cfg.service_user)
+    keys_uids = _uids(cfg.player_keys_user)
+    output = cfg.raw.get("OPENTV_HDMI_OUTPUT") or "HDMI-A-1"
+    card = "vc4hdmi1" if output == "HDMI-A-2" else "vc4hdmi0"
+    stop = threading.Event()
+    for s in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(s, lambda *_: stop.set())
+    playerd.serve(cfg.player_socket, allowed_uids=sorted(uids), log=log, stop=stop,
+                  run_dir=os.path.dirname(cfg.player_socket), alsa_card=card,
+                  gate=lambda: promotion.promoted(cfg.playback_marker, manifest=cfg.install_manifest),
+                  keys_ok=lambda: keys_ping(cfg.player_keys_socket, server_uids=keys_uids),
+                  keys_kw={"path": cfg.player_keys_socket, "server_uids": keys_uids})
+    return 0
+
+
+def cmd_player_keys(a):
+    """Aide des touches (opentv-keys + groupe input par l'unité) : abonnés = contrôleur du lecteur et root."""
+    from . import playerkeys
+    cfg = config.Config.load(a.env)
+    stop = threading.Event()
+    for s in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(s, lambda *_: stop.set())
+    playerkeys.serve(cfg.player_keys_socket, allowed_uids=sorted(_uids(cfg.player_user)), log=log, stop=stop)
+    return 0
+
+
+def cmd_playback(a):
+    """Porte de production de « Regarder » : status (lecture seule), promote (root, après validation terrain), demote
+    (root : témoin retiré PUIS séance en cours fermée côté contrôleur). Témoin et manifeste : root seulement."""
+    from . import promotion
+    from . import source as sourcemod
+    from .playerclient import PlayerClient, PlayerUnavailable
+    cfg = config.Config.load(a.env)
+    if a.action == "status":
+        st = promotion.check(cfg.playback_marker, manifest=cfg.install_manifest)
+        src = sourcemod.SourceConfig.load(cfg.source_file, uid_ok=(0, os.geteuid())).status
+        return _out({"ok": True, "promotion": st, "source": src, "available": st == "promoted" and src == "ok"})
+    if os.geteuid() != 0:
+        return _out({"ok": False, "error": "root_required"}, 2)
+    if a.action == "promote":
+        if not a.field_validated:
+            return _out({"ok": False, "error": "field_validation_required",
+                         "hint": "Regarder -> lecture visible -> Retour même carte, validé sur la TV réelle"}, 2)
+        try:
+            promotion.write(cfg.playback_marker, manifest=cfg.install_manifest, uid=0, gid=0)
+        except ValueError:   # livraison installée non vérifiable (manifeste absent/modifié) : jamais de promotion
+            return _out({"ok": False, "error": "delivery_unverified",
+                         "hint": "sudo /opt/opentv/bin/opentv-pi manifest verify"}, 1)
+        log("playback_promoted")
+        return _out({"ok": True, "promotion": promotion.check(cfg.playback_marker, manifest=cfg.install_manifest)})
+    removed = promotion.remove(cfg.playback_marker)
+    closed = None
+    try:   # séance en cours fermée tout de suite (le contrôleur et le service relisent aussi la porte)
+        r = PlayerClient(cfg.player_socket).call({"op": "close_all", "reason": "demoted"}, timeout=12)
+        closed = bool(r.get("ok")) and r.get("gone") is not False
+    except PlayerUnavailable:
+        closed = None   # contrôleur arrêté : aucune séance possible
+    log("playback_demoted", removed=removed, closed=closed)
+    return _out({"ok": True, "promotion": promotion.check(cfg.playback_marker, manifest=cfg.install_manifest),
+                 "removed": removed, "session_closed": closed})
+
+
 def cmd_manifest(a):
     rep = health.verify_manifest(a.root)
     return _out(rep, 0 if rep["ok"] else 1)
@@ -435,6 +514,15 @@ def build_parser():
                          "ignore le témoin de démarrage ; TV déjà allumée seulement : <Active Source> + <Menu Status>, "
                          "jamais <Image View On> ni réveil — la TV passe sur l'entrée OpenTV")
     cb.add_argument("--release", action="store_true", help="(root) retour arrière : efface la configuration OpenTV")
+    pd = sub.add_parser("player-daemon", help="(opentv-kiosk) contrôleur du lecteur « Regarder » (systemd)")
+    pd.add_argument("--env", default=config.ENV_FILE)
+    pk = sub.add_parser("player-keys", help="(opentv-keys) aide des touches de fermeture du lecteur (systemd)")
+    pk.add_argument("--env", default=config.ENV_FILE)
+    pb = sub.add_parser("playback", help="porte de production de « Regarder » : status | promote | demote")
+    pb.add_argument("action", choices=("status", "promote", "demote"))
+    pb.add_argument("--field-validated", action="store_true",
+                    help="(promote) confirme la validation HDMI réelle Regarder -> lecture -> Retour même carte")
+    pb.add_argument("--env", default=config.ENV_FILE)
     ma = sub.add_parser("manifest", help="vérifie le manifeste SHA-256")
     ma.add_argument("action", choices=("verify",))
     ma.add_argument("--root", default="/")
@@ -445,6 +533,7 @@ def main(argv):
     a = build_parser().parse_args(argv)
     if a.cmd == "agent" and a.action in ("issue", "revoke") and not a.id:
         return _out({"ok": False, "error": "id_required"}, 2)
-    return {"serve": cmd_serve, "preflight": cmd_preflight, "health": cmd_health, "net-helper": cmd_net_helper,
+    return {"serve": cmd_serve, "player-daemon": cmd_player_daemon, "player-keys": cmd_player_keys,
+            "playback": cmd_playback, "preflight": cmd_preflight, "health": cmd_health, "net-helper": cmd_net_helper,
             "ap-guard": cmd_ap_guard, "agent": cmd_agent, "setup": cmd_setup, "cec": cmd_cec,
             "cec-bootstrap": cmd_cec_bootstrap, "manifest": cmd_manifest}[a.cmd](a)

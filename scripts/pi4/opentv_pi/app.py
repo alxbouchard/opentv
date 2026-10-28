@@ -16,6 +16,10 @@ import time
 from . import (VERSION, agents, bootid, cec, config, fsutil, netjobs, netstate, nethelper, peeruid, phoneremote,
                validate, wifiscan)
 from .foryou import ForYou, EngineError
+from . import promotion
+from . import source as sourcemod
+from .playback import Playback
+from .playerclient import PlayerClient
 from .setup_token import SetupToken
 
 KNOWN_AGENTS = ("muse", "hermit", "hermes")
@@ -180,6 +184,9 @@ class App:
         self._cec_thread = None
         self._scan_thread, self.scan_prime_at = None, -1e9
         self.ap_stop_at = -1e9
+        self.playback = self._make_playback(cfg, log, mono)
+        if self.remote is not None:
+            self.remote.interceptor = self._remote_intercept
         self.boot_id = _boot_id(proc_root)
         self.hs = self._hs_load()
         self.device = None
@@ -198,6 +205,52 @@ class App:
     def close(self):
         if self.foryou is not None:
             self.foryou.close()
+        if self.playback.active():
+            self.playback.close("service")
+
+    # -- « Regarder » : source approuvée (fail-closed) + contrôleur du lecteur ; jamais d'URL vers la TV/les agents
+    @staticmethod
+    def _make_playback(cfg, log, mono):
+        src = None
+        try:
+            engine = sourcemod.load_engine(cfg.engine_dir)
+            scfg = sourcemod.SourceConfig.load(cfg.source_file, uid_ok=(0, os.geteuid()),
+                                               valid_host=engine.valid_public_host)
+            src = sourcemod.Source(scfg, cfg.engine_dir, cfg.source_state, cfg.catalogue_file, log=log, engine=engine)
+            log("source_gate", status=scfg.status, kind=scfg.kind)
+        except (sourcemod.SourceError, OSError, ValueError) as e:
+            log("source_gate", status="error", error=str(e)[:32])
+        # porte de production : témoin de promotion terrain root:root (jamais livré par l'installation), lié à
+        # l'empreinte de la livraison installée entière, relu à chaque sondage ; root SEULEMENT (promotion.TRUSTED_UIDS)
+        gate = lambda: promotion.check(cfg.playback_marker, manifest=cfg.install_manifest)   # noqa: E731
+        # needs_reset : « Regarder » reste indisponible tant que la remise à zéro du contrôleur (close_all d'une séance
+        # orpheline d'un service précédent) n'est pas terminée — un close_all tardif ne peut donc jamais fermer une
+        # séance ouverte par ce service
+        pb = Playback(src, PlayerClient(cfg.player_socket), log=log, mono=mono, gate=gate, needs_reset=True)
+        threading.Thread(target=pb.reset, daemon=True, name="playback-reset").start()
+        return pb
+
+    def _remote_intercept(self, action):
+        """Téléphone pendant une lecture : Retour/Accueil ferment le lecteur ; toute autre action est consommée."""
+        if not self.playback.active():
+            return False
+        if action in ("back", "home"):
+            self.playback.close("phone")
+        return True
+
+    def _fy_item(self, uid):
+        with self.fy_lock:
+            if self.fy_session is None:
+                return None
+            return (self.fy_session.get("by_uid") or {}).get(uid)
+
+    def tv_play(self, uid):
+        if self.foryou is None or not isinstance(uid, str) or len(uid) > 120:
+            return False, "unknown_item"
+        item = self._fy_item(uid)
+        if item is None:
+            return False, "unknown_item"
+        return self.playback.start(uid, item)
 
     def _touch_setup_flag(self):
         try:   # sans suivre de lien ni bloquer sur une FIFO ; fichier régulier exigé
@@ -411,6 +464,7 @@ class App:
                 not net.get("ap_active") and self.ap is None
         self._cec_refresh()
         self._mdns_refresh()
+        self.playback.refresh()
         if prime:
             self._scan_prime()
 
@@ -931,7 +985,8 @@ class App:
                     "agents": [x["id"] for x in assistants["list"] if x["connected"]],
                     "cec": {"adapters": len(self.cec["adapters"])},
                     "assistants": dict(assistants, manage=self._agents_view()),
-                    "foryou": self.foryou is not None, "remote": self._remote_view()}
+                    "foryou": self.foryou is not None, "remote": self._remote_view(),
+                    "playback": self.playback.view()}
 
     def tv_foryou(self):
         if self.foryou is None:

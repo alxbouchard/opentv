@@ -292,6 +292,8 @@ class TVHandler(_Base):
                 return self.send_json(200, self.app.tv_state())
             if path == "/api/tv/foryou":
                 return self.send_json(200, self.app.tv_foryou())
+            if path == "/api/tv/play":   # état typé de « Regarder » (jamais d'URL)
+                return self.send_json(200, self.app.playback.view())
             if path == "/api/tv/remote":   # longue requête bornée : touches du téléphone pour la page TV
                 q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query, max_num_fields=1)
                 a = (q.get("after") or ["-1"])[0]
@@ -322,6 +324,16 @@ class TVHandler(_Base):
             state, msg = self.app.tv_feedback(body.get("id"), body.get("action"))
             return self.send_json(200 if state is not None else 400, {"ok": state is not None, "state": state,
                                                                       "message": msg})
+        if path == "/api/tv/play":
+            ok, err = self.app.tv_play(body.get("id"))
+            return self.send_json(200 if ok else 409, {"ok": ok, "error": err, "playback": self.app.playback.view()})
+        if path == "/api/tv/play/close":
+            self.app.playback.close("tv")
+            return self.send_json(200, {"ok": True, "playback": self.app.playback.view()})
+        if path == "/api/tv/play/ack":
+            seq = body.get("seq")
+            ok = isinstance(seq, int) and not isinstance(seq, bool) and self.app.playback.ack(seq)
+            return self.send_json(200, {"ok": ok, "playback": self.app.playback.view()})
         if path == "/api/tv/setup":
             self.app.request_setup()
             return self.send_json(200, {"ok": True})

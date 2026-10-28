@@ -95,7 +95,7 @@ in_scope() {   # chemins qu'OpenTV a le droit de retirer (même périmètre que 
 FILES=()
 add() { FILES+=("$1|$2|$3"); }
 for f in "$HERE"/opentv_pi/*.py; do add "$f" "/opt/opentv/lib/opentv_pi/$(basename "$f")" 644; done
-for b in opentv-pi opentv-mcp opentv-net-helper opentv-kiosk-browser; do add "$HERE/bin/$b" "/opt/opentv/bin/$b" 755; done
+for b in opentv-pi opentv-mcp opentv-net-helper opentv-kiosk-browser opentv-player opentv-player-keys; do add "$HERE/bin/$b" "/opt/opentv/bin/$b" 755; done
 # démarrage produit : écran OpenTV sur tty1 + contrôle en lecture seule après redémarrage
 add "$HERE/system/opentv-splash" /opt/opentv/bin/opentv-splash 755
 add "$HERE/system/opentv-boot-check" /opt/opentv/bin/opentv-boot-check 755
@@ -105,7 +105,7 @@ add "$REPO/scripts/nanopi/opentv_foryou.py" /opt/opentv/lib/foryou/opentv_foryou
 add "$REPO/scripts/nanopi/opentv_bridge.py" /opt/opentv/lib/foryou/opentv_bridge.py 644  # load_catalogue_meta
 for u in opentv.service opentv-kiosk.service opentv-net-helper.service opentv-net-helper.path \
          opentv-ap-guard.service opentv-ap-guard.timer opentv-cec.service opentv-cec.timer \
-         opentv-cec-announce.service opentv-splash.service; do
+         opentv-cec-announce.service opentv-splash.service opentv-player.service opentv-player-keys.service; do
   add "$HERE/systemd/$u" "/etc/systemd/system/$u" 644
 done
 # aucune invite de connexion sur tty1 tant que opentv-kiosk.service est activé (condition seule, rien de masqué)
@@ -119,6 +119,8 @@ add "$HERE/system/pam-opentv-kiosk" /etc/pam.d/opentv-kiosk 644
 add "$HERE/system/logind-opentv-kiosk.conf" /etc/systemd/logind.conf.d/opentv-kiosk.conf 644
 add "$HERE/system/chromium-policy-opentv-kiosk.json" /etc/chromium/policies/managed/opentv-kiosk.json 644
 add "$HERE/system/chromium-policy-opentv-kiosk.json" /etc/chromium-browser/policies/managed/opentv-kiosk.json 644
+# « Regarder » : politique Chromium du LECTEUR, montée par opentv-player.service seulement (jamais dans /etc)
+add "$HERE/system/chromium-policy-opentv-player.json" /opt/opentv/share/chromium-player-policy/opentv-player.json 644
 add "$HERE/uninstall.sh" /opt/opentv/uninstall.sh 755
 add "$HERE/README.md" /opt/opentv/README.md 644
 add "$HERE/CEC_COMPATIBILITY.md" /opt/opentv/CEC_COMPATIBILITY.md 644
@@ -425,7 +427,17 @@ post_fail() {
   exit 1
 }
 post() { host "$@" || post_fail "$*"; }
+# ancienne appartenance opentv-kiosk ∈ input (versions précédentes) retirée : seul opentv-kiosk.service rend input à
+# Cage ; le contrôleur du lecteur et son Chromium (même compte) ne doivent jamais l'hériter. Idempotent.
+drop_kiosk_input() {
+  local line
+  line="$(getent group input 2>/dev/null)" || return 0
+  case ",${line##*:}," in
+    *,opentv-kiosk,*) gpasswd -d opentv-kiosk input >/dev/null ;;
+  esac
+}
 post systemd-sysusers /etc/sysusers.d/opentv.conf
+post drop_kiosk_input
 post systemd-tmpfiles --create /etc/tmpfiles.d/opentv.conf
 post chown root:opentv "$ENVF"
 post systemctl daemon-reload
@@ -434,15 +446,24 @@ if [ "$ENABLE" = 1 ]; then
   # opentv-cec.timer : déclaration Playback « OpenTV » + remappage OK + UNE annonce de source active par démarrage
   # (fenêtre bornée, TV allumée seulement ; jamais de réveil ni de réannonce). Réactivation : opentv-pi cec --activate
   # opentv-splash.service : écran OpenTV sur tty1 au démarrage (sysinit), jamais redémarré ici (Cage possède tty1)
+  # opentv-player.service + opentv-player-keys.service : contrôleur du lecteur « Regarder » et aide des touches.
+  # Activés mais SANS capacité de lecture : « Regarder » exige la source approuvée (/etc/opentv/source.env) ET le
+  # témoin de promotion terrain /etc/opentv/playback-promoted — ni l'un ni l'autre n'est jamais livré, écrit ni
+  # écrasé par l'installation (opentv-pi playback promote --field-validated, après la validation HDMI réelle).
   post systemctl enable opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
-    opentv-cec.timer opentv-splash.service
+    opentv-cec.timer opentv-splash.service opentv-player-keys.service opentv-player.service
   post systemctl restart opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
-    opentv-cec.timer
+    opentv-cec.timer opentv-player-keys.service opentv-player.service
 fi
 if ! host python3 -I /opt/opentv/bin/opentv-pi health; then
   say "santé : à vérifier (sudo /opt/opentv/bin/opentv-pi health ; journalctl -u opentv -u opentv-kiosk)"
 fi
 if [ "$CMDLINE_CHANGED" = 1 ]; then say "cmdline.txt : redémarrer la boîte pour appliquer ${ADD_ARGS[*]}"; fi
+if [ -e "$(dest /etc/opentv/playback-promoted)" ]; then
+  say "« Regarder » : témoin de promotion présent ; lié à la livraison installée entière (manifeste) : cette installation le rend caduc s'il a changé un fichier livré — nouvelle validation terrain puis sudo /opt/opentv/bin/opentv-pi playback promote --field-validated"
+else
+  say "« Regarder » : NON promu (aucun bouton) — après la validation HDMI réelle : sudo /opt/opentv/bin/opentv-pi playback promote --field-validated"
+fi
 say "démarrage : écran OpenTV sur tty1, sans terminal ni invite (effectif au prochain redémarrage ; contrôle : sudo /opt/opentv/bin/opentv-boot-check)"
 say "touche Power des télécommandes ignorée par la boîte (/etc/systemd/logind.conf.d/opentv-kiosk.conf) : effectif au prochain redémarrage (sudo reboot)"
 say "terminé. Retour arrière : sudo /opt/opentv/uninstall.sh   (ajouter --purge pour effacer l'état)"
