@@ -86,6 +86,24 @@ class TestForYouReuse(unittest.TestCase):
         code, out = fy.cli(["history", "--list", "liked"])
         self.assertEqual([x["id"] for x in out["items"]], ["films/102"])
 
+    def test_catalogue_page_is_complete_paged_stable_and_has_no_url(self):
+        fy, _ = make_foryou(self)
+        first = fy.catalogue_page(2, 0)
+        second = fy.catalogue_page(2, 2)
+        self.assertEqual(first["total"], 6)
+        self.assertEqual((first["offset"], first["limit"], first["has_more"]), (0, 2, True))
+        self.assertEqual((second["offset"], second["limit"], second["has_more"]), (2, 2, True))
+        all_ids = []
+        for offset in range(0, first["total"], 2):
+            page = fy.catalogue_page(2, offset)
+            all_ids.extend(x["id"] for x in page["items"])
+            no_url(self, page)
+            for item in page["items"]:
+                self.assertNotIn("poster", item)
+                self.assertNotIn("detail_path", item)
+        self.assertEqual(len(all_ids), first["total"])
+        self.assertEqual(len(set(all_ids)), first["total"])
+
     def test_tv_session_keeps_https_posters_only_and_toggles(self):
         fy, _ = make_foryou(self)
         s = fy.tv_session()
@@ -150,15 +168,17 @@ class TestRegistryAudit(unittest.TestCase):
 class TestTools(unittest.TestCase):
     def test_schemas_are_closed_and_bounded(self):
         names = [t["name"] for t in tools.TOOLS]
-        self.assertEqual(names, ["status", "recommend", "search", "feedback", "history", "display_message"])
+        self.assertEqual(names, ["status", "recommend", "catalogue_list", "search", "feedback", "history", "display_message"])
         for t in tools.TOOLS:
             self.assertFalse(t["inputSchema"].get("additionalProperties", True), t["name"])
             self.assertIn(t["scope"], ("read", "feedback", "display"))
 
     def test_validate_args(self):
         self.assertEqual(tools.validate_args("recommend", {}), {"limit": 5, "offset": 0})
+        self.assertEqual(tools.validate_args("catalogue_list", {}), {"limit": 20, "offset": 0})
         for name, args in (("recommend", {"limit": 0}), ("recommend", {"limit": 21}), ("recommend", {"x": 1}),
                            ("recommend", {"limit": True}), ("search", {}), ("search", {"query": "a" * 81}),
+                           ("catalogue_list", {"limit": 51}), ("catalogue_list", {"offset": 2001}),
                            ("feedback", {"id": "films/1", "action": "delete-db"}), ("feedback", {"id": "../x", "action": "like"}),
                            ("history", {"list": "all"}), ("display_message", {"text": "voir www.x.com"}),
                            ("display_message", {"text": "ok", "seconds": 600}), ("nope", {}), ("status", []),
@@ -188,6 +208,11 @@ class TestAgentService(unittest.TestCase):
         r = self.call("hermit", self.ro, "recommend", {"limit": 3})
         self.assertTrue(r["ok"], r)
         self.assertEqual(len(r["result"]["items"]), 3)
+        no_url(self, r)
+        r = self.call("hermit", self.ro, "catalogue_list", {"limit": 2, "offset": 0})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual((len(r["result"]["items"]), r["result"]["total"]), (2, 6))
+        self.assertTrue(r["result"]["has_more"])
         no_url(self, r)
         r = self.call("muse", self.full, "feedback", {"id": "films/102", "action": "seen"})
         self.assertTrue(r["result"]["changed"])
@@ -318,7 +343,8 @@ class TestMCP(unittest.TestCase):
         self.assertEqual(by_id[0]["error"]["code"], -32002)
         self.assertEqual(by_id[1]["result"]["protocolVersion"], "2025-06-18")
         self.assertEqual(by_id[1]["result"]["capabilities"], {"tools": {"listChanged": False}})
-        self.assertEqual([t["name"] for t in by_id[2]["result"]["tools"]], ["status", "recommend", "search", "history"])
+        self.assertEqual([t["name"] for t in by_id[2]["result"]["tools"]],
+                         ["status", "recommend", "catalogue_list", "search", "history"])
         for t in by_id[2]["result"]["tools"]:
             self.assertNotIn("scope", t)
             self.assertEqual(t["inputSchema"]["type"], "object")
@@ -369,7 +395,7 @@ class TestMCP(unittest.TestCase):
         res = [json.loads(l) for l in p.stdout.decode().splitlines()]
         self.assertEqual(res[0]["result"]["protocolVersion"], "2025-03-26")
         self.assertEqual([t["name"] for t in res[1]["result"]["tools"]],
-                         ["status", "recommend", "search", "feedback", "history"])
+                         ["status", "recommend", "catalogue_list", "search", "feedback", "history"])
         self.assertEqual(len(res[2]["result"]["structuredContent"]["items"]), 2)
         self.assertTrue(res[3]["result"]["structuredContent"]["changed"])
         no_url(self, res)

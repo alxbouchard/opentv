@@ -468,7 +468,8 @@ Configuration MCP stdio de l'agent (même machine) :
 ```
 
 Protocole : JSON-RPC 2.0 ligne par ligne, `initialize` (2025-06-18, 2025-03-26, 2024-11-05), `ping`, `tools/list`
-(filtré par scopes, une page), `tools/call`. Outils : `status`, `recommend` (limit ≤ 20, offset ≤ 200), `search`
+(filtré par scopes, une page), `tools/call`. Outils : `status`, `recommend` (limit ≤ 20, offset ≤ 200),
+`catalogue_list` (tout le catalogue accepté, tri alphabétique, pages ≤ 50, offset ≤ 2000, aucune URL ni champ brut), `search`
 (titre, requête de type URL refusée), `feedback` (actions explicites : J'aime, Pas pour moi, Déjà vu, À voir plus
 tard, Pas ce soir et leurs retraits), `history`, `display_message` (≤ 140 caractères, sans adresse, 1 / 5 s).
 Toutes les sorties passent par le nettoyage du moteur « Pour toi » : **aucune URL**. Pas de shell, pas d'URL arbitraire,

@@ -25,6 +25,10 @@ TOOLS = [
     {"name": "recommend", "scope": "read", "title": "Recommandations « Pour toi »",
      "description": "Sélection personnelle expliquée, filtrée sur le catalogue accepté (paginée).",
      "inputSchema": _obj({"limit": _int(1, 20, 5, "Nombre d'éléments"), "offset": _int(0, 200, 0, "Décalage")})},
+    {"name": "catalogue_list", "scope": "read", "title": "Catalogue OpenTV complet",
+     "description": "Liste alphabétique paginée de tout le catalogue accepté, sans URL ni champ interne.",
+     "inputSchema": _obj({"limit": _int(1, 50, 20, "Nombre d'éléments"),
+                          "offset": _int(0, 2000, 0, "Décalage")})},
     {"name": "search", "scope": "read", "title": "Chercher un titre",
      "description": "Recherche par titre dans le catalogue accepté. Une requête qui ressemble à une URL est refusée.",
      "inputSchema": _obj({"query": {"type": "string", "minLength": 1, "maxLength": 80, "description": "Titre"},
@@ -127,6 +131,11 @@ def dispatch(ctx, agent, scopes, name, a):
             res["foryou"] = {"error": str(e)}
     elif name == "recommend":
         res = _cli(ctx, ["recommend", "--limit", a["limit"], "--offset", a["offset"]])
+    elif name == "catalogue_list":
+        fy = getattr(ctx, "foryou", None)
+        if fy is None:
+            raise ToolError("foryou_unavailable")
+        res = fy.catalogue_page(a["limit"], a["offset"])
     elif name == "search":
         res = _cli(ctx, ["search", "--query", a["query"], "--limit", a["limit"], "--offset", a["offset"]])
     elif name == "feedback":

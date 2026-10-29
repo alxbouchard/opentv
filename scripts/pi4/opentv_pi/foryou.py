@@ -73,6 +73,29 @@ class ForYou:
         items, _, _ = self.bridge_mod.load_catalogue_meta(self.catalogue_file, self.detail_re)
         return items
 
+    def catalogue_page(self, limit, offset):
+        """Page déterministe du catalogue accepté pour les agents locaux.
+
+        Le moteur canonique construit les objets publics (identifiant stable, titre, année, genres et notes séparées)
+        et son scrubber enlève toute adresse imbriquée. Les chemins de fiche/affiche et les champs bruts ne sortent
+        jamais. La pagination évite qu'un agent transforme l'Agent Port en export JSON sans borne.
+        """
+        items, generated_at, _ = self.bridge_mod.load_catalogue_meta(self.catalogue_file, self.detail_re)
+        rows = []
+        for item in items:
+            uid = self.engine.uid_for(self.source, item)
+            title = self.engine.clean_text(item.get("title"), 200)
+            if uid and title:
+                rows.append((self.engine.norm(title), uid, item))
+        rows.sort(key=lambda x: (x[0], x[1]))
+        page = []
+        for _title, uid, item in rows[offset:offset + limit]:
+            public = self.engine.public_item(item, uid, [], None)
+            public["description"] = self.engine.clean_text(item.get("description"), 300)
+            page.append(public)
+        return self.scrub({"items": page, "offset": offset, "limit": limit, "total": len(rows),
+                           "has_more": offset + limit < len(rows), "generated_at": generated_at})
+
     def tv_session(self):
         """Sélection figée pour l'écran TV (loopback) : rangées, affiches https, marques d'état."""
         s = self.tv.session(self.items())

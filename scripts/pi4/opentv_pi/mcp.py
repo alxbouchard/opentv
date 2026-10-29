@@ -14,8 +14,9 @@ from . import VERSION, agentport, tools, validate
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 MAX_LINE = 1024 * 1024
-INSTRUCTIONS = ("OpenTV (Raspberry Pi) : outils bornés « Pour toi » (status, recommend, search, feedback, history) et "
-                "display_message. Les sorties ne contiennent jamais d'URL. Les décisions sensibles restent à l'humain.")
+INSTRUCTIONS = ("OpenTV (Raspberry Pi) : outils bornés « Pour toi » (status, recommend, catalogue_list, search, "
+                "feedback, history) et display_message. Les sorties ne contiennent jamais d'URL. Les décisions "
+                "sensibles restent à l'humain.")
 ERRORS_FR = {"unauthorized": "agent non autorisé", "forbidden_scope": "outil hors des droits de cet agent",
              "invalid_params": "paramètres invalides", "rate_limited": "trop de demandes, réessaie plus tard",
              "locked": "Agent Port verrouillé temporairement", "unknown_id": "identifiant absent du catalogue accepté",
