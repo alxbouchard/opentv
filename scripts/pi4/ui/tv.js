@@ -15,7 +15,9 @@
   // « Connecter Muse » (Gérer les assistants → Muse) : consentement explicite sur la TV (« Autoriser et connecter »,
   // jamais au focus par défaut), puis QR de séance courte et avancement réel. Dernières issues déjà vues : jamais
   // annoncées de nouveau (rechargement compris) ; la TV ne voit jamais de jeton, de clé ni de commande.
-  var museSeq = null, museDiscSeq = null, lastMuseQr = "", museSkipToast = false;
+  var museSeq = null, museDiscSeq = null, lastMuseQr = "", museSkipToast = false, museHidden = false;
+  var MSG_MUSE_FOREIGN = "Une autre installation de Muse existe déjà sur cette boîte : rien n'est modifié d'ici.";
+  var MSG_MUSE_PENDING = "Annulation demandée : la boîte termine l'opération en cours. Le résultat s'affichera ici.";
   var MUSE_CAPS = ["Te proposer des films à l'écran", "Apprendre tes goûts et gérer tes listes", "Naviguer dans OpenTV",
                    "Lancer ou fermer un film quand tu le lui demandes"];
   var MUSE_PHASES = [["preparing", "Préparation"], ["waiting_muse", "En attente de Muse"], ["connecting", "Connexion"],
@@ -674,11 +676,21 @@
   // ---- « Gérer les assistants » : Muse (connexion guidée) ou droits des assistants (QR existant)
   function museTv() { return (state && state.muse) || {}; }
   function museConnected() { return museTv().bridge === "ready"; }
+  // « Déconnecter Muse » : proposé dès que la boîte POSSÈDE Muse (appariement, jeton local ou identité à elle :
+  // owned exactement true, publié par le helper root), pont prêt, en pause ou en échec ; jamais pour une identité
+  // étrangère ni tant que la propriété n'est pas établie (owned null)
+  function museOwned() { return museTv().owned === true; }
+  function museSig() { var m = museTv(); return [m.owned, !!m.foreign, m.bridge || ""].join("|"); }
   function museSub() {
     var m = museTv();
     if (m.active) { return "Connexion en cours…"; }
     if (m.disconnect && m.disconnect.state === "running") { return "Déconnexion en cours…"; }
-    if (m.bridge === "ready") { return "Connectée · Déconnecter"; }
+    if (m.foreign) { return "Installée autrement"; }
+    if (museOwned()) {
+      return m.bridge === "ready" ? "Connectée · Déconnecter" : m.bridge === "paused" ?
+        "En pause · Reconnecter ou déconnecter" : "Pas connectée · Reconnecter ou déconnecter";
+    }
+    if (m.bridge === "ready") { return "Connectée"; }
     if (m.bridge === "paused") { return "En pause · Reconnecter"; }
     return "Connecter";
   }
@@ -697,19 +709,44 @@
                 return b;
               }), idx, { actions: list.map(function (x) { return x[0]; }) });
   }
-  function openMuse() {   // « Autoriser et connecter » n'est JAMAIS au focus par défaut : choisir Muse n'accorde rien
-    var m = museTv();
+  function openMuse(refresh) {   // « Autoriser et connecter » n'est JAMAIS au focus par défaut : choisir Muse n'accorde rien
+    var m = museTv(), sig = museSig();
     if (m.active) { openMuseSetup(); return; }
-    if (museConnected()) {
+    if (!refresh) {   // état public de la boîte relu par le helper root (borné côté service) : « Déconnecter » proposé
+      api("POST", "/api/tv/muse/probe", {}).catch(onApiError);   // seulement s'il est établi que la boîte possède Muse
+    }
+    if (m.foreign) {   // identité « muse-device » qui ne vient pas de cette boîte : jamais de déconnexion d'ici
+      showPanel("muse", "Gérer les assistants", "Muse est installée autrement", MSG_MUSE_FOREIGN,
+                [button("Retour", "lrow")], 0, { actions: ["back"], sig: sig });
+      return;
+    }
+    if (museOwned() && museConnected()) {
       showPanel("muse", "Gérer les assistants", "Muse est connectée",
                 "Muse peut proposer des films, apprendre tes goûts, naviguer et lancer un film quand tu le lui demandes.",
                 [button("Déconnecter Muse", "lrow danger"), button("Retour", "lrow")], 1,
-                { actions: ["disconnect", "back"] });
+                { actions: ["disconnect", "back"], sig: sig });
       return;
     }
+    if (museOwned()) {   // appariée à cette boîte mais en pause ou sans connexion (reconnexion échouée…) : « Retour » au focus
+      var paused = m.bridge === "paused";
+      showPanel("muse", "Gérer les assistants", paused ? "Muse est en pause" : "Muse n'est pas connectée",
+                paused ? "Muse est installée sur cette boîte mais ne peut plus piloter la TV." :
+                  "Muse est appairée à cette boîte mais ne répond pas pour l'instant.",
+                [button("Reconnecter", "lrow"), button("Déconnecter Muse", "lrow danger"), button("Retour", "lrow")], 2,
+                { actions: ["reconnect", "disconnect", "back"], sig: sig });
+      return;
+    }
+    if (museConnected()) {   // pont prêt mais propriété pas encore établie : rien à déconnecter d'ici pour l'instant
+      showPanel("muse", "Gérer les assistants", "Muse est connectée", "Vérification de la boîte…",
+                [button("Retour", "lrow")], 0, { actions: ["back"], sig: sig });
+      return;
+    }
+    openMuseConsent();
+  }
+  function openMuseConsent() {
     showPanel("muse", "Gérer les assistants", "Connecter Muse",
               "Avec ton accord, Muse pourra :", [button("Autoriser et connecter", "lrow"), button("Pas maintenant", "lrow")],
-              1, { actions: ["connect", "back"] });
+              1, { actions: ["connect", "back"], sig: museSig() });
     var ul = $("pcaps");
     ul.textContent = "";
     MUSE_CAPS.forEach(function (x) { ul.appendChild(el("li", null, x)); });
@@ -725,8 +762,8 @@
     api("POST", "/api/tv/muse/start", { consent: true }).then(function (j) {
       if (!j || !j.ok) {
         closePanel();
-        toast(j && j.error === "busy" ? "Muse est déjà en cours de connexion." :
-              "Impossible pour l'instant : la TV doit être connectée au réseau.");
+        toast(j && j.error === "busy" ? "Muse est déjà en cours de connexion." : j && j.message ? j.message :
+              "Impossible pour l'instant : la TV doit être connectée au réseau.", !!(j && j.message));
         return;
       }
       if (j.muse && j.muse.last && typeof j.muse.last.seq === "number") { museSeq = j.muse.last.seq; }
@@ -748,7 +785,7 @@
     if (!panel || panel.kind !== "musesetup") { return; }
     var m = museTv(), c = $("aqr"), ol = $("psteps"), ph = $("pphases");
     var r = MUSE_RANK[m.state] || 0;
-    if (m.cancelling) { $("pmeta").textContent = "Annulation en cours…"; }
+    if (m.cancelling) { $("pmeta").textContent = m.cancel_pending ? MSG_MUSE_PENDING : "Annulation en cours…"; }
     if (!m.active) { return; }
     if (m.state === "keygen" || m.state === "await_token") {
       $("pqrfig").hidden = false; ph.hidden = true;
@@ -782,6 +819,12 @@
   }
   function cancelMuse() {
     var m = museTv();
+    if (m.active && m.cancel_pending) {   // annulation demandée, issue pas encore confirmée : la feuille peut se fermer
+      closePanel();                        // mais rien n'est dit « annulé » ; l'issue réelle sera annoncée
+      museHidden = true;
+      toast("Annulation demandée : le résultat s'affichera sur la TV.");
+      return;
+    }
     if (m.active && (MUSE_RANK[m.state] || 0) >= 1) {   // appariement lancé : la boîte ferme la fenêtre, issue annoncée
       api("POST", "/api/tv/muse/cancel", {}).then(function (j) { if (j && j.muse) { state.muse = j.muse; renderMuse(); } })
         .catch(onApiError);
@@ -794,7 +837,8 @@
     api("POST", "/api/tv/muse/cancel", {}).catch(onApiError);
   }
   function onMuseResult(m) {
-    var st = m.last && m.last.state;
+    var st = m.last && m.last.state, msg = (m.last && m.last.message) || m.message;
+    museHidden = false;
     if (st === "cancelled" && museSkipToast) { museSkipToast = false; return; }
     museSkipToast = false;
     if (panel && (panel.kind === "musesetup" || panel.kind === "muse")) { closePanel(); }
@@ -804,8 +848,8 @@
     } else if (st === "cancelled") { toast("Annulé : rien n'a changé."); }
     else if (st === "expired") { toast("QR de Muse expiré : rien n'a changé."); }
     else if (st === "failed") {
-      if (play || (panel && panel.kind === "item")) { toast(m.message || "Muse n'est pas connectée.", true); return; }
-      showPanel("museresult", "Gérer les assistants", "Muse n'est pas connectée", m.message || "La connexion n'a pas abouti.",
+      if (play || (panel && panel.kind === "item")) { toast(msg || "Muse n'est pas connectée.", true); return; }
+      showPanel("museresult", "Gérer les assistants", "Muse n'est pas connectée", msg || "La connexion n'a pas abouti.",
                 [button("Réessayer", "lrow"), button("Fermer", "lrow")], 0, { actions: ["retry", "close"] });
     }
   }
@@ -900,7 +944,8 @@
       return;
     }
     if (panel.kind === "muse") {
-      if (a === "connect") { startMuse(); } else if (a === "disconnect") { openMuseConfirm(); } else { openAssistants("muse"); }
+      if (a === "connect") { startMuse(); } else if (a === "disconnect") { openMuseConfirm(); }
+      else if (a === "reconnect") { openMuseConsent(); } else { openAssistants("muse"); }
       return;
     }
     if (panel.kind === "museconfirm") { if (a === "yes") { disconnectMuse(); } else { openMuse(); } return; }
@@ -1150,11 +1195,15 @@
               "Muse n'a pas pu être déconnectée. Redémarre la boîte, puis réessaie.", true);
       }
     }
-    if (mu && mu.active && !s.setup.active && !play && (!panel || panel.kind !== "musesetup") &&
+    if (mu && !mu.active) { museHidden = false; }
+    if (mu && mu.active && !museHidden && !s.setup.active && !play && (!panel || panel.kind !== "musesetup") &&
         (!panel || panel.kind !== "item")) {
       openMuseSetup();   // page rechargée pendant la connexion : la feuille revient (séance déjà confirmée sur la TV)
     } else if (panel && panel.kind === "musesetup") {
       if (mu && mu.active) { renderMuse(); } else if (Date.now() - panel.openedAt > 6000) { closePanel(); }
+    }
+    if (panel && panel.kind === "muse" && panel.sig !== undefined && panel.sig !== museSig() && !(mu && mu.active)) {
+      openMuse(true);   // propriété / pont établis entre-temps : choix à jour, focus de nouveau sur l'option sûre
     }
     if (panel && panel.kind === "assistants") {   // sous-titres à jour (Muse connectée, compteurs)
       var subs = document.querySelectorAll("#pbtns .ts");

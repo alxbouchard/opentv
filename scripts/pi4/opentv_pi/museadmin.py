@@ -38,6 +38,7 @@ Portes humaines et barrières :
 - `status` ne lit jamais un fichier secret (présence/mode seulement) et n'affiche aucun jeton ni indice de jeton.
 """
 import getpass
+import hmac
 import json
 import os
 import re
@@ -610,7 +611,125 @@ class Admin:
         except FileNotFoundError:
             return False
 
-    def pair(self, token_stdin=False, replace_token=False, force=False, replace_identity=False):
+    # -- jeton local : comparaison sans jamais le renvoyer, le journaliser ni en dériver une empreinte
+    def _local_token_match(self, dfd, pw, submitted):
+        """(root) Jeton local de la boîte comparé EN TEMPS CONSTANT au jeton soumis -> absent | same | different |
+        unsafe. Fichier ouvert sans suivre de lien : régulier, un seul lien, propriétaire opentv-muse, aucun accès
+        groupe/autres, taille bornée. Aucune écriture ; ni le jeton ni une empreinte ne sortent d'ici."""
+        try:
+            fd = os.open("sdk_token", os.O_RDONLY | fsutil.O_NOFOLLOW | fsutil.O_NONBLOCK | fsutil.O_CLOEXEC,
+                         dir_fd=dfd)
+        except FileNotFoundError:
+            return "absent"
+        except OSError:
+            return "unsafe"
+        raw = None
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != pw.pw_uid or st.st_mode & 0o077 \
+                    or st.st_size > 256:
+                return "unsafe"
+            raw = os.read(fd, 257)
+        except OSError:
+            return "unsafe"
+        finally:
+            os.close(fd)
+        try:
+            have = raw.decode("ascii").strip().encode("ascii")
+        except UnicodeError:
+            return "unsafe"
+        finally:
+            raw = None
+        if not isinstance(submitted, str) or not SDK_TOKEN_RE.fullmatch(submitted):
+            return "different"
+        same = hmac.compare_digest(have, submitted.encode("ascii"))
+        have = None
+        return "same" if same else "different"
+
+    def local_token_match(self, submitted):
+        """(root) -> absent | same | different | unsafe | muse_unavailable ; lecture seule (helper de la TV : AVANT
+        toute autorisation ou tout arrêt du pont, un jeton différent est refusé sans rien changer)."""
+        if self.euid() != 0:
+            return "muse_unavailable"
+        pw, _why = self.muse_account()
+        if pw is None:
+            return "muse_unavailable"
+        try:
+            dfd = self.open_state_dir(pw)
+        except OSError:
+            return "unsafe"
+        try:
+            return self._local_token_match(dfd, pw, submitted)
+        finally:
+            os.close(dfd)
+
+    def ownership(self):
+        """(root) Faits publics, SANS secret : la boîte a-t-elle un appariement, un jeton local, une identité
+        « muse-device » à elle ? -> {"paired", "token", "identity", "identity_present", "foreign"} ; identity =
+        owned|outdated|stale_client|absent|unexpected|unknown. foreign = identité prouvée NON émise par muse pair."""
+        out = {"paired": None, "token": None, "identity": "unknown", "identity_present": None, "foreign": False}
+        pw, _why = self.muse_account()
+        if pw is None:
+            return out
+        try:
+            dfd = self.open_state_dir(pw)
+        except OSError:
+            dfd = None
+        if dfd is not None:
+            try:
+                p, t = self.entry(dfd, "pairing.json"), self.entry(dfd, "sdk_token")
+                out["paired"] = None if p == "unsafe" else p == "present"
+                out["token"] = None if t == "unsafe" else t == "present"
+            finally:
+                os.close(dfd)
+        st = self.identity_state(pw)
+        if st["reason"] in ("registry_unreadable", "clients_dir_unsafe"):
+            return out
+        out["identity"] = st["state"]
+        out["foreign"] = st["state"] == "unexpected"
+        try:
+            out["identity_present"] = AGENT_ID in self.registry().list()
+        except (OSError, ValueError):
+            out["identity_present"] = None
+        return out
+
+    def pair(self, token_stdin=False, replace_token=False, force=False, replace_identity=False, keep_token=False):
+        """keep_token (connexion depuis la TV) : un jeton local existant n'est JAMAIS remplacé. Le jeton soumis est
+        comparé en temps constant AVANT toute écriture : identique ⇒ jeton existant réutilisé tel quel ; différent ⇒
+        refus `sdk_token_mismatch`, rien changé (ni jeton, ni identité, ni pont). Sans jeton local, celui soumis est
+        écrit puis RETIRÉ si l'appariement n'aboutit pas (état d'avant restauré : aucun jeton)."""
+        if keep_token and (replace_token or force or replace_identity):
+            return {"ok": False, "error": "bad_options"}, 2
+        ctx = {"created": None}
+        out, code = self._pair(token_stdin, replace_token, force, replace_identity, keep_token, ctx)
+        if ctx["created"] is not None and not out.get("ok"):
+            out["sdk_token_rolled_back"] = self._rollback_created_token(ctx["created"])
+            if out["sdk_token_rolled_back"]:
+                out["sdk_token_written"] = False
+        return out, code
+
+    def _rollback_created_token(self, created):
+        """Jeton écrit par CET appel (aucun avant) et appariement non abouti : retiré seulement s'il s'agit encore du
+        même fichier (inode) et qu'aucun appariement n'existe. -> True si retiré."""
+        pw, dev, ino = created
+        try:
+            dfd = self.open_state_dir(pw)
+        except OSError:
+            return False
+        try:
+            if self.entry(dfd, "pairing.json") != "absent":
+                return False
+            try:
+                st = os.stat("sdk_token", dir_fd=dfd, follow_symlinks=False)
+            except FileNotFoundError:
+                return False
+            if (st.st_dev, st.st_ino) != (dev, ino):
+                return False
+            return self._unlink(dfd, "sdk_token")
+        finally:
+            os.close(dfd)
+
+    def _pair(self, token_stdin, replace_token, force, replace_identity, keep_token, ctx):
         pw, err = self.preflight()
         if err:
             return dict({"ok": False}, **err), 2
@@ -633,7 +752,27 @@ class Admin:
             tok_state = self.entry(dfd, "sdk_token")
             if tok_state == "unsafe":
                 return {"ok": False, "error": "sdk_token_file_unsafe"}, 2
-            if replace_token or tok_state == "absent":
+            if keep_token:
+                # connexion depuis la TV : jeton lu d'abord, comparé au jeton local AVANT toute écriture
+                try:
+                    tok = self.read_token(token_stdin)
+                except ValueError as e:
+                    return {"ok": False, "error": str(e)}, 2
+                try:
+                    match = self._local_token_match(dfd, pw, tok) if tok_state == "present" else "absent"
+                    if match == "unsafe":
+                        return {"ok": False, "error": "sdk_token_file_unsafe"}, 2
+                    if match == "different":
+                        return {"ok": False, "error": "sdk_token_mismatch",
+                                "note": "Jeton différent de celui de la boîte : rien modifié."}, 2
+                    token_written = match == "absent"
+                    if token_written:
+                        fsutil.atomic_write(dfd, "sdk_token", tok + "\n", mode=0o600, uid=pw.pw_uid, gid=pw.pw_gid)
+                        st_tok = os.stat("sdk_token", dir_fd=dfd, follow_symlinks=False)
+                        ctx["created"] = (pw, st_tok.st_dev, st_tok.st_ino)
+                finally:
+                    tok = None
+            elif replace_token or tok_state == "absent":
                 try:
                     tok = self.read_token(token_stdin)
                 except ValueError as e:

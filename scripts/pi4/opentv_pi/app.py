@@ -95,6 +95,8 @@ def assistant_row(a, v, seen_at, now):
     return {"id": a, "name": AGENT_NAMES[a], "level": lvl, "authorized": bool(allowed), "allowed": allowed,
             "have": sorted(have), "connected": connected, "connected_level": level_of(conn) if connected else None,
             "client": level_of(own) if own else None, "bridge": bridge,
+            # identité liée enregistrée (quels que soient ses droits) : sert à dater l'état public de la boîte Muse
+            "linked_present": any(sc is not None for sc in (v.get("linked") or {}).values()),
             "over": bool(own) and not set(own) <= set(AGENT_LEVELS[lvl]),
             "seen_s": int(max(0, now - seen_at)) if (have and seen_at is not None) else None}
 AP_PSK_ALPHABET = "abcdefghijkmnopqrstuvwxyz23456789"
@@ -220,7 +222,9 @@ class App:
             label = mdns_label(socket.gethostname() if hostname is None else hostname)
             self.mdns_name = label + ".local" if label else None
         self.resolver = resolver
-        self.mdns = {"ip": None, "ok": False}   # dernière vérification : le nom mDNS désigne-t-il l'adresse liée ?
+        # dernière vérification : le nom mDNS désigne-t-il l'adresse liée ? gen = nombre de vérifications terminées
+        self.mdns = {"ip": None, "ok": False, "gen": 0}
+        self.muse_mdns_gen = 0        # « Connecter Muse » : vérifications faites avant l'ouverture de la séance
         self._mdns_thread, self.mdns_at = None, -1e9
         self.bad_token_ips = {}       # ip -> [horodatages monotones] des POST à jeton faux (borné)
         self.fy_session, self.fy_at, self.fy_sig = None, -1e9, None
@@ -479,6 +483,12 @@ class App:
         results = netjobs.read_results(self.cfg.results_dir)
         self.muse.tick()   # progression du helper root (fichiers du service) ; verrou propre, jamais sous self.lock
         with self.lock:
+            mhost = self._muse_host()
+            ip = self.net["ip"] if self.net["mode"] in ("ethernet", "wifi") else None
+            # démenti = une vérification TERMINÉE après l'ouverture, pour l'adresse actuelle, sans correspondance exacte
+            refuted = self.mdns["gen"] > self.muse_mdns_gen and self.mdns["ip"] == ip and not self.mdns["ok"]
+        self.muse.host_check(mhost is not None, refuted)   # nom non vérifié : séance fermée, jamais de QR à IP
+        with self.lock:
             self.net = net
             if net["mode"] == "offline":
                 if self.offline_since is None:
@@ -557,10 +567,10 @@ class App:
             ip = self.net.get("ip") if self.net.get("mode") in ("ethernet", "wifi") else None
         ok = bool(ip and self.mdns_name) and self.resolver(self.mdns_name) == {ip}
         with self.lock:
-            self.mdns = {"ip": ip, "ok": ok}
+            self.mdns = {"ip": ip, "ok": ok, "gen": self.mdns.get("gen", 0) + 1}
 
     def _mdns_refresh(self):
-        if self.remote is None or not self.mdns_name:
+        if not self.mdns_name or (self.remote is None and not self.muse.busy()):
             return
         with self.lock:
             ip = self.net.get("ip") if self.net.get("mode") in ("ethernet", "wifi") else None
@@ -647,6 +657,22 @@ class App:
     def lan_ip(self):
         with self.lock:
             return self.net["ip"] if self.net["mode"] in ("ethernet", "wifi") else None
+
+    def _muse_host(self):   # sous self.lock
+        """Nom mDNS de la boîte s'il vient d'être VÉRIFIÉ vers l'adresse LAN actuelle ; sinon None (jamais l'IP)."""
+        ip = self.net["ip"] if self.net["mode"] in ("ethernet", "wifi") else None
+        if ip and self.mdns_name and self.mdns["ok"] and self.mdns["ip"] == ip:
+            return self.mdns_name
+        return None
+
+    def muse_host(self):
+        with self.lock:
+            return self._muse_host()
+
+    def muse_hosts(self, port):
+        """En-têtes Host acceptés par les pages /muse : le nom mDNS exact de la boîte seulement (avec le port réel) ;
+        jamais l'adresse IP (le QR n'en porte pas)."""
+        return {"%s:%d" % (self.mdns_name, port)} if self.mdns_name else set()
 
     # -- télécommande sur téléphone (LAN, après configuration seulement)
     def want_remote(self):
@@ -864,12 +890,12 @@ class App:
                 "unreadable": corrupt,
                 # pont Muse dédié (« muse-device ») : ready = connecté et autorisé à piloter ; paused = installé mais
                 # en pause (droits réduits) ; None = pas installé
-                "muse_bridge": (muse.get("bridge") or {}).get("state") if muse else None}
+                "muse_bridge": (muse.get("bridge") or {}).get("state") if muse else None,
+                "muse_linked": (bool(muse["linked_present"]) if muse else None) if not corrupt else None}
 
     def _muse_tv(self, assistants):   # sous self.lock
-        ip = self.net["ip"] if self.net["mode"] in ("ethernet", "wifi") else None
         port = self.lan_port_actual if (self.lan_purpose() == "muse") else None
-        v = self.muse.tv_view(ip, port)
+        v = self.muse.tv_view(self._muse_host(), port, assistants.get("muse_linked"))
         v["bridge"] = assistants.get("muse_bridge")
         return v
 
@@ -927,10 +953,16 @@ class App:
                 return False, "setup"
             if self.net["mode"] not in ("ethernet", "wifi") or not self.net["ip"]:
                 return False, "offline"
+            if not self.mdns_name:   # QR par le nom de la boîte seulement : jamais d'adresse IP en repli
+                return False, "name_unavailable"
             if self.agents_mode:
                 self._agents_end("cancelled", "muse")
         ok, why = self.muse.start(consent)
         if ok:
+            with self.lock:   # vérification fraîche du nom : seules celles terminées APRÈS l'ouverture démentent
+                self.muse_mdns_gen = self.mdns["gen"]
+                self.mdns_at = -1e9
+            self._mdns_refresh()
             self.tv_actions.cancel_queued("tv_busy")   # jamais une action d'assistant pendant la connexion de Muse
         return ok, why
 
@@ -944,7 +976,20 @@ class App:
         with self.lock:
             if self.setup_mode or self.device is None:
                 return False, "setup"
-        return self.muse.disconnect(confirm)
+        return self.muse.disconnect(confirm, owned=self._muse_owned())
+
+    def _muse_owned(self):
+        lst, _fp, corrupt = self._assistants_read()
+        muse = next((x for x in lst if x["id"] == "muse"), None)
+        present = None if corrupt or muse is None else bool(muse["linked_present"])
+        return self.muse.box_view(present)["owned"]
+
+    def muse_probe(self):
+        """TV : Muse ouvert dans « Gérer les assistants » -> le helper root republie l'état public de la boîte (borné)."""
+        with self.lock:
+            if self.setup_mode or self.device is None:
+                return False
+        return self.muse.probe("tv")
 
     def muse_unavailable(self):
         """Écoute /muse impossible : la séance (pas encore utilisée) est annulée, la TV l'annonce."""
@@ -952,10 +997,9 @@ class App:
             self.muse.cancel("bind")
 
     def muse_view(self):
+        assistants = self._assistants_summary()
         with self.lock:
-            ip = self.net["ip"] if self.net["mode"] in ("ethernet", "wifi") else None
-            port = self.lan_port_actual if self.lan_purpose() == "muse" else None
-        return self.muse.tv_view(ip, port)
+            return self._muse_tv(assistants)
 
     def agents_csrf(self, tok):
         """Jeton anti-CSRF lié au QR courant (HMAC d'une clé tirée à chaque démarrage) : jamais stocké ni journalisé."""

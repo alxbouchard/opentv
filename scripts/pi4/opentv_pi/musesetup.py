@@ -10,9 +10,20 @@ propriétaire, sur la TV, page loopback du kiosque) ⇒ une séance à usage uni
     (root, musehelper) qui appelle le `muse pair` existant ; le jeton n'est jamais renvoyé, journalisé, audité ni écrit
     ailleurs que dans ce job (dossier 0700 du service, supprimé par le helper AVANT d'agir, retiré ici à l'annulation) ;
   - progression lue dans museresults (préparation → en attente de Muse → connexion → connectée), échéances bornées.
+QR : adresse de la boîte par son NOM mDNS vérifié seulement (`<nom>.local`, même vérification que la télécommande
+téléphone : il doit se résoudre exactement vers l'adresse LAN liée). Jamais d'adresse IP dans le QR, l'état TV ou une
+page : nom absent, en conflit ou non vérifié à temps ⇒ séance fermée (« name_unavailable »), message de reprise, aucun
+QR.
+Deux durées distinctes : SESSION_TTL_S (≤ 10 min) borne l'ACCEPTATION du jeton (QR ouvert) ; après l'envoi, le suivi
+de l'avancement (téléphone /muse/status, TV) dure jusqu'à l'issue du helper, borné par PAIR_BUDGET_S (+ LINGER_S pour
+lire l'issue) — aucun autre envoi n'est accepté pendant ce suivi.
 Annuler : avant prise en charge, le job (et donc le jeton) est retiré ; après, un job « cancel » ciblé demande au helper
-de fermer la fenêtre Bluetooth qu'IL a ouverte (jamais de révocation d'un Muse déjà apparié). « Déconnecter Muse » :
-job « unpair » seulement après confirmation explicite sur la TV.
+de fermer la fenêtre Bluetooth qu'IL a ouverte (jamais de révocation d'un Muse déjà apparié). Seule l'issue du helper
+dit « annulé » ; sans issue après CANCEL_WAIT_S, la TV dit « Annulation demandée » (jamais « rien n'a changé ») et le
+suivi continue jusqu'à l'issue réelle ; au-delà de l'échéance globale : « cancel_unconfirmed », puis une issue
+tardive du helper est encore annoncée telle quelle (réconciliation). « Déconnecter Muse » : job « unpair » seulement
+après confirmation explicite sur la TV, proposé quand la boîte possède un appariement, un jeton ou SA propre identité
+(état public publié par le helper dans box.json, sans secret), jamais pour une identité étrangère.
 Le compte opentv peut déjà écrire la politique des assistants (« Gérer les assistants ») : le job « pair » ne lui
 donne aucun pouvoir nouveau ; il ne contient que des champs fixes (aucun chemin, aucune commande, aucun argument).
 """
@@ -33,6 +44,10 @@ PAIR_BUDGET_S = 20 * 60.0       # jeton reçu → issue finale (fenêtre Bluetoo
 CANCEL_WAIT_S = 120.0           # annulation demandée au helper : issue attendue au plus
 LINGER_S = 90.0                 # après l'issue : la page du téléphone peut encore lire l'état final
 DISCONNECT_BUDGET_S = 180.0
+HOST_WAIT_S = 10.0              # nom mDNS pas encore vérifié à l'ouverture : au plus, puis séance fermée (aucun QR)
+PROBE_MIN_S = 15.0              # relecture de l'état public de la boîte : au plus une demande par intervalle
+BOX_NAME = "box.json"           # état public de la boîte, écrit par le helper root dans museresults (aucun secret)
+BOX_MAX_BYTES = 1024
 MAX_ATTEMPTS = 5                # envois refusés (déchiffrement, forme) avant fermeture de la séance
 JOB_MAX_BYTES = 2048
 SID_RE = re.compile(r"[A-Za-z0-9_-]{22}")
@@ -48,13 +63,21 @@ RANK.update({k: 9 for k in FINAL})
 RESULT_CODES = ("connected", "already_paired", "cancelled", "invalid_sdk_token", "pair_timeout", "window_closed",
                 "pair_window_not_opened", "foreign_identity", "bluetooth_not_ready", "muse_unavailable",
                 "registry_unavailable", "bridge_not_started", "helper_error", "helper_unavailable", "timeout",
-                "too_many_attempts", "disconnected", "disconnect_failed", "interrupted", "busy", "refused")
+                "too_many_attempts", "disconnected", "disconnect_failed", "interrupted", "busy", "refused",
+                "different_token")
 MESSAGES = {
     "connected": "Muse est connectée.",
     "cancelled": "Annulé : rien n'a changé.",
     "expired": "QR expiré : rien n'a changé.",
     "invalid_sdk_token": ("Muse a refusé ce jeton. Vérifie que c'est le jeton complet, le même que pour tes autres "
                           "appareils, puis recommence."),
+    "different_token": ("Ce jeton n'est pas celui déjà enregistré sur cette boîte : rien n'a changé. Colle le même "
+                        "jeton que pour tes autres appareils Muse, puis recommence. S'il a changé chez Muse, choisis "
+                        "d'abord « Déconnecter Muse » ici."),
+    "name_unavailable": ("La TV n'est pas joignable par son nom sur ton Wi-Fi : rien n'a changé, aucun QR affiché. "
+                         "Redémarre la boîte, puis recommence."),
+    "cancel_unconfirmed": ("Annulation demandée, mais la boîte n'a pas encore confirmé l'issue. Ouvre Réglages → "
+                           "Gérer les assistants → Muse pour voir l'état."),
     "pair_timeout": "L'app Muse n'a pas trouvé OpenTV à temps. Recommence, iPhone près de la TV.",
     "window_closed": "L'app Muse n'a pas trouvé OpenTV à temps. Recommence, iPhone près de la TV.",
     "pair_window_not_opened": "Le Bluetooth de la boîte n'a pas démarré. Redémarre la boîte, puis recommence.",
@@ -74,6 +97,8 @@ DEFAULT_MESSAGE = "La connexion n'a pas abouti. Recommence depuis la TV."
 LABELS = {"keygen": "Préparation…", "await_token": "En attente du téléphone", "submitted": "Préparation",
           "preparing": "Préparation", "waiting_muse": "En attente de Muse", "connecting": "Connexion",
           "connected": "Muse est connectée", "failed": "Échec", "cancelled": "Annulé", "expired": "Expiré"}
+LABEL_CANCELLING = "Annulation en cours"
+LABEL_CANCEL_PENDING = "Annulation demandée"
 
 
 def message_for(code):
@@ -166,9 +191,34 @@ def read_results(results_dir, cap=32):
     return out
 
 
+def read_box(results_dir):
+    """État public de la boîte (box.json, écrit par le helper root ; jamais retiré ici) -> dict validé ou None.
+    Aucun secret : propriété (owned/foreign) et présences seulement ; tout fichier anormal ⇒ None (rien proposé)."""
+    try:
+        fd = os.open(os.path.join(results_dir, BOX_NAME), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) |
+                     getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not (st.st_mode & 0o170000 == 0o100000) or st.st_nlink != 1 or st.st_size > BOX_MAX_BYTES:
+            return None
+        d = json.loads(os.read(fd, BOX_MAX_BYTES + 1).decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+        return None
+    finally:
+        os.close(fd)
+    if not isinstance(d, dict) or d.get("v") != 1:
+        return None
+    tri = lambda x: x if isinstance(x, bool) else None   # noqa: E731
+    return {"owned": tri(d.get("owned")), "foreign": d.get("foreign") is True,
+            "identity_present": tri(d.get("identity_present"))}
+
+
 class _Session:
     __slots__ = ("sid", "f", "csrf_key", "key", "created", "expires", "state", "error", "job", "attempts",
-                 "phone_seen", "ble_name", "cancel_job", "deadline", "ended_at", "registered", "cancel_requested")
+                 "phone_seen", "ble_name", "cancel_job", "deadline", "ended_at", "registered", "cancel_requested",
+                 "pair_deadline", "cancel_pending", "nohost_since")
 
     def __repr__(self):   # aucun secret dans une trace
         return "<MuseSession state=%s>" % self.state
@@ -182,10 +232,13 @@ class MuseSetup:
         self.lock = threading.RLock()
         self.cur = None
         self.seq = 0                       # change à chaque transition (TV : annonce d'une issue plus récente)
-        self.last = {"seq": 0, "state": None, "error": None}
+        self.last = {"seq": 0, "state": None, "error": None, "message": None}
         self.disc = None                   # {"job", "state": running|done|failed, "deadline", "error"}
         self.disc_last = {"seq": 0, "state": None}
         self.bad = {}                      # ip -> horodatages (identifiants de séance faux)
+        self.reconcile = None              # job « pair » terminé sans issue confirmée : issue tardive encore annoncée
+        self.box = None                    # état public de la boîte (helper root), relu à chaque tick
+        self.probe_at = -1e18
 
     # -- petits outils
     def _bump(self):
@@ -203,7 +256,7 @@ class MuseSetup:
         if state in FINAL:
             s.ended_at = self.mono()
             self._scrub(s)
-            self.last = {"seq": self.seq, "state": state, "error": s.error}
+            self.last = {"seq": self.seq, "state": state, "error": s.error, "message": self._final_message(s)}
             self.log("muse_setup", state=state, error=s.error)
         else:
             self.log("muse_setup", state=state)
@@ -260,7 +313,9 @@ class MuseSetup:
             s.state, s.error, s.job, s.attempts = "keygen", None, None, 0
             s.phone_seen, s.ble_name, s.cancel_job, s.deadline = False, None, None, None
             s.ended_at, s.registered, s.cancel_requested = None, None, False
+            s.pair_deadline, s.cancel_pending, s.nohost_since = None, False, None
             self.cur = s
+            self.reconcile = None
             self._bump()
             self.log("muse_setup", state="open")
         if self.async_keygen:
@@ -315,10 +370,61 @@ class MuseSetup:
                 self.log("muse_setup_cancel", origin=origin, withdrawn=False)
             return True
 
-    def disconnect(self, confirm):
-        """« Déconnecter Muse » confirmé sur la TV (confirm doit valoir exactement True). -> (ok, erreur)."""
+    # -- nom mDNS vérifié (seule adresse du QR) : jamais d'adresse IP en repli
+    def host_check(self, ok, refuted):
+        """(boucle du service) ok = le nom mDNS désigne exactement l'adresse liée ; refuted = une vérification faite
+        APRÈS l'ouverture l'a démenti (absent, conflit, ambigu). Avant l'envoi du jeton seulement : démenti, ou
+        nom pas vérifié pendant HOST_WAIT_S ⇒ séance fermée (« name_unavailable »), aucun QR montré."""
+        with self.lock:
+            s = self.cur
+            if s is None or s.state not in ("keygen", "await_token"):
+                return
+            if ok:
+                s.nohost_since = None
+                return
+            now = self.mono()
+            if s.nohost_since is None:
+                s.nohost_since = now
+            if refuted or now - s.nohost_since >= HOST_WAIT_S:
+                self._set(s, "failed", "name_unavailable")
+
+    # -- état public de la boîte (« Déconnecter Muse » proposé seulement si la boîte possède Muse)
+    def probe(self, origin="tv"):
+        """Demande au helper root de republier box.json (aucune action). Bornée : au plus une par PROBE_MIN_S."""
+        with self.lock:
+            if self.mono() - self.probe_at < PROBE_MIN_S:
+                return False
+            self.probe_at = self.mono()
+            try:
+                write_job(self.cfg.muse_jobs_dir, self.cfg.muse_jobs_tmp,
+                          {"v": 1, "id": new_job_id(), "action": "probe", "created": round(self.clock(), 3)})
+            except (OSError, ValueError) as e:
+                self.log("muse_probe_error", error=type(e).__name__)
+                return False
+            self.log("muse_probe", origin=origin)
+            return True
+
+    def box_view(self, identity_present=None):
+        """-> {"owned": True|False|None, "foreign": bool}. identity_present (registre lu par le service) différent
+        de celui de l'instantané du helper ⇒ instantané périmé : rien proposé (None) jusqu'à la relecture."""
+        with self.lock:
+            b = self.box
+        if b is None:
+            return {"owned": None, "foreign": False}
+        stale = isinstance(identity_present, bool) and isinstance(b["identity_present"], bool) and \
+            identity_present != b["identity_present"]
+        if stale:
+            return {"owned": None, "foreign": False}
+        return {"owned": b["owned"], "foreign": b["foreign"]}
+
+    def disconnect(self, confirm, owned=None):
+        """« Déconnecter Muse » confirmé sur la TV (confirm doit valoir exactement True) et seulement si la boîte
+        possède Muse (owned exactement True : appariement, jeton ou identité à elle ; jamais une identité étrangère).
+        -> (ok, erreur)."""
         if confirm is not True:
             return False, "confirmation_required"
+        if owned is not True:
+            return False, "not_owned"
         with self.lock:
             if self.cur is not None and self.cur.state not in FINAL:
                 return False, "busy"
@@ -354,7 +460,7 @@ class MuseSetup:
             out = {"state": s.state, "csrf": self.csrf(s), "error": s.error, "ble_name": s.ble_name,
                    "jwk": s.key.public_jwk() if (s.key is not None and s.state == "await_token") else None,
                    "expires_in": max(0, int(s.expires - self.mono())) if s.state == "await_token" else None,
-                   "label": LABELS[s.state], "message": self._final_message(s)}
+                   "label": self._label(s), "message": self._final_message(s)}
             return out
 
     def status(self, sid):
@@ -412,7 +518,7 @@ class MuseSetup:
             finally:
                 tok = None
             s.job = jid
-            s.deadline = self.mono() + PAIR_BUDGET_S
+            s.deadline = s.pair_deadline = self.mono() + PAIR_BUDGET_S
             s.expires = self.mono() + PICKUP_S        # pas de « preparing » à temps ⇒ helper indisponible
             self._scrub(s)                            # clé privée et secret f inutiles désormais : effacés
             self._set(s, "submitted")
@@ -434,20 +540,37 @@ class MuseSetup:
         now = self.mono()
         if s.state in ("keygen", "await_token") and now >= s.expires:
             self._set(s, "expired", "expired")
-        elif s.state == "submitted" and now >= s.expires:
-            if s.job and withdraw_job(self.cfg.muse_jobs_dir, s.job):
+            return
+        if s.state == "submitted" and now >= s.expires and s.job and withdraw_job(self.cfg.muse_jobs_dir, s.job):
+            # jamais pris en charge : job (et jeton) retirés, rien n'a pu se produire
+            if s.cancel_requested:
+                self._set(s, "cancelled", "cancelled")
+            else:
                 self._set(s, "failed", "helper_unavailable")
-            elif s.deadline is not None and now >= s.deadline:
-                self._set(s, "failed", "timeout")
-        elif s.deadline is not None and now >= s.deadline:
+            return
+        if s.deadline is not None and now >= s.deadline:
             if s.job:
                 withdraw_job(self.cfg.muse_jobs_dir, s.job)
-            self._set(s, "cancelled" if s.cancel_requested else "failed",
-                      "cancelled" if s.cancel_requested else "timeout")
+            if s.cancel_requested and not s.cancel_pending and s.pair_deadline is not None and \
+                    now < s.pair_deadline:
+                # annulation demandée, toujours sans issue du helper : jamais « rien n'a changé » sans preuve ;
+                # « Annulation demandée », et le suivi continue jusqu'à l'issue réelle (échéance globale)
+                s.cancel_pending = True
+                s.deadline = s.pair_deadline
+                self._bump()
+                self.log("muse_setup_cancel", state="pending")
+            elif s.cancel_requested:
+                self.reconcile = s.job            # issue tardive du helper : encore annoncée telle quelle
+                self._set(s, "failed", "cancel_unconfirmed")
+            else:
+                self.reconcile = s.job
+                self._set(s, "failed", "timeout")
 
     def tick(self):
         results = read_results(self.cfg.muse_results_dir)
+        box = read_box(self.cfg.muse_results_dir)
         with self.lock:
+            self.box = box
             for r in results:
                 self._on_result(r)
             self._expire()
@@ -467,6 +590,16 @@ class MuseSetup:
         if d is not None and r["id"] == d["job"]:
             if r["phase"] == "done" and d["state"] == "running":
                 self._disc_end("done" if r["ok"] else "failed", None if r["ok"] else (r["result"] or "helper_error"))
+            return
+        if self.reconcile is not None and r["id"] == self.reconcile and r["phase"] == "done":
+            # issue réelle arrivée après une fin sans confirmation (annulation non confirmée, délai) : annoncée
+            self.reconcile = None
+            code = "connected" if r["ok"] else (r["result"] or "helper_error")
+            state = "connected" if r["ok"] else "cancelled" if code in ("cancelled", "interrupted") else "failed"
+            self._bump()
+            self.last = {"seq": self.seq, "state": state, "error": None if r["ok"] else code, "late": True,
+                         "message": message_for(state if state != "failed" else code)}
+            self.log("muse_setup", state=state, error=self.last["error"], late=True)
             return
         s = self.cur
         if s is None or not s.job or r["id"] != s.job or s.state in FINAL:
@@ -516,8 +649,15 @@ class MuseSetup:
             return None
         return message_for(s.state if s.state != "failed" else s.error)
 
-    def tv_view(self, ip, port):
-        """Vue TV (loopback) : jamais de clé, de secret CSRF ni de jeton ; l'URL du QR seulement quand utile."""
+    @staticmethod
+    def _label(s):
+        if s.state not in FINAL and s.cancel_requested:
+            return LABEL_CANCEL_PENDING if s.cancel_pending else LABEL_CANCELLING
+        return LABELS[s.state]
+
+    def tv_view(self, host, port, identity_present=None):
+        """Vue TV (loopback) : jamais de clé, de secret CSRF, de jeton ni d'adresse IP. `host` = nom mDNS VÉRIFIÉ
+        de la boîte (<nom>.local) ou None : sans lui, aucun QR (jamais de repli sur l'adresse)."""
         with self.lock:
             self._expire()
             s = self.cur
@@ -525,18 +665,20 @@ class MuseSetup:
             dv = None
             if d is not None:
                 dv = {"state": d["state"], "message": None if d["state"] == "running" else
-                      message_for("disconnected" if d["state"] == "done" else "disconnect_failed")}
+                      message_for("disconnected" if d["state"] == "done" else
+                                  "foreign_identity" if d["error"] == "foreign_identity" else "disconnect_failed")}
             out = {"seq": self.seq, "last": dict(self.last), "disconnect": dv, "disconnect_last": dict(self.disc_last)}
+            out.update(self.box_view(identity_present))
             if s is None or s.state in FINAL:
                 out.update(active=False, state=s.state if s else None, url=None, expires_in=None, phone=False,
                            message=self._final_message(s), error=s.error if s else None,
-                           cancelling=False, ble_name=None)
+                           cancelling=False, cancel_pending=False, ble_name=None)
                 return out
             url = None
-            if s.state == "await_token" and ip and port:
-                url = "http://%s:%d/muse?s=%s#%s" % (ip, port, s.sid, s.f)
-            out.update(active=True, state=s.state, url=url, label=LABELS[s.state],
+            if s.state == "await_token" and host and port and host.endswith(".local"):
+                url = "http://%s:%d/muse?s=%s#%s" % (host, port, s.sid, s.f)
+            out.update(active=True, state=s.state, url=url, label=self._label(s),
                        expires_in=max(0, int(s.expires - self.mono())) if s.state == "await_token" else None,
                        phone=bool(s.phone_seen), message=None, error=None, cancelling=bool(s.cancel_requested),
-                       ble_name=s.ble_name)
+                       cancel_pending=bool(s.cancel_pending), ble_name=s.ble_name)
             return out

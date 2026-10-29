@@ -1,14 +1,20 @@
 """Helper root de la connexion Muse depuis la TV (opentv-muse-setup.service, lancé par opentv-muse-setup.path).
 
 Seul pont entre le service OpenTV (compte opentv) et l'administration Muse existante (museadmin.Admin, root). Il ne sait
-faire que trois choses, à champs fixes, sans chemin, commande, argument ni option venant du job :
-  - « pair »   (consent = "tv") : autorise le pilotage de Muse (même écriture que `muse authorize-control --yes`, notée
-                 pour retour arrière), puis `muse pair --token-stdin --replace-token` (JAMAIS --replace-identity ni
-                 --force : une identité muse-device étrangère reste intacte et la connexion échoue honnêtement) ;
+faire que quatre choses, à champs fixes, sans chemin, commande, argument ni option venant du job :
+  - « pair »   (consent = "tv") : compare d'abord le jeton reçu au jeton local de la boîte, en temps constant, AVANT
+                 toute écriture (différent ⇒ « different_token », rien changé : ni autorisation, ni pont, ni jeton) ;
+                 puis autorise le pilotage de Muse (même écriture que `muse authorize-control --yes`, notée pour
+                 retour arrière) et `muse pair --token-stdin` en mode keep_token (jeton local existant JAMAIS
+                 remplacé ; JAMAIS --replace-token, --replace-identity ni --force : une identité muse-device
+                 étrangère reste intacte et la connexion échoue honnêtement) ;
   - « cancel » (target = job « pair ») : ferme la fenêtre Bluetooth que CE helper a ouverte (interruption pendant
                  l'attente de l'app Muse : identité tout juste émise révoquée par `muse pair` lui-même) ; un Muse déjà
                  apparié n'est jamais révoqué par une annulation ;
-  - « unpair » (confirm = "tv") : `muse unpair --forget-token` puis `muse revoke-control`.
+  - « unpair » (confirm = "tv") : `muse unpair --forget-token` puis `muse revoke-control` ; refusé sans rien toucher
+                 si l'identité muse-device est étrangère ;
+  - « probe »  : aucune action ; republie l'état public de la boîte (box.json : owned/foreign, sans secret), comme
+                 après toute activation utile.
 Contrôles de chaque job (dossier du service ouvert sans suivre de lien, propriétaire opentv, 0700) : fichier régulier,
 un seul lien, propriétaire opentv, mode exactement 0600, ≤ 2 Kio, JSON strict à clés exactes, âge borné ; il est
 SUPPRIMÉ avant toute action (consommation unique) ; tout résidu (lien, FIFO, dossier, nom invalide) est retiré sans rien
@@ -34,9 +40,15 @@ PAIR_PICKUP_MAX_S = 120.0
 CANCEL_MAX_AGE_S = musesetup.PAIR_BUDGET_S + 60.0
 UNPAIR_MAX_AGE_S = 120.0
 MAX_JOBS = 16
+PROBE_MAX_AGE_S = 120.0
 KEYS = {"pair": {"v", "id", "action", "consent", "created", "token"},
         "cancel": {"v", "id", "action", "target", "created"},
-        "unpair": {"v", "id", "action", "confirm", "created"}}
+        "unpair": {"v", "id", "action", "confirm", "created"},
+        "probe": {"v", "id", "action", "created"}}
+# État public de la boîte (aucun secret) publié pour la TV dans le dossier des issues : la TV propose
+# « Déconnecter Muse » seulement quand la boîte possède un appariement, un jeton local ou SA propre identité
+BOX_NAME = musesetup.BOX_NAME
+OWNED_IDENTITY = ("owned", "outdated", "stale_client")
 WINDOW_CODES = ("pair_timeout", "window_closed", "pair_window_not_opened")
 UNAVAILABLE = ("sdk_unverified", "dependency_missing", "stock_musegadget_present", "muse_user_missing",
                "muse_user_is_root", "muse_user_group_not_private", "agent_group_missing", "muse_user_not_in_agent_group",
@@ -60,6 +72,8 @@ def outcome_code(res):
         return "helper_error"
     if err == "invalid_sdk_token" or err == "no_sdk_token":
         return "invalid_sdk_token"
+    if err == "sdk_token_mismatch":
+        return "different_token"
     if err in WINDOW_CODES:
         return err
     if err in ("pair_unit_failed", "pair_unit_start_failed", "error"):
@@ -129,6 +143,7 @@ class MuseHelper:
         self.cancel_for = set()  # jobs « pair » dont l'annulation est demandée
         self.current = None      # job « pair » en cours
         self.admin = None
+        self.probe_wanted = False   # état public de la boîte à republier en fin d'activation
 
     # -- dossier des jobs : descripteur sans lien suivi, propriétaire = service, aucun accès groupe/autres
     def _open_jobs(self):
@@ -212,7 +227,8 @@ class MuseHelper:
         if not isinstance(created, (int, float)) or isinstance(created, bool):
             raise ValueError("bad_job")
         age = self.clock() - created
-        limit = {"pair": PAIR_PICKUP_MAX_S, "cancel": CANCEL_MAX_AGE_S, "unpair": UNPAIR_MAX_AGE_S}[action]
+        limit = {"pair": PAIR_PICKUP_MAX_S, "cancel": CANCEL_MAX_AGE_S, "unpair": UNPAIR_MAX_AGE_S,
+                 "probe": PROBE_MAX_AGE_S}[action]
         if not -60 <= age <= limit:
             raise ValueError("expired")
         if action == "pair":
@@ -223,7 +239,7 @@ class MuseHelper:
         elif action == "cancel":
             if not isinstance(job["target"], str) or not musesetup.JOB_ID_RE.fullmatch(job["target"]):
                 raise ValueError("bad_fields")
-        elif job["confirm"] != "tv":
+        elif action == "unpair" and job["confirm"] != "tv":
             raise ValueError("no_consent")
         return job
 
@@ -268,6 +284,9 @@ class MuseHelper:
                     self.cancel_for.add(job["target"])
                     self.log("muse_job", id=jid, action="cancel")
                     self._result(jid, "done", ok=True, result="cancelled")
+                elif job["action"] == "probe":   # relecture de l'état public de la boîte (aucune action)
+                    self.probe_wanted = True
+                    self.log("muse_job", id=jid, action="probe")
                 else:
                     self.queue.append(job)
         finally:
@@ -416,7 +435,22 @@ class MuseHelper:
     def do_pair(self, job):
         jid = job["id"]
         self.current = jid
-        stdin = io.StringIO(job.pop("token") + "\n")   # seule copie restante : flux mémoire lu une fois par pair
+        self.probe_wanted = True
+        tok = job.pop("token")
+        # Jeton local déjà présent : comparé EN TEMPS CONSTANT avant toute autorisation, tout arrêt du pont, toute
+        # écriture. Différent ⇒ refus, rien changé (jeton, identité, pont, politique) ; identique ⇒ réutilisé tel quel.
+        pre = self.admin_factory(sleep=self.real_sleep, prompt=_refuse_prompt, stdin=io.StringIO(""),
+                                 err=io.StringIO())
+        match = pre.local_token_match(tok)
+        if match in ("different", "unsafe"):
+            tok = None
+            code = "different_token" if match == "different" else "muse_unavailable"
+            self.current = None
+            self.log("muse_job", id=jid, action="pair", ok=False, result=code)
+            self._result(jid, "done", ok=False, result=code)
+            return code
+        stdin = io.StringIO(tok + "\n")   # seule copie restante : flux mémoire lu une fois par pair
+        tok = None
         try:
             self._journal_write({"v": 1, "id": jid, "changed": False, "before": None, "at": round(self.clock(), 3)})
         except OSError as e:
@@ -443,7 +477,9 @@ class MuseHelper:
                 if jid in self.cancel_for:
                     code = "interrupted"
                 else:
-                    res, _rc = adm.pair(token_stdin=True, replace_token=True, force=False, replace_identity=False)
+                    # JAMAIS --replace-token, --force ni --replace-identity : un jeton local existant est gardé
+                    res, _rc = adm.pair(token_stdin=True, replace_token=False, force=False, replace_identity=False,
+                                        keep_token=True)
                     code = outcome_code(res)
                     registered = res.get("registered") if isinstance(res.get("registered"), bool) else None
         except Cancelled:
@@ -462,7 +498,13 @@ class MuseHelper:
 
     def do_unpair(self, job):
         jid = job["id"]
+        self.probe_wanted = True
         adm = self.admin_factory(sleep=self.real_sleep, prompt=_refuse_prompt, stdin=io.StringIO(""), err=io.StringIO())
+        if adm.ownership().get("foreign"):
+            # identité « muse-device » qui ne vient pas de cette boîte : jamais touchée, ni rien d'autre
+            self.log("muse_job", id=jid, action="unpair", ok=False, result="foreign_identity")
+            self._result(jid, "done", ok=False, result="foreign_identity")
+            return False
         res, rc = adm.unpair(forget_token=True)
         rv, rvc = adm.revoke_control()
         ok = rc == 0 and rvc == 0
@@ -470,9 +512,44 @@ class MuseHelper:
         self._result(jid, "done", ok=ok, result="disconnected" if ok else "disconnect_failed")
         return ok
 
+    def publish_box(self):
+        """État public de la boîte (aucun secret, aucune empreinte) pour la TV : {owned, foreign, paired, token,
+        identity, identity_present}. owned = appariement, jeton local ou identité émise par muse pair, et aucune
+        identité étrangère ; None = indéterminé (registre illisible…) ⇒ la TV ne propose rien (fail-closed)."""
+        adm = self.admin_factory(sleep=self.real_sleep, prompt=_refuse_prompt, stdin=io.StringIO(""),
+                                 err=io.StringIO())
+        o = adm.ownership()
+        if o.get("foreign"):
+            owned = False
+        elif o.get("identity") not in OWNED_IDENTITY + ("absent",):
+            owned = None
+        else:
+            owned = bool(o.get("paired") or o.get("token") or o.get("identity") in OWNED_IDENTITY)
+        body = {"v": 1, "owned": owned, "foreign": bool(o.get("foreign")),
+                "paired": o.get("paired") if isinstance(o.get("paired"), bool) else None,
+                "token": o.get("token") if isinstance(o.get("token"), bool) else None,
+                "identity_present": o.get("identity_present") if isinstance(o.get("identity_present"), bool) else None,
+                "at": round(self.clock(), 3)}
+        try:
+            dfd = fsutil.open_dir(self.cfg.muse_results_dir)
+            try:
+                st = os.fstat(dfd)
+                if st.st_uid != self.owner_uid or st.st_mode & 0o077:
+                    raise fsutil.UnsafePath("results_dir_unsafe")
+                fsutil.atomic_write(dfd, BOX_NAME, json.dumps(body, sort_keys=True), mode=0o600,
+                                    uid=self.owner_uid if self.chown else None)
+            finally:
+                os.close(dfd)
+        except OSError as e:
+            self.log("muse_box_error", error=type(e).__name__)
+            return None
+        self.log("muse_box", owned=owned, foreign=body["foreign"])
+        return body
+
     def run(self, max_rounds=8):
         """Une activation : reprise éventuelle, puis jobs jusqu'à épuisement (borné)."""
-        self.recover()
+        if self.recover() is not None:
+            self.probe_wanted = True
         done = []
         for _ in range(max_rounds):
             self.poll()
@@ -490,6 +567,9 @@ class MuseHelper:
                 else:
                     done.append("disconnected" if self.do_unpair(job) else "disconnect_failed")
         self.queue = []
+        if self.probe_wanted:   # après chaque activation utile : la TV voit la vérité de la boîte
+            self.probe_wanted = False
+            self.publish_box()
         return done
 
 

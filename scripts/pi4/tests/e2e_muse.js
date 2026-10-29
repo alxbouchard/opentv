@@ -3,7 +3,8 @@
    1) TV 1920×1080 : Réglages -> Gérer les assistants -> Muse -> consentement (« Pas maintenant » au focus) ->
       « Autoriser et connecter » -> QR ; mesures (rien de rogné, un seul QR, aucune adresse/jeton à l'écran) ;
    2) téléphone 390×844 SANS JavaScript : étape 1 puis 2 -> champ jamais affiché, rien ne peut partir (échec fermé) ;
-   3) téléphone 390×844 AVEC JavaScript, origine http://<adresse LAN> (contexte NON sécurisé : pas de crypto.subtle) :
+   3) téléphone 390×844 AVEC JavaScript, origine http://<nom>.local vérifié (jamais une IP ; contexte NON sécurisé :
+      pas de crypto.subtle) :
       « Utiliser mon jeton existant » (un jeton, plusieurs appareils ; page officielle en lien secondaire), étape 2, rechargement (secret du QR gardé), jeton invalide refusé sur place, jeton valide
       chiffré puis envoyé, étape 3 et avancement réel ; Retour du navigateur ne redemande jamais le jeton ;
    4) TV : Préparation -> En attente de Muse -> Connexion -> « Muse est connectée ! ».
@@ -58,8 +59,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await key("Enter");                     // Muse
     out.consent = await panel();
     await shot("tv-muse-consent.png");
+    // seule requête permise avant le consentement : relire l'état public de la boîte (aucune écriture d'autorisation)
     out.posts_before_consent = await tv.evaluate(() => performance.getEntriesByType("resource")
-      .filter((e) => e.name.indexOf("/api/tv/muse/") >= 0).length);
+      .filter((e) => e.name.indexOf("/api/tv/muse/") >= 0 && e.name.indexOf("/api/tv/muse/probe") < 0).length);
+    out.probes_before_consent = await tv.evaluate(() => performance.getEntriesByType("resource")
+      .filter((e) => e.name.indexOf("/api/tv/muse/probe") >= 0).length);
     await key("ArrowUp");
     await key("Enter");                     // « Autoriser et connecter »
     await tv.waitForSelector("#pqrfig:not([hidden]) canvas[data-qr=ok]", { timeout: 15000 });
@@ -82,7 +86,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await p0.screenshot({ path: path.join(cfg.shots, "phone-muse-nojs.png"), fullPage: true });
     await nojs.close();
 
-    // -- téléphone AVEC JavaScript, origine LAN en clair (contexte non sécurisé)
+    // -- téléphone AVEC JavaScript, origine http://<nom>.local en clair (contexte non sécurisé)
     const ctx = await browser.newContext({ viewport: { width: 390, height: 844 },
                                            proxy: { server: "http://127.0.0.1:" + cfg.lan_port } });
     const ph = await ctx.newPage();

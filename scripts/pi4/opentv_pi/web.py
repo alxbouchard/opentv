@@ -8,8 +8,8 @@
   actuelle (jamais 0.0.0.0) et **seulement** /assistants + /static/setup.css (aucun /setup, aucun balayage Wi-Fi) ;
   jeton distinct à usage unique, Host = adresse liée, pairs IPv4 privés, Origin exacte + jeton CSRF au POST,
   Referrer-Policy same-origin, aucun script.
-- Connexion de Muse (Réglages TV → Gérer les assistants → Muse, consentement confirmé sur la TV) : même port, adresse
-  LAN actuelle seulement, /muse + /muse/status + /muse/submit + /muse/cancel + setup.css + muse.js ; séance courte à
+- Connexion de Muse (Réglages TV → Gérer les assistants → Muse, consentement confirmé sur la TV) : même port, écoute
+  sur l'adresse LAN actuelle, Host = nom mDNS exact de la boîte seulement (QR sans adresse IP), /muse + /muse/status + /muse/submit + /muse/cancel + setup.css + muse.js ; séance courte à
   usage unique, jeton SDK chiffré par le téléphone (museseal), Referrer-Policy no-referrer, Cache-Control no-store.
 - Télécommande sur téléphone (<adresse LAN actuelle>:OPENTV_REMOTE_PORT, jamais 0.0.0.0, seulement configuré et en
   ligne ; écoute relancée si l'adresse change) : /r (appairage par QR seulement, puis pavé de navigation), POST
@@ -31,7 +31,7 @@ import threading
 import time
 import urllib.parse
 
-from . import VERSION, bounded, museweb, phoneremote, validate, wifiscan
+from . import VERSION, bounded, musesetup, museweb, phoneremote, validate, wifiscan
 from . import app as appmod   # constantes d'erreur du formulaire (app n'importe pas web : pas de cycle)
 
 TV_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; "
@@ -376,6 +376,9 @@ class TVHandler(_Base):
             if ws is not None:
                 ws.sync_lan()
             return self.send_json(200, {"ok": True})
+        if path == "/api/tv/muse/probe":   # Muse ouvert dans « Gérer les assistants » : état public relu (borné)
+            self.app.muse_probe()
+            return self.send_json(200, {"ok": True, "muse": self.app.muse_view()})
         if path in ("/api/tv/muse/start", "/api/tv/muse/cancel", "/api/tv/muse/disconnect"):
             # « Connecter Muse » : consentement explicite du propriétaire sur la TV (consent: true exactement)
             if path == "/api/tv/muse/start":
@@ -387,7 +390,8 @@ class TVHandler(_Base):
             ws = getattr(self.server, "webservers", None)
             if ws is not None:
                 ws.sync_lan()
-            return self.send_json(200 if ok else 409, {"ok": bool(ok), "error": why, "muse": self.app.muse_view()})
+            return self.send_json(200 if ok else 409, {"ok": bool(ok), "error": why, "muse": self.app.muse_view(),
+                                                       "message": musesetup.MESSAGES.get(why) if why else None})
         self.send_json(404, {"ok": False, "error": "not_found"})
 
 
@@ -1054,7 +1058,8 @@ def muse_post_origin_ok(headers, origin):
 
 
 class MuseHandler(_Base):
-    """Téléphone -> /muse (connexion de Muse seulement). Pair IPv4 privé, Host = adresse LAN liée avec le port réel.
+    """Téléphone -> /muse (connexion de Muse seulement). Pair IPv4 privé, Host = nom mDNS exact de la boîte avec le
+    port réel (le QR ne porte jamais d'adresse IP ; un Host à IP est refusé).
     GET /muse?s=…&step=1|2|3 (jamais de jeton dans l'URL), GET /muse/status?s=… (JSON), POST /muse/submit et
     /muse/cancel (JSON, en-tête X-OpenTV-Muse, Origin, CSRF de la séance) ; /static/setup.css et /static/muse.js."""
     csp = MUSE_CSP
@@ -1066,7 +1071,7 @@ class MuseHandler(_Base):
             self.send(403, "interdit", "text/plain; charset=utf-8")
             return False
         host = (self.headers.get("Host") or "").strip().lower()
-        if host != "%s:%d" % (srv.lan_ip, srv.server_address[1]):
+        if host not in self.app.muse_hosts(srv.server_address[1]):   # nom mDNS exact seulement, jamais l'IP
             self.send(421, "hôte refusé", "text/plain; charset=utf-8")
             return False
         self.origin = "http://" + host

@@ -8,6 +8,7 @@ dangereuse, aucun fichier/shell générique.
 """
 import configparser
 import http.client
+import io
 import socket
 import threading
 import json
@@ -25,11 +26,14 @@ from unittest import mock
 from tests._common import PI4
 from tests.test_service import find_chromium, make_app
 from tests.test_remote import NODE, remote_servers, tmpdir
+from tests import test_remote as tr
 from tests import test_agents_manage as tam
 from tests import test_muse_bridge as tmb
 from opentv_pi import agents, config, museadmin, musebridge, musehelper, museseal, musesetup, museweb, tools
 
 LAN = "192.168.2.40"
+MDNS = tr.MDNS                                       # « opentv-test.local » : seul nom que le QR peut porter
+assert LAN == tr.LAN_IP
 TOKEN = "mgst_" + "Zx9_-" * 8 + "ab" + "w"          # 42 + 1 caractères après mgst_, dernier dans l'alphabet canonique
 assert musesetup.SDK_TOKEN_RE.fullmatch(TOKEN)
 CONTROL = ["control", "display", "feedback", "read"]
@@ -47,13 +51,24 @@ def other_key():
     return museseal.PrivateKey()
 
 
-def wizard(tc, **env):
-    a = make_app(tc, **env)
+def wizard(tc, resolver=None, **env):
+    """Service configuré + résolution mDNS simulée (par défaut, le nom désigne exactement l'adresse LAN)."""
+    res = resolver or tr.Resolver()
+    a = make_app(tc, app_kw={"hostname": tr.HOSTNAME + ".lan", "resolver": res}, **env)
+    res.app = a
+    a.test_resolver = res
     config.save_device(a.cfg, {"name": "Salon"})
     a.reload_device()
     a.muse.keygen, a.muse.async_keygen = fast_key, False
     s = remote_servers(tc, a)
     return a, s
+
+
+def settle_mdns(a):
+    """Vérification mDNS de l'ouverture terminée (thread joint), puis une vérification synchrone de plus."""
+    if a._mdns_thread is not None:
+        a._mdns_thread.join(5)
+    a._mdns_check()
 
 
 def tv(s, path, body):
@@ -63,6 +78,7 @@ def tv(s, path, body):
 def start(tc, a, s):
     code, _, body = tv(s, "/api/tv/muse/start", {"consent": True})
     tc.assertEqual(code, 200, body)
+    settle_mdns(a)
     v = a.muse_view()
     tc.assertTrue(v["active"])
     u = urllib.parse.urlsplit(v["url"])
@@ -85,7 +101,7 @@ class MPhone:
 
     @property
     def host(self):
-        return "%s:%d" % (LAN, self.port)
+        return "%s:%d" % (MDNS, self.port)
 
     def req(self, method, path, body=None, headers=None, host=None):
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
@@ -146,6 +162,15 @@ def result(a, jid, phase, ok=None, res=None, **extra):
         json.dump(body, f)
 
 
+def put_box(a, owned=True, foreign=False, identity_present=None, tick=True):
+    """État public de la boîte tel que le helper root le publie (box.json, aucun secret)."""
+    with open(os.path.join(a.cfg.muse_results_dir, musesetup.BOX_NAME), "w", encoding="utf-8") as f:
+        json.dump({"v": 1, "owned": owned, "foreign": foreign, "paired": bool(owned), "token": bool(owned),
+                   "identity_present": identity_present, "at": 1.0}, f)
+    if tick:
+        a.tick()
+
+
 def everything_text(a, s, *extra):
     """Tout ce qu'un observateur pourrait lire : journal, audit, état TV, fichiers résultats, pages."""
     parts = [json.dumps(a.test_logs, ensure_ascii=False), json.dumps(a.tv_state(), ensure_ascii=False)]
@@ -185,7 +210,8 @@ class TestConsentAndSession(unittest.TestCase):
         a, s = wizard(self)
         sid, f, ph = start(self, a, s)
         v = a.tv_state()["muse"]
-        self.assertRegex(v["url"], r"^http://192\.168\.2\.40:\d+/muse\?s=[A-Za-z0-9_-]{22}#[A-Za-z0-9_-]{22}$")
+        self.assertRegex(v["url"], r"^http://opentv-test\.local:\d+/muse\?s=[A-Za-z0-9_-]{22}#[A-Za-z0-9_-]{22}$")
+        self.assertNotIn(LAN, json.dumps(v))                     # jamais d'adresse IP dans l'état Muse de la TV
         dump = json.dumps(a.tv_state())
         k = a.muse.cur.key
         for secret in (museseal.b64u(k.n.to_bytes(256, "big")), str(k._d), a.muse.csrf(a.muse.cur)):
@@ -503,6 +529,7 @@ class TestProgressCancelAndDisconnect(unittest.TestCase):
 
     def test_disconnect_requires_explicit_confirmation_then_one_unpair_job(self):
         a, s = wizard(self)
+        put_box(a, owned=True, identity_present=False)
         for body in ({}, {"confirm": "yes"}, {"confirm": 1}):
             code, _, _ = tv(s, "/api/tv/muse/disconnect", body)
             self.assertEqual(code, 409)
@@ -532,6 +559,242 @@ class TestProgressCancelAndDisconnect(unittest.TestCase):
         b = make_app(self)
         b.tick()
         self.assertEqual(b.muse_start(True), (False, "setup"))
+
+
+# --------------------------------------------------------------------------- QR : nom mDNS vérifié, jamais d'IP
+class TestQrHostIsVerifiedMdnsOnly(unittest.TestCase):
+    def assert_no_ip(self, a, *extra):
+        for blob in (json.dumps(a.muse_view()), json.dumps(a.tv_state()["muse"])) + extra:
+            self.assertNotIn(LAN, blob)
+            self.assertNotRegex(blob, r"https?://\d+\.\d+\.\d+\.\d+")
+
+    def test_verified_mdns_name_is_the_only_qr_host_and_ip_host_is_refused(self):
+        a, s = wizard(self)
+        code, _, body = tv(s, "/api/tv/muse/start", {"consent": True})
+        self.assertEqual(code, 200, body)
+        self.assertNotIn(LAN, body)                                  # réponse au kiosque : jamais l'adresse
+        settle_mdns(a)
+        a.tick()
+        v = a.muse_view()
+        u = urllib.parse.urlsplit(v["url"])
+        self.assertEqual((u.scheme, u.hostname), ("http", MDNS))   # ce que l'appareil photo de l'iPhone affiche
+        self.assert_no_ip(a)
+        sid = urllib.parse.parse_qs(u.query)["s"][0]
+        ph = MPhone(self, a, s)
+        for step in (1, 2, 3):
+            code, _, page = ph.page(sid, step)
+            self.assertEqual(code, 200)
+            self.assertNotIn(LAN, page)
+        for host in ("%s:%d" % (LAN, ph.port), "127.0.0.1:%d" % ph.port, "other-box.local:%d" % ph.port,
+                     "%s:%d" % (MDNS, ph.port + 1), MDNS, "evil.example:%d" % ph.port):
+            self.assertEqual(ph.req("GET", "/muse?s=" + sid, host=host)[0], 421, host)
+        self.assertEqual(ph.req("GET", "/muse?s=" + sid, host="%s:%d" % (MDNS.upper(), ph.port))[0], 200)
+        # POST : Origin à IP refusée (le téléphone n'a jamais vu cette origine)
+        jwk, c = ph.jwk_csrf(sid)
+        code, _, _ = ph.post("/muse/submit", {"s": sid, "c": c, "ct": "x"},
+                             extra={"Origin": "http://%s:%d" % (LAN, ph.port)})
+        self.assertEqual(code, 403)
+
+    def check_fail_closed(self, answer):
+        res = tr.Resolver()
+        res.answer = answer
+        a, s = wizard(self, resolver=res)
+        code, _, body = tv(s, "/api/tv/muse/start", {"consent": True})
+        self.assertEqual(code, 200, body)
+        self.assertIsNone(a.muse_view()["url"])                     # nom pas vérifié : aucun QR, jamais l'IP
+        settle_mdns(a)                                               # vérification fraîche : démentie
+        a.tick()
+        v = a.muse_view()
+        self.assertFalse(v["active"])
+        self.assertIsNone(v["url"])
+        self.assertEqual((v["last"]["state"], v["last"]["error"]), ("failed", "name_unavailable"))
+        self.assertEqual(v["last"]["message"], musesetup.message_for("name_unavailable"))
+        self.assertIn("joignable par son nom", v["last"]["message"])
+        self.assertNotIn("192", v["last"]["message"])
+        self.assertEqual(jobs(a), [])
+        self.assert_no_ip(a, json.dumps(a.test_logs))
+        return a
+
+    def test_mdns_conflict_fails_closed_without_qr(self):
+        self.check_fail_closed({"192.168.2.99"})                     # autre appareil (avahi : « -2 »)
+
+    def test_mdns_ambiguous_fails_closed_without_qr(self):
+        self.check_fail_closed({LAN, "192.168.2.99"})
+
+    def test_mdns_unavailable_fails_closed_without_qr(self):
+        self.check_fail_closed(set())
+
+    def test_name_never_verified_in_time_fails_closed(self):
+        class Slow(tr.Resolver):
+            gate = threading.Event()
+
+            def __call__(self, name):
+                self.gate.wait(10)
+                return super().__call__(name)
+        res = Slow()
+        self.addCleanup(res.gate.set)
+        a, s = wizard(self, resolver=res)
+        self.assertFalse(a.mdns["ok"])
+        self.assertEqual(tv(s, "/api/tv/muse/start", {"consent": True})[0], 200)
+        a.tick()
+        self.assertTrue(a.muse_view()["active"])
+        self.assertIsNone(a.muse_view()["url"])
+        a.mono_clock.t += musesetup.HOST_WAIT_S + 1
+        a.tick()
+        v = a.muse_view()
+        self.assertEqual((v["active"], v["url"], v["last"]["error"]), (False, None, "name_unavailable"))
+        self.assert_no_ip(a)
+
+    def test_mdns_disabled_refuses_to_open_any_qr(self):
+        a, s = wizard(self, OPENTV_REMOTE_MDNS="0")
+        code, _, body = tv(s, "/api/tv/muse/start", {"consent": True})
+        out = json.loads(body)
+        self.assertEqual((code, out["error"]), (409, "name_unavailable"))
+        self.assertEqual(out["message"], musesetup.message_for("name_unavailable"))
+        self.assertFalse(a.muse_view()["active"])
+        self.assertIsNone(a.lan_purpose())
+        self.assertNotIn(LAN, body)
+
+    def test_tv_view_refuses_any_non_mdns_host(self):
+        ms = musesetup.MuseSetup(config.Config({}), keygen=fast_key, async_keygen=False)
+        self.assertEqual(ms.start(True), (True, None))
+        for host in (LAN, "10.0.0.2", "box.lan", "", None):
+            self.assertIsNone(ms.tv_view(host, 8081)["url"], host)
+        self.assertTrue(ms.tv_view(MDNS, 8081)["url"].startswith("http://%s:8081/muse?s=" % MDNS))
+
+
+# --------------------------------------------------------------------------- annulation tardive : jamais un faux « rien »
+class TestLateCancelIsReportedTruthfully(unittest.TestCase):
+    def picked(self):
+        a, s = wizard(self)
+        sid, f, ph = start(self, a, s)
+        self.assertEqual(ph.submit(sid, f)[0], 200)
+        jid = jobs(a)[0][:-5]
+        os.remove(os.path.join(a.cfg.muse_jobs_dir, jid + ".json"))   # pris par le helper
+        result(a, jid, "connecting")                                     # pont en cours : annulation pas lue
+        a.tick()
+        tv(s, "/api/tv/muse/cancel", {})
+        a.mono_clock.t += musesetup.CANCEL_WAIT_S + 1
+        a.tick()
+        return a, s, sid, ph, jid
+
+    def assert_pending(self, a, ph, sid):
+        v = a.muse_view()
+        self.assertTrue(v["active"])
+        self.assertTrue(v["cancelling"] and v["cancel_pending"])
+        self.assertEqual(v["label"], "Annulation demandée")
+        self.assertIsNone(v["message"])
+        self.assertNotEqual(v["last"]["state"], "cancelled")           # rien annoncé sans issue réelle
+        self.assertNotIn("rien n'a changé", json.dumps(v, ensure_ascii=False))
+        st = json.loads(ph.req("GET", "/muse/status?s=" + sid)[2])
+        self.assertEqual((st["state"], st["label"]), ("connecting", "Annulation demandée"))
+
+    def test_unresolved_cancel_says_requested_then_late_connected_is_announced(self):
+        a, s, sid, ph, jid = self.picked()
+        self.assert_pending(a, ph, sid)
+        seq = a.muse_view()["last"]["seq"]
+        result(a, jid, "done", ok=True, res="connected")                 # le pont a fini avant de lire l'annulation
+        a.tick()
+        v = a.muse_view()
+        self.assertGreater(v["last"]["seq"], seq)
+        self.assertEqual(v["last"]["state"], "connected")              # vérité : Muse EST connectée
+
+    def test_unresolved_cancel_then_helper_confirms_cancelled(self):
+        a, s, sid, ph, jid = self.picked()
+        self.assert_pending(a, ph, sid)
+        result(a, jid, "done", ok=False, res="cancelled")
+        a.tick()
+        v = a.muse_view()
+        self.assertEqual((v["last"]["state"], v["last"]["message"]), ("cancelled", "Annulé : rien n'a changé."))
+
+    def test_no_outcome_until_global_deadline_is_unconfirmed_then_reconciled(self):
+        a, s, sid, ph, jid = self.picked()
+        a.mono_clock.t += musesetup.PAIR_BUDGET_S
+        a.tick()
+        v = a.muse_view()
+        self.assertEqual((v["active"], v["last"]["state"], v["last"]["error"]),
+                         (False, "failed", "cancel_unconfirmed"))
+        self.assertNotIn("rien n'a changé", v["last"]["message"])
+        self.assertIn("Annulation demandée", v["last"]["message"])
+        seq = v["last"]["seq"]
+        result(a, jid, "done", ok=True, res="connected")                 # issue tardive : réconciliée
+        a.tick()
+        v = a.muse_view()
+        self.assertGreater(v["last"]["seq"], seq)
+        self.assertEqual((v["last"]["state"], v["last"]["late"]), ("connected", True))
+        result(a, jid, "done", ok=False, res="helper_error")             # une seule fois
+        a.tick()
+        self.assertEqual(a.muse_view()["last"]["state"], "connected")
+
+    def test_race_result_arriving_with_the_timeout_tick_wins_over_pending(self):
+        a, s = wizard(self)
+        sid, f, ph = start(self, a, s)
+        ph.submit(sid, f)
+        jid = jobs(a)[0][:-5]
+        os.remove(os.path.join(a.cfg.muse_jobs_dir, jid + ".json"))
+        result(a, jid, "waiting_muse")
+        a.tick()
+        tv(s, "/api/tv/muse/cancel", {})
+        a.mono_clock.t += musesetup.CANCEL_WAIT_S + 1
+        result(a, jid, "done", ok=False, res="cancelled")                 # même tick que l'échéance : l'issue d'abord
+        a.tick()
+        self.assertEqual(a.muse_view()["last"]["state"], "cancelled")
+
+
+# --------------------------------------------------------------------------- « Déconnecter Muse » : propriété de la boîte
+class TestDisconnectNeedsBoxOwnership(unittest.TestCase):
+    def test_disconnect_only_when_the_box_owns_muse(self):
+        a, s = wizard(self)
+        self.assertIsNone(a.muse_view()["owned"])                        # pas d'état publié : rien proposé
+        code, _, out = tv(s, "/api/tv/muse/disconnect", {"confirm": True})
+        self.assertEqual((code, json.loads(out)["error"]), (409, "not_owned"))
+        put_box(a, owned=False, foreign=True, identity_present=False)    # identité étrangère : jamais
+        self.assertEqual((a.muse_view()["owned"], a.muse_view()["foreign"]), (False, True))
+        self.assertEqual(tv(s, "/api/tv/muse/disconnect", {"confirm": True})[0], 409)
+        self.assertEqual(jobs(a), [])
+        a.registry.set_policy({"muse": CONTROL, "hermit": [], "hermes": []})
+        a.registry.issue("muse-device", ["read"])                        # pont en pause, appairé à la boîte
+        put_box(a, owned=True, identity_present=False)                   # instantané périmé (identité apparue)
+        self.assertIsNone(a.muse_view()["owned"])
+        self.assertEqual(tv(s, "/api/tv/muse/disconnect", {"confirm": True})[0], 409)
+        put_box(a, owned=True, identity_present=True)
+        v = a.muse_view()
+        self.assertEqual((v["owned"], v["bridge"]), (True, "paused"))
+        code, _, out = tv(s, "/api/tv/muse/disconnect", {"confirm": True})
+        self.assertEqual(code, 200, out)
+        self.assertEqual(read_job(a, jobs(a)[0])["action"], "unpair")
+
+    def test_probe_is_a_fixed_schema_job_and_bounded(self):
+        a, s = wizard(self)
+        code, _, out = tv(s, "/api/tv/muse/probe", {})
+        self.assertEqual(code, 200, out)
+        names = jobs(a)
+        self.assertEqual(len(names), 1)
+        j = read_job(a, names[0])
+        self.assertEqual((set(j), j["action"]), ({"v", "id", "action", "created"}, "probe"))
+        for _ in range(3):
+            tv(s, "/api/tv/muse/probe", {})
+        self.assertEqual(len(jobs(a)), 1)                                # au plus une par PROBE_MIN_S
+        a.mono_clock.t += musesetup.PROBE_MIN_S + 1
+        tv(s, "/api/tv/muse/probe", {})
+        self.assertEqual(len(jobs(a)), 2)
+
+    def test_box_file_anomalies_offer_nothing(self):
+        a, s = wizard(self)
+        p = os.path.join(a.cfg.muse_results_dir, musesetup.BOX_NAME)
+        for body in ("{", "[]", json.dumps({"v": 2, "owned": True}), json.dumps({"v": 1, "owned": "yes"}),
+                     " " * (musesetup.BOX_MAX_BYTES + 10)):
+            with open(p, "w") as f:
+                f.write(body)
+            a.tick()
+            self.assertIsNone(a.muse_view()["owned"], body[:20])
+        os.remove(p)
+        target = os.path.join(a.cfg.state_dir, "fake-box.json")
+        with open(target, "w") as f:
+            json.dump({"v": 1, "owned": True}, f)
+        os.symlink(target, p)                                            # lien : jamais suivi
+        a.tick()
+        self.assertIsNone(a.muse_view()["owned"])
 
 
 # --------------------------------------------------------------------------- chiffrement (Python ↔ cryptography ↔ JS)
@@ -728,19 +991,20 @@ class TestHelperJobValidation(HelperBase):
             with open(os.path.join(PI4, "opentv_pi", mod), encoding="utf-8") as f:
                 src = re.sub(r'""".*?"""', "", f.read(), flags=re.S)
             for bad in ("shell=True", "os.system", "subprocess", "eval(", "exec(", "os.popen", "pickle",
-                        "replace_identity=True", "force=True"):
+                        "replace_identity=True", "force=True", "replace_token=True"):
                 self.assertNotIn(bad, src, (mod, bad))
         self.assertEqual(musehelper.KEYS, {
             "pair": {"v", "id", "action", "consent", "created", "token"},
             "cancel": {"v", "id", "action", "target", "created"},
-            "unpair": {"v", "id", "action", "confirm", "created"}})
+            "unpair": {"v", "id", "action", "confirm", "created"},
+            "probe": {"v", "id", "action", "created"}})
         self.assertEqual(sorted(musebridge.COMMANDS), tmb.EXPECTED)           # exactement les 11 commandes
         for bad in ("system.run", "file.read", "file.write", "device.health"):
             self.assertNotIn(bad, musebridge.COMMANDS)
 
 
 # --------------------------------------------------------------------------- helper root + vrai `muse pair`
-class TestHelperWithRealAdmin(tmb.AdminBase):
+class RealAdminHelperBase(tmb.AdminBase):
     def setUp(self):
         super().setUp()
         for p in (self.cfg.muse_jobs_dir, self.cfg.muse_jobs_tmp, self.cfg.muse_results_dir):
@@ -791,6 +1055,8 @@ class TestHelperWithRealAdmin(tmb.AdminBase):
         with open(os.path.join(self.cfg.muse_results_dir, jid + ".json")) as f:
             return json.load(f)
 
+
+class TestHelperWithRealAdmin(RealAdminHelperBase):
     def test_tv_confirmed_pair_grants_control_pairs_and_reports_progress_without_the_token(self):
         seen = []
         real = musehelper.MuseHelper._result
@@ -924,6 +1190,151 @@ class TestHelperWithRealAdmin(tmb.AdminBase):
         self.assertEqual(self.result("u" * 16)["result"], "disconnected")
 
 
+OTHER_TOKEN = "mgst_" + "R" * 42 + "A"
+assert museadmin.SDK_TOKEN_RE.fullmatch(OTHER_TOKEN) and OTHER_TOKEN != tmb.SDK_TOKEN
+
+
+class TestExistingPairingIsPreserved(RealAdminHelperBase):
+    """Reconnexion depuis la TV : un jeton local existant n'est jamais remplacé ; un jeton différent est refusé AVANT
+    toute autorisation, tout arrêt du pont et toute écriture ; un échec de démarrage ne touche ni jeton ni identité."""
+    TOK = "/var/lib/opentv-muse/sdk_token"
+    PAIRING = "/var/lib/opentv-muse/pairing.json"
+
+    def snap(self):
+        p = self.j(self.TOK)
+        st = os.stat(p)
+        with open(p, "rb") as f:
+            raw = f.read()
+        ent = agents.Registry(self.cfg.registry_file).list().get(musebridge.MUSE_AGENT_ID) or {}
+        rst = os.stat(self.cfg.registry_file)
+        return {"token": (raw, stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid, st.st_ino),
+                "registry": (rst.st_ino, rst.st_mtime_ns),            # aucune écriture, même transitoire
+                "identity": (ent.get("token_sha256"), ent.get("scopes")), "policy": sorted(self.policy()),
+                "pairing": os.path.exists(self.j(self.PAIRING))}
+
+    def paired(self):
+        self.pair_job()
+        self.assertEqual(self.helper().run(), ["connected"])
+        self.assertEqual((self.unit.active, self.unit.pid is not None), ("active", True))
+        self.calls.clear()
+        return self.snap(), self.unit.pid
+
+    def no_secret(self, jid):
+        blob = json.dumps(self.hlogs) + json.dumps(self.result(jid)) + self.err.getvalue()
+        for t in (tmb.SDK_TOKEN, OTHER_TOKEN):
+            self.assertNotIn(t, blob)
+            self.assertNotIn(t[5:20], blob)
+        import hashlib
+        self.assertNotIn(hashlib.sha256(OTHER_TOKEN.encode()).hexdigest()[:16], blob)
+
+    def test_different_token_is_refused_before_any_change_and_bridge_keeps_running(self):
+        before, pid = self.paired()
+        self.put({"id": "b" * 16, "action": "pair", "consent": "tv", "token": OTHER_TOKEN})
+        self.assertEqual(self.helper().run(), ["different_token"])
+        self.assertEqual(self.snap(), before)                          # octets, mode, propriétaire, inode du jeton
+        self.assertEqual((self.unit.active, self.unit.pid), ("active", pid))   # pont jamais arrêté
+        self.assertEqual(self.cmds(), [])                              # ni stop, ni fenêtre, ni enable
+        r = self.result("b" * 16)
+        self.assertEqual((r["ok"], r["result"]), (False, "different_token"))
+        self.assertEqual(os.listdir(self.journal), [])
+        self.no_secret("b" * 16)
+        self.assertIn("rien n'a changé", musesetup.message_for("different_token"))
+
+    def test_different_token_never_grants_control_to_a_paused_bridge(self):
+        self.paired()
+        reg = agents.Registry(self.cfg.registry_file)
+        v, fp, _ = reg.snapshot(("muse", "hermit", "hermes"))
+        reg.apply_policy_changes({"muse": ["feedback", "read"]}, ("muse", "hermit", "hermes"), fp)   # en pause
+        before = self.snap()
+        self.calls.clear()
+        self.put({"id": "b" * 16, "action": "pair", "consent": "tv", "token": OTHER_TOKEN})
+        self.assertEqual(self.helper().run(), ["different_token"])
+        self.assertEqual(self.snap(), before)                          # aucune autorisation, identité inchangée
+        self.assertEqual(sorted(self.policy()), ["feedback", "read"])
+        self.assertEqual(self.cmds(), [])
+
+    def test_same_token_reuses_existing_credential_and_leaves_healthy_bridge_alone(self):
+        before, pid = self.paired()
+        self.put({"id": "b" * 16, "action": "pair", "consent": "tv", "token": tmb.SDK_TOKEN})
+        self.assertEqual(self.helper().run(), ["connected"])
+        self.assertEqual(self.snap(), before)                          # même inode : jamais réécrit
+        self.assertEqual((self.unit.active, self.unit.pid), ("active", pid))
+        self.assertFalse([c for c in self.cmds() if c.startswith("stop") or museadmin.PAIR_UNIT in c])
+        self.no_secret("b" * 16)
+
+    def test_bridge_start_failure_keeps_token_identity_policy_and_a_usable_bridge(self):
+        before, _pid = self.paired()
+        self.unit.gone(1)                                               # reconnexion échouée : pont arrêté
+        self.unit.crash_next = 1                                       # le prochain démarrage échoue aussi
+        self.put({"id": "b" * 16, "action": "pair", "consent": "tv", "token": tmb.SDK_TOKEN})
+        self.assertEqual(self.helper().run(), ["bridge_not_started"])
+        self.assertEqual(self.snap(), before)
+        self.assertFalse([c for c in self.cmds() if museadmin.PAIR_UNIT in c])   # aucun Bluetooth rouvert
+        started, _rb = self.factory().start_bridge()                   # l'ancien appariement reste utilisable
+        self.assertTrue(started)
+        self.assertEqual(self.unit.active, "active")
+
+    def test_failed_first_pairing_removes_only_the_token_it_wrote(self):
+        self.window = "window_closed"
+        self.pair_job()
+        self.assertEqual(self.helper().run(), ["window_closed"])
+        self.assertFalse(os.path.exists(self.j(self.TOK)))             # état d'avant : aucun jeton
+        self.assertNotIn(musebridge.MUSE_AGENT_ID, agents.Registry(self.cfg.registry_file).list())
+
+    def test_unsafe_local_token_is_never_replaced(self):
+        before, _ = self.paired()
+        os.chmod(self.j(self.TOK), 0o644)
+        self.put({"id": "b" * 16, "action": "pair", "consent": "tv", "token": OTHER_TOKEN})
+        self.assertEqual(self.helper().run(), ["muse_unavailable"])
+        with open(self.j(self.TOK), "rb") as f:
+            self.assertEqual(f.read(), before["token"][0])
+        self.assertEqual(self.cmds(), [])
+
+    def test_admin_layer_also_refuses_a_different_token_without_writing(self):
+        before, pid = self.paired()                                    # défense en profondeur (course TOCTOU)
+        r, code = self.factory(stdin=io.StringIO(OTHER_TOKEN + "\n")).pair(token_stdin=True, keep_token=True)
+        self.assertEqual((r["ok"], r["error"], code), (False, "sdk_token_mismatch", 2))
+        self.assertEqual(self.snap(), before)
+        self.assertEqual((self.unit.active, self.unit.pid), ("active", pid))
+        self.assertEqual(self.cmds(), [])
+        self.assertNotIn(OTHER_TOKEN, json.dumps(r))
+
+    def test_keep_token_refuses_replacement_options(self):
+        for kw in ({"replace_token": True}, {"force": True}, {"replace_identity": True}):
+            r, code = self.factory(stdin=io.StringIO(tmb.SDK_TOKEN + "\n")).pair(token_stdin=True, keep_token=True,
+                                                                                 **kw)
+            self.assertEqual((r["error"], code), ("bad_options", 2), kw)
+        self.assertEqual(self.cmds(), [])
+
+    def test_probe_publishes_public_ownership_and_foreign_identity_is_never_unpaired(self):
+        box = os.path.join(self.cfg.muse_results_dir, musesetup.BOX_NAME)
+        self.put({"id": "p" * 16, "action": "probe"})
+        self.assertEqual(self.helper().run(), [])
+        self.assertEqual(musesetup.read_box(self.cfg.muse_results_dir),
+                         {"owned": False, "foreign": False, "identity_present": False})
+        self.paired()
+        b = musesetup.read_box(self.cfg.muse_results_dir)              # publié après le pair, sans probe
+        self.assertEqual(b, {"owned": True, "foreign": False, "identity_present": True})
+        with open(box) as f:
+            raw = f.read()
+        self.assertNotIn(tmb.SDK_TOKEN, raw)
+        self.assertEqual(stat.S_IMODE(os.stat(box).st_mode), 0o600)
+        # identité « muse-device » remplacée par un autre client : étrangère ⇒ jamais déconnectée d'ici
+        reg = agents.Registry(self.cfg.registry_file)
+        reg.revoke(musebridge.MUSE_AGENT_ID)
+        reg.issue(musebridge.MUSE_AGENT_ID, CONTROL)
+        foreign = reg.list()[musebridge.MUSE_AGENT_ID]
+        self.put({"id": "u" * 16, "action": "unpair", "confirm": "tv"})
+        self.assertEqual(self.helper().run(), ["disconnect_failed"])
+        self.assertEqual(self.result("u" * 16)["result"], "foreign_identity")
+        self.assertEqual(reg.list()[musebridge.MUSE_AGENT_ID].get("token_sha256"), foreign.get("token_sha256"))
+        self.assertTrue(os.path.exists(self.j(self.PAIRING)))
+        self.assertTrue(os.path.exists(self.j(self.TOK)))
+        self.assertEqual(musesetup.read_box(self.cfg.muse_results_dir),
+                         {"owned": False, "foreign": True, "identity_present": True})
+        self.assertFalse([c for c in self.cmds() if "disable" in c])
+
+
 # --------------------------------------------------------------------------- unités, installation
 def unit(name):
     cp = configparser.ConfigParser(strict=False, interpolation=None)
@@ -1052,22 +1463,27 @@ MUSE_SNAP = tam.AGENT_DRIVER.replace(
     " caps: Array.prototype.map.call(document.querySelectorAll(\"#pcaps:not([hidden]) li\"), function (x) {"
     " return x.textContent; }), phases: Array.prototype.map.call(document.querySelectorAll("
     "\"#pphases:not([hidden]) li\"), function (x) { return [x.textContent, x.className]; }),"
-    " bodies: (window.__BODIES__ || []).slice(), text: document.body.innerText };")
+    " bodies: (window.__BODIES__ || []).filter(function (b) { return b.indexOf(\"/api/tv/muse/probe\") !== 0; }),"
+    " probes: (window.__BODIES__ || []).filter(function (b) { return b.indexOf(\"/api/tv/muse/probe\") === 0; })"
+    ".length, text: document.body.innerText };").replace(
+    "return c.indexOf(\"POST\") === 0; }),",
+    "return c.indexOf(\"POST\") === 0 && c.indexOf(\"/api/tv/muse/probe\") < 0; }),")
 assert MUSE_SNAP != tam.AGENT_DRIVER
 
 
 @unittest.skipUnless(find_chromium(), "Chromium introuvable")
 class TestMuseTvInChromium(unittest.TestCase):
-    URL = "http://192.168.2.40:8081/muse?s=" + "S" * 22 + "#" + "F" * 22
+    URL = "http://opentv-test.local:8081/muse?s=" + "S" * 22 + "#" + "F" * 22
     T = tam.TestAgentsTvInChromium
     FY, STATE, REMOTE1, render = T.FY, T.STATE, T.REMOTE1, T.render
 
     def st(self, active=False, state=None, url=None, lseq=0, last=None, bridge=None, phone=False, ble=None,
-           message=None, disc=None, cancelling=False):
+           message=None, disc=None, cancelling=False, owned=None, foreign=False, pending=False, lmsg=None):
         base = self.T.st(self.T)
-        base["muse"] = {"seq": lseq, "last": {"seq": lseq, "state": last, "error": None}, "active": active,
-                        "state": state, "url": url if active else None, "phone": phone, "ble_name": ble,
-                        "message": message, "bridge": bridge, "cancelling": cancelling, "expires_in": 600,
+        base["muse"] = {"seq": lseq, "last": {"seq": lseq, "state": last, "error": None, "message": lmsg},
+                        "active": active, "state": state, "url": url if active else None, "phone": phone,
+                        "ble_name": ble, "message": message, "bridge": bridge, "cancelling": cancelling,
+                        "cancel_pending": pending, "expires_in": 600, "owned": owned, "foreign": foreign,
                         "disconnect": None, "disconnect_last": disc or {"seq": 0, "state": None}}
         return base
 
@@ -1195,7 +1611,7 @@ class TestMuseTvInChromium(unittest.TestCase):
         self.assertEqual([b for b in r["bodies"] if "start" in b], ['/api/tv/muse/start {"consent":true}'])
 
     def test_connected_muse_disconnect_needs_confirmation_with_safe_default(self):
-        ready = self.st(bridge="ready")
+        ready = self.st(bridge="ready", owned=True)
         plan = [{"at": 1200, "keys": ["ArrowUp", "Enter", "ArrowDown", "Enter"], "tag": "sheet"},
                 {"at": 1300, "keys": ["Enter"], "tag": "muse"}, {"at": 1400, "keys": ["ArrowUp", "Enter"], "tag": "ask"},
                 {"at": 1500, "keys": ["Enter"], "tag": "no"}, {"at": 1600, "keys": ["ArrowUp", "Enter"], "tag": "ask2"},
@@ -1217,6 +1633,86 @@ class TestMuseTvInChromium(unittest.TestCase):
         self.assertEqual(s["yes"]["bodies"], ['/api/tv/muse/disconnect {"confirm":true}'])
         self.assertEqual(s["done"]["toast"], "Muse est déconnectée.")
 
+    def owned_panel(self, st):
+        plan = [{"at": 1200, "keys": ["ArrowUp", "Enter", "ArrowDown", "Enter"], "tag": "sheet"},
+                {"at": 1300, "keys": ["Enter"], "tag": "muse"}, {"at": 1400, "keys": ["ArrowUp", "Enter"], "tag": "ask"},
+                {"at": 1500, "keys": ["Enter"], "tag": "no"}, {"at": 1600, "keys": ["ArrowUp", "ArrowUp", "Enter"],
+                                                               "tag": "reconnect"}]
+        res, s = self.live([(0, st)], plan, delay=2000)
+        self.assertEqual(s["sheet"]["probes"], 0)
+        self.assertEqual(s["muse"]["probes"], 1)                         # état de la boîte relu en ouvrant Muse
+        return s
+
+    def test_paused_bridge_owned_by_the_box_offers_confirmed_disconnect_and_reconnect(self):
+        s = self.owned_panel(self.st(bridge="paused", owned=True))
+        self.assertEqual(s["sheet"]["subs"][0], "En pause · Reconnecter ou déconnecter")
+        m = s["muse"]
+        self.assertEqual((m["ptitle"], m["btns"], m["focused"]),
+                         ("Muse est en pause", ["Reconnecter", "Déconnecter Muse", "Retour"], "Retour"))
+        self.assertEqual(m["clip"], [], m)
+        self.assertEqual((s["ask"]["ptitle"], s["ask"]["focused"]), ("Déconnecter Muse ?", "Non"))
+        self.assertEqual((s["no"]["ptitle"], s["no"]["focused"]), ("Muse est en pause", "Retour"))
+        self.assertEqual(s["no"]["bodies"], [])                           # « Non » : rien envoyé
+        r = s["reconnect"]
+        self.assertEqual((r["ptitle"], r["focused"]), ("Connecter Muse", "Pas maintenant"))   # consentement de nouveau
+        self.assertEqual(r["bodies"], [])
+
+    def test_paired_but_not_ready_or_failed_reconnect_offers_disconnect(self):
+        s = self.owned_panel(self.st(bridge=None, owned=True, lseq=3, last="failed"))
+        self.assertEqual(s["sheet"]["subs"][0], "Pas connectée · Reconnecter ou déconnecter")
+        m = s["muse"]
+        self.assertEqual((m["ptitle"], m["btns"], m["focused"]),
+                         ("Muse n'est pas connectée", ["Reconnecter", "Déconnecter Muse", "Retour"], "Retour"))
+        self.assertEqual((s["ask"]["ptitle"], s["ask"]["focused"]), ("Déconnecter Muse ?", "Non"))
+
+    def test_foreign_or_unproven_identity_never_offers_disconnect(self):
+        for st, title in ((self.st(bridge="ready", owned=False, foreign=True), "Muse est installée autrement"),
+                          (self.st(bridge="ready", owned=None), "Muse est connectée"),
+                          (self.st(bridge="paused", owned=None), "Connecter Muse")):
+            plan = [{"at": 1200, "keys": ["ArrowUp", "Enter", "ArrowDown", "Enter"], "tag": "sheet"},
+                    {"at": 1300, "keys": ["Enter"], "tag": "muse"},
+                    {"at": 1400, "keys": ["ArrowUp", "ArrowUp", "Enter"], "tag": "up"}]
+            res, s = self.live([(0, st)], plan, delay=1800)
+            m = s["muse"]
+            self.assertEqual(m["ptitle"], title, st["muse"])
+            self.assertNotIn("Déconnecter Muse", m["btns"])
+            self.assertNotIn("disconnect", json.dumps(s["up"]["bodies"]))
+            self.assertNotEqual(s["up"]["ptitle"], "Déconnecter Muse ?")
+
+    def test_ownership_learned_while_open_refreshes_the_choices_with_safe_focus(self):
+        plan = [{"at": 1200, "keys": ["ArrowUp", "Enter", "ArrowDown", "Enter", "Enter"], "tag": "before"},
+                {"at": 4200, "keys": [], "tag": "after"}]
+        script = [(0, self.st(bridge="ready")), (2000, self.st(bridge="ready", owned=True))]
+        res, s = self.live(script, plan, delay=4600)
+        self.assertEqual(s["before"]["btns"], ["Retour"])
+        a = s["after"]
+        self.assertEqual((a["ptitle"], a["btns"], a["focused"]), ("Muse est connectée", ["Déconnecter Muse", "Retour"],
+                                                                  "Retour"))
+
+    def test_unresolved_cancel_says_requested_closable_then_real_outcome_announced(self):
+        wait = self.st(active=True, state="connecting", lseq=2)
+        cancelling = self.st(active=True, state="connecting", cancelling=True, lseq=2)
+        pending = self.st(active=True, state="connecting", cancelling=True, pending=True, lseq=2)
+        script = [(0, self.st(lseq=2)), (1500, wait), (3000, cancelling), (5000, pending),
+                  (9500, self.st(lseq=9, last="connected", state="connected", bridge="ready", owned=True))]
+        plan = [{"at": 1200, "keys": self.TO_MUSE + ["ArrowUp", "Enter"], "tag": "go"},
+                {"at": 2600, "keys": ["Escape"], "tag": "cancel"}, {"at": 4500, "keys": [], "tag": "cancelling"},
+                {"at": 6500, "keys": [], "tag": "pending"}, {"at": 6700, "keys": ["Escape"], "tag": "closed"},
+                {"at": 8800, "keys": [], "tag": "still"}, {"at": 11000, "keys": [], "tag": "done"}]
+        res, s = self.live(script, plan, delay=11500)
+        self.assertEqual(s["cancelling"]["pmeta"], "Annulation en cours…")
+        p = s["pending"]
+        self.assertTrue(p["panel"])
+        self.assertIn("Annulation demandée", p["pmeta"])
+        self.assertNotIn("rien n'a changé", p["text"])
+        c = s["closed"]
+        self.assertFalse(c["panel"])                                       # la feuille peut se fermer…
+        self.assertTrue(c["toast"].startswith("Annulation demandée"), c)   # …sans prétendre que rien n'a changé
+        self.assertFalse(s["still"]["panel"])                              # pas rouverte de force
+        allt = s["done"]["toasts"]
+        self.assertNotIn("Annulé : rien n'a changé.", allt)
+        self.assertTrue(s["done"]["toast"].startswith("Muse est connectée !"), s["done"])   # issue réelle annoncée
+
     def test_reload_during_connection_reopens_the_sheet_and_announces_nothing_old(self):
         st = self.st(active=True, state="waiting_muse", lseq=7)
         st["muse"]["last"] = {"seq": 6, "state": "cancelled", "error": "cancelled"}
@@ -1232,10 +1728,20 @@ class E2EAdmin:
     """Administration Muse simulée pour le bout en bout : mêmes appels que museadmin.Admin depuis MuseHelper ;
     l'appariement passe par les vraies phases (fenêtre ouverte, connexion) et le vrai registre."""
     calls = []
+    paired = False
 
     def __init__(self, app, progress=None, stdin=None, **kw):
         self.app, self.progress, self.stdin = app, progress or (lambda *a, **k: None), stdin
         self.waiting = False
+
+    def local_token_match(self, tok):
+        E2EAdmin.calls.append(("local_token_match",))
+        return "same" if E2EAdmin.paired else "absent"
+
+    def ownership(self):
+        present = "muse-device" in self.app.registry.list()
+        return {"paired": E2EAdmin.paired, "token": E2EAdmin.paired, "identity": "owned" if present else "absent",
+                "identity_present": present, "foreign": False}
 
     def authorize_control(self, yes=False):
         E2EAdmin.calls.append(("authorize_control", yes))
@@ -1252,6 +1758,7 @@ class E2EAdmin:
         self.progress("connecting")
         time.sleep(1.0)
         self.app.registry.issue("muse-device", CONTROL)
+        E2EAdmin.paired = True
         return {"ok": True, "registered": True}, 0
 
     def registry(self):
@@ -1269,7 +1776,9 @@ class TestMuseEndToEnd(unittest.TestCase):
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
         sock.close()
-        a = make_app(self, OPENTV_SETUP_PORT=str(port))
+        res = tr.Resolver()
+        a = make_app(self, app_kw={"hostname": tr.HOSTNAME + ".lan", "resolver": res}, OPENTV_SETUP_PORT=str(port))
+        res.app = a
         config.save_device(a.cfg, {"name": "Salon"})
         a.reload_device()
         a.registry.set_policy({"muse": ["feedback", "read"], "hermit": [], "hermes": []})
@@ -1277,7 +1786,7 @@ class TestMuseEndToEnd(unittest.TestCase):
         s = remote_servers(self, a)
         journal = tmpdir(self, "otvmj")
         os.chmod(journal, 0o700)
-        E2EAdmin.calls = []
+        E2EAdmin.calls, E2EAdmin.paired = [], False
         helper = musehelper.MuseHelper(a.cfg, os.getuid(), admin_factory=lambda **kw: E2EAdmin(a, **kw),
                                        chown=False, journal_dir=journal, journal_uid=os.getuid(),
                                        log=lambda ev, **f: None)
@@ -1320,16 +1829,17 @@ class TestMuseEndToEnd(unittest.TestCase):
         c = res["consent"]
         self.assertEqual((c["title"], c["focused"]), ("Connecter Muse", "Pas maintenant"))
         self.assertEqual(res["posts_before_consent"], 0)
+        self.assertEqual(res["probes_before_consent"], 1)                        # relecture seule (aucun droit)
         q = res["qr"]
         self.assertEqual((q["qr"], q["panel_in_view"], q["remotebox_hidden"], q["clipped"]), ("ok", True, True, []))
         for snap in (res["consent"], res["qr"], res["waiting"], res["connected"]):
             for bad in ("192.168", "127.0.0.1", "mgst_", "sudo", "ssh"):
                 self.assertNotIn(bad, snap["text"], bad)
-        self.assertEqual(res["origin"], "http://%s:%d" % (LAN, port))
+        self.assertEqual(res["origin"], "http://%s:%d" % (MDNS, port))   # nom mDNS vérifié : jamais d'IP
         # téléphone sans JavaScript : champ jamais affiché, rien envoyé
         self.assertIn("JavaScript désactivé", res["nojs_step2"]["text"])
         self.assertFalse(res["nojs_step2"]["input_visible"] or res["nojs_step2"]["form_visible"])
-        # téléphone avec JavaScript sur http://<LAN> : contexte non sécurisé, sans crypto.subtle
+        # téléphone avec JavaScript sur http://<nom>.local : contexte non sécurisé, sans crypto.subtle
         self.assertEqual(res["secure_context"], [False, False])
         st1 = res["step1"]
         self.assertEqual((st1["official"], st1["target"]), (museweb.OFFICIAL_TOKEN_PAGE, "_blank"))
@@ -1348,14 +1858,18 @@ class TestMuseEndToEnd(unittest.TestCase):
             blob = r["url"] + r["body"] + json.dumps(r["headers"])
             self.assertNotIn(TOKEN, blob)
             self.assertNotIn(TOKEN[5:25], blob)
+        for r in res["requests"]:                                                 # téléphone : le nom, jamais l'IP
+            self.assertTrue(r["url"].startswith("http://%s:%d/" % (MDNS, port)), r["url"])
         submits = [r for r in res["requests"] if r["url"].endswith("/muse/submit")]
         self.assertEqual(len(submits), 1)
         self.assertEqual(submits[0]["headers"].get("origin"), res["origin"])     # vraie Origin, même origine
         self.assertEqual(set(json.loads(submits[0]["body"])), {"s", "c", "ct"})
         # helper : consentement TV -> autorisation, puis pair avec les options figées et le jeton
-        self.assertEqual(E2EAdmin.calls[0], ("authorize_control", True))
-        self.assertEqual(E2EAdmin.calls[1], ("pair", {"token_stdin": True, "replace_token": True, "force": False,
-                                                      "replace_identity": False}, TOKEN + "\n"))
+        calls = [c for c in E2EAdmin.calls if c[0] in ("local_token_match", "authorize_control", "pair")]
+        self.assertEqual(calls[0], ("local_token_match",))               # jeton local comparé AVANT l'autorisation
+        self.assertEqual(calls[1], ("authorize_control", True))
+        self.assertEqual(calls[2], ("pair", {"token_stdin": True, "replace_token": False, "force": False,
+                                             "replace_identity": False, "keep_token": True}, TOKEN + "\n"))
         self.assertEqual(res["waiting"]["phases"][1], ["En attente de Muse", "on"])
         self.assertIn("Mode développeur", res["waiting"]["meta"])
         self.assertTrue(res["phone_waiting"].startswith("En attente de Muse"))
