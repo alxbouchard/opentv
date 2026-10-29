@@ -1044,20 +1044,22 @@ class App:
                     "version": VERSION, "control": self._control_view(scopes)}
 
     def show_message(self, agent, text, seconds):
+        # nom affiché = agent PROPRIÉTAIRE (« muse-device » -> « Muse ») ; le journal garde l'identité authentifiée
         with self.lock:
-            self.message = {"text": text, "from": agent, "until": self.mono() + seconds}
+            self.message = {"text": text, "from": agents.canonical_agent(agent), "until": self.mono() + seconds}
         self.log("agent_message", agent=agent, length=len(text))
         return {"shown": True, "seconds": seconds}
 
     # -- pilotage par assistant (scope « control ») : commandes sémantiques typées, jamais d'URL ni de touche brute
     def _control_view(self, scopes):   # sous self.lock (agent_status) : lectures sans verrou du service
+        """Moindre privilège : sans scope « control », ni film en cours (id), ni état de lecture, ni actions TV."""
+        if "control" not in scopes:
+            return {"enabled": False}
         pb = self.playback.view()
-        out = {"enabled": "control" in scopes,
-               "playback": {"available": pb["available"], "state": pb["state"], "id": pb["id"],
-                            "reason": pb["reason"], "seq": pb["seq"]}}
-        if "control" in scopes:
-            out["actions"] = self.tv_actions.recent()
-        return out
+        return {"enabled": True,
+                "playback": {"available": pb["available"], "state": pb["state"], "id": pb["id"],
+                             "reason": pb["reason"], "seq": pb["seq"]},
+                "actions": self.tv_actions.recent()}
 
     def _fy_lookup(self, uid):
         """-> (élément du catalogue accepté, fiche TV) ; (None, None) si absent. Sélection reconstruite au besoin."""
@@ -1100,7 +1102,9 @@ class App:
         if name == "remote_control":
             if self.playback.active():   # lecteur au premier plan : seules Retour/Accueil (ci-dessus) le ferment
                 raise tools.ToolError("player_active")
-            return {"accepted": True, "action": self._push("key", agent, {"key": a["key"]})}
+            act = self._push("key", agent, {"key": a["key"]})
+            self.log("agent_control", agent=agent, tool=name, ok=True)
+            return {"accepted": True, "action": act}
         item, tvitem = self._fy_lookup(a["id"])
         if item is None or tvitem is None:
             raise tools.ToolError("unknown_id")
@@ -1112,12 +1116,16 @@ class App:
             if a.get("text"):
                 payload["text"] = a["text"]
             act = self._push("present", agent, payload)
+            self.log("agent_control", agent=agent, tool=name, ok=True)
             return {"accepted": True, "id": uid, "title": tvitem.get("title"), "action": act}
         if name == "play_title":
-            ok, err = self.playback.start(uid, item)
+            # agent : seulement depuis « idle » (atomique dans Playback.start). Une lecture « closed »/« unavailable »
+            # pas encore acquittée par la page /tv signifie que la TV revient encore sur la fiche précédente : un
+            # nouveau lancement ferait courir ce retour contre le nouveau film (refus « player_returning »).
+            ok, err = self.playback.start(uid, item, require_idle=True)
             if not ok:
-                raise tools.ToolError({"busy": "player_busy", "unavailable": "playback_unavailable"}.get(
-                    err, "playback_refused"))
+                raise tools.ToolError({"busy": "player_busy", "unavailable": "playback_unavailable",
+                                       "returning": "player_returning"}.get(err, "playback_refused"))
             pb = self._pb_public()
             try:   # la page TV montre la fiche du film sous le lecteur et y revient à la fermeture
                 act = self._push("play", agent, {"id": uid, "item": tvitem, "playback_seq": pb["seq"]})
@@ -1128,8 +1136,9 @@ class App:
         raise tools.ToolError("unknown_tool")
 
     def _push(self, kind, agent, payload):
+        # « from » (affiché « Proposé par … » sur la TV) = agent PROPRIÉTAIRE : « muse-device » -> « muse »
         try:
-            return self.tv_actions.push(kind, agent, payload)
+            return self.tv_actions.push(kind, agents.canonical_agent(agent), payload)
         except tvcontrol.QueueFull:
             raise tools.ToolError("tv_queue_full")
 

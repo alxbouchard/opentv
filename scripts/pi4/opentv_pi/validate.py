@@ -13,6 +13,56 @@ HEX64_RE = re.compile(r"[0-9a-fA-F]{64}")
 URLISH_RE = re.compile(r"[a-z][a-z0-9+.-]*://|(?<![a-z0-9])www\.|(?<![a-z0-9])(?:javascript|data|vbscript|file|blob|magnet):"
                        r"|(?:[a-z0-9-]+\.)+[a-z]{2,24}(?:[:/]|\b)(?!\s*[a-zà-ÿ])|[0-9]{1,3}(?:\.[0-9]{1,3}){3}", re.I)
 
+# ---- texte libre d'un agent affiché sur la TV (bannière, phrase d'une fiche proposée) : durcissement anti-usurpation.
+# Catégories Unicode refusées : contrôles, formats (marques/isolats/surcharges bidi, largeur nulle, BOM, tirets
+# conditionnels, étiquettes), substituts, usage privé, non attribués, séparateurs de ligne/paragraphe (U+2028/2029).
+MSG_BAD_CATEGORIES = frozenset(("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"))
+# espaces admis : ordinaire, insécable, fine insécable (typographie française « … » ; ; ?), fine
+MSG_SPACES = frozenset("\u0020\u00a0\u202f\u2009")
+MSG_MAX_MARKS = 3   # diacritiques combinants consécutifs au plus (texte « zalgo » qui déborde sur le titre)
+# Écritures de droite à gauche refusées (classes bidi R, AL, AN) : sans caractère de contrôle, elles suffisent à
+# réordonner visuellement la phrase et le nom de l'assistant autour d'elle. Alex lit OpenTV en français.
+MSG_RTL_BIDI = frozenset(("R", "AL", "AN"))
+# équivalents visuels de « . », « / », « : » que NFKC ne ramène pas (ou pas tous) à l'ASCII
+_SKEL_MAP = {ord(c): "." for c in "\u3002\uff0e\uff61\ufe12\ufe52\u2024\u2e3c\u06d4\u0701\u0702\u1362\ua4f8\ua60e"}
+_SKEL_MAP.update({ord(c): "/" for c in "\u2044\u2215\u29f8\u2571\uff0f"})
+_SKEL_MAP.update({ord(c): ":" for c in "\ua789\u2236\ufe13\ufe55\uff1a\u02d0"})
+# forme « squelette » : tout ce qui y ressemble à un nom d'hôte est refusé, même suivi d'un mot (« evil.com ici »)
+STRICT_HOST_RE = re.compile(r"(?<![a-z0-9-])[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*"
+                            r"\.[a-z]{2,24}(?![a-z0-9])")
+
+
+def _skeleton(s):
+    """Forme de comparaison anti-usurpation (jamais affichée) : NFKC (pleine chasse, petites formes), points,
+    barres et deux-points idéographiques ou exotiques -> ASCII, minuscules, accents retirés, autre lettre non latine
+    -> x."""
+    s = unicodedata.normalize("NFKC", s).translate(_SKEL_MAP)
+    s = unicodedata.normalize("NFKD", s.casefold())
+    out = []
+    for c in s:
+        if unicodedata.category(c) == "Mn":
+            continue
+        if ord(c) > 127 and unicodedata.category(c).startswith("L"):
+            out.append("x")
+        else:
+            out.append(c)
+    return "".join(out).translate(_SKEL_MAP)
+
+
+def message_chars_ok(s):
+    """Caractères admis dans un texte libre d'agent affiché sur la TV (voir MSG_BAD_CATEGORIES et MSG_RTL_BIDI)."""
+    marks = 0
+    for c in s:
+        cat = unicodedata.category(c)
+        if cat in MSG_BAD_CATEGORIES or (cat == "Zs" and c not in MSG_SPACES):
+            return False
+        if unicodedata.bidirectional(c) in MSG_RTL_BIDI:
+            return False
+        marks = marks + 1 if cat in ("Mn", "Me") else 0
+        if marks > MSG_MAX_MARKS:
+            return False
+    return True
+
 
 def _printable(s):
     return all(ord(c) >= 32 and ord(c) != 127 and not (0x80 <= ord(c) < 0xA0) for c in s)
@@ -79,17 +129,21 @@ def no_url(s):
 
 
 def message_text(s, max_len=140):
-    """Message d'agent affiché sur la TV : une ligne, 1 à 140 caractères, aucune adresse."""
+    """Texte libre d'agent affiché sur la TV (bannière, phrase d'une fiche proposée) : une ligne, 1 à 140 caractères,
+    aucune adresse — y compris déguisée (pleine chasse, point idéographique, lettres non latines, « evil.com ici »),
+    aucun contrôle de mise en forme (bidi, largeur nulle, U+2028/2029…), aucune écriture de droite à gauche. La page TV
+    l'insère par textContent seulement ; ce filtre garde en plus l'affichage lisible et non trompeur."""
     if not isinstance(s, str):
         raise ValueError("text_type")
-    if not _printable(s):
+    if not _printable(s) or not message_chars_ok(s):
         raise ValueError("text_chars")
     s = unicodedata.normalize("NFC", s).strip()
     if not 1 <= len(s) <= max_len:
         raise ValueError("text_length")
-    if not _printable(s):
+    if not _printable(s) or not message_chars_ok(s):
         raise ValueError("text_chars")
-    if not no_url(s):
+    sk = _skeleton(s)
+    if not no_url(s) or not no_url(sk) or STRICT_HOST_RE.search(sk):
         raise ValueError("text_url")
     return s
 

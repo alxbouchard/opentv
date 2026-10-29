@@ -102,10 +102,12 @@ DESCRIPTIONS = {
     "opentv.present_title": "Propose un film à Alex sur la TV : sa fiche s'ouvre avec ta phrase (facultative, une "
                             "ligne). Utilise l'identifiant stable vu dans recommend, search ou catalogue_list. "
                             "Résultat = action acceptée (queued) ; suis-la dans opentv.status (applied = la page TV "
-                            "l'a affichée). Refusé pendant une lecture ou un réglage.",
+                            "l'a affichée). Refusé pendant une lecture ou un réglage ; la TV l'écarte (human_active) "
+                            "si Alex vient de se servir de sa télécommande.",
     "opentv.play_title": "Lance un film du catalogue accepté par le lecteur officiel d'OpenTV, UNIQUEMENT quand Alex "
                          "te demande explicitement de le regarder. Mêmes portes que le bouton « Regarder » ; refusé si "
-                         "la lecture n'est pas disponible ou déjà en cours. Résultat = lecture acceptée (loading) ; "
+                         "la lecture n'est pas disponible ou déjà en cours, ou tant qu'OpenTV revient sur la fiche du "
+                         "film précédent (player_returning). Résultat = lecture acceptée (loading) ; "
                          "playing/closed se lisent dans opentv.status.",
     "opentv.close_player": "Ferme le lecteur en cours ; OpenTV revient sur la fiche du film.",
     "opentv.remote_control": "Une touche de navigation OpenTV (up, down, left, right, ok, back, home), débit borné. "
@@ -513,14 +515,22 @@ def load_sdk(d=None, require_websockets=True):
 
 # ------------------------------------------------------------------------------------------------ commandes Muse
 def _param_desc(p):
-    d = p.get("description") or ""
+    """Description d'un paramètre, fidèle au schéma : bornes et défaut SEULEMENT quand ils existent (jamais « défaut
+    None » pour une énumération requise, jamais « 0 à 200 caractères » pour un identifiant au format fixe)."""
+    d = (p.get("description") or "").strip()
     if p["type"] == "integer":
-        d += " (entier de %d à %d, défaut %d)" % (p["minimum"], p["maximum"], p["default"])
+        extra = "entier de %d à %d" % (p["minimum"], p["maximum"])
+        if "default" in p:
+            extra += ", défaut %d" % p["default"]
     elif "enum" in p:
-        d = (d + " " if d else "") + "(une valeur parmi : %s ; défaut %s)" % (", ".join(p["enum"]), p.get("default"))
+        extra = "une valeur parmi : " + ", ".join(p["enum"])
+        if "default" in p:
+            extra += " ; défaut " + p["default"]
+    elif "pattern" in p:
+        extra = "format section/numéro exact, tel que renvoyé par recommend, search ou catalogue_list"
     else:
-        d += " (%d à %d caractères, texte seul, jamais d'adresse)" % (p.get("minLength", 0), p.get("maxLength", 200))
-    return d.strip()
+        extra = "%d à %d caractères, texte seul, jamais d'adresse" % (p.get("minLength", 0), p.get("maxLength", 200))
+    return (d + " (" + extra + ")").strip() if d else extra[0].upper() + extra[1:]
 
 
 def command_specs():

@@ -1,6 +1,7 @@
 /* Bout en bout du pilotage par assistant (tests seulement, jamais installé) : vrai service OpenTV + vraie page /tv
-   1920×1080 dans Chromium headless. Les commandes d'assistant passent par App.agent_control côté Python (canal
-   fichier ligne à ligne : cfg.ctl -> cfg.res) ; contrôleur du lecteur simulé côté Python.
+   1920×1080 dans Chromium headless. Les commandes d'assistant passent par l'Agent Port réel (AgentService.handle)
+   avec l'identité LIÉE « muse-device » du pont Muse (canal fichier ligne à ligne : cfg.ctl -> cfg.res) ; contrôleur
+   du lecteur simulé côté Python. Tout libellé visible doit dire « Muse », jamais « muse-device » ni « un assistant ».
    argv[2] = module playwright ; argv[3] = JSON {chromium, tv, shots, ctl, res}. Sortie : une ligne JSON. */
 "use strict";
 const fs = require("fs");
@@ -43,13 +44,21 @@ async function finalState(seq, ms) {   // état autoritaire d'une action TV (sta
         const btns = Array.prototype.map.call(document.querySelectorAll("#pbtns button"), (b) => ({
           t: b.textContent, focused: b.className.indexOf("focused") >= 0 }));
         const ov = q("playov");
-        return { focus: f ? f.textContent : null, panel: !q("panel").hidden, ptitle: q("ptitle").textContent,
+        const bn = q("banner");
+        return { banner: bn.hidden ? null : bn.textContent, bodyText: document.body.innerText,
+                 focus: f ? f.textContent : null, panel: !q("panel").hidden, ptitle: q("ptitle").textContent,
                  kicker: q("pkicker").textContent, pmeta: q("pmeta").textContent, btns: btns,
                  overlay: !ov.hidden, ovTitle: q("playtitle").textContent, ovMsg: q("playmsg").textContent,
                  gear: q("gear").className, url: location.pathname, iframes: document.querySelectorAll("iframe").length,
                  html: document.documentElement.outerHTML };
       });
       s.s = label;
+      for (const bad of ["muse-device", "un assistant"]) {   // nom brut ou anonyme : jamais à l'écran
+        if (s.bodyText.indexOf(bad) >= 0 || s.kicker.indexOf(bad) >= 0) {
+          throw new Error("libellé interdit : " + bad);
+        }
+      }
+      delete s.bodyText;
       for (const bad of ["https://", "http://", "spam.example", "films-mirror", "/b/fakrov"]) {
         // seule l'affiche https approuvée peut figurer dans le DOM, en attribut src d'une image de carte
         if (bad !== "https://" && s.html.indexOf(bad) >= 0) { throw new Error("adresse dans le DOM : " + bad); }
@@ -104,6 +113,14 @@ async function finalState(seq, ms) {   // état autoritaire d'une action TV (sta
     await sleep(150);
     await snap("proposed_in_rows", true);
 
+    // 3b. Alex vient d'agir (→ dans la fiche) : une nouvelle proposition de l'assistant ne remplace pas sa fiche
+    await page.keyboard.press("ArrowRight");
+    r = await agent("present_title", { id: "films/101", text: "Autre idée." });
+    f = await finalState(r.result.action.seq);
+    out.applied.present_human_first = [f.state, f.reason];
+    await sleep(150);
+    await snap("present_after_human", false);
+
     // 4. Alex demande de le regarder : play_title (portes officielles) -> écran OpenTV, lecteur, puis close_player
     r = await agent("play_title", { id: "films/106" });
     if (!r.ok) { throw new Error("play: " + JSON.stringify(r)); }
@@ -114,6 +131,7 @@ async function finalState(seq, ms) {   // état autoritaire d'une action TV (sta
     out.playing_seen = w.result.state;
     await page.waitForFunction(() => document.getElementById("playov").hidden, null, { timeout: 15000 });
     await snap("playing_under", false);
+    await page.keyboard.press("ArrowDown");                      // touche humaine : fermer reste toujours permis
     r = await agent("close_player");
     if (!r.ok || !r.result.closed) { throw new Error("close: " + JSON.stringify(r)); }
     for (let i = 0; i < 250; i++) {
@@ -132,6 +150,12 @@ async function finalState(seq, ms) {   // état autoritaire d'une action TV (sta
     await page.waitForSelector(".card.focused", { timeout: 10000 });
     await sleep(2600);
     await snap("reloaded", false);
+
+    // 6. bannière d'un message envoyé par l'identité liée : « Message de Muse », jamais l'identifiant brut
+    r = await agent("display_message", { text: "Bonne soirée, Alex !", seconds: 30 });
+    if (!r.ok) { throw new Error("message: " + JSON.stringify(r)); }
+    await page.waitForFunction(() => !document.getElementById("banner").hidden, null, { timeout: 15000 });
+    await snap("message", true);
   } finally {
     await browser.close();
   }

@@ -490,6 +490,264 @@ class TestAuthorizeControl(tmb.AdminBase):
         self.assertEqual(p.returncode, 2)
 
 
+# ------------------------------------------------------------------------------------------- revue : identité liée
+class TestLinkedIdentityIsMuseOnScreen(unittest.TestCase):
+    """« muse-device » (pont Muse) est l'identité authentifiée ; tout ce que voit Alex dit « Muse »."""
+
+    def setUp(self):
+        self.a = tp.TestAppIntegration.app(self)
+        self.a.registry.set_policy({"muse": appmod.AGENT_LEVELS["control"], "hermit": [], "hermes": []})
+
+    def test_canonical_agent(self):
+        self.assertEqual(agents.canonical_agent("muse-device"), "muse")
+        for x in ("muse", "hermit", "hermes", "other", None):
+            self.assertEqual(agents.canonical_agent(x), x)
+
+    def test_actions_and_message_carry_the_owner_name(self):
+        logs = []
+        self.a.log = lambda ev, **kw: logs.append((ev, kw))
+        self.a.agent_control("muse-device", "present_title",
+                             tools.validate_args("present_title", {"id": "films/106", "text": "Très bien noté."}))
+        self.a.agent_control("muse-device", "remote_control", tools.validate_args("remote_control", {"key": "down"}))
+        self.a.show_message("muse-device", "Bonne soirée", 15)
+        st = self.a.tv_state()
+        self.assertEqual({x["from"] for x in st["actions"]["pending"]}, {"muse"})
+        self.assertEqual(st["message"]["from"], "muse")
+        self.assertNotIn("muse-device", json.dumps(st))
+        # journal du service : identité authentifiée conservée (jamais réécrite en « muse »)
+        self.assertIn(("agent_message", {"agent": "muse-device", "length": 12}), logs)
+        self.assertEqual({kw["agent"] for ev, kw in logs if ev == "agent_control"}, {"muse-device"})
+
+    def test_tv_page_never_prints_a_raw_agent_id(self):
+        with open(os.path.join(PI4, "ui", "tv.js"), encoding="utf-8") as f:
+            js = f.read()
+        self.assertIn('"Proposé par " + agentName(prop.from)', js)
+        self.assertIn('"Message de " + agentName(s.message.from)', js)
+        self.assertNotIn("|| s.message.from", js)
+        self.assertNotIn('"muse-device"', js)   # canonicalisé par le service, pas masqué par la page
+
+
+class TestLinkedIdentitySharesRates(unittest.TestCase):
+    def setUp(self):
+        d = tempfile.mkdtemp(prefix="otvlink", dir="/tmp")
+        self.addCleanup(shutil.rmtree, d, True)
+        self.reg = agents.Registry(os.path.join(d, "agents.json"))
+        self.reg.set_policy({"muse": appmod.AGENT_LEVELS["control"], "hermit": appmod.AGENT_LEVELS["control"],
+                             "hermes": []})
+        self.tok = {a: self.reg.issue(a, appmod.AGENT_LEVELS["control"]) for a in ("muse", "muse-device", "hermit")}
+        self.calls = []
+        calls = self.calls
+
+        class Ctx:
+            foryou = None
+
+            def agent_control(self, agent, name, a):
+                calls.append((agent, name))
+                return {"accepted": True}
+
+            def show_message(self, agent, text, seconds):
+                calls.append((agent, "display_message"))
+                return {"shown": True}
+
+            def agent_status(self, agent, scopes):
+                return {"agent": agent}
+        self.clock = Clock()
+        self.audit_path = os.path.join(d, "audit.jsonl")
+        self.s = agentport.AgentService(Ctx(), self.reg, agents.Audit(self.audit_path), clock=self.clock)
+
+    def call(self, agent, tool, args=None, uid=1000):
+        return self.s.handle({"v": 1, "agent": agent, "token": self.tok[agent], "op": "call", "tool": tool,
+                              "args": args or {}}, peer_uid=uid)
+
+    def test_proposal_display_and_key_budgets_are_shared_with_the_parent(self):
+        self.assertTrue(self.call("muse", "present_title", {"id": "films/101"})["ok"])
+        self.assertEqual(self.call("muse-device", "present_title", {"id": "films/102"})["error"], "rate_limited")
+        self.assertTrue(self.call("hermit", "present_title", {"id": "films/102"})["ok"])   # autre agent : son budget
+        self.clock.t += 3.01
+        self.assertTrue(self.call("muse-device", "present_title", {"id": "films/102"})["ok"])
+        self.assertEqual(self.call("muse", "present_title", {"id": "films/103"})["error"], "rate_limited")
+        self.assertTrue(self.call("muse-device", "display_message", {"text": "Salut"})["ok"])
+        self.assertEqual(self.call("muse", "display_message", {"text": "Salut"})["error"], "rate_limited")
+        self.clock.t += 10
+        oks = [self.call(("muse", "muse-device")[i % 2], "remote_control", {"key": "down"}, uid=1000 + i)["ok"]
+               for i in range(5)]
+        self.assertEqual(oks, [True, True, True, False, False])                  # 3 / s pour Muse, toutes identités
+        self.clock.t += 10
+        self.assertTrue(self.call("muse", "play_title", {"id": "films/101"})["ok"])
+        self.assertEqual(self.call("muse-device", "play_title", {"id": "films/101"})["error"], "rate_limited")
+        with open(self.audit_path, encoding="utf-8") as f:
+            audited = [json.loads(x)["agent"] for x in f if x.strip()]
+        self.assertIn("muse-device", audited)                                     # audit : identité authentifiée
+        self.assertIn("muse", audited)
+        self.assertEqual([a for a, n in self.calls if n == "present_title"], ["muse", "hermit", "muse-device"])
+
+    def test_per_second_budget_is_shared_too(self):
+        res = [self.call(("muse", "muse-device")[i % 2], "status")["ok"] for i in range(agentport.CALLS_PER_S + 2)]
+        self.assertEqual(res.count(True), agentport.CALLS_PER_S)
+
+
+# ------------------------------------------------------------------------------------------- revue : moindre privilège
+class TestStatusLeastPrivilege(unittest.TestCase):
+    def test_no_playback_state_or_title_without_control(self):
+        a = tp.TestAppIntegration.app(self)
+        ok, err = a.playback.start("films/106", a._fy_lookup("films/106")[0])
+        self.assertTrue(ok, err)
+        self.assertEqual(tp.wait_state(a.playback, ("playing",))["state"], "playing")
+        for scopes in ([], ["read"], ["feedback", "read"], ["display", "feedback", "read"]):
+            st = a.agent_status("hermit", scopes)
+            self.assertEqual(st["control"], {"enabled": False}, scopes)
+            blob = json.dumps(st)
+            for leak in ("films/106", "Les Étoiles", "playing", "loading", "\"actions\""):
+                self.assertNotIn(leak, blob, (scopes, leak))
+        st = a.agent_status("muse", appmod.AGENT_LEVELS["control"])["control"]
+        self.assertEqual((st["enabled"], st["playback"]["state"], st["playback"]["id"]), (True, "playing", "films/106"))
+        self.assertIn("actions", st)
+        # même chose par l'outil status complet (tools.dispatch) d'un agent sans pilotage
+        res = tools.dispatch(a, "hermit", ["display", "feedback", "read"], "status", {})
+        self.assertEqual(res["control"], {"enabled": False})
+
+
+# ------------------------------------------------------------------------------------------- revue : course au retour
+class TestPlayTitleWaitsForTheReturn(unittest.TestCase):
+    def setUp(self):
+        self.a = tp.TestAppIntegration.app(self)
+        self.c = self.client
+
+    def play(self, uid):
+        return self.a.agent_control("muse", "play_title", tools.validate_args("play_title", {"id": uid}))
+
+    def opened(self):
+        end = time.monotonic() + 5   # ouverture envoyée par le fil de lecture : attendue avant de compter
+        while time.monotonic() < end and not any(r["op"] == "open" for r in self.c.reqs):
+            time.sleep(0.01)
+
+    def refused(self, uid, code):
+        self.opened()
+        n = len([r for r in self.c.reqs if r["op"] == "open"])
+        with self.assertRaises(tools.ToolError) as e:
+            self.play(uid)
+        self.assertEqual(str(e.exception), code)
+        self.assertEqual(len([r for r in self.c.reqs if r["op"] == "open"]), n)   # aucune ouverture
+
+    def test_closed_then_ack_sequence(self):
+        """loading -> playing -> closing -> closed (non acquitté : la page revient sur la fiche) ⇒ refus
+        « player_returning » ; acquittement de la page -> idle ⇒ nouveau lancement accepté."""
+        self.assertEqual(self.play("films/106")["playback"]["state"], "loading")
+        self.refused("films/101", "player_busy")                                  # loading
+        tp.wait_state(self.a.playback, ("playing",))
+        self.refused("films/101", "player_busy")                                  # playing
+        self.c.reveal_after = 10 ** 6
+        self.a.agent_control("muse", "close_player", {})
+        v = tp.wait_state(self.a.playback, ("closed",))
+        self.assertEqual(v["state"], "closed")
+        self.refused("films/101", "player_returning")                             # closed, pas encore acquitté
+        self.refused("films/106", "player_returning")
+        self.assertFalse(self.a.playback.ack(v["seq"] - 1))                       # mauvais seq : toujours refusé
+        self.refused("films/101", "player_returning")
+        self.assertTrue(self.a.playback.ack(v["seq"]))
+        self.assertEqual(self.a.playback.view()["state"], "idle")
+        self.c.reveal_after, self.c.polls = 1, 0
+        r = self.play("films/101")
+        self.assertIn(r["playback"]["state"], ("loading", "playing"))   # accepté (le faux contrôleur révèle vite)
+        self.assertEqual(r["playback"]["id"], "films/101")
+
+    def test_unavailable_then_ack_sequence(self):
+        self.c.outcome = "no-player"
+        self.play("films/106")
+        v = tp.wait_state(self.a.playback, ("unavailable",))
+        self.assertEqual(v["state"], "unavailable")
+        self.refused("films/101", "player_returning")
+        self.assertTrue(self.a.playback.ack(v["seq"]))
+        self.c.outcome = "revealed"
+        self.assertIn(self.play("films/101")["playback"]["state"], ("loading", "playing"))
+
+    def test_human_watch_button_keeps_its_contract(self):
+        """« Regarder » d'Alex (page visible) : inchangé — un OK sur une fin non acquittée relance toujours."""
+        self.c.outcome = "no-player"
+        self.a.playback.start("films/106", self.a._fy_lookup("films/106")[0])
+        tp.wait_state(self.a.playback, ("unavailable",))
+        self.assertEqual(self.a.playback.start("films/106", self.a._fy_lookup("films/106")[0], require_idle=True),
+                         (False, "returning"))
+        self.c.outcome = "revealed"
+        self.assertEqual(self.a.playback.start("films/106", self.a._fy_lookup("films/106")[0]), (True, None))
+
+    def test_error_is_explained(self):
+        from opentv_pi import mcp
+        self.assertIn("player_returning", mcp.ERRORS_FR)
+
+
+# ------------------------------------------------------------------------------------------- revue : texte libre
+class TestFreeTextHardening(unittest.TestCase):
+    ADVERSARIAL = [
+        "Regarde \u202eevil.com\u202c", "a\u202bb", "a\u202db", "x\u2066y\u2069", "x\u2067y\u2069", "x\u2068y\u2069",
+        "Muse\u200f dit", "Muse\u200e dit", "x\u061cy", "ligne\u2028deux", "para\u2029deux", "x\u200by", "x\u200cy",
+        "x\u200dy", "x\u2060y", "\ufeffBonjour", "x\u00ady", "x\u180ey", "x\U000e0041y", "x\ue000y", "x\u0378y",
+        "Va sur evil.com maintenant", "voir evil\uff0ecom", "voir evil\u3002com", "voir evil\uff61com",
+        "voir evil\ufe52com", "voir evil\u2024com", "\uff45\uff56\uff49\uff4c\uff0e\uff43\uff4f\uff4d",
+        "https\uff1a\uff0f\uff0fevil", "javascript\uff1aalert(1)", "\uff57\uff57\uff57\uff0ex",
+        "exampl\u0435.com", "\u0441\u0430\u0439\u0442.\u0440\u0444", "e\u0301vil.com", "x.com ce soir",
+        "t.co/abc", "https\u2236\u2215\u2215evil", "192.168.2.14", "\uff11\uff19\uff12.168.2.14",
+        "\u05e9\u05dc\u05d5\u05dd", "\u0645\u0631\u062d\u0628\u0627", "\u0660\u0661",
+        "x\u0301\u0302\u0303\u0304y", "un\u3000deux", "un\u2003deux", "tab\tici", "x\x85y",
+    ]
+    FRENCH = [
+        "Amélie, le fabuleux destin : une valeur sûre.", "« L’Été meurtrier » est noté 7,2 sur IMDb.",
+        "Ça : Chapitre 2 ? Frissons garantis !", "Astérix & Obélix : Mission Cléopâtre, IMDb 7.0.",
+        "E.T. l’extra-terrestre, pour toute la famille.", "O.S.S. 117 : Le Caire, nid d’espions",
+        "Mr. Nobody, très bien noté.", "WALL·E ce soir ?", "Les 400 coups (1959)", "Cœur de pirate, 20 h 30.",
+        "S.O.S. Fantômes", "Œdipe roi – Pasolini", "Prêt\u202f? C’est parti\u00a0!", "Noté 8.1/10 sur TMDb.",
+        "Le Seigneur des anneaux : Le Retour du roi ❤️", "Ponyo sur la falaise 🌊", "Ma vie de Courgette",
+        "Les Misérables — Ladj Ly", "Intouchables, 2011 ; 8,5/10",
+    ]
+
+    def test_adversarial_text_is_refused_everywhere(self):
+        for t in self.ADVERSARIAL:
+            with self.assertRaises(ValueError, msg=repr(t)):
+                validate.message_text(t)
+            for tool, args in (("display_message", {"text": t}), ("present_title", {"id": "films/106", "text": t})):
+                with self.assertRaises(ValueError, msg=(tool, repr(t))):
+                    tools.validate_args(tool, args)
+
+    def test_legitimate_french_is_kept_verbatim(self):
+        import unicodedata
+        for t in self.FRENCH:
+            self.assertEqual(validate.message_text(t), unicodedata.normalize("NFC", t))
+            self.assertEqual(tools.validate_args("present_title", {"id": "films/106", "text": t})["text"],
+                             unicodedata.normalize("NFC", t))
+
+    def test_tv_inserts_agent_text_as_text_only(self):
+        with open(os.path.join(PI4, "ui", "tv.js"), encoding="utf-8") as f:
+            js = f.read()
+        self.assertNotIn("innerHTML", js)
+        self.assertNotIn("insertAdjacentHTML", js)
+        self.assertIn('$("pmeta").textContent = text', js)
+        self.assertIn('b.textContent = "Message de "', js)
+
+
+# ------------------------------------------------------------------------------------------- revue : descriptions Muse
+class TestMuseCommandDescriptions(unittest.TestCase):
+    def test_descriptions_match_the_schema(self):
+        from opentv_pi import musebridge
+        specs = musebridge.command_specs()
+        self.assertEqual(len(specs), 11)
+        for cmd, spec in specs.items():
+            t = tools.TOOL_BY_NAME[musebridge.COMMANDS[cmd]]
+            for k, p in list(spec["required"].items()) + list(spec["optional"].items()):
+                d, sch = p["description"], t["inputSchema"]["properties"][k]
+                self.assertNotIn("None", d, (cmd, k))
+                if sch["type"] == "string":
+                    self.assertNotIn("0 à 200", d, (cmd, k))
+                self.assertEqual("défaut" in d, "default" in sch, (cmd, k, d))
+                if "pattern" in sch:
+                    self.assertIn("section/numéro", d, (cmd, k))
+                    self.assertNotIn("caractères", d, (cmd, k))
+                if "enum" in sch:
+                    self.assertIn(", ".join(sch["enum"]), d)
+                    self.assertNotIn("caractères", d, (cmd, k))
+                if sch["type"] == "integer":
+                    self.assertIn("entier de %d à %d" % (sch["minimum"], sch["maximum"]), d)
+
+
 # ------------------------------------------------------------------------------------------- vraie page TV
 @unittest.skipUnless(find_chromium() and shutil.which("node") and os.environ.get("OPENTV_TEST_PLAYWRIGHT"),
                      "bout en bout : OPENTV_TEST_PLAYWRIGHT=<module playwright> + Chromium + node")
@@ -516,6 +774,10 @@ class TestRealTvControl(unittest.TestCase):
         rates = mock.patch.dict(agentport.TOOL_RATES, clear=True)
         rates.start()
         self.addCleanup(rates.stop)
+        # chemin réel du pont Muse : Agent Port authentifié avec l'identité LIÉE « muse-device » (plafond = « muse »)
+        a.registry.set_policy({"muse": appmod.AGENT_LEVELS["control"], "hermit": [], "hermes": []})
+        dev_tok = a.registry.issue("muse-device", appmod.AGENT_LEVELS["control"])
+        svc = agentport.AgentService(a, a.registry, a.audit)
         import threading
         stop = threading.Event()
         c.reveal_after = 25                                                  # ~5 s de chargement visible
@@ -536,8 +798,9 @@ class TestRealTvControl(unittest.TestCase):
                         elif cmd["tool"] == "wait":
                             out = {"ok": True, "result": tp.wait_state(a.playback, tuple(cmd["states"]), 15)}
                         else:
-                            out = {"ok": True, "result": a.agent_control("muse", cmd["tool"], tools.validate_args(
-                                cmd["tool"], cmd.get("args") or {}))}
+                            r = svc.handle({"v": 1, "agent": "muse-device", "token": dev_tok, "op": "call",
+                                            "tool": cmd["tool"], "args": cmd.get("args") or {}}, peer_uid=os.getuid())
+                            out = {"ok": r["ok"], "result": r.get("result"), "error": r.get("error")}
                     except tools.ToolError as e:
                         out = {"ok": False, "error": str(e)}
                     out["status"] = a.agent_status("muse", ["control", "read"])["control"]
@@ -558,6 +821,7 @@ class TestRealTvControl(unittest.TestCase):
         st = {x["s"]: x for x in res["steps"]}
         # 1. fiche proposée, film hors des rangées : panneau « Proposé par Muse » avec sa phrase, Regarder en premier
         pr = st["proposed"]
+        # identité liée « muse-device » : libellé du PROPRIÉTAIRE, exactement « Proposé par Muse »
         self.assertEqual((pr["panel"], pr["kicker"], pr["ptitle"]), (True, "Proposé par Muse", "Rire Encore"))
         self.assertTrue(pr["pmeta"].startswith("« Une comédie pour finir la semaine. »"), pr["pmeta"])
         self.assertEqual(pr["btns"][0], {"t": "Regarder", "focused": True})
@@ -572,6 +836,11 @@ class TestRealTvControl(unittest.TestCase):
         # 3. film des rangées : focus sur SA carte puis fiche
         f2 = st["proposed_in_rows"]
         self.assertEqual((f2["focus"], f2["ptitle"], f2["kicker"]), ("Les Étoiles", "Les Étoiles", "Proposé par Muse"))
+        # 3b. priorité d'Alex aussi pour les fiches : sa fiche reste, la proposition est refusée (human_active)
+        self.assertEqual(res["applied"]["present_human_first"], ["failed", "human_active"])
+        ph = st["present_after_human"]
+        self.assertEqual((ph["panel"], ph["ptitle"], ph["focus"]), (True, "Les Étoiles", "Les Étoiles"))
+        self.assertEqual([b["focused"] for b in ph["btns"]][:2], [False, True])   # le → d'Alex est gardé
         # 4. play_title : écran OpenTV « Chargement… » puis lecteur ; close_player : retour sur la même fiche
         ld = st["agent_loading"]
         self.assertEqual((ld["overlay"], ld["ovTitle"], ld["ovMsg"]), (True, "Les Étoiles", "Chargement…"))
@@ -586,6 +855,16 @@ class TestRealTvControl(unittest.TestCase):
         # 5. page rechargée : aucune action déjà appliquée n'est rejouée
         self.assertEqual(res["reload_pending"], 0)
         self.assertEqual(st["reloaded"]["panel"], False)
+        # 6. message de l'identité liée : exactement « Message de Muse » (jamais l'identifiant brut ni « un assistant »)
+        self.assertEqual(st["message"]["banner"], "Message de Muse : Bonne soirée, Alex !")
+        for x in res["steps"]:
+            if x["kicker"].startswith("Proposé par"):
+                self.assertEqual(x["kicker"], "Proposé par Muse", x["s"])
+        # l'audit garde l'identité réellement authentifiée
+        with open(a.cfg.audit_file, encoding="utf-8") as f:
+            audit = [json.loads(line) for line in f if line.strip()]
+        self.assertTrue(audit)
+        self.assertEqual({x["agent"] for x in audit}, {"muse-device"})
         # jamais d'iframe, de navigation hors de /tv ni d'adresse dans le DOM
         for x in res["steps"]:
             self.assertEqual((x["iframes"], x["url"]), (0, "/tv"))

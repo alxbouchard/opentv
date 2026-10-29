@@ -492,13 +492,34 @@ Les actions TV (`opentv_pi/tvcontrol.py`) portent un `seq` croissant ; la page `
 (`POST /api/tv/action {seq, phase:"claim"}`, atomique : jamais appliquée deux fois, même page rechargée) puis rend
 compte (`phase:"done"`) : `queued` → `claimed` → `applied` | `failed` (raison bornée), ou `expired` (non réclamée en
 20 s), `failed:lost` (réclamée sans résultat en 15 s), `failed:superseded` (nouvelle fiche avant réclamation).
-`status` expose `control.playback` (idle/loading/playing/closing/closed/unavailable, `id`, `seq`) et
-`control.actions` (dernières actions et leur état) : queued, appliqué, en lecture et fermé restent quatre faits
-distincts. Priorité humaine : configuration ou « Gérer les assistants » ouverts ⇒ `tv_setup_active`/`tv_busy` ;
-pendant une lecture, aucune fiche ni touche (`player_active`) sauf fermeture ; une touche d'assistant moins de 2 s
-après une touche de la télécommande ou du téléphone est refusée (`human_active`) ; jamais les Réglages
-(`settings_forbidden`) ni « Regarder » par OK (`use_play_title`). La fiche proposée affiche « Proposé par Muse » et
-la phrase de l'assistant ; après une lecture, Retour revient sur cette même fiche.
+`status` expose, **seulement à un agent qui a le scope `control`**, `control.playback`
+(idle/loading/playing/closing/closed/unavailable, `id`, `seq`) et `control.actions` (dernières actions et leur état) :
+queued, appliqué, en lecture et fermé restent quatre faits distincts. Sans `control`, `status` répond
+`control: {enabled: false}` — ni film en cours, ni état de lecture, ni actions TV (moindre privilège).
+`play_title` ne part que d'un lecteur `idle` : tant qu'une fin (`closed`/`unavailable`) n'est pas acquittée par la
+page `/tv` (retour sur la fiche précédente en cours), il est refusé `player_returning` (vérifié sous le verrou de
+`Playback.start` ; « Regarder » d'Alex garde son contrat). Priorité humaine : configuration ou « Gérer les
+assistants » ouverts ⇒ `tv_setup_active`/`tv_busy` ; pendant une lecture, aucune fiche ni touche (`player_active`)
+sauf fermeture ; une touche **ou une fiche proposée** (`present_title`) mise en file moins de 2 s après une touche de
+la télécommande ou du téléphone (ou suivie d'une touche avant d'être appliquée) est refusée (`human_active`) : la
+fiche ou la carte qu'Alex vient d'ouvrir reste. `close_player` est toujours permis ; `play_title` (demande
+explicite d'Alex, lecture déjà acceptée par les portes) affiche toujours l'écran de chargement honnête. Jamais les
+Réglages (`settings_forbidden`) ni « Regarder » par OK (`use_play_title`). La fiche proposée affiche « Proposé par
+Muse » et la phrase de l'assistant ; après une lecture, Retour revient sur cette même fiche.
+
+**Identité liée** : le pont Muse s'authentifie comme `muse-device`, mais tout ce que voit Alex porte le nom de
+l'agent propriétaire (`agents.canonical_agent` : « Proposé par Muse », « Message de Muse », jamais l'identifiant
+brut) et ses budgets de débit (`TOOL_RATES`, appels/s, intervalle des messages et des propositions) sont **partagés**
+avec `muse` : deux identités ne doublent jamais le débit. L'audit et le journal gardent l'identité réellement
+authentifiée.
+
+**Texte libre** (`display_message`, phrase de `present_title`) : 1–140 caractères, inséré par `textContent`
+seulement ; refusés : contrôles et formats Unicode (surcharges/isolats/marques bidi, largeur nulle, BOM, tiret
+conditionnel, étiquettes), U+2028/U+2029, usage privé/non attribués, espaces exotiques (seuls espace, insécable,
+fine insécable et fine sont admis), plus de 3 diacritiques empilés, écritures de droite à gauche, et toute adresse —
+y compris déguisée : pleine chasse, point idéographique/pleine chasse/petite forme, lettres non latines
+(squelette NFKC + accents retirés), ou nom d'hôte suivi d'un mot (« evil.com ce soir »). Les titres français
+(accents, « », ’, E.T., O.S.S. 117, WALL·E, 8.1/10, émojis) restent intacts.
 
 ### 6 · Muse. Pont Muse (SDK Linux officiel, transport seulement)
 

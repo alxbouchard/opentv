@@ -30,6 +30,13 @@ LOCK_TIMEOUT_S = 5.0
 LINKED_POLICY = {"muse-device": "muse"}
 
 
+def canonical_agent(agent):
+    """Agent PROPRIÉTAIRE d'une identité authentifiée : « muse-device » -> « muse ». Sert à tout ce qui est visible ou
+    partagé sur la TV (nom affiché, « Proposé par … », « Message de … », budgets de débit) ; jamais à l'authentification
+    ni à l'audit, qui gardent l'identité réellement authentifiée."""
+    return LINKED_POLICY.get(agent, agent) if isinstance(agent, str) else agent
+
+
 def ceiling(policy, agent):
     """Plafond de scopes d'`agent` dans `policy` (ligne de l'agent parent pour une identité liée). None si absent."""
     v = policy.get(LINKED_POLICY.get(agent, agent)) if isinstance(policy, dict) else None

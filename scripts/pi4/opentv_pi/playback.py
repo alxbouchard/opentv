@@ -100,8 +100,10 @@ class Playback:
         self.log("playback_state", state=state, reason=self.reason, seq=self.seq)
 
     # -- API TV
-    def start(self, uid, item):
-        """-> (True, None) | (False, code). `item` = élément « Pour toi » validé (jamais une URL de l'appelant)."""
+    def start(self, uid, item, require_idle=False):
+        """-> (True, None) | (False, code). `item` = élément « Pour toi » validé (jamais une URL de l'appelant).
+        require_idle (assistant, play_title) : refus « returning » tant qu'une fin (closed/unavailable) n'est pas
+        acquittée par la page /tv — vérifié sous le même verrou que le passage à « loading » (aucune course)."""
         if not isinstance(item, dict) or not isinstance(uid, str):
             return False, "unknown_item"
         if not self.ready.is_set():   # remise à zéro de démarrage en cours : jamais d'ouverture concurrente
@@ -116,6 +118,8 @@ class Playback:
         with self.lock:
             if self.state in ACTIVE:
                 return False, "busy"
+            if require_idle and self.state != "idle":
+                return False, "returning"
             # « closed »/« unavailable » non acquittés : un nouveau OK vient forcément d'une page /tv visible
             sess = {"sid": secrets.token_urlsafe(18), "uid": uid, "item": item, "cancel": threading.Event(),
                     "why": None}

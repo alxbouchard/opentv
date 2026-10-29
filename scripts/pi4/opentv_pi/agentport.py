@@ -17,7 +17,7 @@ import struct
 import threading
 import time
 
-from . import bounded, tools
+from . import agents, bounded, tools
 
 MAX_REQUEST = 16 * 1024
 MAX_RESPONSE = 1024 * 1024
@@ -117,20 +117,24 @@ class AgentService:
             a = tools.validate_args(tool, args)
         except ValueError:
             return self._deny(agent, tool, None, "invalid_params", t0)
-        key = (uid, agent)
+        # budgets de débit au nom de l'agent PROPRIÉTAIRE : une identité liée (« muse-device ») partage ceux de son
+        # parent (« muse ») — deux identités ne doublent jamais le débit d'écran/lecteur ; l'audit garde l'identité
+        # authentifiée
+        owner = agents.canonical_agent(agent)
+        key = (uid, owner)
         with self.lock:
             win = [x for x in self.calls.get(key, []) if x > now - 1.0]
             if len(win) >= CALLS_PER_S:
                 self.calls[key] = win
                 limited = True
-            elif tool in TOOL_RATES and self._tool_limited(agent, tool, now):
+            elif tool in TOOL_RATES and self._tool_limited(owner, tool, now):
                 limited = True
             else:
                 limited = False
                 win.append(now)
                 self.calls[key] = win
                 if tool in TOOL_RATES:
-                    self.tool_calls.setdefault((agent, tool), collections.deque()).append(now)
+                    self.tool_calls.setdefault((owner, tool), collections.deque()).append(now)
             if len(self.calls) > MAX_TRACKED_UIDS or len(self.tool_calls) > MAX_TRACKED_UIDS:
                 self._prune(now)
         if limited:

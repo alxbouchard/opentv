@@ -8,6 +8,7 @@ FEEDBACK_ACTIONS = ("clear-not-tonight", "clear-opinion", "dislike", "like", "no
 HISTORY_LISTS = ("events", "opened", "liked", "disliked", "seen", "watchlist", "not-tonight")
 UID_PATTERN = r"^[a-z][a-z0-9-]{1,23}/[0-9]{1,12}$"
 NAV_KEYS = ("up", "down", "left", "right", "ok", "back", "home")   # = REMOTE_ACTIONS de tv.js (vérifié par les tests)
+ID_DESC = "Identifiant stable du catalogue accepté, ex. films/17397"
 
 
 def _int(lo, hi, default, desc):
@@ -40,8 +41,9 @@ TOOLS = [
     {"name": "feedback", "scope": "feedback", "title": "Avis sur un titre",
      "description": "Enregistre un avis explicite (J'aime, Pas pour moi, Déjà vu, À voir plus tard, Pas ce soir) "
                     "sur un identifiant du catalogue. Idempotent. Ouvrir un film n'est jamais « vu ».",
-     "inputSchema": _obj({"id": {"type": "string", "pattern": UID_PATTERN, "description": "ex. films/17397"},
-                          "action": {"type": "string", "enum": list(FEEDBACK_ACTIONS)}}, ("id", "action"))},
+     "inputSchema": _obj({"id": {"type": "string", "pattern": UID_PATTERN, "description": ID_DESC},
+                          "action": {"type": "string", "enum": list(FEEDBACK_ACTIONS), "description": "Avis"}},
+                         ("id", "action"))},
     {"name": "history", "scope": "read", "title": "Historique « Pour toi »",
      "description": "Historique local (changements, ouvertures, listes) paginé.",
      "inputSchema": _obj({"list": {"type": "string", "enum": list(HISTORY_LISTS), "default": "events"},
@@ -49,7 +51,8 @@ TOOLS = [
     {"name": "display_message", "scope": "display", "title": "Afficher un message sur la TV",
      "description": "Affiche une courte bannière (texte seul, sans adresse) sur l'écran OpenTV. Limité à un "
                     "message toutes les 5 secondes par agent.",
-     "inputSchema": _obj({"text": {"type": "string", "minLength": 1, "maxLength": 140},
+     "inputSchema": _obj({"text": {"type": "string", "minLength": 1, "maxLength": 140,
+                                   "description": "Message affiché"},
                           "seconds": _int(5, 60, 15, "Durée d'affichage")}, ("text",))},
     # ---- pilotage (scope « control », accordé explicitement par le propriétaire) : commandes SÉMANTIQUES typées,
     # jamais d'URL, de chemin, de touche brute de la TV, de durée libre ni de boucle ; résultats = état accepté/persisté
@@ -60,15 +63,15 @@ TOOLS = [
                     "(goûts « Pour toi », historique, notes), explique ton choix en une phrase, puis appelle cet outil : "
                     "Alex décide avec sa télécommande ou en te demandant de le lancer. Refusé pendant une lecture ou "
                     "un réglage en cours. Résultat : action mise en file (queued) ; suivre son état avec status.",
-     "inputSchema": _obj({"id": {"type": "string", "pattern": UID_PATTERN, "description": "ex. films/17397"},
+     "inputSchema": _obj({"id": {"type": "string", "pattern": UID_PATTERN, "description": ID_DESC},
                           "text": {"type": "string", "minLength": 1, "maxLength": 140,
-                                   "description": "Pourquoi ce film (une phrase, sans adresse)"}}, ("id",))},
+                                   "description": "Pourquoi ce film, en une phrase"}}, ("id",))},
     {"name": "play_title", "scope": "control", "title": "Lancer un film (à la demande d'Alex)",
      "description": "Lance un film du catalogue accepté par le lecteur officiel promu d'OpenTV, SEULEMENT quand Alex "
                     "demande explicitement de le regarder. Mêmes portes que le bouton « Regarder » (source approuvée, "
                     "promotion terrain, contrôleur) ; refusé si indisponible ou si une lecture est déjà en cours. "
                     "Résultat : lecture acceptée (loading), jamais « visible » ; suivre playback dans status.",
-     "inputSchema": _obj({"id": {"type": "string", "pattern": UID_PATTERN, "description": "ex. films/17397"}},
+     "inputSchema": _obj({"id": {"type": "string", "pattern": UID_PATTERN, "description": ID_DESC}},
                          ("id",))},
     {"name": "close_player", "scope": "control", "title": "Fermer le lecteur",
      "description": "Ferme le lecteur en cours et revient à OpenTV sur la fiche du film. Sans lecture en cours : "
@@ -79,7 +82,7 @@ TOOLS = [
                     "present_title/play_title/close_player ; débit borné, la télécommande d'Alex reste prioritaire, "
                     "jamais d'accès aux Réglages ni de lancement de film par OK (utiliser play_title). Pendant une "
                     "lecture, seules back/home sont acceptées (elles ferment le lecteur).",
-     "inputSchema": _obj({"key": {"type": "string", "enum": list(NAV_KEYS)}}, ("key",))},
+     "inputSchema": _obj({"key": {"type": "string", "enum": list(NAV_KEYS), "description": "Touche"}}, ("key",))},
 ]
 TOOL_BY_NAME = {t["name"]: t for t in TOOLS}
 CONTROL_TOOLS = tuple(t["name"] for t in TOOLS if t["scope"] == "control")

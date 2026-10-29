@@ -33,6 +33,9 @@
                  seen: ["seen", true, "unseen"], watchlist: ["watchlist", true, "unwatchlist"],
                  "not-tonight": ["not_tonight", true, "clear-not-tonight"] };
   var AGENTS = { muse: "Muse", hermit: "Hermit", hermes: "Hermes" };
+  // nom affiché d'un assistant : le service envoie l'agent PROPRIÉTAIRE (« muse-device » -> « muse ») ; jamais un
+  // identifiant technique brut ni une propriété héritée d'Object (« constructor »…)
+  function agentName(id) { return typeof id === "string" && AGENTS.hasOwnProperty(id) ? AGENTS[id] : "un assistant"; }
   var NET = { ethernet: "Ethernet", wifi: "Wi-Fi", hotspot: "Wi-Fi temporaire", offline: "Hors ligne" };
   // Reprise après redémarrage du service : la clé de page change à chaque démarrage. Un 403 explicite « tv_key »
   // recharge /tv (qui porte la nouvelle clé) après une attente croissante, au plus RELOAD_MAX fois par fenêtre,
@@ -482,7 +485,7 @@
     });
     var kicker = row ? row.title : "", text = it.description || meta(it, false);
     if (prop) {   // fiche proposée par un assistant : son nom et sa phrase (texte seul, sans adresse) en tête
-      kicker = "Proposé par " + (AGENTS[prop.from] || "un assistant");
+      kicker = "Proposé par " + agentName(prop.from);
       if (prop.text) { text = "« " + prop.text + " »" + (text ? " — " + text : ""); }
     }
     showPanel("item", kicker, it.title, text, actions.map(function (a) {
@@ -791,19 +794,26 @@
   function validItem(it, id) {
     return !!(it && typeof it === "object" && it.id === id && typeof it.title === "string" && it.title);
   }
+  // touche humaine (télécommande, clavier, téléphone) moins de HUMAN_PRIORITY_MS avant la mise en file d'une action
+  // d'assistant, ou depuis : l'humain gagne (jamais de focus ni de fiche volés à Alex pendant qu'il navigue)
+  function humanRecent(queuedAt) { return !!(lastHumanAt && lastHumanAt > queuedAt - HUMAN_PRIORITY_MS); }
   function applyAction(x, sentAt) {   // -> null (appliquée) | code de refus
     if (!state || state.setup.active) { return "tv_setup_active"; }
-    if (x.kind === "key") {   // heure de mise en file estimée sur l'horloge de la page (au plus tôt)
-      return agentKey(x.key, (sentAt || Date.now()) - (typeof x.age_ms === "number" ? Math.max(0, x.age_ms) : 0));
-    }
+    // heure de mise en file estimée sur l'horloge de la page (au plus tôt : la latence favorise l'humain)
+    var queuedAt = (sentAt || Date.now()) - (typeof x.age_ms === "number" ? Math.max(0, x.age_ms) : 0);
+    if (x.kind === "key") { return agentKey(x.key, queuedAt); }
     if (!validItem(x.item, x.id)) { return "bad_item"; }
     var prop = { from: x.from, text: typeof x.text === "string" ? x.text : null };
-    if (x.kind === "present") {
+    if (x.kind === "present") {   // change le focus et ouvre une fiche : même priorité humaine que les touches
       if (play) { return "player_active"; }                          // jamais de vol du focus du lecteur
       if (panel && panel.kind !== "item") { return "tv_busy"; }      // Réglages / assistants : l'humain d'abord
+      if (humanRecent(queuedAt)) { return "human_active"; }          // fiche/carte qu'Alex vient d'ouvrir : gardée
       presentItem(x.item, prop);
       return null;
     }
+    // « play » : la lecture est DÉJÀ acceptée côté service (play_title = demande explicite d'Alex, portes de
+    // « Regarder ») et le lecteur va apparaître quoi qu'il arrive ; la page montre donc honnêtement l'écran de
+    // chargement puis revient sur la fiche du film. Fermer (close_player) reste toujours permis.
     if (x.kind === "play") { return agentPlay(x, prop); }
     return "bad_kind";
   }
@@ -841,8 +851,7 @@
   function agentKey(a, queuedAt) {   // touche d'un assistant : jamais prioritaire, jamais Réglages ni « Regarder »
     if (REMOTE_ACTIONS[a] !== 1) { return "bad_key"; }
     if (play) { return "player_active"; }   // Retour/Accueil pendant une lecture : fermés côté service
-    // touche humaine moins de HUMAN_PRIORITY_MS avant la mise en file de cette touche, ou depuis : l'humain gagne
-    if (lastHumanAt && lastHumanAt > queuedAt - HUMAN_PRIORITY_MS) { return "human_active"; }
+    if (humanRecent(queuedAt)) { return "human_active"; }
     if (panel && panel.kind !== "item") {
       if (panel.kind === "agents") { return "tv_busy"; }
       if (a !== "back" && a !== "home") { return "settings_forbidden"; }
@@ -926,7 +935,7 @@
     $("agents").hidden = !conn.length;
     // message d'assistant : accueil seulement, emplacement réservé dans le héros (jamais sur le titre ni un QR)
     var b = $("banner"), showMsg = !!s.message && !s.setup.active;
-    if (showMsg) { b.textContent = "Message de " + (AGENTS[s.message.from] || s.message.from) + " : " + s.message.text; }
+    if (showMsg) { b.textContent = "Message de " + agentName(s.message.from) + " : " + s.message.text; }
     b.hidden = !showMsg;
     $("hero").className = "hero" + (showMsg ? " msg" : "");
     $("setup").hidden = !s.setup.active;

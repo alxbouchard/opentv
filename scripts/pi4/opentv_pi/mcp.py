@@ -25,7 +25,9 @@ ERRORS_FR = {"unauthorized": "agent non autorisé", "forbidden_scope": "outil ho
              "usage": "requête refusée", "store_unavailable": "historique indisponible",
              "service_unavailable": "service OpenTV indisponible",
              "player_active": "un film est en cours : seule la fermeture est possible",
-             "player_busy": "un film est déjà en cours", "playback_unavailable": "lecture indisponible sur cette TV",
+             "player_busy": "un film est déjà en cours",
+             "player_returning": "OpenTV revient sur la fiche du film précédent : réessaie dans un instant",
+             "playback_unavailable": "lecture indisponible sur cette TV",
              "tv_busy": "la TV est dans un réglage : réessaie après", "tv_setup_active": "OpenTV est en configuration",
              "tv_queue_full": "trop d'actions en attente sur la TV", "control_unavailable": "pilotage indisponible"}
 
