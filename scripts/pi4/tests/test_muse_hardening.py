@@ -152,16 +152,29 @@ class TestDedicatedIdentity(tmb.AdminBase):
         self.assertTrue(r["replaced_identity"]["agent_revoked"])
         self.assertIsNone(self.reg().authenticate(MUSE_DEV, foreign))
         mine = json.loads(read(self.client()))["token"]
-        self.assertEqual(self.reg().authenticate(MUSE_DEV, mine), ["read"])
+        self.assertEqual(self.reg().authenticate(MUSE_DEV, mine), tmb.CONTROL)
         self.assertEqual(self.admin().identity_state(self.pwmap["opentv-muse"])["state"], "owned")
         self.assertTrue(os.path.isfile(self.client(MUSE_DEV, self.other_uid())))   # fichier d'autrui jamais retiré
 
-    def test_wider_dedicated_identity_fails_closed(self):
-        tok = self.reg().issue(MUSE_DEV, ["feedback", "read"])
-        agents.write_client_config(self.client(), MUSE_DEV, tok, "/run/x.sock")
-        r, code = self.pair()
-        self.assertEqual((r["error"], r["reason"], code),
-                         ("muse_device_identity_unexpected", "scopes_not_read_only", 2))
+    def test_owned_identity_with_other_scopes_is_reissued_exactly(self):
+        """Ancien pont en lecture seule (prouvé à nous par le jeton de notre fichier client) : révoqué puis réémis
+        avec exactement les scopes du pont, sans nouvel appariement Bluetooth ; jamais élargi au-delà du plafond."""
+        old = self.reg().issue(MUSE_DEV, ["read"])
+        agents.write_client_config(self.client(), MUSE_DEV, old, "/run/x.sock")
+        fsutil.atomic_write_path(self.j("/var/lib/opentv-muse/sdk_token"), (tmb.SDK_TOKEN + "\n").encode())
+        fsutil.atomic_write_path(self.j("/var/lib/opentv-muse/pairing.json"),
+                                 json.dumps({"access_token": tmb.ACCESS, "refresh_token": tmb.REFRESH}))
+        self.assertEqual(self.admin().identity_state(self.pwmap["opentv-muse"])["state"], "outdated")
+        r, code = self.pair(stdin="")
+        self.assertEqual((r["result"], code), ("already_paired", 0), r)
+        self.assertNotIn("start --no-block " + museadmin.PAIR_UNIT, self.cmds())   # aucun Bluetooth
+        self.assertIsNone(self.reg().authenticate(MUSE_DEV, old))
+        new = json.loads(read(self.client()))["token"]
+        self.assertEqual(self.reg().authenticate(MUSE_DEV, new), tmb.CONTROL)
+        # plafond sans pilotage : refus avant toute écriture (jamais un pont à moitié autorisé ni --force)
+        self.reg().set_policy({"muse": ["display", "feedback", "read"], "hermit": [], "hermes": []})
+        r, code = self.pair(stdin="")
+        self.assertEqual((r["error"], code), ("muse_control_not_authorized", 2))
 
     def test_unpair_revokes_only_an_identity_it_owns(self):
         foreign = self.reg().issue(MUSE_DEV, ["read"])
@@ -197,21 +210,24 @@ class TestDedicatedIdentity(tmb.AdminBase):
         self.assertEqual(self.pair()[1], 0)
         tok = json.loads(read(self.client()))["token"]
         reg = self.reg()
-        self.assertEqual(reg.authenticate(MUSE_DEV, tok), ["read"])
-        # plafond relu à chaque appel : Muse réduite à « feedback » sur la TV (écriture brute) ⇒ refus immédiat
+        self.assertEqual(reg.authenticate(MUSE_DEV, tok), tmb.CONTROL)
+        # plafond relu à chaque appel : Muse réduite sur la TV (écriture brute) ⇒ scopes réduits aussitôt
         data = json.loads(read(self.cfg.registry_file))
-        data["policy"]["muse"] = ["feedback"]
+        data["policy"]["muse"] = []
         fsutil.atomic_write_path(self.cfg.registry_file, json.dumps(data).encode())
         self.assertIsNone(reg.authenticate(MUSE_DEV, tok))
         data["policy"]["muse"] = ["feedback", "read"]
         fsutil.atomic_write_path(self.cfg.registry_file, json.dumps(data).encode())
-        self.assertEqual(reg.authenticate(MUSE_DEV, tok), ["read"])
+        self.assertEqual(reg.authenticate(MUSE_DEV, tok), ["feedback", "read"])     # jamais control ni display
+        data["policy"]["muse"] = list(tmb.CONTROL)
+        fsutil.atomic_write_path(self.cfg.registry_file, json.dumps(data).encode())
+        self.assertEqual(reg.authenticate(MUSE_DEV, tok), tmb.CONTROL)
         # « Gérer les assistants » : Muse « Aucun accès » ⇒ identité du pont révoquée dans la même écriture
         _, fp, _ = reg.snapshot(appmod.KNOWN_AGENTS)
         self.assertEqual(reg.apply_policy_changes({"muse": []}, appmod.KNOWN_AGENTS, fp), {"muse": "policy"})
         self.assertIsNone(reg.list().get(MUSE_DEV))
         # QR de configuration (set_policy, revoke_exceeding) : même règle
-        reg.set_policy({"muse": ["read"], "hermit": [], "hermes": []})
+        reg.set_policy({"muse": list(tmb.CONTROL), "hermit": [], "hermes": []})
         self.assertEqual(self.pair(stdin="", force=True)[1], 0)
         self.assertIsNotNone(reg.list().get(MUSE_DEV))
         self.assertIn(MUSE_DEV, reg.set_policy({"muse": [], "hermit": [], "hermes": []}, revoke_exceeding=True))

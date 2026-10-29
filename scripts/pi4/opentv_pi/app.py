@@ -14,7 +14,7 @@ import threading
 import time
 
 from . import (VERSION, agents, bootid, cec, config, fsutil, netjobs, netstate, nethelper, peeruid, phoneremote,
-               validate, wifiscan)
+               tools, tvcontrol, validate, wifiscan)
 from .foryou import ForYou, EngineError
 from . import promotion
 from . import source as sourcemod
@@ -24,8 +24,11 @@ from .setup_token import SetupToken
 
 KNOWN_AGENTS = ("muse", "hermit", "hermes")
 AGENT_NAMES = {"muse": "Muse", "hermit": "Hermit", "hermes": "Hermes"}
+# Niveaux emboîtés (moindre privilège) : aucun ⊂ lecture ⊂ avis ⊂ messages (« full ») ⊂ pilotage (« control »).
+# « control » n'est JAMAIS un défaut : seulement un choix explicite du propriétaire (téléphone « Gérer les assistants »
+# ou `opentv-pi muse authorize-control --yes` en root) ; aucune installation ni mise à jour ne l'accorde.
 AGENT_LEVELS = {"none": [], "read": ["read"], "feedback": ["feedback", "read"],
-                "full": ["display", "feedback", "read"]}
+                "full": ["display", "feedback", "read"], "control": ["control", "display", "feedback", "read"]}
 # « Gérer les assistants » (Réglages TV) : mode dédié, distinct de la configuration. Il n'ouvre que la page
 # /assistants sur l'adresse LAN (jamais 0.0.0.0, jamais en configuration ni hors ligne), avec son propre jeton à
 # usage unique ; il ne touche ni au Wi-Fi, ni au nom, ni au hotspot, ni aux jobs réseau, et n'émet aucune identité.
@@ -44,9 +47,10 @@ AGENT_KEEP = "keep"   # « Ne rien changer pour lui » : aucune écriture de sa 
 
 
 def level_of(scopes):
-    """Scopes -> préréglage affiché (none|read|feedback|full) ; « display » = tout."""
+    """Scopes -> préréglage affiché (none|read|feedback|full|control) : le scope le plus fort décide."""
     sc = set(scopes or ())
-    return "full" if "display" in sc else "feedback" if "feedback" in sc else "read" if "read" in sc else "none"
+    return "control" if "control" in sc else "full" if "display" in sc else "feedback" if "feedback" in sc else \
+        "read" if "read" in sc else "none"
 
 
 def choice_changes(x, new):
@@ -188,6 +192,7 @@ class App:
         self._scan_thread, self.scan_prime_at = None, -1e9
         self.ap_stop_at = -1e9
         self.playback = self._make_playback(cfg, log, mono)
+        self.tv_actions = tvcontrol.TvActions(mono=mono, log=log)   # pilotage par assistant (scope control)
         if self.remote is not None:
             self.remote.interceptor = self._remote_intercept
         self.boot_id = _boot_id(proc_root)
@@ -262,6 +267,7 @@ class App:
             self.log("setup_flag_error", error=getattr(e, "reason", type(e).__name__))
 
     def request_setup(self):
+        self.tv_actions.cancel_queued("tv_setup_active")
         self._touch_setup_flag()
         with self.lock:
             self._hs_rearm("tv")   # demande explicite depuis la TV : le Wi-Fi temporaire peut de nouveau servir
@@ -825,6 +831,7 @@ class App:
                 return False, "offline"
             self.agents_token.issue()
             self.agents_mode = True
+        self.tv_actions.cancel_queued("tv_busy")   # jamais une action d'assistant sur la feuille des assistants
         self.log("agents_manage", state="open")
         return True, None
 
@@ -989,7 +996,9 @@ class App:
                     "cec": {"adapters": len(self.cec["adapters"])},
                     "assistants": dict(assistants, manage=self._agents_view()),
                     "foryou": self.foryou is not None, "remote": self._remote_view(),
-                    "playback": self.playback.view()}
+                    "playback": self.playback.view(),
+                    # pilotage par assistant : actions en attente (fiche, film lancé, touche), à réclamer une fois
+                    "actions": {"pending": [] if self.setup_mode else self.tv_actions.pending()}}
 
     def _catalogue_sig(self):
         """Signature du catalogue (périphérique, inode, taille, mtime_ns) ; None si illisible (repli : TTL seul)."""
@@ -1032,10 +1041,108 @@ class App:
                     "setup_active": self.setup_mode, "network": {"mode": mode, "online": mode in ("ethernet", "wifi")},
                     "cec": {"adapters": len(self.cec["adapters"]), "discovery_only": True},
                     "agent": {"id": agent, "scopes": list(scopes)}, "relay": {"status": "not_implemented"},
-                    "version": VERSION}
+                    "version": VERSION, "control": self._control_view(scopes)}
 
     def show_message(self, agent, text, seconds):
         with self.lock:
             self.message = {"text": text, "from": agent, "until": self.mono() + seconds}
         self.log("agent_message", agent=agent, length=len(text))
         return {"shown": True, "seconds": seconds}
+
+    # -- pilotage par assistant (scope « control ») : commandes sémantiques typées, jamais d'URL ni de touche brute
+    def _control_view(self, scopes):   # sous self.lock (agent_status) : lectures sans verrou du service
+        pb = self.playback.view()
+        out = {"enabled": "control" in scopes,
+               "playback": {"available": pb["available"], "state": pb["state"], "id": pb["id"],
+                            "reason": pb["reason"], "seq": pb["seq"]}}
+        if "control" in scopes:
+            out["actions"] = self.tv_actions.recent()
+        return out
+
+    def _fy_lookup(self, uid):
+        """-> (élément du catalogue accepté, fiche TV) ; (None, None) si absent. Sélection reconstruite au besoin."""
+        if self.foryou is None or not isinstance(uid, str):
+            return None, None
+        with self.fy_lock:
+            if self.fy_session is None or self.mono() - self.fy_at >= FORYOU_TTL_S or \
+                    (self._catalogue_sig() not in (None, self.fy_sig)):
+                self._fy_rebuild()
+            sess = self.fy_session
+            item = (sess.get("by_uid") or {}).get(uid)
+            if item is None:
+                return None, None
+            return item, self.foryou.tv_item(sess, uid)
+
+    def agent_control(self, agent, name, a):
+        """Outils de pilotage de l'Agent Port (déjà authentifiés, scope control vérifié, arguments validés, débit
+        borné). -> résultat autoritaire (état accepté/persisté), ou tools.ToolError(code stable).
+
+        Priorité humaine : configuration ou « Gérer les assistants » ouverts ⇒ refus ; pendant une lecture, seule la
+        fermeture (close_player, back/home) est acceptée — jamais une fiche ni une touche qui volerait le focus du
+        lecteur. Le lancement passe par Playback.start, exactement comme « Regarder » (source approuvée, promotion
+        terrain, contrôleur prêt) : aucune porte n'est contournée et aucune adresse n'est vue ni produite ici."""
+        # fermer le lecteur est toujours permis (jamais de focus volé : on rend la main à OpenTV), même pendant un
+        # réglage ; tout le reste attend que l'humain ait fini (configuration, « Gérer les assistants »)
+        if name == "close_player" or (name == "remote_control" and a["key"] in ("back", "home") and
+                                      self.playback.active()):
+            closed = self.playback.active()
+            if closed:
+                self.playback.close("agent")
+            self.log("agent_control", agent=agent, tool=name, ok=True)
+            if name == "remote_control":
+                return {"accepted": True, "effect": "player_closing", "playback": self._pb_public()}
+            return {"closed": closed, "playback": self._pb_public()}
+        with self.lock:
+            if self.setup_mode or self.device is None:
+                raise tools.ToolError("tv_setup_active")
+            if self.agents_mode:
+                raise tools.ToolError("tv_busy")
+        if name == "remote_control":
+            if self.playback.active():   # lecteur au premier plan : seules Retour/Accueil (ci-dessus) le ferment
+                raise tools.ToolError("player_active")
+            return {"accepted": True, "action": self._push("key", agent, {"key": a["key"]})}
+        item, tvitem = self._fy_lookup(a["id"])
+        if item is None or tvitem is None:
+            raise tools.ToolError("unknown_id")
+        uid = a["id"]
+        if name == "present_title":
+            if self.playback.active():
+                raise tools.ToolError("player_active")
+            payload = {"id": uid, "item": tvitem}
+            if a.get("text"):
+                payload["text"] = a["text"]
+            act = self._push("present", agent, payload)
+            return {"accepted": True, "id": uid, "title": tvitem.get("title"), "action": act}
+        if name == "play_title":
+            ok, err = self.playback.start(uid, item)
+            if not ok:
+                raise tools.ToolError({"busy": "player_busy", "unavailable": "playback_unavailable"}.get(
+                    err, "playback_refused"))
+            pb = self._pb_public()
+            try:   # la page TV montre la fiche du film sous le lecteur et y revient à la fermeture
+                act = self._push("play", agent, {"id": uid, "item": tvitem, "playback_seq": pb["seq"]})
+            except tools.ToolError:
+                act = None   # file pleine : la lecture reste acceptée, la page la reprend par son état
+            self.log("agent_control", agent=agent, tool=name, ok=True)
+            return {"accepted": True, "id": uid, "title": tvitem.get("title"), "playback": pb, "action": act}
+        raise tools.ToolError("unknown_tool")
+
+    def _push(self, kind, agent, payload):
+        try:
+            return self.tv_actions.push(kind, agent, payload)
+        except tvcontrol.QueueFull:
+            raise tools.ToolError("tv_queue_full")
+
+    def _pb_public(self):
+        v = self.playback.view()
+        return {"state": v["state"], "id": v["id"], "reason": v["reason"], "seq": v["seq"]}
+
+    def tv_action(self, seq, phase, ok=None, reason=None):
+        """Page /tv : claim (une seule fois) puis done. -> (code HTTP, corps)."""
+        if phase == "claim":
+            act = self.tv_actions.claim(seq)
+            return (200, {"ok": True, "action": act}) if act is not None else (409, {"ok": False, "error": "gone"})
+        if phase == "done":
+            changed = self.tv_actions.done(seq, ok, reason if isinstance(reason, str) else None)
+            return (200 if changed else 409), {"ok": changed}
+        return 400, {"ok": False, "error": "bad_phase"}

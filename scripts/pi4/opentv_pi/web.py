@@ -88,7 +88,8 @@ TV_KEY_ERROR = "tv_key"   # 403 de /api/tv/* : clé de page périmée (service r
 MAX_FORM = 4096
 AGENT_LABELS = (("muse", "Muse"), ("hermit", "Hermit"), ("hermes", "Hermes"))
 LEVEL_LABELS = (("none", "Aucun accès"), ("read", "Voir seulement"), ("feedback", "Voir + donner mon avis"),
-                ("full", "Tout : avis + messages sur la TV"))
+                ("full", "Avis + messages sur la TV"),
+                ("control", "Piloter OpenTV : proposer et lancer des films"))
 
 
 # Journal HTTP : erreurs et non-2xx toujours ; navigations de page (/tv, /setup) toujours (rares, bornées) ; succès
@@ -334,6 +335,14 @@ class TVHandler(_Base):
             seq = body.get("seq")
             ok = isinstance(seq, int) and not isinstance(seq, bool) and self.app.playback.ack(seq)
             return self.send_json(200, {"ok": ok, "playback": self.app.playback.view()})
+        if path == "/api/tv/action":   # pilotage par assistant : réclamer (une fois) puis rendre compte
+            seq = body.get("seq")
+            if not isinstance(seq, int) or isinstance(seq, bool):
+                return self.send_json(400, {"ok": False, "error": "bad_seq"})
+            ok = body.get("ok")
+            code, out = self.app.tv_action(seq, body.get("phase"), ok=ok if isinstance(ok, bool) else None,
+                                           reason=body.get("reason"))
+            return self.send_json(code, out)
         if path == "/api/tv/setup":
             self.app.request_setup()
             return self.send_json(200, {"ok": True})
@@ -686,7 +695,7 @@ class LANHandler(_Base):
 # de fichier client, de commande ou d'adresse technique.
 AGENT_STEPS = 3
 LEVEL_SHORT = {"none": "Aucun accès", "read": "Voir seulement", "feedback": "Voir + donner mon avis",
-               "full": "Tout : avis + messages sur la TV"}
+               "full": "Avis + messages sur la TV", "control": "Piloter OpenTV : proposer et lancer des films"}
 AGENTS_DENIED = ("Ce QR a expiré ou a déjà servi. Sur la TV : Réglages, puis «\u00a0Gérer les assistants\u00a0» pour "
                  "en afficher un nouveau.")
 
@@ -786,7 +795,7 @@ def agents_plan(lst, values):
 
 def _consequence(x, new):
     """Effet réel d'un choix sur un assistant (jamais d'affirmation de connexion pour un assistant absent)."""
-    rank = {"none": 0, "read": 1, "feedback": 2, "full": 3}
+    rank = {"none": 0, "read": 1, "feedback": 2, "full": 3, "control": 4}
     if x["connected"] and new == "none":
         return "Il sera déconnecté tout de suite (il faudra le réinstaller pour lui redonner accès)."
     if x["connected"] and rank[new] < rank[x["connected_level"]]:

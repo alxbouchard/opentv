@@ -27,6 +27,15 @@ AUTH_FAIL_WINDOW_S = 60.0
 AUTH_LOCK_S = 60.0
 CALLS_PER_S = 10
 DISPLAY_MIN_INTERVAL_S = 5.0
+# Débits par AGENT (tous comptes confondus : ils protègent l'écran et le lecteur, pas le socket) : outil -> fenêtres
+# (nombre maximal, durée en s). Aucune boucle de clics ni rafale de propositions/lancements n'est possible.
+TOOL_RATES = {
+    "display_message": ((1, DISPLAY_MIN_INTERVAL_S),),
+    "present_title": ((1, 3.0), (20, 600.0)),
+    "play_title": ((1, 10.0), (6, 600.0)),
+    "close_player": ((1, 2.0), (30, 600.0)),
+    "remote_control": ((3, 1.0), (60, 60.0)),
+}
 MAX_TRACKED_UIDS = 256    # tables de débit/verrouillage bornées (les entrées inactives sont purgées)
 
 
@@ -38,7 +47,7 @@ class AgentService:
         self.fails = {}          # uid -> deque des échecs récents
         self.locked_until = {}   # uid -> fin du verrouillage
         self.calls = {}          # (uid, agent) -> horodatages de la dernière seconde
-        self.last_display = {}   # agent -> dernier message affiché (protège l'écran, tous comptes confondus)
+        self.tool_calls = {}     # (agent, outil limité) -> horodatages récents (TOOL_RATES, tous comptes confondus)
 
     def _prune(self, now):
         """Borne les tables par UID : purge des entrées expirées, puis des plus anciennes si nécessaire."""
@@ -48,10 +57,23 @@ class AgentService:
             del self.fails[uid]
         for k in [k for k, w in self.calls.items() if not w or w[-1] <= now - 1.0]:
             del self.calls[k]
+        for k in [k for k, w in self.tool_calls.items()
+                  if not w or w[-1] <= now - max(s for _, s in TOOL_RATES.get(k[1], ((0, 0.0),)))]:
+            del self.tool_calls[k]
         while len(self.fails) > MAX_TRACKED_UIDS:
             del self.fails[min(self.fails, key=lambda u: self.fails[u][-1])]
         while len(self.locked_until) > MAX_TRACKED_UIDS:
             del self.locked_until[min(self.locked_until, key=self.locked_until.get)]
+
+    def _tool_limited(self, agent, tool, now):   # sous self.lock
+        rates = TOOL_RATES[tool]
+        q = self.tool_calls.get((agent, tool))
+        if not q:
+            return False
+        longest = max(s for _, s in rates)
+        while q and q[0] <= now - longest:
+            q.popleft()
+        return any(sum(1 for t in q if t > now - span) >= n for n, span in rates)
 
     def _deny(self, agent, tool, args, code, t0):
         self.audit.record(agent, tool, args, False, code, (time.monotonic() - t0) * 1000)
@@ -101,15 +123,15 @@ class AgentService:
             if len(win) >= CALLS_PER_S:
                 self.calls[key] = win
                 limited = True
-            elif tool == "display_message" and now - self.last_display.get(agent, -1e9) < DISPLAY_MIN_INTERVAL_S:
+            elif tool in TOOL_RATES and self._tool_limited(agent, tool, now):
                 limited = True
             else:
                 limited = False
                 win.append(now)
                 self.calls[key] = win
-                if tool == "display_message":
-                    self.last_display[agent] = now
-            if len(self.calls) > MAX_TRACKED_UIDS:
+                if tool in TOOL_RATES:
+                    self.tool_calls.setdefault((agent, tool), collections.deque()).append(now)
+            if len(self.calls) > MAX_TRACKED_UIDS or len(self.tool_calls) > MAX_TRACKED_UIDS:
                 self._prune(now)
         if limited:
             return self._deny(agent, tool, a, "rate_limited", t0)

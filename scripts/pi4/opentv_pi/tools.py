@@ -7,6 +7,7 @@ FEEDBACK_ACTIONS = ("clear-not-tonight", "clear-opinion", "dislike", "like", "no
                     "unwatchlist", "watchlist")   # = opentv_foryou.ACTIONS (vérifié par les tests)
 HISTORY_LISTS = ("events", "opened", "liked", "disliked", "seen", "watchlist", "not-tonight")
 UID_PATTERN = r"^[a-z][a-z0-9-]{1,23}/[0-9]{1,12}$"
+NAV_KEYS = ("up", "down", "left", "right", "ok", "back", "home")   # = REMOTE_ACTIONS de tv.js (vérifié par les tests)
 
 
 def _int(lo, hi, default, desc):
@@ -23,10 +24,12 @@ TOOLS = [
                     "(découverte), catalogue et profil « Pour toi ». Aucune adresse ni secret.",
      "inputSchema": _obj({})},
     {"name": "recommend", "scope": "read", "title": "Recommandations « Pour toi »",
-     "description": "Sélection personnelle expliquée, filtrée sur le catalogue accepté (paginée).",
+     "description": "Sélection personnelle expliquée (goûts explicites, notes, nouveautés), filtrée sur le catalogue "
+                    "accepté (paginée). Point de départ pour choisir TOI-MÊME un film à proposer à Alex.",
      "inputSchema": _obj({"limit": _int(1, 20, 5, "Nombre d'éléments"), "offset": _int(0, 200, 0, "Décalage")})},
     {"name": "catalogue_list", "scope": "read", "title": "Catalogue OpenTV complet",
-     "description": "Liste alphabétique paginée de tout le catalogue accepté, sans URL ni champ interne.",
+     "description": "Liste alphabétique paginée de tout le catalogue accepté, sans URL ni champ interne. Parcourir "
+                    "avec offset jusqu'à has_more=false en gardant generated_at : s'il change, recommencer à 0.",
      "inputSchema": _obj({"limit": _int(1, 50, 20, "Nombre d'éléments"),
                           "offset": _int(0, 2000, 0, "Décalage")})},
     {"name": "search", "scope": "read", "title": "Chercher un titre",
@@ -48,8 +51,38 @@ TOOLS = [
                     "message toutes les 5 secondes par agent.",
      "inputSchema": _obj({"text": {"type": "string", "minLength": 1, "maxLength": 140},
                           "seconds": _int(5, 60, 15, "Durée d'affichage")}, ("text",))},
+    # ---- pilotage (scope « control », accordé explicitement par le propriétaire) : commandes SÉMANTIQUES typées,
+    # jamais d'URL, de chemin, de touche brute de la TV, de durée libre ni de boucle ; résultats = état accepté/persisté
+    # côté service (file d'actions TV numérotée, état de lecture), jamais une affirmation sur les pixels.
+    {"name": "present_title", "scope": "control", "title": "Proposer un film à l'écran",
+     "description": "Montre sur la TV la fiche d'un film du catalogue accepté (identifiant stable de recommend, search "
+                    "ou catalogue_list), avec une courte phrase d'explication facultative. Choisis toi-même le film "
+                    "(goûts « Pour toi », historique, notes), explique ton choix en une phrase, puis appelle cet outil : "
+                    "Alex décide avec sa télécommande ou en te demandant de le lancer. Refusé pendant une lecture ou "
+                    "un réglage en cours. Résultat : action mise en file (queued) ; suivre son état avec status.",
+     "inputSchema": _obj({"id": {"type": "string", "pattern": UID_PATTERN, "description": "ex. films/17397"},
+                          "text": {"type": "string", "minLength": 1, "maxLength": 140,
+                                   "description": "Pourquoi ce film (une phrase, sans adresse)"}}, ("id",))},
+    {"name": "play_title", "scope": "control", "title": "Lancer un film (à la demande d'Alex)",
+     "description": "Lance un film du catalogue accepté par le lecteur officiel promu d'OpenTV, SEULEMENT quand Alex "
+                    "demande explicitement de le regarder. Mêmes portes que le bouton « Regarder » (source approuvée, "
+                    "promotion terrain, contrôleur) ; refusé si indisponible ou si une lecture est déjà en cours. "
+                    "Résultat : lecture acceptée (loading), jamais « visible » ; suivre playback dans status.",
+     "inputSchema": _obj({"id": {"type": "string", "pattern": UID_PATTERN, "description": "ex. films/17397"}},
+                         ("id",))},
+    {"name": "close_player", "scope": "control", "title": "Fermer le lecteur",
+     "description": "Ferme le lecteur en cours et revient à OpenTV sur la fiche du film. Sans lecture en cours : "
+                    "rien n'est fermé (closed=false).",
+     "inputSchema": _obj({})},
+    {"name": "remote_control", "scope": "control", "title": "Touche de navigation OpenTV",
+     "description": "Une touche de navigation dans OpenTV (haut, bas, gauche, droite, OK, retour, accueil). Préfère "
+                    "present_title/play_title/close_player ; débit borné, la télécommande d'Alex reste prioritaire, "
+                    "jamais d'accès aux Réglages ni de lancement de film par OK (utiliser play_title). Pendant une "
+                    "lecture, seules back/home sont acceptées (elles ferment le lecteur).",
+     "inputSchema": _obj({"key": {"type": "string", "enum": list(NAV_KEYS)}}, ("key",))},
 ]
 TOOL_BY_NAME = {t["name"]: t for t in TOOLS}
+CONTROL_TOOLS = tuple(t["name"] for t in TOOLS if t["scope"] == "control")
 
 
 def public_tools(scopes):
@@ -91,7 +124,7 @@ def validate_args(name, args):
             if "pattern" in p and not re.match(p["pattern"], v):
                 raise ValueError("invalid_params")
         out[k] = v
-    if name == "display_message":
+    if name == "display_message" or (name == "present_title" and "text" in out):
         out["text"] = validate.message_text(out["text"])
     return out
 
@@ -146,6 +179,13 @@ def dispatch(ctx, agent, scopes, name, a):
         res = _cli(ctx, ["history", "--list", a["list"], "--limit", a["limit"], "--offset", a["offset"]])
     elif name == "display_message":
         res = ctx.show_message(agent, a["text"], a["seconds"])
+    elif name in CONTROL_TOOLS:
+        # pilotage : le contexte (App) est seul juge (catalogue accepté, portes de lecture, priorité humaine) ;
+        # refus = ToolError(code stable), jamais une exception interne vers l'agent
+        fn = getattr(ctx, "agent_control", None)
+        if not callable(fn):
+            raise ToolError("control_unavailable")
+        res = fn(agent, name, a)
     else:
         raise ToolError("unknown_tool")
     fy = getattr(ctx, "foryou", None)

@@ -1,6 +1,7 @@
-"""Pont Muse : SDK officiel épinglé (transport seulement), aucune commande par défaut, commandes OpenTV en lecture
-déléguées par MCP à l'Agent Port authentifié, bornes, nettoyage, refus fail-closed, secrets jamais journalisés,
-service jamais démarré sans appariement, installation/désinstallation, CLI status|pair|unpair.
+"""Pont Muse : SDK officiel épinglé (transport seulement), aucune commande par défaut, liste fermée de commandes OpenTV
+typées (lecture, goûts, message, pilotage) déléguées par MCP à l'Agent Port authentifié avec EXACTEMENT les scopes du
+pont, bornes, nettoyage, refus fail-closed, secrets jamais journalisés, service jamais démarré sans appariement,
+autorisation explicite du pilotage, installation/désinstallation, CLI status|authorize-control|pair|unpair.
 
 Les tests qui exercent le chiffrement Noise réel (faux VM Muse en mémoire) exigent `cryptography` (python3-cryptography
 sur la Pi) ; sans elle ils sont sautés avec un message explicite.
@@ -36,7 +37,10 @@ WHEEL_SHA256 = "f221081107b8c48184d99f7019604486376e7ef826037e70aad6b02540732c23
 UPSTREAM = os.environ.get("OPENTV_TEST_MUSE_UPSTREAM",
                           os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(PI4))),
                                        "muse-gadget-sdk-review"))
-EXPECTED = ["opentv.catalogue_list", "opentv.history", "opentv.recommend", "opentv.search", "opentv.status"]
+EXPECTED = ["opentv.catalogue_list", "opentv.close_player", "opentv.display_message", "opentv.feedback",
+            "opentv.history", "opentv.play_title", "opentv.present_title", "opentv.recommend", "opentv.remote_control",
+            "opentv.search", "opentv.status"]
+CONTROL = ["control", "display", "feedback", "read"]
 HAVE_CRYPTO = importlib.util.find_spec("cryptography") is not None
 needs_crypto = unittest.skipUnless(HAVE_CRYPTO, "cryptography absente (python3-cryptography sur la Pi)")
 SDK_TOKEN = "mgst_" + "Q" * 42 + "A"
@@ -64,6 +68,19 @@ def read(path):
         return f.read()
 
 
+class ControlCtx(tap.FakeCtx):
+    """Contexte d'Agent Port avec pilotage simulé (l'App réelle est testée dans test_muse_control)."""
+
+    def __init__(self, fy):
+        super().__init__(fy)
+        self.control = []
+
+    def agent_control(self, agent, name, a):
+        self.control.append((agent, name, dict(a)))
+        return {"accepted": True, "id": a.get("id"), "action": {"seq": len(self.control), "kind": name,
+                                                                 "state": "queued", "reason": None}}
+
+
 class AgentPortFixture:
     """Agent Port réel (socket Unix) + registre + audit + moteur « Pour toi » réel sur un catalogue piégé."""
 
@@ -73,11 +90,11 @@ class AgentPortFixture:
         self.fy = foryou.ForYou(NANOPI, os.path.join(self.d, "fy"), cat, clock=lambda: 1800000000.0)
         tc.addCleanup(self.fy.close)
         self.reg = agents.Registry(os.path.join(self.d, "agents.json"))
-        # Muse autorisée sur la TV (plafond de l'identité dédiée liée « muse-device ») ; autres agents sans accès
-        self.reg.set_policy({"muse": ["display", "feedback", "read"], "hermit": ["read"], "hermes": []})
+        # Muse autorisée à piloter sur la TV (plafond de l'identité dédiée liée « muse-device ») ; autres sans accès
+        self.reg.set_policy({"muse": list(CONTROL), "hermit": ["read"], "hermes": []})
         self.audit_path = os.path.join(self.d, "audit.jsonl")
         self.audit = agents.Audit(self.audit_path)
-        self.ctx = ctx or tap.FakeCtx(self.fy)
+        self.ctx = ctx or ControlCtx(self.fy)
         svc = agentport.AgentService(self.ctx, self.reg, self.audit)
         self.sock = os.path.join(self.d, "a.sock")
         self.srv = agentport.AgentPortServer(self.sock, svc.handle)
@@ -86,7 +103,7 @@ class AgentPortFixture:
         tc.addCleanup(self.srv.shutdown)
         self.client = os.path.join(self.d, "agent-muse-device.json")
 
-    def issue(self, scopes=("read",), agent=musebridge.MUSE_AGENT_ID):
+    def issue(self, scopes=tuple(CONTROL), agent=musebridge.MUSE_AGENT_ID):
         self.token = self.reg.issue(agent, list(scopes), force=True)
         agents.write_client_config(self.client, agent, self.token, self.sock)
         return self.token
@@ -186,21 +203,37 @@ class TestSupplyChain(unittest.TestCase):
 
 # ------------------------------------------------------------------------------------------- aucune commande par défaut
 class TestNoDefaultCommands(unittest.TestCase):
-    def test_registered_command_set_is_exactly_the_bounded_read_set(self):
+    def test_registered_command_set_is_exactly_the_bounded_typed_set(self):
         specs = musebridge.command_specs()
         self.assertEqual(sorted(specs), EXPECTED)
+        self.assertEqual(musebridge.MUSE_SCOPES, CONTROL)                     # ni lecture seule, ni plus
+        self.assertEqual(sorted({tools.TOOL_BY_NAME[t]["scope"] for t in musebridge.COMMANDS.values()}), CONTROL)
         for name, spec in specs.items():
             self.assertFalse(name.startswith(("system.", "file.", "device.")), name)
-            self.assertEqual(tools.TOOL_BY_NAME[musebridge.COMMANDS[name]]["scope"], "read")
+            self.assertTrue(name.startswith("opentv."), name)
+            self.assertIn(tools.TOOL_BY_NAME[musebridge.COMMANDS[name]]["scope"], musebridge.MUSE_SCOPES)
             self.assertEqual(set(spec), {"description", "required", "optional", "timeout_ms"})
             params = dict(spec["required"], **spec["optional"])
             for p, ps in params.items():
-                self.assertNotIn(p, ("command", "cmd", "path", "url", "cwd", "file", "data_base64", "uri", "host"))
+                self.assertNotIn(p, ("command", "cmd", "path", "url", "cwd", "file", "data_base64", "uri", "host",
+                                     "tool", "name", "args", "duration", "repeat", "times", "code", "raw"))
                 self.assertIn(ps["type"], ("integer", "string"))
                 if ps["type"] == "integer":
                     self.assertRegex(ps["description"], r"de \d+ à \d+")
-        self.assertNotIn("feedback", musebridge.COMMANDS.values())
-        self.assertNotIn("display_message", musebridge.COMMANDS.values())
+        # pilotage : identifiants stables et énumérations fermées seulement
+        self.assertEqual(set(specs["opentv.present_title"]["required"]), {"id"})
+        self.assertEqual(set(specs["opentv.present_title"]["optional"]), {"text"})
+        self.assertEqual(set(specs["opentv.play_title"]["required"]), {"id"})
+        self.assertEqual(specs["opentv.play_title"]["optional"], {})
+        self.assertEqual((specs["opentv.close_player"]["required"], specs["opentv.close_player"]["optional"]), ({}, {}))
+        self.assertEqual(set(specs["opentv.remote_control"]["required"]), {"key"})
+        for k in ("up", "down", "left", "right", "ok", "back", "home"):
+            self.assertIn(k, specs["opentv.remote_control"]["required"]["key"]["description"])
+        self.assertEqual(tools.TOOL_BY_NAME["remote_control"]["inputSchema"]["properties"]["key"]["enum"],
+                         ["up", "down", "left", "right", "ok", "back", "home"])
+        # Muse est invitée à choisir et présenter elle-même, pas à recopier des pages brutes
+        self.assertIn("present_title", specs["opentv.recommend"]["description"])
+        self.assertIn("explicitement", specs["opentv.play_title"]["description"])
 
     @needs_crypto
     def test_import_guard_blocks_executor_service_fileops_and_cli(self):
@@ -304,16 +337,54 @@ class TestThroughAgentPort(unittest.TestCase):
         for t in ("status", "search", "recommend", "history"):
             self.assertIn(t, tools_seen)
         self.assertNotIn(self.fx.token, read(self.fx.audit_path))
-        self.assertEqual(self.port.identity_scopes(), ["read"])
+        self.assertEqual(self.port.identity_scopes(), CONTROL)
+
+    def test_feedback_display_and_control_commands_cross_the_agent_port(self):
+        rates = mock.patch.dict(agentport.TOOL_RATES, clear=True)   # débits testés à part (test_muse_control)
+        rates.start()
+        self.addCleanup(rates.stop)
+        r = self.call("opentv.feedback", {"id": "films/101", "action": "watchlist"})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.fx.fy.cli(["history", "--list", "watchlist"])[1]["items"][0]["id"], "films/101")
+        self.assertTrue(self.call("opentv.display_message", {"text": "Ce soir : un thriller ?"})["ok"])
+        self.assertEqual(self.fx.ctx.messages[-1][:2], ("muse-device", "Ce soir : un thriller ?"))
+        for cmd, params in (("opentv.present_title", {"id": "films/106", "text": "Tu aimes la science-fiction."}),
+                            ("opentv.present_title", {"id": "films/106", "text": None}),       # null = omis
+                            ("opentv.play_title", {"id": "films/106"}), ("opentv.close_player", {}),
+                            ("opentv.remote_control", {"key": "down"})):
+            r = self.call(cmd, params)
+            self.assertTrue(r["ok"], (cmd, r))
+            self.assertEqual(r["payload"]["action"]["state"], "queued")
+        self.assertEqual([c[1] for c in self.fx.ctx.control],
+                         ["present_title", "present_title", "play_title", "close_player", "remote_control"])
+        self.assertEqual(self.fx.ctx.control[1][2], {"id": "films/106"})
+        self.assertTrue(all(c[0] == "muse-device" for c in self.fx.ctx.control))
+        audited = [x["tool"] for x in self.fx.audit_records()]
+        for t in ("feedback", "display_message", "present_title", "play_title", "close_player", "remote_control"):
+            self.assertIn(t, audited)
+
+    def test_control_withdrawn_on_the_tv_fails_closed_at_the_next_call(self):
+        """Pilotage retiré dans « Gérer les assistants » : l'identité liée est réduite dans la même écriture et
+        l'Agent Port refuse aussitôt (aucune action TV), tandis que la lecture continue."""
+        reg = self.fx.reg
+        _, fp, _ = reg.snapshot(("muse", "hermit", "hermes"))
+        reg.apply_policy_changes({"muse": ["display", "feedback", "read"]}, ("muse", "hermit", "hermes"), fp)
+        self.assertEqual(self.call("opentv.present_title", {"id": "films/106"}),
+                         {"ok": False, "error": "forbidden_scope"})
+        self.assertEqual(self.fx.ctx.control, [])
+        self.assertTrue(self.call("opentv.status")["ok"])
+        self.assertEqual(self.port.identity_scopes(), ["display", "feedback", "read"])
 
     def test_default_and_write_commands_never_reach_the_agent_port(self):
         before = len(self.fx.audit_records())
-        for cmd in ("system.run", "file.read", "file.write", "device.health", "opentv.feedback",
-                    "opentv.display_message", "feedback", "status", "", None, 7):
+        for cmd in ("system.run", "file.read", "file.write", "device.health", "opentv.exec", "opentv.open_url",
+                    "opentv.key", "opentv.tv_power", "opentv.agent_issue", "feedback", "status", "present_title", "",
+                    None, 7):
             self.assertEqual(self.call(cmd, {"command": "id"}), {"ok": False, "error": "unknown_command"}, cmd)
-        with self.assertRaises(musebridge.BridgeError) as e:
-            self.port.call_tool("feedback", {"id": "films/101", "action": "like"})
-        self.assertEqual(e.exception.code, "unknown_command")
+        for tool in ("exec", "agent_issue", "open_url", "system.run"):
+            with self.assertRaises(musebridge.BridgeError) as e:
+                self.port.call_tool(tool, {})
+            self.assertEqual(e.exception.code, "unknown_command")
         self.assertEqual(len(self.fx.audit_records()), before)
 
     def test_invalid_or_unbounded_params_fail_before_any_call(self):
@@ -326,7 +397,24 @@ class TestThroughAgentPort(unittest.TestCase):
                ("opentv.search", {}), ("opentv.search", {"query": "https://evil.example/x"}),
                ("opentv.search", {"query": "www.evil.example"}), ("opentv.search", {"query": "a\nb"}),
                ("opentv.search", {"query": "x" * 81}), ("opentv.history", {"list": "../../etc"}),
-               ("opentv.status", {"url": "http://x"}), ("opentv.recommend", {"limit": 0})]
+               ("opentv.status", {"url": "http://x"}), ("opentv.recommend", {"limit": 0}),
+               # pilotage : identifiant stable, énumérations fermées, texte sans adresse, aucun champ en plus
+               ("opentv.present_title", {}), ("opentv.present_title", {"id": "https://evil.example/f"}),
+               ("opentv.present_title", {"id": "films/101/../../x"}), ("opentv.present_title", {"id": "Films/101"}),
+               ("opentv.present_title", {"id": "films/101", "text": "voir www.evil.example"}),
+               ("opentv.present_title", {"id": "films/101", "text": "http://x.example/a"}),
+               ("opentv.present_title", {"id": "films/101", "text": "a\nb"}),
+               ("opentv.present_title", {"id": "films/101", "text": "x" * 141}),
+               ("opentv.present_title", {"id": "films/101", "url": "https://x"}),
+               ("opentv.play_title", {}), ("opentv.play_title", {"id": "films/101", "seconds": 30}),
+               ("opentv.play_title", {"id": "films/101", "source": "https://cdn.example/v.m3u8"}),
+               ("opentv.play_title", {"id": 101}), ("opentv.close_player", {"force": True}),
+               ("opentv.remote_control", {}), ("opentv.remote_control", {"key": "power"}),
+               ("opentv.remote_control", {"key": "volume_up"}), ("opentv.remote_control", {"key": "OK"}),
+               ("opentv.remote_control", {"key": "ok", "repeat": 50}), ("opentv.remote_control", {"key": "menu"}),
+               ("opentv.feedback", {"id": "films/101", "action": "delete"}),
+               ("opentv.display_message", {"text": "https://evil.example"}),
+               ("opentv.display_message", {"text": "ok", "seconds": 3600})]
         for cmd, params in bad:
             self.assertEqual(self.call(cmd, params), {"ok": False, "error": "invalid_params"}, (cmd, params))
         self.assertEqual(len(self.fx.audit_records()), before)
@@ -541,7 +629,10 @@ class TestEndToEndFakeMuse(unittest.TestCase):
                        ("i4", "file.write", {"path": "/tmp/x", "data_base64": "eA=="}),
                        ("i5", "device.health", {}),
                        ("i6", "opentv.search", {"query": "https://evil.example"}),
-                       ("i7", "opentv.feedback", {"id": "films/101", "action": "like"})]
+                       ("i7", "opentv.feedback", {"id": "films/101", "action": "like"}),
+                       ("i8", "opentv.present_title", {"id": "films/106", "text": "Grand spectacle ce soir."}),
+                       ("i9", "opentv.remote_control", {"key": "power"}),
+                       ("i10", "opentv.play_title", {"id": "https://cdn.example/x.m3u8"})]
             for iid, cmd, params in invokes:
                 await vm.send_message({"method": "link.invoke", "id": iid, "command": cmd, "params": params,
                                        "timeout_ms": 5000})
@@ -566,17 +657,22 @@ class TestEndToEndFakeMuse(unittest.TestCase):
         self.assertTrue(inv["i1"]["ok"], inv["i1"])
         self.assertEqual(inv["i1"]["payload"]["offset"], 2)
         self.assertEqual(len(inv["i1"]["payload"]["items"]), 2)
-        for iid in ("i2", "i3", "i4", "i5", "i7"):
+        for iid in ("i2", "i3", "i4", "i5"):
             self.assertEqual((inv[iid]["ok"], inv[iid]["error"]), (False, "unknown_command"), iid)
-        self.assertEqual((inv["i6"]["ok"], inv["i6"]["error"]), (False, "invalid_params"))
+        for iid in ("i6", "i9", "i10"):
+            self.assertEqual((inv[iid]["ok"], inv[iid]["error"]), (False, "invalid_params"), iid)
+        self.assertTrue(inv["i7"]["ok"], inv["i7"])                      # goût explicite : par l'Agent Port
+        self.assertTrue(inv["i8"]["ok"], inv["i8"])                      # proposition : action TV en file
+        self.assertEqual(inv["i8"]["payload"]["action"]["state"], "queued")
+        self.assertEqual(self.fx.ctx.control, [("muse-device", "present_title",
+                                                {"id": "films/106", "text": "Grand spectacle ce soir."})])
         self.assertEqual(results["registered_status"]["state"], "registered")
         self.assertEqual(results["end"], "unpaired")
         self.assertFalse(os.path.exists(os.path.join(self.st.dir, "pairing.json")))
         self.assertEqual(results["connect"][0][1], {"Authorization": "Bearer " + VM_TOKEN})
-        # une seule requête atteint l'Agent Port (catalogue_list) ; les refus n'y arrivent jamais
+        # seules les commandes valides atteignent l'Agent Port ; les refus n'y arrivent jamais
         tools_called = [x["tool"] for x in self.fx.audit_records()]
-        self.assertEqual(tools_called.count("catalogue_list"), 1)
-        self.assertNotIn("feedback", tools_called)
+        self.assertEqual(sorted(tools_called), ["catalogue_list", "feedback", "present_title"])
         # aucun secret dans les journaux (SDK, appareil, VM, Agent Port), l'audit ni le statut
         blob = logs.getvalue() + out.getvalue() + read(self.fx.audit_path) + read(self.status)
         self.assertIn("muse_invoke", out.getvalue())
@@ -599,10 +695,10 @@ class TestEndToEndFakeMuse(unittest.TestCase):
         self.counts["connect"] += 1
         raise AssertionError("connect")
 
-    def test_identity_wider_than_read_or_revoked_is_fatal_before_any_muse_connection(self):
+    def test_identity_without_exact_scopes_or_revoked_is_fatal_before_any_muse_connection(self):
         self.st.pairing()
-        for scopes, want in ((("feedback", "read"), "identity_not_read_only"), (("display", "read"),
-                                                                                 "identity_not_read_only")):
+        for scopes in (("read",), ("feedback", "read"), ("display", "feedback", "read"), ("control", "read")):
+            want = "identity_scope_mismatch"
             self.fx.issue(scopes=scopes)
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(asyncio.run(self.bridge(connect=self.fail_connect).run()), want)
@@ -649,7 +745,7 @@ class TestEndToEndFakeMuse(unittest.TestCase):
             self.assertEqual(musebridge.cmd_run(a, sdk=self.sdk, connect=self.fail_connect, fetch_vms=self.fetch,
                                                 status_path=self.status, client_config=self.fx.client), 0)
             self.st.pairing()
-            self.fx.issue(scopes=("feedback", "read"))
+            self.fx.issue(scopes=("read",))      # ancien pont en lecture seule : refus explicite, jamais à moitié
             self.assertEqual(musebridge.cmd_run(a, sdk=self.sdk, connect=self.fail_connect, fetch_vms=self.fetch,
                                                 status_path=self.status, client_config=self.fx.client),
                              musebridge.EX_CONFIG)
@@ -777,7 +873,7 @@ class AdminBase(unittest.TestCase):
             self.addCleanup(p.stop)
         self.chowns = []
         reg = agents.Registry(self.cfg.registry_file)
-        reg.set_policy({"muse": ["feedback", "read"], "hermit": [], "hermes": []})
+        reg.set_policy({"muse": list(CONTROL), "hermit": [], "hermes": []})   # pilotage déjà accordé par Alex
         self.bt_pid = 4242
         self.prepare_bt()
 
@@ -880,9 +976,11 @@ class TestAdmin(AdminBase):
         self.groups.members["opentv-agent"] = ["opentv"]
         self.assertEqual(self.pair()[0]["error"], "muse_user_not_in_agent_group")
         self.groups.members["opentv-agent"] = ["opentv", "opentv-muse"]
-        agents.Registry(self.cfg.registry_file).set_policy({"muse": [], "hermit": ["read"]})
-        r, code = self.pair()
-        self.assertEqual((r["error"], code), ("muse_not_authorized", 2))
+        for pol in ([], ["read"], ["display", "feedback", "read"]):   # tout sauf le pilotage explicite : refus
+            agents.Registry(self.cfg.registry_file).set_policy({"muse": pol, "hermit": ["read"]})
+            r, code = self.pair()
+            self.assertEqual((r["error"], code), ("muse_control_not_authorized", 2), pol)
+            self.assertIn("authorize-control", r["note"])
         self.assertEqual(self.cmds(), [])                                 # lectures seulement (systemctl show)
         self.assertFalse(os.path.exists(self.j("/var/lib/opentv-muse/sdk_token")))
         self.assertIsNone(agents.Registry(self.cfg.registry_file).list().get(musebridge.MUSE_AGENT_ID))
@@ -896,11 +994,11 @@ class TestAdmin(AdminBase):
         self.assertNotIn("mgst_wrong", json.dumps(r) + self.err.getvalue())
         self.assertEqual(self.cmds(), [])
 
-    def test_successful_pair_writes_secret_files_issues_read_only_identity_then_enables(self):
+    def test_successful_pair_writes_secret_files_issues_exact_control_identity_then_enables(self):
         r, code = self.pair()
         self.assertEqual(code, 0, r)
         self.assertEqual(r["result"], "paired")
-        self.assertEqual(r["agent"]["scopes"], ["read"])
+        self.assertEqual(r["agent"]["scopes"], CONTROL)
         self.assertEqual(r["link"]["state"], "registered")
         tok = self.j("/var/lib/opentv-muse/sdk_token")
         self.assertEqual(read(tok), SDK_TOKEN + "\n")
@@ -909,7 +1007,7 @@ class TestAdmin(AdminBase):
                               agents.client_file_name(musebridge.MUSE_AGENT_ID, os.getuid()))
         self.assertEqual(stat.S_IMODE(os.stat(client).st_mode), 0o640)
         self.assertIn((0, os.getgid()), self.chowns)                     # root:<groupe privé de opentv-muse>
-        self.assertEqual(agents.Registry(self.cfg.registry_file).list()[musebridge.MUSE_AGENT_ID]["scopes"], ["read"])
+        self.assertEqual(agents.Registry(self.cfg.registry_file).list()[musebridge.MUSE_AGENT_ID]["scopes"], CONTROL)
         c = self.cmds()
         start = c.index("start --no-block " + museadmin.PAIR_UNIT)
         enable = c.index("enable --now " + museadmin.UNIT)
@@ -964,8 +1062,10 @@ class TestAdmin(AdminBase):
         self.assertTrue(rep["paired"])
         self.assertEqual(rep["sdk_token"], "present")
         self.assertEqual(rep["identity"], {"node_id": "homelink-ccddee", "ble_name": "MuseGadgetCCDDEE"})
-        self.assertEqual(rep["agent"]["scopes"], ["read"])
-        self.assertTrue(rep["agent"]["read_only"])
+        self.assertEqual(rep["agent"]["scopes"], CONTROL)
+        self.assertTrue(rep["agent"]["exact_scopes"])
+        self.assertTrue(rep["agent"]["control_authorized"])
+        self.assertNotIn("muse_control_not_authorized", rep["gates"])
         self.assertEqual(rep["commands"], EXPECTED)
         self.assertTrue(rep["sdk"]["verified"])
         self.assertEqual(rep["link"]["state"], "registered")

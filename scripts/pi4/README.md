@@ -474,7 +474,31 @@ Protocole : JSON-RPC 2.0 ligne par ligne, `initialize` (2025-06-18, 2025-03-26, 
 tard, Pas ce soir et leurs retraits), `history`, `display_message` (≤ 140 caractères, sans adresse, 1 / 5 s).
 Toutes les sorties passent par le nettoyage du moteur « Pour toi » : **aucune URL**. Pas de shell, pas d'URL arbitraire,
 pas d'accès brut à la base. Relais sortant générique (agent distant) : **non implémenté** ; `status` répond
-`relay: not_implemented`. Muse dispose de son propre pont sortant, en lecture seule (section suivante).
+`relay: not_implemented`. Muse dispose de son propre pont sortant (section suivante).
+
+**Pilotage (scope `control`)** — jamais un défaut, jamais accordé par une installation ou une mise à jour : seulement
+par un choix explicite du propriétaire (« Gérer les assistants » → « Piloter OpenTV : proposer et lancer des films »,
+ou `sudo opentv-pi muse authorize-control --yes` pour Muse). Niveaux emboîtés : Aucun ⊂ Voir ⊂ Avis ⊂ Messages ⊂
+Pilotage. Outils sémantiques typés, sans URL, chemin, touche brute de la TV, durée libre ni boucle :
+
+| Outil | Paramètres | Effet autoritaire (jamais « pixels visibles ») | Débit par agent |
+|---|---|---|---|
+| `present_title` | `id` stable du catalogue accepté, `text` facultatif ≤ 140 sans adresse | action TV `present` mise en file (`queued`) | 1 / 3 s, 20 / 10 min |
+| `play_title` | `id` stable | `Playback.start` — mêmes portes que « Regarder » (source approuvée, promotion terrain, contrôleur prêt) ⇒ `loading` + action TV `play` | 1 / 10 s, 6 / 10 min |
+| `close_player` | — | lecteur en cours ⇒ `closing` (raison `agent`), sinon `closed:false` | 1 / 2 s |
+| `remote_control` | `key` ∈ up, down, left, right, ok, back, home | action TV `key` ; pendant une lecture seules back/home (ferment le lecteur) | 3 / s, 60 / min |
+
+Les actions TV (`opentv_pi/tvcontrol.py`) portent un `seq` croissant ; la page `/tv` les **réclame** une à une
+(`POST /api/tv/action {seq, phase:"claim"}`, atomique : jamais appliquée deux fois, même page rechargée) puis rend
+compte (`phase:"done"`) : `queued` → `claimed` → `applied` | `failed` (raison bornée), ou `expired` (non réclamée en
+20 s), `failed:lost` (réclamée sans résultat en 15 s), `failed:superseded` (nouvelle fiche avant réclamation).
+`status` expose `control.playback` (idle/loading/playing/closing/closed/unavailable, `id`, `seq`) et
+`control.actions` (dernières actions et leur état) : queued, appliqué, en lecture et fermé restent quatre faits
+distincts. Priorité humaine : configuration ou « Gérer les assistants » ouverts ⇒ `tv_setup_active`/`tv_busy` ;
+pendant une lecture, aucune fiche ni touche (`player_active`) sauf fermeture ; une touche d'assistant moins de 2 s
+après une touche de la télécommande ou du téléphone est refusée (`human_active`) ; jamais les Réglages
+(`settings_forbidden`) ni « Regarder » par OK (`use_play_title`). La fiche proposée affiche « Proposé par Muse » et
+la phrase de l'assistant ; après une lecture, Retour revient sur cette même fiche.
 
 ### 6 · Muse. Pont Muse (SDK Linux officiel, transport seulement)
 
@@ -482,27 +506,38 @@ Muse joint OpenTV par le **SDK Linux officiel** (`facebookincubator/muse-gadget-
 l'appariement Bluetooth et le transport chiffré (Noise). Les commandes par défaut du SDK — `system.run`, `file.read`,
 `file.write`, `device.health` — ne sont **jamais** exposées : leurs modules (`executor.py`, `fileops.py`, `service.py`,
 `cli.py`) et l'unité `musegadget.service` d'origine ne sont pas livrés, un garde d'import refuse de les charger, et le
-pont enregistre sa propre description d'appareil, limitée à :
+pont enregistre sa propre description d'appareil, limitée à cette liste fermée :
 
 | Commande Muse | Outil MCP OpenTV | Bornes |
 |---|---|---|
-| `opentv.status` | `status` | aucun paramètre |
+| `opentv.status` | `status` | aucun paramètre (inclut l'état de lecture et des actions TV) |
 | `opentv.search` | `search` | `query` 1–80 caractères, jamais d'adresse ; `limit` ≤ 20 ; `offset` ≤ 200 |
 | `opentv.recommend` | `recommend` | `limit` ≤ 20 ; `offset` ≤ 200 |
 | `opentv.catalogue_list` | `catalogue_list` | pages `limit` ≤ 50, `offset` ≤ 2000 : tout le catalogue accepté, `has_more` |
 | `opentv.history` | `history` | `list` (énumération), `limit` ≤ 50, `offset` ≤ 500 |
+| `opentv.feedback` | `feedback` | `id` stable, `action` (énumération « Pour toi ») |
+| `opentv.display_message` | `display_message` | `text` ≤ 140 sans adresse, `seconds` 5–60, 1 / 5 s |
+| `opentv.present_title` | `present_title` | `id` stable, `text` facultatif ≤ 140 sans adresse |
+| `opentv.play_title` | `play_title` | `id` stable — seulement quand Alex demande de regarder |
+| `opentv.close_player` | `close_player` | aucun paramètre |
+| `opentv.remote_control` | `remote_control` | `key` (énumération de 7 touches) |
+
+Muse formule ses propositions lui-même : les descriptions l'invitent à choisir avec `recommend`, `search`, `history`
+et `catalogue_list`, à expliquer son choix en une phrase, puis à le montrer avec `present_title` (ou une bannière
+`display_message`) plutôt qu'à recopier des pages brutes.
 
 Chaque appel est validé strictement (champs inconnus, types, bornes, adresses ⇒ `invalid_params`, sans aucun appel),
 puis délégué par le client MCP (`opentv_pi.mcp`) à l'**Agent Port** avec l'identité locale **dédiée**
-`muse-device` en **lecture seule** — jamais l'identité `muse` d'un autre client local (ex. un client MCP de Muse émis
+`muse-device`, scopes **exactement** `control, display, feedback, read` — jamais l'identité `muse` d'un autre client local (ex. un client MCP de Muse émis
 par `agent issue --id muse`), que `pair`/`unpair` n'émettent, ne révoquent ni n'invalident jamais. Son plafond est
 l'autorisation de **Muse** sur la TV (`agents.LINKED_POLICY`) : « Aucun accès » au QR ou dans « Gérer les assistants »
 la révoque dans la même écriture, et l'Agent Port réapplique ce plafond à chaque appel. `muse-device` est réservée :
 `agent issue --id muse-device` est refusé. L'Agent Port reste la barrière (identité révoquée ⇒ `unauthorized`, scope
 retiré ⇒ `forbidden_scope`).
-Aucun avis (`feedback`) ni message TV (`display_message`) pour cette première identité, même si la politique du QR
-les autorise. Le pont refuse de s'enregistrer auprès de Muse si son identité a d'autres scopes que `read` (code 78,
-pas de redémarrage). Les résultats repassent par un nettoyage : jetons-adresses retirés (détecteur explicite, au
+Le pont refuse de s'enregistrer auprès de Muse si son identité authentifiée n'a pas **exactement** ces scopes
+(`identity_scope_mismatch`, code 78, pas de redémarrage) : un retrait ou une réduction du pilotage sur la TV (ou
+`muse revoke-control`) réduit l'identité dans la même écriture, l'Agent Port refuse aussitôt chaque outil retiré et
+le pont ne se réenregistre plus. Les résultats repassent par un nettoyage : jetons-adresses retirés (détecteur explicite, au
 moins aussi strict que le moteur « Pour toi » : schémas, `www.`, hôte/chemin, hôte:port, IPv4, hôtes nus des TLD
 courants, `user:mot@hôte`, courriels, chemins absolus/`~/`/`../`/Windows) sans effacer les titres légitimes
 (« Big Data: le film », « M.Butterfly », « Mr.Robot », « File: … », « Paris.Fin ») ; clés retirées par segment exact
@@ -538,7 +573,9 @@ Paquets : `bluez python3-cryptography python3-dbus python3-gi`.
 sudo /opt/opentv/bin/opentv-pi muse status        # SDK vérifié, BlueZ, appariement, service, lien, identité ; aucun secret
 sudo /opt/opentv/bin/opentv-pi muse prepare-bluetooth   # compatibilité BlueZ du SDK (voir plus bas), redémarre bluetooth
                                                         # seulement si nécessaire ; --replace-mtu : valeur locale > 256
-# porte humaine : Muse d'abord autorisé « Voir seulement » (ou plus) sur la TV (QR ou Gérer les assistants)
+# porte humaine : Alex autorise Muse à PILOTER OpenTV (TV : Gérer les assistants > « Piloter OpenTV », ou ici)
+sudo /opt/opentv/bin/opentv-pi muse authorize-control        # plan seul (rien écrit) ; --yes : ligne « muse » -> control
+sudo /opt/opentv/bin/opentv-pi muse revoke-control           # retire control (politique + identité du pont, même écriture)
 sudo /opt/opentv/bin/opentv-pi muse pair          # jeton SDK mgst_… saisi SANS écho (jamais en argument), puis
                                                   # app Muse > Réglages > Appareils > Mode développeur > + MuseGadgetXXXXXX
 sudo /opt/opentv/bin/opentv-pi muse pair --replace-token   # nouveau jeton SDK ; --force : nouvel appariement
@@ -548,10 +585,12 @@ sudo /opt/opentv/bin/opentv-pi muse unpair [--forget-token]  # pont désactivé,
 
 `pair` vérifie d'abord (sans rien écrire) : root, SDK épinglé intact, roue présente, aucun service d'origine, compte
 `opentv-muse`, groupe `bluetooth`, compatibilité BlueZ **active** (sinon `bluetooth_not_prepared` /
-`bluetooth_restart_required` avec la commande à lancer), politique OpenTV autorisant Muse en lecture, et que
-`muse-device` est absente ou prouvée à nous (jeton de notre fichier client, scope `read` seul) — sinon
-`muse_device_identity_unexpected`, rien modifié, sauf `--replace-identity` explicite (révoque `muse-device`
-seulement). Il écrit le jeton (0600 opentv-muse, par descripteur), émet `muse-device` **read**, ouvre la fenêtre
+`bluetooth_restart_required` avec la commande à lancer), politique OpenTV autorisant Muse à **piloter**
+(`muse_control_not_authorized` sinon, rien écrit), et que `muse-device` est absente ou prouvée à nous (jeton de notre
+fichier client) — sinon `muse_device_identity_unexpected`, rien modifié, sauf `--replace-identity` explicite (révoque
+`muse-device` seulement). Prouvée à nous avec d'autres scopes (ancien pont en lecture seule) : révoquée puis réémise
+avec les scopes exacts, sans nouvel appariement Bluetooth. Il écrit le jeton (0600 opentv-muse, par descripteur),
+émet `muse-device` (`control, display, feedback, read`, jamais au-delà du plafond, jamais `--force`), ouvre la fenêtre
 (10 min) et n'active `opentv-muse.service` qu'**après** un appariement réussi ; puis il attend l'enregistrement du
 lien. Tout échec (fenêtre fermée, unité en échec, Ctrl-C) révoque l'identité tout juste émise et retire son fichier
 client. `unpair` ne révoque `muse-device` que si elle est la nôtre (sinon : conservée, signalée). Migration d'une
@@ -560,7 +599,15 @@ installation de développement antérieure (identité `muse` émise au compte `o
 mise à jour, le pont refuse de démarrer (code 78, identité absente) jusqu'à `sudo opentv-pi muse pair`, qui migre et
 réémet `muse-device` sans nouvel appariement Bluetooth (appareil déjà apparié). Portes distinctes : appareil apparié,
 service démarré, lien enregistré (`link.state=registered`), commande reçue (`journalctl -u opentv-muse` :
-`muse_invoke`), réponse visible dans l'app Muse — seule la dernière prouve le parcours complet.
+`muse_invoke`), réponse visible dans l'app Muse — seule la dernière prouve le parcours complet. Pour le pilotage,
+quatre portes de plus, chacune distincte : action acceptée (`queued`), appliquée par la page `/tv` (`applied`),
+lecture `playing` puis `closed` (`opentv-pi muse status` ne lit pas l'Agent Port : utiliser `status` via Muse), et
+photo HDMI de la fiche « Proposé par Muse » puis du retour sur la même fiche — porte terrain.
+
+Aide Mac (jamais versionnée avec un jeton, rien n'est stocké) : `scripts/pi4/tools/muse-pair-from-mac.sh
+<admin>@<hôte-opentv>` lit `muse status`, propose l'autorisation du pilotage (Alex tape « oui » ; sinon rien écrit),
+ouvre la page des jetons SDK, lit le jeton `mgst_…` **sans écho**, vérifie seulement sa forme et le passe une fois par
+SSH à `muse pair --token-stdin` (jamais en argument, fichier, historique ni sortie ; variable effacée à chaque sortie).
 
 Compatibilité BlueZ (exigée par l'installateur officiel du même commit, Android **et** iPhone) : `[GATT]
 ExchangeMTU = 256` dans `/etc/bluetooth/main.conf` (l'app Android échoue au-delà de 512) et greffon `battery` de

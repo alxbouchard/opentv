@@ -325,7 +325,7 @@ class TestAgentsMode(unittest.TestCase):
         self.assertEqual((st["authorized"], st["connected"]), (2, 1))
         self.assertEqual(st["manage"]["last"]["kind"], "saved")
         self.assertIn("Muse</b><span>Modifié</span><ul class=\"status\"><li class=\"st yes\"><b>Autorisé</b>"
-                      "<span>Tout", done)
+                      "<span>Avis + messages sur la TV", done)
         self.assertIn("Non, pas installé sur la boîte", done)
         with open(a.cfg.registry_file, encoding="utf-8") as f:
             raw = f.read()

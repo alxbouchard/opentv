@@ -2,14 +2,21 @@
 
 Muse ne reçoit jamais les commandes par défaut du SDK (system.run, file.read, file.write, device.health) : les modules
 executor/fileops/service/cli ne sont pas livrés (vendor/muse/PIN.json) et un garde d'import refuse de les charger même
-s'ils apparaissaient. Le pont enregistre sa PROPRE description d'appareil, limitée à des commandes OpenTV en lecture :
+s'ils apparaissaient. Le pont enregistre sa PROPRE description d'appareil, limitée à des commandes OpenTV typées :
 
-    opentv.status  opentv.search  opentv.recommend  opentv.catalogue_list  opentv.history
+    lecture   opentv.status  opentv.search  opentv.recommend  opentv.catalogue_list  opentv.history
+    goûts     opentv.feedback (J'aime, Pas pour moi, Déjà vu, À voir plus tard, Pas ce soir… et leurs retraits)
+    écran     opentv.display_message (bannière texte, sans adresse)
+    pilotage  opentv.present_title  opentv.play_title  opentv.close_player  opentv.remote_control
 
-Chaque appel est validé (schéma strict, bornes, aucune adresse), puis délégué au serveur MCP OpenTV (opentv_pi.mcp)
-qui parle à l'Agent Port Unix authentifié avec l'identité DÉDIÉE « muse-device » (scope read seulement, fichier
-client root:opentv-muse 0640 émis par `opentv-pi muse pair` ; jamais l'identité « muse » d'un autre client local).
-Son plafond est l'autorisation donnée à Muse sur la TV (agents.LINKED_POLICY). L'Agent Port reste la barrière
+Chaque appel est validé (schéma strict, bornes, énumérations, aucune adresse), puis délégué au serveur MCP OpenTV
+(opentv_pi.mcp) qui parle à l'Agent Port Unix authentifié avec l'identité DÉDIÉE « muse-device » (scopes EXACTEMENT
+MUSE_SCOPES, fichier client root:opentv-muse 0640 émis par `opentv-pi muse pair` ; jamais l'identité « muse » d'un
+autre client local). Son plafond est l'autorisation donnée à Muse sur la TV (agents.LINKED_POLICY) : le pilotage
+n'existe que si Alex l'a accordé explicitement (« Gérer les assistants » → « Piloter OpenTV », ou
+`opentv-pi muse authorize-control --yes` en root) ; tout autre ensemble de scopes ⇒ le pont refuse de s'enregistrer
+(exit 78). Lancer un film passe par les MÊMES portes que « Regarder » (source approuvée, promotion terrain, lecteur
+officiel) ; aucune URL de média n'est jamais lue ni produite. L'Agent Port reste la barrière
 d'autorisation : identité révoquée, scope retiré ou outil hors liste ⇒ refus. Les résultats repassent par un nettoyage
 récursif (aucune adresse, aucune clé de secret, tailles bornées). Aucun paramètre de commande shell, de chemin ni d'URL
 n'existe.
@@ -39,7 +46,8 @@ from . import VERSION, agentport, agents, config as otconfig, fsutil, mcp, tools
 
 MUSE_AGENT_ID = "muse-device"                 # identité dédiée du pont (jamais « muse » : autre client local)
 LEGACY_AGENT_ID = "muse"                      # anciennes installations de développement (migration : museadmin)
-MUSE_SCOPES = ["read"]
+# scopes EXACTS de l'identité du pont (triés) : ni lecture seule, ni plus ; vérifiés avant tout enregistrement
+MUSE_SCOPES = ["control", "display", "feedback", "read"]
 DEFAULT_STATE_DIR = "/var/lib/opentv-muse"
 RUN_STATUS = "/run/opentv-muse/status.json"
 PAIR_STATUS_NAME = "pair-status.json"
@@ -56,26 +64,53 @@ BACKOFF_BASE_S, BACKOFF_MAX_S, AUTH_BACKOFF_MIN_S, HEALTHY_SESSION_S = 2.0, 60.0
 TOKEN_REFRESH_AGE_S, TOKEN_RETRY_S = 3 * 3600, 300
 MAX_CONCURRENT_INVOKES = 4
 
-# commande Muse -> outil MCP OpenTV (scope read exigé ; jamais feedback ni display_message pour cette identité)
+# commande Muse -> outil MCP OpenTV (liste FERMÉE ; aucune commande générique, aucun nom d'outil libre)
 COMMANDS = {
     "opentv.status": "status",
     "opentv.search": "search",
     "opentv.recommend": "recommend",
     "opentv.catalogue_list": "catalogue_list",
     "opentv.history": "history",
+    "opentv.feedback": "feedback",
+    "opentv.display_message": "display_message",
+    "opentv.present_title": "present_title",
+    "opentv.play_title": "play_title",
+    "opentv.close_player": "close_player",
+    "opentv.remote_control": "remote_control",
 }
 DESCRIPTIONS = {
-    "opentv.status": "État de la boîte OpenTV (nom, réseau en mode seulement, catalogue, profil « Pour toi »). "
-                     "Lecture seule, sans adresse ni secret.",
+    "opentv.status": "État d'OpenTV : nom, réseau (mode seulement), catalogue, profil « Pour toi », état de lecture "
+                     "(idle, loading, playing, closing, closed, unavailable) et dernières actions TV (queued, claimed, "
+                     "applied, failed, expired). Sans adresse ni secret.",
     "opentv.search": "Cherche un titre dans le catalogue OpenTV accepté (paginé). Une requête ressemblant à une "
-                     "adresse est refusée. Lecture seule.",
-    "opentv.recommend": "Recommandations « Pour toi » expliquées, filtrées sur le catalogue accepté (paginées). "
-                        "Lecture seule.",
+                     "adresse est refusée.",
+    "opentv.recommend": "Recommandations « Pour toi » expliquées (goûts explicites d'Alex, notes IMDb/TMDb séparées, "
+                        "nouveautés), filtrées sur le catalogue accepté. Sers-t'en avec history et search pour CHOISIR "
+                        "toi-même un film à proposer, puis montre-le avec opentv.present_title et une phrase qui "
+                        "explique pourquoi.",
     "opentv.catalogue_list": "Liste alphabétique paginée de TOUT le catalogue accepté (identifiant stable, titre, "
                              "année, genres, notes séparées). Parcourir avec offset jusqu'à has_more=false en gardant "
                              "generated_at : s'il change entre deux pages (rafraîchissement quotidien), recommencer à "
-                             "offset 0. Aucune URL. Lecture seule.",
-    "opentv.history": "Historique local « Pour toi » (changements, ouvertures, listes) paginé. Lecture seule.",
+                             "offset 0. Aucune URL.",
+    "opentv.history": "Historique local « Pour toi » (changements, ouvertures, listes J'aime / Pas pour moi / Déjà vu "
+                      "/ À voir plus tard / Pas ce soir), paginé.",
+    "opentv.feedback": "Enregistre un goût explicite d'Alex sur un film (like, dislike, seen, unseen, watchlist, "
+                       "unwatchlist, not-tonight, clear-not-tonight, clear-opinion), SEULEMENT quand Alex le dit. "
+                       "Idempotent. Ouvrir ou lancer un film n'est jamais « vu ».",
+    "opentv.display_message": "Affiche une courte bannière (texte seul, sans adresse) sur l'écran OpenTV ; au plus "
+                              "une toutes les 5 secondes.",
+    "opentv.present_title": "Propose un film à Alex sur la TV : sa fiche s'ouvre avec ta phrase (facultative, une "
+                            "ligne). Utilise l'identifiant stable vu dans recommend, search ou catalogue_list. "
+                            "Résultat = action acceptée (queued) ; suis-la dans opentv.status (applied = la page TV "
+                            "l'a affichée). Refusé pendant une lecture ou un réglage.",
+    "opentv.play_title": "Lance un film du catalogue accepté par le lecteur officiel d'OpenTV, UNIQUEMENT quand Alex "
+                         "te demande explicitement de le regarder. Mêmes portes que le bouton « Regarder » ; refusé si "
+                         "la lecture n'est pas disponible ou déjà en cours. Résultat = lecture acceptée (loading) ; "
+                         "playing/closed se lisent dans opentv.status.",
+    "opentv.close_player": "Ferme le lecteur en cours ; OpenTV revient sur la fiche du film.",
+    "opentv.remote_control": "Une touche de navigation OpenTV (up, down, left, right, ok, back, home), débit borné. "
+                             "Préfère present_title/play_title/close_player. La télécommande d'Alex reste prioritaire ; "
+                             "jamais les Réglages ni « Regarder » par OK.",
 }
 # modules du SDK jamais chargés (non livrés ; refusés même s'ils apparaissaient)
 FORBIDDEN_MODULES = frozenset(("musegadget.executor", "musegadget.fileops", "musegadget.service", "musegadget.cli",
@@ -490,12 +525,12 @@ def _param_desc(p):
 
 def command_specs():
     """Spécifications enregistrées auprès de Muse (format commands_v2 du SDK). Toujours dérivées des schémas typés
-    de l'Agent Port ; tout outil hors scope read est un défaut de construction (exception)."""
+    de l'Agent Port ; tout outil hors des scopes du pont est un défaut de construction (exception)."""
     out = {}
     for cmd, tool in COMMANDS.items():
         t = tools.TOOL_BY_NAME[tool]
-        if t["scope"] != "read":
-            raise RuntimeError("muse_command_not_read_only:" + cmd)
+        if t["scope"] not in MUSE_SCOPES:
+            raise RuntimeError("muse_command_scope:" + cmd)
         sch = t["inputSchema"]
         req, opt = {}, {}
         for k, p in sch["properties"].items():
@@ -607,7 +642,7 @@ class AgentPortMCP:
         return sorted(str(x) for x in scopes)
 
     def call_tool(self, name, args):
-        if name not in COMMANDS.values():   # jamais feedback / display_message, même si l'identité les avait
+        if name not in COMMANDS.values():   # liste fermée : jamais un outil hors des commandes enregistrées
             raise BridgeError("unknown_command")
         s, last = self._session()
         r = s.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": name, "arguments": args}})
@@ -657,7 +692,7 @@ class _Backoff:
         self.failures, self.floor = 0, 0.0
 
 
-FATAL_IDENTITY = ("bridge_identity_missing", "bridge_identity_invalid", "unauthorized", "identity_not_read_only")
+FATAL_IDENTITY = ("bridge_identity_missing", "bridge_identity_invalid", "unauthorized", "identity_scope_mismatch")
 
 
 class Bridge:
@@ -728,7 +763,8 @@ class Bridge:
                     continue
                 await self._sleep(TOKEN_RETRY_S)
                 continue
-            # verrou OpenTV : identité « muse-device » authentifiée et STRICTEMENT en lecture avant tout enregistrement
+            # verrou OpenTV : identité « muse-device » authentifiée avec EXACTEMENT MUSE_SCOPES avant tout enregistrement
+            # (autorisation retirée ou réduite sur la TV ⇒ plafond réduit ⇒ refus : jamais un pont à moitié autorisé)
             try:
                 scopes = await asyncio.to_thread(self.port.identity_scopes)
             except BridgeError as e:
@@ -740,9 +776,9 @@ class Bridge:
                 await self._sleep(backoff.next_delay())
                 continue
             if scopes != MUSE_SCOPES:
-                self._status("refused", reason="identity_not_read_only")
-                log_event("muse_identity_refused", error="identity_not_read_only")
-                return "identity_not_read_only"
+                self._status("refused", reason="identity_scope_mismatch")
+                log_event("muse_identity_refused", error="identity_scope_mismatch")
+                return "identity_scope_mismatch"
             api = self.sdk.muse_api.api_root(pairing.get("api_url_v2", "") if str(
                 pairing.get("api_url_v2", "")).startswith("https://") else "")
             noise_host = pairing.get("noise_host") or DEFAULT_NOISE_HOST
@@ -913,10 +949,10 @@ def cmd_pair(a, sdk=None, pair_fn=None):
 
 def build_parser():
     p = argparse.ArgumentParser(prog="opentv-muse-bridge",
-                                description="Pont Muse OpenTV (SDK officiel = transport ; commandes OpenTV en lecture)")
+                                description="Pont Muse OpenTV (SDK officiel = transport ; commandes OpenTV typées)")
     p.add_argument("--env", default=otconfig.ENV_FILE)
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("run", help="(opentv-muse.service) connexion à Muse, commandes OpenTV en lecture seulement")
+    sub.add_parser("run", help="(opentv-muse.service) connexion à Muse, commandes OpenTV typées et bornées")
     pa = sub.add_parser("pair", help="(opentv-muse-pair.service) fenêtre d'appariement Bluetooth bornée")
     pa.add_argument("--timeout", type=int, default=PAIR_TIMEOUT_S, choices=range(60, 901), metavar="60..900")
     sub.add_parser("describe", help="commandes enregistrées auprès de Muse (aucun secret)")

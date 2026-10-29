@@ -102,6 +102,25 @@ class ForYou:
         s["data"]["marks"] = dict(s["nav"].marks)
         return s
 
+    def tv_item(self, session, uid):
+        """Fiche d'UN film du catalogue accepté pour la page TV locale (proposition d'un assistant), même forme que
+        les cartes « Pour toi » : objet public du moteur + affiche https approuvée + résumé sans adresse + marques
+        explicites. None si l'identifiant n'est pas dans le catalogue accepté de cette sélection."""
+        x = (session.get("by_uid") or {}).get(uid) if isinstance(uid, str) else None
+        if not isinstance(x, dict) or not isinstance(x.get("title"), str):
+            return None
+        pub = self.engine.public_item(x, uid, [], None)
+        poster = x.get("poster")
+        pub["poster"] = poster if isinstance(poster, str) and poster.startswith("https://") and len(poster) < 600 \
+            else None
+        desc = " ".join(self.engine.clean_text(x.get("description")).split())[:400]   # = ui_data (_strip_urls)
+        pub["description"] = desc or None
+        mark = session["nav"].marks.get(uid)
+        if mark is None:
+            mark = self.engine.marks_for(self.tv.call("profile") or {}, [uid], self.clock())[uid]
+        pub["marks"] = dict(mark)
+        return pub
+
     def tv_feedback(self, session, uid, action):
         if not isinstance(action, str) or action not in self.engine.ACTIONS or \
                 not isinstance(uid, str) or uid not in session.get("by_uid", {}):

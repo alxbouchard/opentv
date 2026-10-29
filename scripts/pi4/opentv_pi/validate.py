@@ -2,7 +2,10 @@
 import re
 import unicodedata
 
-SCOPES = ("display", "feedback", "read")
+# « control » : pilotage sémantique d'OpenTV (proposer un film à l'écran, naviguer, lancer un film accepté par le lecteur
+# officiel promu, fermer le lecteur). Jamais accordé par défaut ni par une installation : choix explicite du
+# propriétaire (« Gérer les assistants » sur la TV, ou `opentv-pi muse authorize-control --yes` en root).
+SCOPES = ("control", "display", "feedback", "read")
 AGENT_ID_RE = re.compile(r"[a-z][a-z0-9-]{1,23}")
 HEX64_RE = re.compile(r"[0-9a-fA-F]{64}")
 # toute forme d'adresse : schéma, www., hôte.tld, IP, schémas dangereux (plus strict que le moteur : un message

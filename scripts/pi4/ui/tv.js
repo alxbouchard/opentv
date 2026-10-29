@@ -20,6 +20,13 @@
   // carte d'origine restent en place
   var RETURN_GUARD_MS = 600, guardUntil = 0;
   var MSG_PLAY_LOADING = "Chargement…", MSG_PLAY_RETURN = "Retour à OpenTV…";
+  // Pilotage par un assistant (scope « control ») : actions typées numérotées du service (fiche proposée, film lancé
+  // par le lecteur officiel, touche de navigation). Chacune est RÉCLAMÉE (claim, atomique côté service) avant d'être
+  // appliquée, puis son résultat est rendu (done) : jamais appliquée deux fois, même page rechargée. La télécommande
+  // d'Alex (CEC/USB/clavier) et son téléphone restent prioritaires : une touche d'assistant arrivée moins de
+  // HUMAN_PRIORITY_MS après une touche humaine est refusée ; Réglages, confirmation et « Regarder » par OK sont
+  // interdits à l'assistant (lancement : seulement play_title, mêmes portes que « Regarder »).
+  var actSeq = 0, actBusy = false, lastHumanAt = 0, HUMAN_PRIORITY_MS = 2000;
   var LABELS = { watch: "Regarder", like: "J'aime", dislike: "Pas pour moi", seen: "Déjà vu", watchlist: "À voir plus tard",
                  "not-tonight": "Pas ce soir" };
   var TOGGLE = { like: ["opinion", "like", "clear-opinion"], dislike: ["opinion", "dislike", "clear-opinion"],
@@ -433,7 +440,7 @@
       remoteFails = 0;
       if (d && typeof d.seq === "number") {
         if (remoteSeq >= 0 && d.events) {
-          d.events.forEach(function (ev) { if (ev && REMOTE_ACTIONS[ev.a] === 1) { handle(ev.a); } });
+          d.events.forEach(function (ev) { if (ev && REMOTE_ACTIONS[ev.a] === 1) { lastHumanAt = Date.now(); handle(ev.a); } });
         }
         remoteSeq = d.seq;
       }
@@ -469,15 +476,20 @@
     return b;
   }
   function canWatch() { return !!(state && state.playback && state.playback.available); }
-  function openItem(it, row) {   // « Regarder » en premier, seulement si une lecture réelle est possible
+  function openItem(it, row, prop) {   // « Regarder » en premier, seulement si une lecture réelle est possible
     var m = ((fy && fy.marks) || {})[it.id] || {}, actions = Object.keys(LABELS).filter(function (a) {
       return a !== "watch" || canWatch();
     });
-    showPanel("item", row ? row.title : "", it.title, it.description || meta(it, false), actions.map(function (a) {
+    var kicker = row ? row.title : "", text = it.description || meta(it, false);
+    if (prop) {   // fiche proposée par un assistant : son nom et sa phrase (texte seul, sans adresse) en tête
+      kicker = "Proposé par " + (AGENTS[prop.from] || "un assistant");
+      if (prop.text) { text = "« " + prop.text + " »" + (text ? " — " + text : ""); }
+    }
+    showPanel("item", kicker, it.title, text, actions.map(function (a) {
       if (a === "watch") { return button(LABELS[a], "play"); }
       var on = m[TOGGLE[a][0]] === TOGGLE[a][1];
       return button((on ? "✓ " : "") + LABELS[a], on ? "on" : "");
-    }), 0, { it: it, actions: actions });
+    }), 0, { it: it, actions: actions, prop: prop || null });
   }
   // ---- « Regarder » : écran OpenTV pendant la préparation cachée ; retour sur la même carte, fiche rouverte
   function showPlayOverlay(title, msg) {
@@ -487,15 +499,17 @@
   }
   function restoreCard(p) {   // même film (identifiant stable), fiche rouverte sur « Regarder »
     var hit = findItem(p.it.id, p.key);
-    focus.zone = "rows";
-    if (!hit) {   // film absent des rangées affichées : position d'origine bornée, aucune fiche d'un titre disparu
+    focus.zone = ROWS.length ? "rows" : "top";
+    if (!hit) {   // film absent des rangées affichées : position d'origine bornée
       if (ROWS.length) { focus.row = Math.min(p.row, ROWS.length - 1); focus.cols[focus.row] = p.col; }
       paint();
+      // fiche proposée par un assistant (film du catalogue hors des rangées) : la même fiche est rouverte
+      if (p.prop) { openItem(p.it, null, p.prop); }
       return;
     }
     focus.row = hit.row; focus.cols[hit.row] = hit.col;
     paint();
-    openItem(ROWS[hit.row].items[hit.col], ROWS[hit.row]);
+    openItem(ROWS[hit.row].items[hit.col], p.prop ? null : ROWS[hit.row], p.prop || null);
   }
   // lecteur révélé ou fermeture demandée : la page /tv (sous la fenêtre du lecteur) montre DÉJÀ la destination du
   // retour — jamais un « Chargement… » périmé quand le lecteur disparaît
@@ -512,8 +526,8 @@
     return true;
   }
   function startPlay(it) {
-    play = { it: it, row: focus.row, col: col(), key: rowKey(ROWS[focus.row], focus.row), seq: -1, done: false,
-             restored: false };
+    play = { it: it, row: focus.row, col: col(), key: ROWS[focus.row] ? rowKey(ROWS[focus.row], focus.row) : null,
+             seq: -1, done: false, restored: false, prop: (panel && panel.prop) || null };
     closePanel();
     showPlayOverlay(it.title);
     api("POST", "/api/tv/play", { id: it.id }).then(function (r) {
@@ -527,7 +541,8 @@
     api("GET", "/api/tv/play").then(function (v) {
       if (!play) { return; }
       if (v.state === "closed" || v.state === "unavailable") { endPlay(v, false); return; }
-      if (v.state === "idle" && v.seq !== play.seq) { endPlay(v, false); return; }
+      // lecture lancée par un assistant : un « idle » antérieur à son démarrage (minSeq) n'est jamais une fin
+      if (v.state === "idle" && v.seq !== play.seq && !(play.minSeq && v.seq < play.minSeq)) { endPlay(v, false); return; }
       if (v.state === "playing" || v.state === "closing") { restoreUnder(); }
       setTimeout(pollPlay, PLAY_POLL_MS);
     }).catch(function (e) { if (!onApiError(e)) { setTimeout(pollPlay, 1000); } });
@@ -550,8 +565,14 @@
       }); });
     }
   }
+  function agentPlayPending(s) {   // lecture lancée par un assistant dont l'action « play » n'est pas encore appliquée
+    var l = (s && s.actions && s.actions.pending) || [], i;
+    for (i = 0; i < l.length; i++) { if (l[i] && l[i].kind === "play" && l[i].seq > actSeq) { return true; } }
+    return actBusy;
+  }
   function resumePlay(v) {   // page /tv rechargée pendant une lecture : écran de chargement ou acquittement
     if (play || !v || (typeof v.seq === "number" && v.seq <= playEndSeq)) { return; }
+    if ((v.state === "loading" || v.state === "playing") && agentPlayPending(state)) { return; }   // l'action s'en charge
     if (v.state === "loading" || v.state === "playing" || v.state === "closing") {
       play = { it: null, row: focus.row, col: col(), seq: -1, restored: false };
       showPlayOverlay("", v.state === "loading" ? MSG_PLAY_LOADING : MSG_PLAY_RETURN);
@@ -748,6 +769,88 @@
       if (r.ok) { loadForYou(true); }   // état du service relu (redessiné seulement s'il diffère, focus gardé)
     }).catch(function (e) { if (!onApiError(e)) { toast("Action non enregistrée."); } });
   }
+  // ---- pilotage par assistant : une action à la fois, réclamée puis appliquée une seule fois, résultat rendu
+  function runActions(s) {
+    if (actBusy || !s || s.setup.active) { return; }
+    var l = (s.actions && s.actions.pending) || [], next = null, i;
+    for (i = 0; i < l.length; i++) { if (l[i] && typeof l[i].seq === "number" && l[i].seq > actSeq) { next = l[i]; break; } }
+    if (!next) { return; }
+    actBusy = true;
+    // heure d'ENVOI de la réclamation : l'âge mesuré par le service s'y retranche, jamais la latence de la réponse
+    // (une page lente ne peut donc que reculer l'heure estimée de mise en file — en faveur de la touche humaine)
+    var seq = next.seq, sentAt = Date.now();
+    api("POST", "/api/tv/action", { seq: seq, phase: "claim" }).then(function (r) {
+      actSeq = Math.max(actSeq, seq);
+      if (!r || !r.ok || !r.action || r.action.seq !== seq) { return null; }   // déjà prise, expirée, remplacée
+      var why = null;
+      try { why = applyAction(r.action, sentAt); } catch (e) { why = "error"; }
+      return api("POST", "/api/tv/action", { seq: seq, phase: "done", ok: !why, reason: why || null });
+    }).catch(function (e) { onApiError(e); actSeq = Math.max(actSeq, seq); })
+      .then(function () { actBusy = false; if (state) { runActions(state); } });
+  }
+  function validItem(it, id) {
+    return !!(it && typeof it === "object" && it.id === id && typeof it.title === "string" && it.title);
+  }
+  function applyAction(x, sentAt) {   // -> null (appliquée) | code de refus
+    if (!state || state.setup.active) { return "tv_setup_active"; }
+    if (x.kind === "key") {   // heure de mise en file estimée sur l'horloge de la page (au plus tôt)
+      return agentKey(x.key, (sentAt || Date.now()) - (typeof x.age_ms === "number" ? Math.max(0, x.age_ms) : 0));
+    }
+    if (!validItem(x.item, x.id)) { return "bad_item"; }
+    var prop = { from: x.from, text: typeof x.text === "string" ? x.text : null };
+    if (x.kind === "present") {
+      if (play) { return "player_active"; }                          // jamais de vol du focus du lecteur
+      if (panel && panel.kind !== "item") { return "tv_busy"; }      // Réglages / assistants : l'humain d'abord
+      presentItem(x.item, prop);
+      return null;
+    }
+    if (x.kind === "play") { return agentPlay(x, prop); }
+    return "bad_kind";
+  }
+  function presentItem(it, prop) {   // fiche du film : sa carte au focus si elle est dans les rangées, sinon par-dessus
+    if (it.marks && fy) { fy.marks = fy.marks || {}; if (!fy.marks[it.id]) { fy.marks[it.id] = it.marks; } }
+    if (panel) { panel = null; $("panel").hidden = true; $("pqrfig").hidden = true; }
+    var hit = findItem(it.id, null);
+    if (hit) { focus.zone = "rows"; focus.auto = false; focus.row = hit.row; focus.cols[hit.row] = hit.col; }
+    paint();
+    openItem(hit ? ROWS[hit.row].items[hit.col] : it, null, prop);
+  }
+  function agentPlay(x, prop) {   // lecture DÉJÀ acceptée côté service (Playback.start + portes) : écran OpenTV
+    // même film que la fiche proposée ouverte : sa phrase est gardée pour la fiche rouverte au retour
+    if (!prop.text && panel && panel.prop && panel.it && panel.it.id === x.id) { prop = panel.prop; }
+    if (panel && panel.kind !== "item") { panel = null; $("panel").hidden = true; $("pqrfig").hidden = true; }
+    var pb = state && state.playback, minSeq = typeof x.playback_seq === "number" ? x.playback_seq : 0;
+    if (pb && typeof pb.seq === "number" && pb.seq <= playEndSeq && pb.state !== "loading" && pb.state !== "playing") {
+      if (!play) { presentItem(x.item, prop); }   // déjà terminée et acquittée : la fiche seulement
+      return null;
+    }
+    if (!play) {
+      presentItem(x.item, prop);
+      play = { it: panel && panel.it ? panel.it : x.item, row: focus.row, col: col(),
+               key: ROWS[focus.row] ? rowKey(ROWS[focus.row], focus.row) : null, seq: -1, done: false,
+               restored: false, minSeq: minSeq, prop: prop };
+      closePanel();
+      showPlayOverlay(x.item.title);
+      pollPlay();
+    } else if (!play.it) {   // page rechargée / état vu avant l'action : la carte d'origine est complétée
+      play.it = x.item; play.prop = prop; play.minSeq = minSeq;
+      if (!play.restored) { showPlayOverlay(x.item.title); }
+    }
+    return null;
+  }
+  function agentKey(a, queuedAt) {   // touche d'un assistant : jamais prioritaire, jamais Réglages ni « Regarder »
+    if (REMOTE_ACTIONS[a] !== 1) { return "bad_key"; }
+    if (play) { return "player_active"; }   // Retour/Accueil pendant une lecture : fermés côté service
+    // touche humaine moins de HUMAN_PRIORITY_MS avant la mise en file de cette touche, ou depuis : l'humain gagne
+    if (lastHumanAt && lastHumanAt > queuedAt - HUMAN_PRIORITY_MS) { return "human_active"; }
+    if (panel && panel.kind !== "item") {
+      if (panel.kind === "agents") { return "tv_busy"; }
+      if (a !== "back" && a !== "home") { return "settings_forbidden"; }
+    } else if (!panel && focus.zone === "top" && a === "ok") { return "settings_forbidden"; }
+    else if (panel && a === "ok" && panel.actions[panel.btn] === "watch") { return "use_play_title"; }
+    handle(a);
+    return null;
+  }
   // ---- télécommande : actions normalisées par keys.js (clavier, télécommande USB 2,4 GHz, HDMI-CEC)
   var KEYS = window.OpenTVKeys || { normalize: function () { return null; }, isBrowserNav: function () { return false; } };
   function handle(a) {   // -> true si l'action a été consommée
@@ -790,6 +893,7 @@
     // navigation du navigateur (Retour, Accueil…) : toujours empêchée, configuration comprise — le kiosque reste sur /tv
     if (KEYS.isBrowserNav(e) || a === "back" || a === "home") { e.preventDefault(); }
     if (!a) { return; }
+    lastHumanAt = Date.now();   // télécommande d'Alex : prioritaire sur toute touche d'assistant
     if (!play && guarded(a)) { e.preventDefault(); return; }   // Retour/Accueil tenus depuis la fermeture du lecteur
     if (e.repeat && (a === "ok" || a === "back" || a === "home")) { e.preventDefault(); return; }   // pas de rafale
     if (handle(a)) { e.preventDefault(); }
@@ -847,6 +951,7 @@
       loadForYou(false);
     }
     renderRemote();
+    runActions(s);
     resumePlay(s.playback);
   }
   function poll() {

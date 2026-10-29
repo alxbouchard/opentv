@@ -168,10 +168,12 @@ class TestRegistryAudit(unittest.TestCase):
 class TestTools(unittest.TestCase):
     def test_schemas_are_closed_and_bounded(self):
         names = [t["name"] for t in tools.TOOLS]
-        self.assertEqual(names, ["status", "recommend", "catalogue_list", "search", "feedback", "history", "display_message"])
+        self.assertEqual(names, ["status", "recommend", "catalogue_list", "search", "feedback", "history", "display_message",
+                                 "present_title", "play_title", "close_player", "remote_control"])
         for t in tools.TOOLS:
             self.assertFalse(t["inputSchema"].get("additionalProperties", True), t["name"])
-            self.assertIn(t["scope"], ("read", "feedback", "display"))
+            self.assertIn(t["scope"], ("read", "feedback", "display", "control"))
+        self.assertEqual(tools.CONTROL_TOOLS, ("present_title", "play_title", "close_player", "remote_control"))
 
     def test_validate_args(self):
         self.assertEqual(tools.validate_args("recommend", {}), {"limit": 5, "offset": 0})

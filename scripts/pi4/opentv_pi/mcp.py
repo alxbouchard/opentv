@@ -15,13 +15,19 @@ from . import VERSION, agentport, tools, validate
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 MAX_LINE = 1024 * 1024
 INSTRUCTIONS = ("OpenTV (Raspberry Pi) : outils bornés « Pour toi » (status, recommend, catalogue_list, search, "
-                "feedback, history) et display_message. Les sorties ne contiennent jamais d'URL. Les décisions "
-                "sensibles restent à l'humain.")
+                "feedback, history), display_message et, si le propriétaire l'a autorisé, le pilotage (present_title, "
+                "play_title, close_player, remote_control). Choisis toi-même un film avec recommend/search/history, "
+                "explique-le en une phrase et montre-le avec present_title ; lance un film seulement quand l'humain "
+                "le demande. Les sorties ne contiennent jamais d'URL. Les décisions sensibles restent à l'humain.")
 ERRORS_FR = {"unauthorized": "agent non autorisé", "forbidden_scope": "outil hors des droits de cet agent",
              "invalid_params": "paramètres invalides", "rate_limited": "trop de demandes, réessaie plus tard",
              "locked": "Agent Port verrouillé temporairement", "unknown_id": "identifiant absent du catalogue accepté",
              "usage": "requête refusée", "store_unavailable": "historique indisponible",
-             "service_unavailable": "service OpenTV indisponible"}
+             "service_unavailable": "service OpenTV indisponible",
+             "player_active": "un film est en cours : seule la fermeture est possible",
+             "player_busy": "un film est déjà en cours", "playback_unavailable": "lecture indisponible sur cette TV",
+             "tv_busy": "la TV est dans un réglage : réessaie après", "tv_setup_active": "OpenTV est en configuration",
+             "tv_queue_full": "trop d'actions en attente sur la TV", "control_unavailable": "pilotage indisponible"}
 
 
 class ConfigError(Exception):

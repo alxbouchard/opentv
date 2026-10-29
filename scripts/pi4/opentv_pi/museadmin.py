@@ -1,16 +1,19 @@
-"""opentv-pi muse status | pair | unpair | prepare-bluetooth | restore-bluetooth : administration du pont Muse.
+"""opentv-pi muse status | authorize-control | revoke-control | pair | unpair | prepare-bluetooth | restore-bluetooth :
+administration du pont Muse.
 
 Portes humaines et barrières :
 - `pair` exige root, un SDK épinglé vérifié (empreintes), sa dépendance websockets épinglée, l'absence du service
   musegadget d'origine, le compte opentv-muse (groupe privé, membre du groupe de l'Agent Port), la compatibilité BlueZ
   du SDK ACTIVE (ExchangeMTU = 256 et greffon battery désactivé dans bluetoothd en cours : Android ET iPhone ; sinon
-  refus avec la commande `prepare-bluetooth`) et une politique OpenTV qui autorise DÉJÀ Muse en lecture (QR / « Gérer
-  les assistants » sur la TV). Le jeton SDK (mgst_…) est saisi sans écho (getpass) ou lu sur stdin (--token-stdin),
-  jamais en argument, variable d'environnement ou sortie ; il est écrit 0600 opentv-muse par descripteur dans
-  /var/lib/opentv-muse. L'identité Agent Port DÉDIÉE « muse-device » est émise avec le SEUL scope read (fichier client
-  root:opentv-muse 0640) ; son plafond reste l'autorisation de Muse sur la TV. L'identité « muse » d'un autre client
-  local n'est jamais émise, révoquée ni invalidée. Si « muse-device » existe déjà sans être prouvée à nous (jeton de
-  notre fichier client, scope read seul) : refus, sauf remplacement explicite --replace-identity. La fenêtre Bluetooth
+  refus avec la commande `prepare-bluetooth`) et une politique OpenTV qui autorise DÉJÀ Muse à PILOTER OpenTV (choix
+  explicite d'Alex : « Gérer les assistants » sur la TV → « Piloter OpenTV », ou `authorize-control --yes` ci-dessous).
+  Le jeton SDK (mgst_…) est saisi sans écho (getpass) ou lu sur stdin (--token-stdin), jamais en argument, variable
+  d'environnement ou sortie ; il est écrit 0600 opentv-muse par descripteur dans /var/lib/opentv-muse. L'identité
+  Agent Port DÉDIÉE « muse-device » est émise avec EXACTEMENT musebridge.MUSE_SCOPES (fichier client root:opentv-muse
+  0640) ; son plafond reste l'autorisation de Muse sur la TV, jamais au-delà (pas de --force). L'identité « muse »
+  d'un autre client local n'est jamais émise, révoquée ni invalidée. Si « muse-device » existe déjà sans être prouvée
+  à nous (jeton de notre fichier client) : refus, sauf remplacement explicite --replace-identity ; prouvée à nous mais
+  avec d'autres scopes (ancien pont en lecture seule) : réémise avec les scopes exacts. La fenêtre Bluetooth
   bornée tourne dans l'unité bac à sable opentv-muse-pair.service ; opentv-muse.service n'est activé qu'APRÈS un
   appariement réussi ; tout échec de l'appariement révoque l'identité tout juste émise et retire son fichier client.
 - `unpair` arrête et désactive le pont, efface l'appariement (et le jeton SDK avec --forget-token), révoque
@@ -20,6 +23,11 @@ Portes humaines et barrières :
   n'est révoquée que si elle porte encore CE jeton (jamais celle d'un autre client).
 - `prepare-bluetooth` : compatibilité BlueZ du SDK (opentv_pi.musebluez), notée et réversible ; redémarre bluetooth
   seulement si nécessaire. `restore-bluetooth` (uninstall.sh) : retire seulement ce qu'OpenTV a noté.
+- `authorize-control --yes` (root, décision explicite d'Alex sur la boîte) : la ligne de politique « muse » SEULE
+  passe au niveau « control » (lecture, avis, messages, pilotage) dans une écriture atomique verrouillée ; aucune
+  identité n'est émise ni élargie (le pont la reçoit à `muse pair`). Sans --yes : plan affiché, rien écrit.
+  `revoke-control` : retire « control » de la ligne « muse » ET, dans la même écriture, de l'identité du pont (qui
+  refuse alors de s'enregistrer) ; les autres droits de Muse restent. Les autres assistants ne sont jamais touchés.
 - `status` ne lit jamais un fichier secret (présence/mode seulement) et n'affiche aucun jeton ni indice de jeton.
 """
 import getpass
@@ -230,8 +238,9 @@ class Admin:
         return fsutil.open_trusted_dir(self.cfg.agent_clients_dir, self.trusted_uids)
 
     def identity_state(self, pw):
-        """(root) -> {"state": absent|owned|stale_client|unexpected, "reason", "foreign_clients": [...]}.
-        owned = entrée du registre portant le jeton de notre fichier client ET scope read seul."""
+        """(root) -> {"state": absent|owned|outdated|stale_client|unexpected, "reason", "foreign_clients": [...]}.
+        owned = entrée du registre portant le jeton de notre fichier client ET exactement MUSE_SCOPES ; outdated =
+        prouvée à nous (même jeton) mais d'autres scopes (ancien pont en lecture seule, plafond réduit) : réémise."""
         out = {"state": "absent", "reason": None, "foreign_clients": []}
         try:
             entry = self.registry().list().get(AGENT_ID)
@@ -263,7 +272,7 @@ class Admin:
         if not tok or not self.registry().entry_matches(AGENT_ID, tok):
             return dict(out, state="unexpected", reason="not_issued_by_muse_pair")
         if entry.get("scopes") != list(musebridge.MUSE_SCOPES):
-            return dict(out, state="unexpected", reason="scopes_not_read_only")
+            return dict(out, state="outdated", reason="scopes_differ")
         return dict(out, state="owned")
 
     def discard_identity(self, pw, only_owned=True):
@@ -352,9 +361,12 @@ class Admin:
             issued = reg.list().get(AGENT_ID)
             allowed = agents.ceiling(reg.policy(), AGENT_ID)
             rep["agent"] = {"id": AGENT_ID, "issued": issued is not None,
-                            "scopes": (issued or {}).get("scopes"), "read_only": (issued or {}).get("scopes") == ["read"],
+                            "scopes": (issued or {}).get("scopes"), "required_scopes": list(musebridge.MUSE_SCOPES),
+                            "exact_scopes": (issued or {}).get("scopes") == list(musebridge.MUSE_SCOPES),
                             "ceiling_from": agents.LINKED_POLICY[AGENT_ID],
-                            "allowed_by_policy": allowed if isinstance(allowed, list) else None}
+                            "allowed_by_policy": allowed if isinstance(allowed, list) else None,
+                            "control_authorized": isinstance(allowed, list) and
+                            set(musebridge.MUSE_SCOPES) <= set(allowed)}
         except (OSError, ValueError):
             rep["agent"] = {"id": AGENT_ID, "issued": None, "error": "registry_unreadable"}
         if pw is not None:   # présence seulement (jamais lus : secrets)
@@ -372,6 +384,8 @@ class Admin:
             gates.append("stock_musegadget_present")
         if rep["bluetooth"]["gate"]:
             gates.append(rep["bluetooth"]["gate"])
+        if not (rep.get("agent") or {}).get("control_authorized"):
+            gates.append("muse_control_not_authorized")
         if rep["paired"] is not True:
             gates.append("human_pairing_required")
         if (rep.get("link") or {}).get("state") != "registered":
@@ -411,10 +425,12 @@ class Admin:
             defined, pol = reg.policy_defined(), agents.ceiling(reg.policy(), AGENT_ID)
         except (OSError, ValueError):
             return None, {"error": "registry_unreadable"}
-        if not defined or not isinstance(pol, list) or "read" not in pol:
-            return None, {"error": "muse_not_authorized",
-                          "note": "Sur la TV : Réglages > Gérer les assistants > Muse « Voir seulement » (ou plus), "
-                                  "puis relancer. Le pont n'utilise jamais que la lecture."}
+        if not defined or not isinstance(pol, list) or not set(musebridge.MUSE_SCOPES) <= set(pol):
+            return None, {"error": "muse_control_not_authorized", "required_scopes": list(musebridge.MUSE_SCOPES),
+                          "allowed_by_policy": pol if isinstance(pol, list) else None,
+                          "note": "Muse pilote OpenTV seulement si Alex l'autorise : sur la TV, Réglages > Gérer les "
+                                  "assistants > Muse « Piloter OpenTV », ou sudo /opt/opentv/bin/opentv-pi muse "
+                                  "authorize-control --yes ; puis relancer."}
         return pw, None
 
     def read_token(self, from_stdin):
@@ -551,8 +567,10 @@ class Admin:
             base = {"sdk_token_written": token_written, "migration": migration}
             if replaced is not None:
                 base["replaced_identity"] = replaced
+            if ident_state["state"] == "outdated":   # prouvée à nous, autres scopes : révoquée puis réémise exacte
+                self.discard_identity(pw)
             if self.entry(dfd, "pairing.json") == "present":
-                if self.identity_state(pw)["state"] != "owned":   # identité lecture seule réémise si absente
+                if self.identity_state(pw)["state"] != "owned":   # identité aux scopes exacts réémise si absente
                     code, ident = self.issue_identity(pw)
                     if code != 0:
                         return dict(ident, ok=False), code
@@ -586,6 +604,8 @@ class Admin:
                                "ceiling_from": agents.LINKED_POLICY[AGENT_ID]},
                         commands=sorted(musebridge.COMMANDS), service_started=started, link=link,
                         gates=["Muse : demander « liste le catalogue OpenTV » et vérifier la réponse dans l'app",
+                               "Muse : « propose-moi un film » -> fiche sur la TV (opentv-pi muse status : action "
+                               "applied), puis photo HDMI",
                                "journalctl -u opentv-muse -n 30 : muse_registered puis muse_invoke ok"]), 0
         finally:
             os.close(dfd)
@@ -632,6 +652,52 @@ class Admin:
             out["migration"] = self.migrate_legacy(pw)
         out["note"] = "Retirer aussi l'appareil dans l'app Muse (Réglages > Appareils)."
         return out, 0 if out["ok"] else 1
+
+    # -- autorisation explicite du pilotage (root, décision d'Alex sur la boîte)
+    def _control_change(self, grant, yes):
+        if self.euid() != 0:
+            return {"ok": False, "error": "root_required",
+                    "note": "sudo /opt/opentv/bin/opentv-pi muse %s" % ("authorize-control --yes" if grant else
+                                                                         "revoke-control")}, 2
+        from .app import KNOWN_AGENTS, AGENT_LEVELS
+        reg = self.registry()
+        try:
+            view, fp, corrupt = reg.snapshot(KNOWN_AGENTS)
+        except (OSError, ValueError):
+            return {"ok": False, "error": "registry_unreadable"}, 2
+        if corrupt:
+            return {"ok": False, "error": "registry_unreadable", "note": "Registre des agents illisible : rien écrit."}, 2
+        before = list(view[LEGACY_ID]["allowed"])
+        after = list(AGENT_LEVELS["control"]) if grant else [x for x in before if x != "control"]
+        plan = {"agent": LEGACY_ID, "policy_before": before, "policy_after": after,
+                "bridge_identity": AGENT_ID, "other_agents": "unchanged"}
+        if sorted(after) == sorted(before):
+            return dict(plan, ok=True, changed=False), 0
+        if grant and not yes:
+            return dict(plan, ok=False, error="confirmation_required", changed=False,
+                        note="Autorise Muse à proposer des films à l'écran, naviguer dans OpenTV et lancer un film du "
+                             "catalogue accepté par le lecteur officiel quand tu le lui demandes. Relancer avec --yes "
+                             "pour confirmer ; retrait : opentv-pi muse revoke-control (ou Gérer les assistants)."), 2
+        try:
+            changed = reg.apply_policy_changes({LEGACY_ID: after}, KNOWN_AGENTS, fp, **self.service_ids())
+        except ValueError as e:
+            return dict(plan, ok=False, error="stale" if str(e) == "stale" else "registry_unreadable"), 2
+        except OSError as e:
+            return dict(plan, ok=False, error="registry_busy" if isinstance(e, agents.RegistryBusy) else
+                        "registry_write_failed"), 2
+        out = dict(plan, ok=True, changed=True, result=changed.get(LEGACY_ID))
+        if grant:
+            out["next"] = ("sudo /opt/opentv/bin/opentv-pi muse pair (réémet l'identité du pont avec les scopes "
+                           "exacts ; déjà apparié : aucun Bluetooth)")
+        else:
+            out["bridge"] = "refuse de s'enregistrer tant que le pilotage n'est pas réautorisé"
+        return out, 0
+
+    def authorize_control(self, yes=False):
+        return self._control_change(True, yes)
+
+    def revoke_control(self):
+        return self._control_change(False, True)
 
     # -- compatibilité BlueZ du SDK
     def prepare_bluetooth(self, replace_mtu=False, dry_run=False, restart=True):
@@ -716,6 +782,12 @@ def main(a, cfg=None, admin=None):
     adm = admin or (Admin(cfg) if root == "/" else Admin(cfg, root=root, runner=_no_host_runner))
     if a.action == "status":
         return _out(adm.status())
+    if a.action == "authorize-control":
+        res, code = adm.authorize_control(yes=getattr(a, "yes", False))
+        return _out(res, code)
+    if a.action == "revoke-control":
+        res, code = adm.revoke_control()
+        return _out(res, code)
     if a.action == "pair":
         res, code = adm.pair(token_stdin=a.token_stdin, replace_token=a.replace_token, force=a.force,
                              replace_identity=a.replace_identity)

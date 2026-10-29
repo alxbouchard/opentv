@@ -4,7 +4,7 @@
   idle         rien en cours (« Regarder » utilisable si `available`)
   loading      OK reçu : écran OpenTV « Chargement… » ; résolution puis préparation cachée par le contrôleur
   playing      le contrôleur a révélé le seul lecteur dominant, plein écran
-  closing      fermeture demandée (Retour/Quitter/Accueil CEC-HID-téléphone, plafond) : lecteur en cours d'arrêt
+  closing      fermeture demandée (Retour/Quitter/Accueil CEC-HID-téléphone, assistant, plafond) : lecteur en cours d'arrêt
   closed       lecteur et profil disparus ; /tv doit se repeindre puis acquitter (ack) avant le retour à « idle »
   unavailable  aucun lecteur / ambigu / échec / délai / plantage : « Lecture indisponible », site jamais montré ;
                même acquittement que « closed »
@@ -25,7 +25,7 @@ from .source import SourceError
 
 STATES = ("idle", "loading", "playing", "closing", "closed", "unavailable")
 ACTIVE = ("loading", "playing", "closing")
-USER_CLOSE = ("back", "exit", "home", "phone", "tv", "devtools")
+USER_CLOSE = ("back", "exit", "home", "phone", "tv", "devtools", "agent")
 REASON_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 MSG_UNAVAILABLE = "Lecture indisponible"
 

@@ -741,11 +741,15 @@ def build_parser():
     ca.add_argument("action", choices=("status", "refresh", "rollback", "resume", "ratings", "ratings-retry",
                                        "ratings-credential"))
     ca.add_argument("--env", default=argparse.SUPPRESS, help="fichier env (défaut : celui de opentv-pi --env)")
-    mu = sub.add_parser("muse", help="pont Muse (SDK officiel = transport ; commandes OpenTV en lecture seule) : "
-                                     "status | pair (root, humain : jeton SDK masqué + app Muse) | unpair (root) | "
-                                     "prepare-bluetooth (root : compatibilité BlueZ du SDK, réversible) | "
-                                     "restore-bluetooth (uninstall.sh)")
-    mu.add_argument("action", choices=("status", "pair", "unpair", "prepare-bluetooth", "restore-bluetooth"))
+    mu = sub.add_parser("muse", help="pont Muse (SDK officiel = transport ; commandes OpenTV typées : lecture, goûts, "
+                                     "message, pilotage) : status | authorize-control (root, --yes : Alex autorise "
+                                     "Muse à piloter OpenTV) | revoke-control (root) | pair (root, humain : jeton SDK "
+                                     "masqué + app Muse) | unpair (root) | prepare-bluetooth (root : compatibilité "
+                                     "BlueZ du SDK, réversible) | restore-bluetooth (uninstall.sh)")
+    mu.add_argument("action", choices=("status", "authorize-control", "revoke-control", "pair", "unpair",
+                                       "prepare-bluetooth", "restore-bluetooth"))
+    mu.add_argument("--yes", action="store_true",
+                    help="(authorize-control) confirmation explicite d'Alex ; sans elle, plan affiché, rien écrit")
     mu.add_argument("--token-stdin", action="store_true",
                     help="(pair) lire le jeton SDK sur stdin (une ligne) au lieu d'une saisie masquée ; jamais en argument")
     mu.add_argument("--replace-token", action="store_true", help="(pair) remplacer le jeton SDK enregistré")
