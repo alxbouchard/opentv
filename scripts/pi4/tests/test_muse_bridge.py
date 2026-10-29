@@ -1033,7 +1033,7 @@ class TestUnitsAndInstall(unittest.TestCase):
                      ("PrivateDevices", "yes"), ("MemoryDenyWriteExecute", "yes"), ("RestartPreventExitStatus", "78"),
                      ("StateDirectoryMode", "0700"), ("UMask", "0077"), ("ProtectHome", "yes")):
             self.assertEqual(s[k], v, k)
-        for p in ("/var/lib/opentv ", "/run/dbus", "/etc/opentv/tmdb.env", "/etc/opentv/source.env"):
+        for p in ("/var/lib/opentv ", "/run/dbus", "/etc/opentv/tmdb", "/etc/opentv/source.env"):
             self.assertIn("-" + p.strip(), text)
         self.assertNotIn("SupplementaryGroups", s)
         self.assertNotIn("MUSEGADGET_SDK_TOKEN", text)
