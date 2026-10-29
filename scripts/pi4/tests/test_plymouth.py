@@ -1465,7 +1465,7 @@ cat "$OTV_SC_DIR/$p" 2>/dev/null || echo
         self.assertEqual(p.returncode, 0, p.stderr)
         line = [l for l in p.stdout.decode().splitlines() if "apt-get install" in l][0]
         self.assertIn(" plymouth", line)
-        self.assertNotIn("plymouth-themes", line)                              # module script fourni par plymouth
+        self.assertIn("plymouth-themes", line)                                 # fournit label.so (prompts du thème)
         with open(INSTALL) as f:
             code = "\n".join(l for l in f.read().splitlines() if not l.lstrip().startswith("#"))
         self.assertNotIn("apt-get", code)
