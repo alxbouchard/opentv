@@ -570,10 +570,14 @@ class Admin:
             if ident_state["state"] == "outdated":   # prouvée à nous, autres scopes : révoquée puis réémise exacte
                 self.discard_identity(pw)
             if self.entry(dfd, "pairing.json") == "present":
+                reissued = False
                 if self.identity_state(pw)["state"] != "owned":   # identité aux scopes exacts réémise si absente
                     code, ident = self.issue_identity(pw)
                     if code != 0:
                         return dict(ident, ok=False), code
+                    reissued = True
+                if reissued:   # pont encore en marche avec l'ancienne identité (en pause) : relancé avec la nouvelle ;
+                    self.systemctl("try-restart", UNIT)   # arrêté (exit 78) : rien ici, démarré juste après
                 self.systemctl("enable", "--now", UNIT)
                 return dict(base, ok=True, result="already_paired", service=self.systemctl_word("is-active", UNIT),
                             link=self.wait_registered(),

@@ -29,6 +29,7 @@ from unittest import mock
 from tests._common import PI4, NANOPI, write_catalogue
 from tests import test_agent_port as tap
 from opentv_pi import agentport, agents, cli, config, foryou, fsutil, museadmin, musebluez, musebridge, tools
+from opentv_pi import app as appmod, web
 
 VENDOR = os.path.join(PI4, "vendor", "muse")
 PIN_COMMIT = "1db6a26f4ca56939c4465d8a12e241c1b1b5c8dc"
@@ -74,6 +75,10 @@ class ControlCtx(tap.FakeCtx):
     def __init__(self, fy):
         super().__init__(fy)
         self.control = []
+        self.seen = []   # appels authentifiés réellement servis (« actif » sur la TV)
+
+    def agent_seen(self, agent):
+        self.seen.append(agent)
 
     def agent_control(self, agent, name, a):
         self.control.append((agent, name, dict(a)))
@@ -363,17 +368,47 @@ class TestThroughAgentPort(unittest.TestCase):
         for t in ("feedback", "display_message", "present_title", "play_title", "close_player", "remote_control"):
             self.assertIn(t, audited)
 
-    def test_control_withdrawn_on_the_tv_fails_closed_at_the_next_call(self):
+    def test_control_withdrawn_on_the_tv_pauses_every_bridge_call(self):
         """Pilotage retiré dans « Gérer les assistants » : l'identité liée est réduite dans la même écriture et
-        l'Agent Port refuse aussitôt (aucune action TV), tandis que la lecture continue."""
+        l'Agent Port refuse aussitôt TOUT appel du pont (bridge_paused) — lecture, avis et message compris, jamais
+        une session à moitié autorisée ; l'identité reste installée (en pause) et l'audit garde « muse-device »."""
         reg = self.fx.reg
         _, fp, _ = reg.snapshot(("muse", "hermit", "hermes"))
         reg.apply_policy_changes({"muse": ["display", "feedback", "read"]}, ("muse", "hermit", "hermes"), fp)
-        self.assertEqual(self.call("opentv.present_title", {"id": "films/106"}),
-                         {"ok": False, "error": "forbidden_scope"})
-        self.assertEqual(self.fx.ctx.control, [])
-        self.assertTrue(self.call("opentv.status")["ok"])
-        self.assertEqual(self.port.identity_scopes(), ["display", "feedback", "read"])
+        before = len(self.fx.audit_records())
+        for cmd, params in (("opentv.present_title", {"id": "films/106"}), ("opentv.status", {}),
+                            ("opentv.catalogue_list", {}), ("opentv.display_message", {"text": "Bonsoir"}),
+                            ("opentv.feedback", {"id": "films/101", "action": "watchlist"})):
+            self.assertEqual(self.call(cmd, params), {"ok": False, "error": "bridge_paused"}, cmd)
+        with self.assertRaises(musebridge.BridgeError) as e:
+            self.port.identity_scopes()
+        self.assertEqual(e.exception.code, "bridge_paused")
+        self.assertEqual((self.fx.ctx.control, self.fx.ctx.messages), ([], []))
+        self.assertEqual(self.fx.fy.cli(["history", "--list", "watchlist"])[1].get("items", []), [])
+        self.assertEqual(reg.authenticate(musebridge.MUSE_AGENT_ID, self.fx.token), ["display", "feedback", "read"])
+        new = self.fx.audit_records()[before:]
+        self.assertEqual(len(new), 6)
+        self.assertEqual({(x["agent"], x["ok"], x["error"]) for x in new}, {("muse-device", False, "bridge_paused")})
+
+    def test_generic_identities_are_never_paused(self):
+        """La pause ne vise QUE l'identité liée : un client « muse » générique (ou Hermit) en lecture seule garde
+        exactement le comportement par scope (lecture servie, outil hors scope ⇒ forbidden_scope)."""
+        reg = self.fx.reg
+        _, fp, _ = reg.snapshot(("muse", "hermit", "hermes"))
+        reg.apply_policy_changes({"muse": ["read"]}, ("muse", "hermit", "hermes"), fp)
+        for agent in ("muse", "hermit"):
+            tok = reg.issue(agent, ["read"])
+            base = {"v": 1, "agent": agent, "token": tok}
+            r = agentport.call(self.fx.sock, dict(base, op="whoami"))
+            self.assertEqual(r, {"ok": True, "result": {"agent": agent, "scopes": ["read"]}})
+            self.assertTrue(agentport.call(self.fx.sock, dict(base, op="call", tool="catalogue_list", args={}))["ok"])
+            self.assertEqual(agentport.call(self.fx.sock, dict(base, op="call", tool="display_message",
+                                                               args={"text": "Salut"}))["error"], "forbidden_scope")
+        self.assertFalse(agents.linked_paused("muse", ["read"]))
+        self.assertFalse(agents.linked_paused("hermit", []))
+        self.assertFalse(agents.linked_paused("muse-device", CONTROL))
+        for sc in ([], ["read"], ["feedback", "read"], ["display", "feedback", "read"], CONTROL + ["extra"]):
+            self.assertTrue(agents.linked_paused("muse-device", sc), sc)
 
     def test_default_and_write_commands_never_reach_the_agent_port(self):
         before = len(self.fx.audit_records())
@@ -426,10 +461,12 @@ class TestThroughAgentPort(unittest.TestCase):
             self.port.identity_scopes()
         self.assertEqual(e.exception.code, "unauthorized")
 
-    def test_scope_without_read_is_forbidden_by_the_agent_port(self):
+    def test_bridge_identity_without_the_exact_scopes_is_paused_by_the_agent_port(self):
         self.fx.issue(scopes=("display",))
-        self.assertEqual(self.call("opentv.catalogue_list"), {"ok": False, "error": "forbidden_scope"})
-        self.assertEqual(self.port.identity_scopes(), ["display"])
+        self.assertEqual(self.call("opentv.catalogue_list"), {"ok": False, "error": "bridge_paused"})
+        with self.assertRaises(musebridge.BridgeError) as e:
+            self.port.identity_scopes()
+        self.assertEqual(e.exception.code, "bridge_paused")
 
     def test_wrong_missing_or_unreachable_identity(self):
         self.fx.issue(agent="hermit")
@@ -698,7 +735,7 @@ class TestEndToEndFakeMuse(unittest.TestCase):
     def test_identity_without_exact_scopes_or_revoked_is_fatal_before_any_muse_connection(self):
         self.st.pairing()
         for scopes in (("read",), ("feedback", "read"), ("display", "feedback", "read"), ("control", "read")):
-            want = "identity_scope_mismatch"
+            want = "bridge_paused"   # refus serveur (Agent Port) ; le contrôle local reste en défense en profondeur
             self.fx.issue(scopes=scopes)
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(asyncio.run(self.bridge(connect=self.fail_connect).run()), want)
@@ -710,6 +747,15 @@ class TestEndToEndFakeMuse(unittest.TestCase):
             self.assertEqual(asyncio.run(self.bridge(connect=self.fail_connect).run()), "bridge_identity_missing")
         self.assertEqual((self.counts["fetch"], self.counts["connect"]), (0, 0))
         self.assertTrue(os.path.exists(os.path.join(self.st.dir, "pairing.json")))
+
+        class WrongScopes:   # Agent Port plus ancien (sans pause serveur) : le pont refuse quand même
+            def identity_scopes(self):
+                return ["display", "feedback", "read"]
+        b = self.bridge(connect=self.fail_connect)
+        b.port = WrongScopes()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(asyncio.run(b.run()), "identity_scope_mismatch")
+        self.assertEqual((self.counts["fetch"], self.counts["connect"]), (0, 0))
 
     def test_malformed_pairing_is_refused_without_connecting(self):
         self.st.write("pairing.json", {"access_token": ACCESS, "noise_host": "gw.example"})
@@ -749,6 +795,198 @@ class TestEndToEndFakeMuse(unittest.TestCase):
             self.assertEqual(musebridge.cmd_run(a, sdk=self.sdk, connect=self.fail_connect, fetch_vms=self.fetch,
                                                 status_path=self.status, client_config=self.fx.client),
                              musebridge.EX_CONFIG)
+
+
+@needs_crypto
+class TestLivePauseFakeMuse(unittest.TestCase):
+    """Blocage de la revue finale : une session Muse DÉJÀ enregistrée doit se mettre en pause pour de vrai dès que le
+    propriétaire abaisse l'autorisation de Muse (pilotage → lecture / avis + messages), et être révoquée pour
+    « Aucun accès ». Agent Port réel (socket Unix, registre, audit), faux VM Muse à chiffrement Noise réel, pont réel."""
+
+    def setUp(self):
+        self.sdk = load_sdk()
+        self.st = StateEnv(self)
+        self.fx = AgentPortFixture(self)
+        self.fx.issue()
+        self.st.write("sdk_token", SDK_TOKEN + "\n")
+        self.st.pairing()
+        self.status = os.path.join(self.st.dir, "run-status.json")
+        self.counts = {"connect": 0}
+        grace = mock.patch.object(musebridge, "PAUSE_REPLY_GRACE_S", 1.0)   # marge sous charge (CI)
+        grace.start()
+        self.addCleanup(grace.stop)
+
+    def fetch(self, token, root):
+        return [{"vm_url": "wss://x", "vm_auth_token": VM_TOKEN, "vm_name": "vm", "vm_id": "vm-1",
+                 "is_default": True}], 200
+
+    def lower(self, level):
+        _, fp, _ = self.fx.reg.snapshot(appmod.KNOWN_AGENTS)
+        self.fx.reg.apply_policy_changes({"muse": list(appmod.AGENT_LEVELS[level])}, appmod.KNOWN_AGENTS, fp)
+
+    def live(self, level, invokes, recheck_s=musebridge.POLICY_RECHECK_S):
+        """Session enregistrée, un appel autorisé, abaissement par le propriétaire, puis `invokes` (envoyés
+        ensemble) -> résultats observés côté VM et côté pont."""
+        out, logs = io.StringIO(), io.StringIO()
+        handler = musebridge.setup_logging(logs)
+        self.addCleanup(logging_reset, handler)
+        res = {}
+
+        async def scenario():
+            qd, qv = asyncio.Queue(), asyncio.Queue()
+            dev_ws, vm_ws = Pipe(qd, qv), Pipe(qv, qd)
+
+            async def connect(url, headers):
+                self.counts["connect"] += 1
+                return dev_ws
+            b = musebridge.Bridge(self.sdk, self.sdk.identity.load_or_create(), musebridge.AgentPortMCP(self.fx.client),
+                                  sdk_token=SDK_TOKEN, connect=connect, fetch_vms=self.fetch,
+                                  refresh=lambda *a: (None, None), status_path=self.status, sleep_scale=0.001,
+                                  recheck_s=recheck_s)
+            task = asyncio.ensure_future(b.run())
+            vm = FakeVm(vm_ws)
+            await vm.handshake()
+            await vm.accept_control_stream()
+            reg = await vm.next_message()
+            await vm.send_message({"type": "res", "id": reg["id"], "ok": True})
+            await vm.send_message({"method": "link.invoke", "id": "pre", "command": "opentv.catalogue_list",
+                                   "params": {"limit": 2}, "timeout_ms": 5000})
+            res["pre"] = await asyncio.wait_for(vm.next_message(), 10)
+            res["registered"] = json.loads(read(self.status))["state"]
+            res["seen_before"] = list(self.fx.ctx.seen)
+            res["audit_before"] = len(self.fx.audit_records())
+            self.lower(level)                         # « Gérer les assistants » / revoke-control : une écriture
+            for iid, cmd, params in invokes:
+                await vm.send_message({"method": "link.invoke", "id": iid, "command": cmd, "params": params,
+                                       "timeout_ms": 5000})
+            got = {}
+            while len(got) < len(invokes):
+                m = await asyncio.wait_for(vm.next_message(), 10)
+                got[m["id"]] = m
+            res["got"] = got
+            res["end"] = await asyncio.wait_for(task, 10)
+            try:                                       # le pont a fermé la connexion Noise de son côté
+                await asyncio.wait_for(vm.next_message(), 5)
+                res["closed"] = False
+            except ConnectionError:
+                res["closed"] = True
+            res["fatal"] = b.fatal
+        with contextlib.redirect_stdout(out):
+            asyncio.run(scenario())
+        res["log"] = out.getvalue() + logs.getvalue()
+        return res
+
+    INVOKES = [("c", "opentv.catalogue_list", {"limit": 2}),
+               ("d", "opentv.display_message", {"text": "Toujours là ?"}),
+               ("f", "opentv.feedback", {"id": "films/101", "action": "watchlist"})]
+
+    def assert_paused(self, level, res, code="bridge_paused"):
+        self.assertTrue(res["pre"]["ok"], res["pre"])                     # avant : session réellement servie
+        self.assertEqual(res["registered"], "registered")
+        self.assertEqual(res["seen_before"], ["muse-device"] * len(res["seen_before"]))
+        for iid, _cmd, _p in self.INVOKES:
+            self.assertEqual((res["got"][iid]["ok"], res["got"][iid]["error"]), (False, code), iid)
+        self.assertEqual((res["end"], res["fatal"], res["closed"]), (code, code, True))
+        self.assertEqual(self.counts["connect"], 1)                       # jamais réenregistré
+        st = json.loads(read(self.status))
+        self.assertEqual((st["state"], st["reason"]), ("refused", code))
+        # aucun effet : ni bannière, ni goût, ni action TV, ni « actif » après l'abaissement
+        self.assertEqual((self.fx.ctx.messages, self.fx.ctx.control), ([], []))
+        self.assertEqual(self.fx.fy.cli(["history", "--list", "watchlist"])[1].get("items", []), [])
+        self.assertEqual(self.fx.ctx.seen, res["seen_before"])
+        # audit : identité authentifiée conservée, chaque appel transmis après l'abaissement refusé
+        after = self.fx.audit_records()[res["audit_before"]:]
+        self.assertTrue(after)
+        self.assertEqual({(x["agent"], x["ok"], x["error"]) for x in after}, {("muse-device", False, code)})
+        self.assertNotIn("display_message", {x["tool"] for x in self.fx.audit_records() if x["ok"]})
+        self.assertIn("muse_bridge_paused", res["log"])
+        blob = res["log"] + read(self.fx.audit_path) + read(self.status)
+        for secret in (SDK_TOKEN, ACCESS, REFRESH, VM_TOKEN, self.fx.token):
+            self.assertNotIn(secret, blob)
+
+    def assert_ui_paused(self, level):
+        view, _, _ = self.fx.reg.snapshot(appmod.KNOWN_AGENTS)
+        x = appmod.assistant_row("muse", view["muse"], None, 0)
+        self.assertEqual((x["connected"], x["bridge"]), (False, {"state": "paused", "level": level}))
+        page = web._agent_status_html(x)
+        self.assertIn("Non : pont Muse installé mais en pause", page)
+        self.assertNotIn("pas installé", page)
+        self.assertIn("ne le relance pas tout seul", web._consequence(x, "control"))
+        return x
+
+    def check_lowered(self, level):
+        res = self.live(level, self.INVOKES)
+        self.assert_paused(level, res)
+        want = list(appmod.AGENT_LEVELS[level])
+        self.assertEqual(self.fx.reg.list()["muse-device"]["scopes"], want)        # toujours installé (en pause)
+        self.assertEqual(self.fx.reg.authenticate("muse-device", self.fx.token), want)
+        self.assert_ui_paused(level)
+        # réautoriser le pilotage ne relance RIEN tout seul : identité toujours réduite ⇒ toujours en pause côté
+        # serveur, pont arrêté ; seul `opentv-pi muse pair` (réémission) le rétablit
+        self.lower("control")
+        r = agentport.call(self.fx.sock, {"v": 1, "agent": "muse-device", "token": self.fx.token, "op": "whoami"})
+        self.assertEqual(r, {"ok": False, "error": "bridge_paused"})
+        self.assertEqual(self.counts["connect"], 1)
+        self.assertEqual(json.loads(read(self.status))["state"], "refused")
+        self.assert_ui_paused(level)
+
+    def test_control_to_read_pauses_the_live_session(self):
+        self.check_lowered("read")
+
+    def test_control_to_full_pauses_the_live_session(self):
+        self.check_lowered("full")
+
+    def test_control_to_none_revokes_and_stops_the_live_session(self):
+        res = self.live("none", self.INVOKES)
+        self.assert_paused("none", res, code="unauthorized")
+        self.assertNotIn("muse-device", self.fx.reg.list())                       # révoquée dans la même écriture
+        self.assertIsNone(self.fx.reg.authenticate("muse-device", self.fx.token))
+        view, _, _ = self.fx.reg.snapshot(appmod.KNOWN_AGENTS)
+        x = appmod.assistant_row("muse", view["muse"], None, 0)
+        self.assertEqual((x["connected"], x["bridge"]), (False, None))
+        self.assertIn("Non, pas installé sur la boîte", web._agent_status_html(x))
+
+    def test_idle_session_pauses_on_the_periodic_recheck(self):
+        """Sans aucune commande Muse : le whoami de contrôle voit la pause et ferme la session."""
+        res = self.live("full", [], recheck_s=0.05)
+        self.assertTrue(res["pre"]["ok"])
+        self.assertEqual((res["end"], res["fatal"], res["closed"]), ("bridge_paused", "bridge_paused", True))
+        self.assertEqual(json.loads(read(self.status))["reason"], "bridge_paused")
+        self.assertEqual(self.counts["connect"], 1)
+        self.assertEqual(self.fx.ctx.seen, res["seen_before"])
+        self.assert_ui_paused("full")
+
+    def test_unchanged_control_keeps_the_session_live(self):
+        """Témoin : la vérification périodique ne coupe jamais une session dont l'autorisation est intacte."""
+        out = io.StringIO()
+
+        async def scenario():
+            qd, qv = asyncio.Queue(), asyncio.Queue()
+            dev_ws, vm_ws = Pipe(qd, qv), Pipe(qv, qd)
+
+            async def connect(url, headers):
+                return dev_ws
+            b = musebridge.Bridge(self.sdk, self.sdk.identity.load_or_create(), musebridge.AgentPortMCP(self.fx.client),
+                                  sdk_token=SDK_TOKEN, connect=connect, fetch_vms=self.fetch,
+                                  refresh=lambda *a: (None, None), status_path=self.status, sleep_scale=0.001,
+                                  recheck_s=0.02)
+            task = asyncio.ensure_future(b.run())
+            vm = FakeVm(vm_ws)
+            await vm.handshake()
+            await vm.accept_control_stream()
+            reg = await vm.next_message()
+            await vm.send_message({"type": "res", "id": reg["id"], "ok": True})
+            await asyncio.sleep(0.4)                   # ~20 vérifications
+            self.assertFalse(task.done())
+            await vm.send_message({"method": "link.invoke", "id": "x", "command": "opentv.display_message",
+                                   "params": {"text": "Bonsoir"}, "timeout_ms": 5000})
+            m = await asyncio.wait_for(vm.next_message(), 10)
+            self.assertTrue(m["ok"], m)
+            b.stop()
+            return await asyncio.wait_for(task, 10), b.fatal
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(asyncio.run(scenario()), ("stopped", None))
+        self.assertEqual(self.fx.ctx.messages[-1][:2], ("muse-device", "Bonsoir"))
 
 
 def logging_reset(handler):

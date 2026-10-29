@@ -28,10 +28,22 @@ LOCK_TIMEOUT_S = 5.0
 # retirent Muse réduisent ou révoquent aussi l'identité du pont, dans la MÊME écriture ; l'authentification applique
 # ce plafond à chaque appel (aucun plafond ⇒ refus). L'identité « muse » d'un autre client local n'est jamais touchée.
 LINKED_POLICY = {"muse-device": "muse"}
-# Scopes dont une identité liée a EXACTEMENT besoin pour fonctionner : le pont Muse refuse de s'enregistrer avec moins
-# (identity_scope_mismatch, exit 78). En dessous, l'identité reste installée mais le pont est « en pause » : la TV ne
-# compte alors pas Muse comme connecté par ce pont (musebridge.MUSE_SCOPES en dérive : une seule source).
+# Scopes dont une identité liée a EXACTEMENT besoin pour fonctionner : en dessous, l'identité reste installée mais le
+# pont est « en pause » — l'Agent Port refuse chacun de ses appels (BRIDGE_PAUSED), le pont ferme sa session et
+# s'arrête (exit 78), et la TV ne compte pas Muse comme connecté par ce pont (musebridge.MUSE_SCOPES en dérive).
 LINKED_REQUIRED = {"muse-device": ("control", "display", "feedback", "read")}
+# Code d'erreur STABLE de l'Agent Port pour un pont lié en pause : TOUT appel (whoami compris) d'une identité liée dont
+# les droits effectifs (enregistrés ∩ plafond du parent, relus à chaque appel) ne valent pas exactement
+# LINKED_REQUIRED est refusé ainsi — jamais une session à moitié autorisée qui continuerait à lire, noter ou afficher.
+# Le pont reconnaît ce code, ferme sa session Muse et s'arrête (exit 78, sans redémarrage automatique).
+BRIDGE_PAUSED = "bridge_paused"
+
+
+def linked_paused(agent, scopes):
+    """Vrai si `agent` est une identité liée (« muse-device ») dont les droits EFFECTIFS `scopes` ne valent pas
+    exactement LINKED_REQUIRED : pont « en pause ». Toujours faux pour une identité générique (« muse », « hermit »…)."""
+    need = LINKED_REQUIRED.get(agent) if isinstance(agent, str) else None
+    return need is not None and sorted(scopes or ()) != sorted(need)
 
 
 def linked_of(parent):

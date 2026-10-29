@@ -138,6 +138,50 @@ class TestBridgeActivityIsSeenAsMuse(unittest.TestCase):
         self.assertNotIn("pas installé", sec["Muse"])
 
 
+    def test_paused_bridge_is_refused_on_every_call_never_seen_and_audited_as_the_bridge(self):
+        """Pilotage abaissé pendant que le pont tourne : l'Agent Port de l'App réelle refuse tout appel du pont
+        (bridge_paused, whoami compris), sans marquer Muse « actif » ni compter d'échec d'authentification ; la TV et
+        le téléphone disent « en pause », l'audit garde « muse-device »."""
+        a, s = tam.configured(self)
+        tok = bridge_only(a)
+        svc = agentport.AgentService(a, a.registry, a.audit)
+
+        def req(op, tool=None, args=None):
+            r = {"v": 1, "agent": "muse-device", "token": tok, "op": op}
+            if op == "call":
+                r.update(tool=tool, args=args or {})
+            return svc.handle(r, 1000)
+        self.assertTrue(req("call", "status")["ok"])
+        for level in ("full", "read"):
+            _, fp, _ = a.registry.snapshot(appmod.KNOWN_AGENTS)
+            a.registry.apply_policy_changes({"muse": appmod.AGENT_LEVELS[level]}, appmod.KNOWN_AGENTS, fp)
+            with a.lock:
+                a.agent_seen_at.clear()
+            for op, tool, args in (("call", "status", {}), ("call", "catalogue_list", {}),
+                                   ("call", "display_message", {"text": "Salut"}),
+                                   ("call", "feedback", {"id": "films/101", "action": "like"}),
+                                   ("call", "present_title", {"id": "films/101"}), ("whoami", None, None)):
+                self.assertEqual(req(op, tool, args), {"ok": False, "error": "bridge_paused"}, (level, tool))
+            self.assertEqual(a.agent_seen_at, {})                                # jamais « actif »
+            self.assertEqual((svc.fails, svc.locked_until), ({}, {}))            # jeton valide : aucun verrouillage
+            x = row(a)
+            self.assertEqual((x["connected"], x["bridge"], x["seen_s"]),
+                             (False, {"state": "paused", "level": level}, None))
+            st = a.tv_state()
+            self.assertEqual((st["agents"], st["assistants"]["connected"]), ([], 0))
+            self.assertEqual(a.registry.authenticate("muse-device", tok), appmod.AGENT_LEVELS[level])
+        with open(a.cfg.audit_file, encoding="utf-8") as f:
+            audited = [json.loads(x) for x in f if x.strip()]
+        paused = [x for x in audited if x["error"] == "bridge_paused"]
+        self.assertEqual(len(paused), 12)
+        self.assertEqual({x["agent"] for x in paused}, {"muse-device"})
+        self.assertNotIn(tok, json.dumps(audited))
+        tk, ph = tam.open_mode(self, a, s)
+        sec = sections(ph.req("GET", "/assistants?t=" + tk)[2])
+        self.assertIn("Connecté</b><span>Non : pont Muse installé mais en pause", sec["Muse"])
+        self.assertNotIn("actif", sec["Muse"])
+
+
 class TestConsentWordingForTheBridge(unittest.TestCase):
     def flow(self, level, **want):
         a, s = tam.configured(self)

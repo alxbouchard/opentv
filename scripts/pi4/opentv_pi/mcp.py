@@ -29,7 +29,8 @@ ERRORS_FR = {"unauthorized": "agent non autorisé", "forbidden_scope": "outil ho
              "player_returning": "OpenTV revient sur la fiche du film précédent : réessaie dans un instant",
              "playback_unavailable": "lecture indisponible sur cette TV",
              "tv_busy": "la TV est dans un réglage : réessaie après", "tv_setup_active": "OpenTV est en configuration",
-             "tv_queue_full": "trop d'actions en attente sur la TV", "control_unavailable": "pilotage indisponible"}
+             "tv_queue_full": "trop d'actions en attente sur la TV", "control_unavailable": "pilotage indisponible",
+             "bridge_paused": "pont en pause : le pilotage n'est plus autorisé sur la TV"}
 
 
 class ConfigError(Exception):

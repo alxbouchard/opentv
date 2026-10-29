@@ -806,8 +806,9 @@ def _consequence(x, new):
 
     Deux faits distincts : son identité du même nom (« client ») et, pour Muse, le pont dédié lié (« bridge ») dont
     les droits suivent cette autorisation dans la même écriture. Le pont ne fonctionne qu'avec « Piloter OpenTV » :
-    le réduire le met en pause (identité toujours installée, il refuse de s'enregistrer et reste arrêté), « Aucun
-    accès » révoque son identité ; dans les deux cas il faudra le réinstaller sur la boîte."""
+    le réduire le met en pause tout de suite (identité toujours installée ; l'Agent Port refuse chacun de ses appels,
+    bridge_paused, et le pont ferme sa session et reste arrêté), « Aucun accès » révoque son identité ; dans les deux
+    cas il faudra le réinstaller sur la boîte."""
     rank = {"none": 0, "read": 1, "feedback": 2, "full": 3, "control": 4}
     cl = x["client"] if "client" in x else (x["connected_level"] if x["connected"] else None)
     b, name, out = x.get("bridge"), x["name"], []

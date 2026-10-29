@@ -408,10 +408,13 @@ class TestAppControl(unittest.TestCase):
         self.assertIn('"id": "films/104"', audit)                           # identifiant stable audité, texte non
         self.assertNotIn("Action culte", audit)                             # texte libre jamais audité
         self.assertNotIn(tok, audit)
-        # politique de Muse réduite sur la TV : l'identité liée perd control dans la même écriture
+        # politique de Muse réduite sur la TV : l'identité liée perd control dans la même écriture et le pont est
+        # aussitôt en pause (plus aucun outil, lecture comprise) ; Hermit garde son accès par scope
         _, fp, _ = self.a.registry.snapshot(appmod.KNOWN_AGENTS)
         self.a.registry.apply_policy_changes({"muse": appmod.AGENT_LEVELS["full"]}, appmod.KNOWN_AGENTS, fp)
-        self.assertEqual(call("remote_control", {"key": "down"})["error"], "forbidden_scope")
+        self.assertEqual(call("remote_control", {"key": "down"})["error"], "bridge_paused")
+        self.assertEqual(call("status", {})["error"], "bridge_paused")
+        self.assertTrue(call("status", {}, agent="hermit", token=ro)["ok"])
 
 
 # ------------------------------------------------------------------------------------------- autorisation root
@@ -457,6 +460,35 @@ class TestAuthorizeControl(tmb.AdminBase):
         self.assertEqual(reg.authenticate("muse-device", tok), ["display", "feedback", "read"])
         self.assertEqual(reg.policy()["hermit"], ["read"])                  # autres assistants intacts
         self.assertIn("muse_control_not_authorized", self.admin().status()["gates"])
+
+    def test_reauthorizing_control_never_reactivates_a_paused_bridge_until_pair(self):
+        """Pilotage retiré puis réautorisé : l'identité du pont reste réduite (Agent Port : bridge_paused), rien ne
+        redémarre ; seul `muse pair` la réémet et relance explicitement le pont (try-restart puis enable --now)."""
+        self.admin().authorize_control(yes=True)
+        self.assertEqual(self.pair()[1], 0)
+        client = os.path.join(self.cfg.agent_clients_dir, agents.client_file_name("muse-device", os.getuid()))
+        old = json.loads(tmb.read(client))["token"]
+        self.admin().revoke_control()
+        n = len(self.calls)
+        r, code = self.admin().authorize_control(yes=True)
+        self.assertEqual((code, r["changed"]), (0, True), r)
+        self.assertEqual([c for c in self.calls[n:] if c[1] not in ("is-active", "is-enabled", "show")], [])
+        reg = agents.Registry(self.cfg.registry_file)
+        self.assertEqual(reg.list()["muse-device"]["scopes"], ["display", "feedback", "read"])
+        self.assertTrue(agents.linked_paused("muse-device", reg.authenticate("muse-device", old)))
+        n = len(self.calls)
+        r, code = self.pair()
+        self.assertEqual((code, r["result"]), (0, "already_paired"), r)
+        cmds = [" ".join(c[1:]) for c in self.calls[n:] if c[1] not in ("is-active", "is-enabled", "show")]
+        self.assertLess(cmds.index("try-restart " + museadmin.UNIT), cmds.index("enable --now " + museadmin.UNIT))
+        new = json.loads(tmb.read(client))["token"]
+        reg = agents.Registry(self.cfg.registry_file)
+        self.assertIsNone(reg.authenticate("muse-device", old))
+        self.assertEqual(reg.authenticate("muse-device", new), ["control", "display", "feedback", "read"])
+        self.assertFalse(agents.linked_paused("muse-device", reg.authenticate("muse-device", new)))
+        n = len(self.calls)                                  # identité déjà exacte : session saine jamais coupée
+        self.assertEqual(self.pair()[1], 0)
+        self.assertNotIn("try-restart " + museadmin.UNIT, [" ".join(c[1:]) for c in self.calls[n:]])
 
     def test_cli_wiring(self):
         p = cli.build_parser()

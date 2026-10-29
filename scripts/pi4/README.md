@@ -572,10 +572,19 @@ l'autorisation de **Muse** sur la TV (`agents.LINKED_POLICY`) : « Aucun accès 
 la révoque dans la même écriture, et l'Agent Port réapplique ce plafond à chaque appel. `muse-device` est réservée :
 `agent issue --id muse-device` est refusé. L'Agent Port reste la barrière (identité révoquée ⇒ `unauthorized`, scope
 retiré ⇒ `forbidden_scope`).
-Le pont refuse de s'enregistrer auprès de Muse si son identité authentifiée n'a pas **exactement** ces scopes
-(`identity_scope_mismatch`, code 78, pas de redémarrage) : un retrait ou une réduction du pilotage sur la TV (ou
-`muse revoke-control`) réduit l'identité dans la même écriture, l'Agent Port refuse aussitôt chaque outil retiré et
-le pont ne se réenregistre plus. Les résultats repassent par un nettoyage : jetons-adresses retirés (détecteur explicite, au
+**Pause immédiate du pont** : pour `muse-device` (et elle seule — un client `muse`, Hermit ou Hermes gardent le
+contrôle par scope), l'Agent Port refuse **chaque** appel, `whoami` compris, avec le code stable `bridge_paused` dès que
+ses droits effectifs (scopes enregistrés ∩ autorisation de Muse, relus à chaque appel) ne valent plus exactement
+`control, display, feedback, read` : abaisser Muse de « Piloter OpenTV » à « Voir seulement », « Voir + donner mon
+avis » ou « Avis + messages » (TV, QR ou `muse revoke-control`) coupe donc aussitôt lecture, avis, messages et pilotage
+par le pont, même au milieu d'une session déjà enregistrée ; ces refus ne marquent jamais Muse « actif », ne comptent
+pas comme des échecs d'authentification et l'audit garde `muse-device`. Le pont reconnaît `bridge_paused` (ou
+`unauthorized` après « Aucun accès », qui révoque l'identité), ne transmet plus rien, ferme sa session Muse et
+s'arrête avec le code 78 (`RestartPreventExitStatus=78` : pas de redémarrage) ; sans commande, un `whoami` de contrôle
+toutes les 15 s détecte la même pause. Au démarrage, le même refus (ou des scopes différents :
+`identity_scope_mismatch`) l'empêche de s'enregistrer. Réautoriser le pilotage ne relance rien tout seul : l'identité
+reste réduite (toujours `bridge_paused`) jusqu'à `sudo /opt/opentv/bin/opentv-pi muse pair`, qui la réémet et
+redémarre le pont. Les résultats repassent par un nettoyage : jetons-adresses retirés (détecteur explicite, au
 moins aussi strict que le moteur « Pour toi » : schémas, `www.`, hôte/chemin, hôte:port, IPv4, hôtes nus des TLD
 courants, `user:mot@hôte`, courriels, chemins absolus/`~/`/`../`/Windows) sans effacer les titres légitimes
 (« Big Data: le film », « M.Butterfly », « Mr.Robot », « File: … », « Paris.Fin ») ; clés retirées par segment exact

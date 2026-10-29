@@ -103,6 +103,13 @@ class AgentService:
                     self.log("agent_port_locked", uid=uid, seconds=AUTH_LOCK_S)
                 self._prune(now)
             return self._deny(agent, tool, None, "unauthorized", t0)
+        if agents.linked_paused(agent, scopes):
+            # pont lié (« muse-device ») dont le propriétaire a abaissé l'autorisation sous « Piloter OpenTV » : pause
+            # IMMÉDIATE, appel par appel — aucun outil (lecture, avis, message, pilotage) ni whoami n'est servi, rien
+            # n'est marqué « actif » ; l'audit garde l'identité authentifiée. Jeton valide : jamais compté comme un
+            # échec d'authentification (pas de verrouillage du compte). Identités génériques jamais concernées.
+            known = tool if isinstance(tool, str) and tool in tools.TOOL_BY_NAME else None
+            return self._deny(agent, known, None, agents.BRIDGE_PAUSED, t0)
         seen = getattr(self.ctx, "agent_seen", None)   # activité réelle (Réglages TV : « connecté », jamais supposé)
         if callable(seen):
             seen(agent)

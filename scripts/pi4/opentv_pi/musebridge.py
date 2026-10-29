@@ -15,9 +15,11 @@ MUSE_SCOPES, fichier client root:opentv-muse 0640 émis par `opentv-pi muse pair
 autre client local). Son plafond est l'autorisation donnée à Muse sur la TV (agents.LINKED_POLICY) : le pilotage
 n'existe que si Alex l'a accordé explicitement (« Gérer les assistants » → « Piloter OpenTV », ou
 `opentv-pi muse authorize-control --yes` en root) ; tout autre ensemble de scopes ⇒ le pont refuse de s'enregistrer
-(exit 78). Lancer un film passe par les MÊMES portes que « Regarder » (source approuvée, promotion terrain, lecteur
-officiel) ; aucune URL de média n'est jamais lue ni produite. L'Agent Port reste la barrière
-d'autorisation : identité révoquée, scope retiré ou outil hors liste ⇒ refus. Les résultats repassent par un nettoyage
+(exit 78). Abaisser cette autorisation EN COURS de session met le pont en pause tout de suite : l'Agent Port refuse
+chaque appel de « muse-device » (agents.BRIDGE_PAUSED), le pont n'envoie plus rien, ferme la session Muse et s'arrête
+(exit 78) ; un whoami périodique fait de même sans commande. Lancer un film passe par les MÊMES portes que
+« Regarder » (source approuvée, promotion terrain, lecteur officiel) ; aucune URL de média n'est jamais lue ni
+produite. L'Agent Port reste la barrière d'autorisation : identité révoquée, scope retiré ou outil hors liste ⇒ refus. Les résultats repassent par un nettoyage
 récursif (aucune adresse, aucune clé de secret, tailles bornées). Aucun paramètre de commande shell, de chemin ni d'URL
 n'existe.
 
@@ -63,6 +65,12 @@ NO_PYCACHE = os.path.join(os.devnull, "opentv-muse-no-pycache")
 BACKOFF_BASE_S, BACKOFF_MAX_S, AUTH_BACKOFF_MIN_S, HEALTHY_SESSION_S = 2.0, 60.0, 15.0, 30.0
 TOKEN_REFRESH_AGE_S, TOKEN_RETRY_S = 3 * 3600, 300
 MAX_CONCURRENT_INVOKES = 4
+# Pause en cours de session : l'Agent Port refuse chaque appel du pont dès que l'autorisation de Muse passe sous
+# « Piloter OpenTV » (agents.BRIDGE_PAUSED) ; le pont le reconnaît à la première réponse, ne transmet plus rien,
+# laisse PAUSE_REPLY_GRACE_S à la réponse d'erreur pour partir vers Muse, puis ferme la session et s'arrête (exit 78).
+# Sans aucune commande, un whoami de contrôle toutes les POLICY_RECHECK_S détecte la même pause.
+PAUSE_REPLY_GRACE_S = 0.25
+POLICY_RECHECK_S = 15.0
 
 # commande Muse -> outil MCP OpenTV (liste FERMÉE ; aucune commande générique, aucun nom d'outil libre)
 COMMANDS = {
@@ -702,15 +710,19 @@ class _Backoff:
         self.failures, self.floor = 0, 0.0
 
 
-FATAL_IDENTITY = ("bridge_identity_missing", "bridge_identity_invalid", "unauthorized", "identity_scope_mismatch")
+# refus d'identité définitifs : au démarrage, AVANT tout enregistrement ; en session, à la première réponse (session
+# fermée, pont arrêté, exit 78 — jamais de nouvel enregistrement sans relance explicite par l'administrateur)
+FATAL_IDENTITY = ("bridge_identity_missing", "bridge_identity_invalid", "unauthorized", "identity_scope_mismatch",
+                  agents.BRIDGE_PAUSED)
 
 
 class Bridge:
     """Boucle de connexion (reprise de musegadget.service.Service, sans executor) et réponse aux commandes."""
 
     def __init__(self, sdk, identity, port, sdk_token=None, display_name=DISPLAY_NAME, connect=None, fetch_vms=None,
-                 refresh=None, status_path=RUN_STATUS, sleep_scale=1.0):
+                 refresh=None, status_path=RUN_STATUS, sleep_scale=1.0, recheck_s=POLICY_RECHECK_S):
         self.sdk, self.identity, self.port = sdk, identity, port
+        self.recheck_s = recheck_s
         self.sdk_token, self.display_name, self.connect = sdk_token, display_name, connect
         self.fetch_vms = fetch_vms or sdk.muse_api.fetch_vms_with_status
         self.refresh = refresh or sdk.muse_api.refresh_device_token
@@ -718,6 +730,9 @@ class Bridge:
         self._stop = asyncio.Event()
         self._last_refresh_attempt = float("-inf")
         self._slots = None
+        self._loop = None
+        self._halt_lock = threading.Lock()
+        self.fatal = None   # refus d'identité vu en session (bridge_paused, unauthorized…) : arrêt définitif
         register_secret(sdk_token)
 
     # -- description et commandes (aucune commande par défaut du SDK)
@@ -726,14 +741,40 @@ class Bridge:
                                                       version=self.sdk.version, commands=command_specs())
 
     def run_command(self, name, params, timeout_ms=None):
+        """(fil d'exécution du SDK) Une commande Muse. Après un refus d'identité définitif, plus rien n'atteint
+        l'Agent Port : la même erreur est rendue aussitôt, et la session est fermée."""
         t0 = time.monotonic()
-        res = dispatch(self.port, name, params)
+        fatal = self.fatal
+        if fatal is not None:
+            res = {"ok": False, "error": fatal}
+        else:
+            res = dispatch(self.port, name, params)
+            if not res["ok"] and res.get("error") in FATAL_IDENTITY:
+                self.halt(res["error"])
         log_event("muse_invoke", command=name if name in COMMANDS else "?", ok=res["ok"], error=res.get("error"),
                   ms=round((time.monotonic() - t0) * 1000, 1))
         return res
 
     def stop(self):
         self._stop.set()
+
+    def halt(self, code):
+        """Refus d'identité définitif vu EN SESSION (n'importe quel fil) : note le code, puis ferme la session et
+        arrête la boucle après PAUSE_REPLY_GRACE_S (la réponse d'erreur en cours part d'abord vers Muse)."""
+        with self._halt_lock:
+            first = self.fatal is None
+            if first:
+                self.fatal = code if code in FATAL_IDENTITY else agents.BRIDGE_PAUSED
+        if not first:
+            return
+        log_event("muse_bridge_paused", error=self.fatal)
+        loop = self._loop
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(loop.call_later, PAUSE_REPLY_GRACE_S, self._stop.set)
+        except RuntimeError:   # boucle déjà fermée : rien à arrêter
+            pass
 
     def _status(self, state, **extra):
         if self.status_path:
@@ -754,6 +795,7 @@ class Bridge:
         """-> code de fin : stopped | not_paired | unpaired | <erreur d'identité OpenTV> (fatale, exit 78)."""
         if self._slots is None:
             self._slots = asyncio.Semaphore(MAX_CONCURRENT_INVOKES)
+        self._loop = asyncio.get_running_loop()
         cfgmod = self.sdk.config
         backoff = _Backoff()
         while not self._stop.is_set():
@@ -809,6 +851,10 @@ class Bridge:
             register_secret(vm.get("vm_auth_token"))
             outcome, lasted = await self._session(vm, noise_host)
             o = self.sdk.link_client.Outcome
+            if self.fatal is not None:   # pause/révocation vue en session : session fermée, jamais réenregistré
+                self._status("refused", reason=self.fatal)
+                log_event("muse_identity_refused", error=self.fatal)
+                return self.fatal
             if outcome is o.STOPPED:
                 break
             if outcome is o.UNPAIRED:
@@ -836,15 +882,32 @@ class Bridge:
             await session.registered.wait()
             self._status("registered")
             log_event("muse_registered", commands=sorted(COMMANDS))
+
+        async def recheck():
+            # même sans commande : l'autorisation du propriétaire est relue périodiquement (whoami authentifié)
+            while True:
+                await asyncio.sleep(self.recheck_s)
+                try:
+                    scopes = await asyncio.to_thread(self.port.identity_scopes)
+                except BridgeError as e:
+                    if e.code in FATAL_IDENTITY:
+                        self.halt(e.code)
+                        return
+                    continue   # OpenTV momentanément indisponible : la prochaine commande tranchera
+                if scopes != MUSE_SCOPES:
+                    self.halt("identity_scope_mismatch")
+                    return
         watcher = asyncio.ensure_future(watch())
+        checker = asyncio.ensure_future(recheck())
         try:
             outcome = await session.run(self._stop)
         except Exception as e:
             log_event("muse_session_failed", error=type(e).__name__)
             outcome = lc.Outcome.CLOSED
         finally:
-            watcher.cancel()
-            await asyncio.gather(watcher, return_exceptions=True)
+            for t in (watcher, checker):
+                t.cancel()
+            await asyncio.gather(watcher, checker, return_exceptions=True)
         self._status("disconnected", outcome=outcome.value)
         log_event("muse_session_ended", outcome=outcome.value, seconds=round(time.monotonic() - started))
         lasted = time.monotonic() - (session.registered_at or time.monotonic())
