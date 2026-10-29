@@ -27,7 +27,7 @@ from unittest import mock
 
 from tests._common import PI4, NANOPI, write_catalogue
 from tests import test_agent_port as tap
-from opentv_pi import agentport, agents, cli, config, foryou, fsutil, museadmin, musebridge, tools
+from opentv_pi import agentport, agents, cli, config, foryou, fsutil, museadmin, musebluez, musebridge, tools
 
 VENDOR = os.path.join(PI4, "vendor", "muse")
 PIN_COMMIT = "1db6a26f4ca56939c4465d8a12e241c1b1b5c8dc"
@@ -73,6 +73,8 @@ class AgentPortFixture:
         self.fy = foryou.ForYou(NANOPI, os.path.join(self.d, "fy"), cat, clock=lambda: 1800000000.0)
         tc.addCleanup(self.fy.close)
         self.reg = agents.Registry(os.path.join(self.d, "agents.json"))
+        # Muse autorisée sur la TV (plafond de l'identité dédiée liée « muse-device ») ; autres agents sans accès
+        self.reg.set_policy({"muse": ["display", "feedback", "read"], "hermit": ["read"], "hermes": []})
         self.audit_path = os.path.join(self.d, "audit.jsonl")
         self.audit = agents.Audit(self.audit_path)
         self.ctx = ctx or tap.FakeCtx(self.fy)
@@ -82,9 +84,9 @@ class AgentPortFixture:
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         tc.addCleanup(self.srv.server_close)
         tc.addCleanup(self.srv.shutdown)
-        self.client = os.path.join(self.d, "agent-muse.json")
+        self.client = os.path.join(self.d, "agent-muse-device.json")
 
-    def issue(self, scopes=("read",), agent="muse"):
+    def issue(self, scopes=("read",), agent=musebridge.MUSE_AGENT_ID):
         self.token = self.reg.issue(agent, list(scopes), force=True)
         agents.write_client_config(self.client, agent, self.token, self.sock)
         return self.token
@@ -287,7 +289,7 @@ class TestThroughAgentPort(unittest.TestCase):
         self.assertEqual(len(set(ids)), total)
         recs = [x for x in self.fx.audit_records() if x["tool"] == "catalogue_list"]
         self.assertEqual(len(recs), 4)
-        self.assertTrue(all(x["agent"] == "muse" and x["ok"] for x in recs))
+        self.assertTrue(all(x["agent"] == "muse-device" and x["ok"] for x in recs))
 
     def test_status_search_recommend_history_pass_through_mcp_with_auth(self):
         for cmd, params in (("opentv.status", {}), ("opentv.search", {"query": "nuit"}),
@@ -330,7 +332,7 @@ class TestThroughAgentPort(unittest.TestCase):
         self.assertEqual(len(self.fx.audit_records()), before)
 
     def test_unauthorized_identity_fails_closed(self):
-        self.fx.reg.revoke("muse")
+        self.fx.reg.revoke(musebridge.MUSE_AGENT_ID)
         self.assertEqual(self.call("opentv.catalogue_list"), {"ok": False, "error": "unauthorized"})
         with self.assertRaises(musebridge.BridgeError) as e:
             self.port.identity_scopes()
@@ -370,7 +372,7 @@ class TestThroughAgentPort(unittest.TestCase):
         p = r["payload"]
         self.assertEqual(len(p["items"]), musebridge.MAX_LIST)
         it = p["items"][0]
-        self.assertEqual(it["title"], "")
+        self.assertEqual(it["title"], "Voir")                           # seule l'adresse part, le titre reste
         for k in ("poster", "detail_path", "token", "Weird-Key"):
             self.assertNotIn(k, it)
         self.assertNotIn("\x1b", it["note"])
@@ -604,7 +606,7 @@ class TestEndToEndFakeMuse(unittest.TestCase):
             self.fx.issue(scopes=scopes)
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(asyncio.run(self.bridge(connect=self.fail_connect).run()), want)
-        self.fx.reg.revoke("muse")
+        self.fx.reg.revoke(musebridge.MUSE_AGENT_ID)
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(asyncio.run(self.bridge(connect=self.fail_connect).run()), "unauthorized")
         os.remove(self.fx.client)
@@ -736,7 +738,9 @@ class FakeGroups:
         return types.SimpleNamespace(gr_name=name, gr_mem=self.members[name])
 
 
-class TestAdmin(unittest.TestCase):
+class AdminBase(unittest.TestCase):
+    """Racine de test + faux comptes/systemctl pour opentv-pi muse (aucun test ici : réutilisée ailleurs)."""
+
     def setUp(self):
         base = os.path.realpath(tempfile.mkdtemp(prefix="otvadm"))
         self.addCleanup(shutil.rmtree, base, True)
@@ -774,6 +778,36 @@ class TestAdmin(unittest.TestCase):
         self.chowns = []
         reg = agents.Registry(self.cfg.registry_file)
         reg.set_policy({"muse": ["feedback", "read"], "hermit": [], "hermes": []})
+        self.bt_pid = 4242
+        self.prepare_bt()
+
+    def w(self, path, text, mode=0o644):
+        q = self.j(path)
+        os.makedirs(os.path.dirname(q), exist_ok=True)
+        with open(q, "w") as f:
+            f.write(text)
+        os.chmod(q, mode)
+        return q
+
+    def prepare_bt(self, battery=True, started_after=True, conf="[General]\n\n[GATT]\n#ExchangeMTU = 517\n"):
+        """BlueZ Debian (main.conf + bluetooth.service), compatibilité appliquée par musebluez, bluetoothd en cours."""
+        self.w("/etc/bluetooth/main.conf", conf)
+        self.w("/lib/systemd/system/bluetooth.service",
+               "[Unit]\nDescription=Bluetooth service\n\n[Service]\nType=dbus\nBusName=org.bluez\n"
+               "ExecStart=/usr/libexec/bluetooth/bluetoothd\n\n[Install]\nWantedBy=bluetooth.target\n")
+        musebluez.BlueZ(self.r).apply()
+        self.fake_bluetoothd(battery, started_after)
+
+    def fake_bluetoothd(self, battery=True, started_after=True):
+        args = ["/usr/libexec/bluetooth/bluetoothd"] + (["--noplugin=battery"] if battery else [])
+        self.w("/proc/%d/cmdline" % self.bt_pid, "\0".join(args) + "\0")
+        mtime = os.stat(self.j("/etc/bluetooth/main.conf")).st_mtime
+        tck = os.sysconf("SC_CLK_TCK")
+        btime = int(mtime) - 1000
+        start = (mtime + 60 - btime) if started_after else (mtime - 60 - btime)
+        self.w("/proc/stat", "cpu  1 2 3\nbtime %d\n" % btime)
+        self.w("/proc/%d/stat" % self.bt_pid, "%d (bluetoothd) S " % self.bt_pid + " ".join(
+            ["0"] * 18 + [str(int(start * tck))]) + " 0 0\n")
 
     def record_fchown(self, fd, uid, gid):
         self.chowns.append((uid, gid))
@@ -807,6 +841,8 @@ class TestAdmin(unittest.TestCase):
                                      json.dumps({"state": "open", "ble_name": "MuseGadget0A0B0C", "timeout_s": 600}))
         if argv[:3] == ["systemctl", "enable", "--now"] and argv[3] == museadmin.UNIT:
             fsutil.atomic_write_path(self.j(musebridge.RUN_STATUS), json.dumps({"state": "registered", "since": 1.0}))
+        if argv[1:5] == ["show", "-p", "MainPID", "--value"]:
+            return 0, "%d\n" % self.bt_pid
         if argv[1] == "is-active":
             return 0, "activating\n"
         if argv[1] == "is-enabled":
@@ -819,8 +855,10 @@ class TestAdmin(unittest.TestCase):
         return adm.pair(**kw)
 
     def cmds(self):
-        return [" ".join(c[1:]) for c in self.calls if c[1] not in ("is-active", "is-enabled")]
+        return [" ".join(c[1:]) for c in self.calls if c[1] not in ("is-active", "is-enabled", "show")]
 
+
+class TestAdmin(AdminBase):
     def test_non_root_and_missing_prerequisites_are_refused_before_any_write(self):
         self.euid = 1000
         self.assertEqual(self.pair()[0]["error"], "root_required")
@@ -829,10 +867,10 @@ class TestAdmin(unittest.TestCase):
         self.assertEqual(self.pair()[0]["error"], "sdk_unverified")
         shutil.copy(os.path.join(VENDOR, "musegadget", "streaming.py"), os.path.join(self.sdk, "musegadget"))
         wheel = os.path.join(self.sdk, "websockets-17.1-py3-none-any.whl")
-        os.rename(wheel, wheel + ".x")
+        os.rename(wheel, self.sdk + ".whl")                  # hors du dossier (tout fichier en trop y est refusé)
         self.assertEqual(self.pair()[0]["error"], "dependency_missing")
-        os.rename(wheel + ".x", wheel)
-        os.makedirs(self.j("/etc/systemd/system"))
+        os.rename(self.sdk + ".whl", wheel)
+        os.makedirs(self.j("/etc/systemd/system"), exist_ok=True)
         with open(self.j("/etc/systemd/system/musegadget.service"), "w") as f:
             f.write("[Service]\nExecStart=/opt/musegadget/venv/bin/musegadget run\n")
         r, code = self.pair()
@@ -845,9 +883,9 @@ class TestAdmin(unittest.TestCase):
         agents.Registry(self.cfg.registry_file).set_policy({"muse": [], "hermit": ["read"]})
         r, code = self.pair()
         self.assertEqual((r["error"], code), ("muse_not_authorized", 2))
-        self.assertEqual(self.calls, [])
+        self.assertEqual(self.cmds(), [])                                 # lectures seulement (systemctl show)
         self.assertFalse(os.path.exists(self.j("/var/lib/opentv-muse/sdk_token")))
-        self.assertIsNone(agents.Registry(self.cfg.registry_file).list().get("muse"))
+        self.assertIsNone(agents.Registry(self.cfg.registry_file).list().get(musebridge.MUSE_AGENT_ID))
 
     def test_token_is_validated_and_never_echoed(self):
         r, code = self.pair(stdin="mgst_wrong\n")
@@ -856,7 +894,7 @@ class TestAdmin(unittest.TestCase):
         self.assertEqual(r["error"], "token_input_required")
         self.assertFalse(os.path.exists(self.j("/var/lib/opentv-muse/sdk_token")))
         self.assertNotIn("mgst_wrong", json.dumps(r) + self.err.getvalue())
-        self.assertEqual(self.calls, [])
+        self.assertEqual(self.cmds(), [])
 
     def test_successful_pair_writes_secret_files_issues_read_only_identity_then_enables(self):
         r, code = self.pair()
@@ -867,10 +905,11 @@ class TestAdmin(unittest.TestCase):
         tok = self.j("/var/lib/opentv-muse/sdk_token")
         self.assertEqual(read(tok), SDK_TOKEN + "\n")
         self.assertEqual(stat.S_IMODE(os.stat(tok).st_mode), 0o600)
-        client = os.path.join(self.cfg.agent_clients_dir, agents.client_file_name("muse", os.getuid()))
+        client = os.path.join(self.cfg.agent_clients_dir,
+                              agents.client_file_name(musebridge.MUSE_AGENT_ID, os.getuid()))
         self.assertEqual(stat.S_IMODE(os.stat(client).st_mode), 0o640)
         self.assertIn((0, os.getgid()), self.chowns)                     # root:<groupe privé de opentv-muse>
-        self.assertEqual(agents.Registry(self.cfg.registry_file).list()["muse"]["scopes"], ["read"])
+        self.assertEqual(agents.Registry(self.cfg.registry_file).list()[musebridge.MUSE_AGENT_ID]["scopes"], ["read"])
         c = self.cmds()
         start = c.index("start --no-block " + museadmin.PAIR_UNIT)
         enable = c.index("enable --now " + museadmin.UNIT)
@@ -930,14 +969,16 @@ class TestAdmin(unittest.TestCase):
         self.assertEqual(rep["commands"], EXPECTED)
         self.assertTrue(rep["sdk"]["verified"])
         self.assertEqual(rep["link"]["state"], "registered")
-        client = os.path.join(self.cfg.agent_clients_dir, agents.client_file_name("muse", os.getuid()))
+        client = os.path.join(self.cfg.agent_clients_dir,
+                              agents.client_file_name(musebridge.MUSE_AGENT_ID, os.getuid()))
         blob = json.dumps(rep)
         for s in (SDK_TOKEN, SDK_TOKEN[:12], ACCESS, REFRESH, json.loads(read(client))["token"]):
             self.assertNotIn(s, blob)
 
     def test_unpair_disables_removes_pairing_and_revokes_identity(self):
         self.assertEqual(self.pair()[1], 0)
-        client = os.path.join(self.cfg.agent_clients_dir, agents.client_file_name("muse", os.getuid()))
+        client = os.path.join(self.cfg.agent_clients_dir,
+                              agents.client_file_name(musebridge.MUSE_AGENT_ID, os.getuid()))
         token = json.loads(read(client))["token"]
         self.calls.clear()
         r, code = self.admin().unpair()
@@ -947,7 +988,7 @@ class TestAdmin(unittest.TestCase):
         self.assertIn("disable --now " + museadmin.UNIT, self.cmds())
         self.assertFalse(os.path.exists(self.j("/var/lib/opentv-muse/pairing.json")))
         self.assertTrue(os.path.exists(self.j("/var/lib/opentv-muse/sdk_token")))
-        self.assertIsNone(agents.Registry(self.cfg.registry_file).authenticate("muse", token))
+        self.assertIsNone(agents.Registry(self.cfg.registry_file).authenticate(musebridge.MUSE_AGENT_ID, token))
         r, _ = self.admin().unpair(forget_token=True)
         self.assertEqual(r["sdk_token"], "removed")
         self.euid = 1000

@@ -23,6 +23,19 @@ SAFE_ARG_KEYS = ("action", "list", "id")
 LOCK_TIMEOUT_S = 5.0
 
 
+# Identités DÉDIÉES dont le plafond est l'autorisation d'un agent de la TV (jamais leur propre ligne de politique) :
+# « muse-device » (pont Muse, opentv-pi muse pair) suit « muse ». « Gérer les assistants » / le QR qui réduisent ou
+# retirent Muse réduisent ou révoquent aussi l'identité du pont, dans la MÊME écriture ; l'authentification applique
+# ce plafond à chaque appel (aucun plafond ⇒ refus). L'identité « muse » d'un autre client local n'est jamais touchée.
+LINKED_POLICY = {"muse-device": "muse"}
+
+
+def ceiling(policy, agent):
+    """Plafond de scopes d'`agent` dans `policy` (ligne de l'agent parent pour une identité liée). None si absent."""
+    v = policy.get(LINKED_POLICY.get(agent, agent)) if isinstance(policy, dict) else None
+    return v if isinstance(v, list) else None
+
+
 class RegistryBusy(OSError):
     """Verrou du registre tenu trop longtemps par un autre processus : rien n'est écrit, nouvel essai possible."""
 
@@ -231,7 +244,7 @@ class Registry:
             if revoke_exceeding:
                 for a, e in sorted(self.data["agents"].items()):
                     sc = e.get("scopes", []) if isinstance(e, dict) else None   # entrée non-objet ⇒ révoquée
-                    if not isinstance(sc, list) or not set(map(str, sc)) <= set(clean.get(a, [])):
+                    if not isinstance(sc, list) or not set(map(str, sc)) <= set(ceiling(clean, a) or []):
                         gone.append(a)
                 for a in gone:
                     del self.data["agents"][a]
@@ -290,6 +303,16 @@ class Registry:
                 elif keep != have:
                     e["scopes"] = keep
                     out[a] = "restricted"
+            for child, parent in sorted(LINKED_POLICY.items()):   # identité dédiée liée : même plafond, même écriture
+                e = self.data["agents"].get(child)
+                if parent not in clean or e is None:
+                    continue
+                have = _valid_scopes(e.get("scopes")) if isinstance(e, dict) else []
+                keep = [x for x in have if x in clean[parent]]
+                if not keep:
+                    del self.data["agents"][child]
+                elif keep != have:
+                    e["scopes"] = keep
             try:
                 self._save(uid, gid)
             except BaseException:
@@ -313,8 +336,8 @@ class Registry:
         if not scopes:
             raise ValueError("bad_scopes")
         with self._mutating(uid, gid):
-            if self._policy_defined() and not force:
-                pol = self.data["policy"].get(agent_id)
+            if (self._policy_defined() or agent_id in LINKED_POLICY) and not force:
+                pol = ceiling(self.data["policy"], agent_id)
                 if not isinstance(pol, list):
                     raise ValueError("agent_not_in_policy")
                 if not set(scopes) <= set(pol):
@@ -342,6 +365,19 @@ class Registry:
             self._save(uid, gid)
         return True
 
+    def revoke_token(self, agent_id, token, uid=None, gid=None):
+        """Révoque `agent_id` SEULEMENT si son entrée courante est celle de `token` (identité dont l'appelant détient
+        le fichier client) : une réémission par un autre client n'est jamais touchée. -> True si révoqué."""
+        return self.rollback_issue(agent_id, token, None, uid=uid, gid=gid)
+
+    def entry_matches(self, agent_id, token):
+        """L'entrée courante de `agent_id` est-elle celle de `token` (comparaison en temps constant) ?"""
+        with self.lock:
+            self._reload()
+            cur = self.data["agents"].get(agent_id)
+        return isinstance(cur, dict) and isinstance(token, str) and \
+            hmac.compare_digest(str(cur.get("token_sha256")), _sha(token))
+
     def revoke(self, agent_id, uid=None, gid=None):
         with self._mutating(uid, gid):
             gone = self.data["agents"].pop(agent_id, None) is not None
@@ -362,14 +398,20 @@ class Registry:
         with self.lock:
             self._reload()
             e = self.data["agents"].get(agent_id)
+            cap = ceiling(self.data["policy"], agent_id) if agent_id in LINKED_POLICY else None
         if not isinstance(e, dict) or not isinstance(e.get("token_sha256"), str):
             return None
         if not hmac.compare_digest(_sha(token), e["token_sha256"]):
             return None
         try:
-            return validate.scopes(e.get("scopes") or [])
+            scopes = validate.scopes(e.get("scopes") or [])
         except ValueError:
             return None
+        if agent_id in LINKED_POLICY:   # identité liée : plafond du parent relu à chaque appel, absent ⇒ refus
+            scopes = [x for x in scopes if x in (cap or [])]
+            if not scopes:
+                return None
+        return scopes
 
 
 def client_config_bytes(agent_id, token, socket_path):

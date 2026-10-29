@@ -493,17 +493,30 @@ pont enregistre sa propre description d'appareil, limitée à :
 | `opentv.history` | `history` | `list` (énumération), `limit` ≤ 50, `offset` ≤ 500 |
 
 Chaque appel est validé strictement (champs inconnus, types, bornes, adresses ⇒ `invalid_params`, sans aucun appel),
-puis délégué par le client MCP (`opentv_pi.mcp`) à l'**Agent Port** avec l'identité locale `muse` en **lecture
-seule** : l'Agent Port reste la barrière (identité révoquée ⇒ `unauthorized`, scope retiré ⇒ `forbidden_scope`).
+puis délégué par le client MCP (`opentv_pi.mcp`) à l'**Agent Port** avec l'identité locale **dédiée**
+`muse-device` en **lecture seule** — jamais l'identité `muse` d'un autre client local (ex. un client MCP de Muse émis
+par `agent issue --id muse`), que `pair`/`unpair` n'émettent, ne révoquent ni n'invalident jamais. Son plafond est
+l'autorisation de **Muse** sur la TV (`agents.LINKED_POLICY`) : « Aucun accès » au QR ou dans « Gérer les assistants »
+la révoque dans la même écriture, et l'Agent Port réapplique ce plafond à chaque appel. `muse-device` est réservée :
+`agent issue --id muse-device` est refusé. L'Agent Port reste la barrière (identité révoquée ⇒ `unauthorized`, scope
+retiré ⇒ `forbidden_scope`).
 Aucun avis (`feedback`) ni message TV (`display_message`) pour cette première identité, même si la politique du QR
 les autorise. Le pont refuse de s'enregistrer auprès de Muse si son identité a d'autres scopes que `read` (code 78,
-pas de redémarrage). Les résultats repassent par un nettoyage (aucune adresse, aucune clé de secret/chemin, tailles
-bornées, ≤ 64 Kio). Le pont ne lit jamais `catalogue.json` ni l'état OpenTV (inaccessibles dans son bac à sable).
+pas de redémarrage). Les résultats repassent par un nettoyage : jetons-adresses retirés (détecteur explicite, au
+moins aussi strict que le moteur « Pour toi » : schémas, `www.`, hôte/chemin, hôte:port, IPv4, hôtes nus des TLD
+courants, `user:mot@hôte`, courriels, chemins absolus/`~/`/`../`/Windows) sans effacer les titres légitimes
+(« Big Data: le film », « M.Butterfly », « Mr.Robot », « File: … », « Paris.Fin ») ; clés retirées par segment exact
+(`token`, `secret`, `password`, `auth`, `url`, `uri`, `href`, `link`, `poster`, `path`, `src`, `socket`… —
+`author`, `during`, `favourites`, `security` restent) ; tailles bornées, ≤ 64 Kio. Un paramètre facultatif à `null`
+vaut « omis » (comme le SDK d'origine) ; une requête qui commence par `-` est un titre littéral (jamais une erreur
+`usage`). Le pont ne lit jamais `catalogue.json` ni l'état OpenTV (inaccessibles dans son bac à sable). Journal : chaque
+argument (nom de commande, raison de fermeture venus du réseau) est expurgé, neutralisé (contrôle, bidi) et borné
+avant la mise en forme ; les traces d'exception sont rendues expurgées et bornées.
 
 Comptes et fichiers : service `opentv-muse.service` (compte `opentv-muse`, jamais root, membre de `opentv-agent` ;
 `ProtectSystem=strict`, aucun D-Bus, aucune capacité, `/var/lib/opentv` et les secrets OpenTV inaccessibles) ;
 état `/var/lib/opentv-muse` 0700 (`identity.json`, `pairing.json`, `sdk_token` 0600) ; identité Agent Port
-`/etc/opentv/agents/agent-muse-<uid>.json` (root:opentv-muse 0640). Fenêtre Bluetooth : `opentv-muse-pair.service`
+`/etc/opentv/agents/agent-muse-device-<uid>.json` (root:opentv-muse 0640). Fenêtre Bluetooth : `opentv-muse-pair.service`
 (oneshot borné, seul à recevoir le groupe `bluetooth`, sans section `[Install]`). L'installation livre le SDK
 **non apparié et désactivé** ; elle masque `musegadget.service` d'origine (lien `/dev/null` noté, retiré par
 `uninstall.sh`) et, si une unité d'origine existe déjà, la laisse intacte et le pont refuse de s'apparier.
@@ -513,32 +526,64 @@ Approvisionnement épinglé (`scripts/pi4/vendor/muse/PIN.json`, jamais `@main`)
 `https://github.com/facebookincubator/muse-gadget-sdk/archive/1db6a26f4ca56939c4465d8a12e241c1b1b5c8dc.tar.gz`
 (SHA-256 `bc02e8dfb54b7fb52cd500c584f6cda732195a9c0b0cb8958bc3a668d72fb2ee`, 6 433 027 octets, vérifiée le
 2026-10-28) ; 18 fichiers relus copiés octet pour octet + licence Apache-2.0, chacun épinglé par SHA-256 et revérifié
-à chaque démarrage (fichier en trop, modifié ou absent ⇒ refus). Dépendance `websockets` 17.1 : roue pure Python
+à chaque démarrage (fichier en trop, modifié ou absent ⇒ refus). Le dossier SDK étant en tête du chemin d'import, son
+sommet n'admet que `PIN.json`, `LICENSE`, `musegadget/` et la roue épinglée (un `ssl.py`, un `websockets/`, un `.pth`
+ou tout lien symbolique ⇒ refus) ; le bytecode en cache n'est jamais lu (`sys.pycache_prefix`), un `.pyc` planté ne
+remplace donc jamais une source vérifiée. Dépendance `websockets` 17.1 : roue pure Python
 `websockets-17.1-py3-none-any.whl`, SHA-256 `f221081107b8c48184d99f7019604486376e7ef826037e70aad6b02540732c23`
 (= `requirements.lock` du même commit), téléchargée par `prepare-pi.sh` seulement, vérifiée avant installation.
 Paquets : `bluez python3-cryptography python3-dbus python3-gi`.
 
 ```sh
-sudo /opt/opentv/bin/opentv-pi muse status        # SDK vérifié, appariement, service, lien, identité ; aucun secret
+sudo /opt/opentv/bin/opentv-pi muse status        # SDK vérifié, BlueZ, appariement, service, lien, identité ; aucun secret
+sudo /opt/opentv/bin/opentv-pi muse prepare-bluetooth   # compatibilité BlueZ du SDK (voir plus bas), redémarre bluetooth
+                                                        # seulement si nécessaire ; --replace-mtu : valeur locale > 256
 # porte humaine : Muse d'abord autorisé « Voir seulement » (ou plus) sur la TV (QR ou Gérer les assistants)
 sudo /opt/opentv/bin/opentv-pi muse pair          # jeton SDK mgst_… saisi SANS écho (jamais en argument), puis
                                                   # app Muse > Réglages > Appareils > Mode développeur > + MuseGadgetXXXXXX
 sudo /opt/opentv/bin/opentv-pi muse pair --replace-token   # nouveau jeton SDK ; --force : nouvel appariement
-sudo /opt/opentv/bin/opentv-pi muse unpair [--forget-token]  # pont désactivé, appariement effacé, identité révoquée
+sudo /opt/opentv/bin/opentv-pi muse pair --replace-identity  # muse-device existante non émise par pair : remplacée
+sudo /opt/opentv/bin/opentv-pi muse unpair [--forget-token]  # pont désactivé, appariement effacé, muse-device révoquée
 ```
 
 `pair` vérifie d'abord (sans rien écrire) : root, SDK épinglé intact, roue présente, aucun service d'origine, compte
-`opentv-muse`, groupe `bluetooth`, politique OpenTV autorisant Muse en lecture. Il écrit le jeton (0600 opentv-muse,
-par descripteur), émet l'identité `muse` **read**, ouvre la fenêtre (10 min) et n'active `opentv-muse.service`
-qu'**après** un appariement réussi ; puis il attend l'enregistrement du lien. Portes distinctes : appareil apparié,
+`opentv-muse`, groupe `bluetooth`, compatibilité BlueZ **active** (sinon `bluetooth_not_prepared` /
+`bluetooth_restart_required` avec la commande à lancer), politique OpenTV autorisant Muse en lecture, et que
+`muse-device` est absente ou prouvée à nous (jeton de notre fichier client, scope `read` seul) — sinon
+`muse_device_identity_unexpected`, rien modifié, sauf `--replace-identity` explicite (révoque `muse-device`
+seulement). Il écrit le jeton (0600 opentv-muse, par descripteur), émet `muse-device` **read**, ouvre la fenêtre
+(10 min) et n'active `opentv-muse.service` qu'**après** un appariement réussi ; puis il attend l'enregistrement du
+lien. Tout échec (fenêtre fermée, unité en échec, Ctrl-C) révoque l'identité tout juste émise et retire son fichier
+client. `unpair` ne révoque `muse-device` que si elle est la nôtre (sinon : conservée, signalée). Migration d'une
+installation de développement antérieure (identité `muse` émise au compte `opentv-muse`) : `pair`/`unpair` retirent
+`agent-muse-<uid opentv-muse>.json` et ne révoquent l'entrée `muse` que si elle porte encore CE jeton ; après la
+mise à jour, le pont refuse de démarrer (code 78, identité absente) jusqu'à `sudo opentv-pi muse pair`, qui migre et
+réémet `muse-device` sans nouvel appariement Bluetooth (appareil déjà apparié). Portes distinctes : appareil apparié,
 service démarré, lien enregistré (`link.state=registered`), commande reçue (`journalctl -u opentv-muse` :
 `muse_invoke`), réponse visible dans l'app Muse — seule la dernière prouve le parcours complet.
 
+Compatibilité BlueZ (exigée par l'installateur officiel du même commit, Android **et** iPhone) : `[GATT]
+ExchangeMTU = 256` dans `/etc/bluetooth/main.conf` (l'app Android échoue au-delà de 512) et greffon `battery` de
+bluetoothd désactivé par le drop-in `/etc/systemd/system/bluetooth.service.d/zz-opentv-muse.conf` (sinon BlueZ demande
+à l'iPhone de se lier, ce que le gadget refuse, et l'appariement iOS peut tomber). `install.sh` l'applique dans sa
+transaction (sauvegardes, retour arrière automatique en cas d'échec, idempotent) et ne redémarre bluetooth qu'après le
+point de non-retour, sur la vraie racine, si quelque chose a changé. Changements notés dans
+`/var/lib/opentv-install/muse-bluez.json` et retirés exactement par `uninstall.sh` (avec ou sans `--purge`) : fichier
+inchangé ⇒ octets d'origine, modifié depuis ⇒ seules les lignes OpenTV. Jamais : une valeur `ExchangeMTU` locale > 256
+remplacée sans `prepare-bluetooth --replace-mtu` (ligne d'origine notée et rendue), un drop-in étranger écrasé, une
+commande bluetoothd complexe réécrite — `pair` refuse alors avec la marche à suivre. « Actif » = bluetoothd en cours
+avec `--noplugin=battery` et démarré après la dernière modification de `main.conf`.
+
+Désinstallation sans `--purge` : le pont est arrêté et son code retiré, mais l'état reste sur la carte, inactif —
+appariement Muse (`pairing.json` : jetons d'appareil), identité d'appareil (`identity.json` : clé privée), jeton SDK
+(`/var/lib/opentv-muse`), identité Agent Port `muse-device` (registre `/var/lib/opentv`) et son fichier client
+`/etc/opentv/agents/agent-muse-device-<uid>.json`. Pour les effacer : `sudo opentv-pi muse unpair --forget-token`
+avant la désinstallation, ou `--purge`. Dans tous les cas, retirer l'appareil dans l'app Muse.
+
 Limites : la communauté Muse n'a pas de vérification fabricant à l'appariement (MITM actif possible pendant la
-fenêtre : apparier sur un réseau de confiance). OpenTV ne modifie pas BlueZ : sans `[GATT] ExchangeMTU = 256` dans
-`/etc/bluetooth/main.conf`, l'appariement Android peut échouer après l'étape Wi-Fi (signalé par `pair`) ; le greffon
-batterie de BlueZ peut gêner iOS. `MemoryDenyWriteExecute` du pont et la politique D-Bus BlueZ du groupe `bluetooth`
-sont à valider sur la Pi. Muse continue de voir l'appareil jusqu'à son retrait dans l'app après `unpair`.
+fenêtre : apparier sur un réseau de confiance). `MemoryDenyWriteExecute` du pont, la politique D-Bus BlueZ du groupe
+`bluetooth` et l'appariement réel Android/iPhone avec la compatibilité BlueZ active sont à valider sur la Pi. Muse
+continue de voir l'appareil jusqu'à son retrait dans l'app après `unpair`.
 
 ## 6 bis. « Regarder » (lecteur du site autorisé, plein écran direct)
 

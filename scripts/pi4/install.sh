@@ -798,6 +798,37 @@ if [ ${#NEW_DIRS[@]} -gt 0 ]; then
   fi
 fi
 
+# ---------------------------------------------------------------- pont Muse : compatibilité BlueZ du SDK épinglé
+# = install.sh officiel du commit épinglé (configure_bluez + disable_bluez_battery) : [GATT] ExchangeMTU = 256 (app
+# Android) et greffon battery de bluetoothd désactivé par le drop-in bluetooth.service.d/zz-opentv-muse.conf (sinon
+# BlueZ demande à l'iPhone de se lier et l'appariement iOS peut tomber). Changements POSSÉDÉS (opentv_pi/musebluez.py) :
+# notés dans /var/lib/opentv-install/muse-bluez.json, sauvegardés dans $BK (retour arrière de CETTE transaction) et
+# retirés exactement par uninstall.sh (--purge compris). Jamais : une valeur ExchangeMTU locale > 256 remplacée (geste
+# explicite : opentv-pi muse prepare-bluetooth --replace-mtu), un drop-in étranger écrasé, une commande bluetoothd
+# complexe réécrite — l'appariement est alors refusé avec la commande à lancer. Bluetooth n'est redémarré qu'après le
+# point de non-retour, sur la vraie racine, et seulement si quelque chose a changé.
+BLUEZ_RESTART=0
+BLUEZ_ARGS=(muse prepare-bluetooth --installer --root "$ROOT" --backup-dir "$BK")
+if [ "$DRY" = 1 ]; then BLUEZ_ARGS+=(--dry-run); fi
+if ! command -v python3 >/dev/null 2>&1; then
+  say "Muse : python3 introuvable, compatibilité BlueZ non appliquée (appariement refusé : opentv-pi muse status)"
+else
+  BLUEZ_OUT="$(python3 -I "$HERE/bin/opentv-pi" "${BLUEZ_ARGS[@]}")" ||
+    fail "compatibilité BlueZ du pont Muse non appliquée (octets d'avant rendus) : retour à l'état précédent"
+  while IFS= read -r l; do
+    case "$l" in
+      "saved "*) STARTED=1; SAVED+=("${l#saved }") ;;
+      "created "*) STARTED=1; NEW+=("${l#created }") ;;
+      "dir "*) NEW_DIRS+=("${l#dir }") ;;
+      restart) BLUEZ_RESTART=1; say "Muse : compatibilité BlueZ du SDK appliquée (ExchangeMTU = 256, greffon battery désactivé ; notée, retirée par uninstall.sh)" ;;
+      "skipped "*) say "ATTENTION Muse : BlueZ non modifié (${l#skipped }) — appariement refusé tant que la compatibilité n'est pas active : sudo /opt/opentv/bin/opentv-pi muse status" ;;
+      "plan "*) say "[dry-run] Muse : ${l#plan }" ;;
+    esac
+  done <<EOF
+$BLUEZ_OUT
+EOF
+fi
+
 ENVF="/etc/opentv/opentv.env"
 if [ ! -e "$(dest "$ENVF")" ]; then
   STARTED=1
@@ -939,6 +970,11 @@ if [ -e "$(dest /run/opentv-uninstalling)" ] || [ -L "$(dest /run/opentv-uninsta
   act rm -f -- "$(dest /run/opentv-uninstalling)"
 fi
 post systemctl daemon-reload
+# compatibilité BlueZ changée par cette installation : bluetoothd relit main.conf et sa commande (try-restart : rien
+# si bluetooth ne tourne pas) ; un échec n'annule rien, l'appariement reste refusé tant qu'elle n'est pas active
+if [ "$BLUEZ_RESTART" = 1 ] && ! host systemctl try-restart bluetooth.service; then
+  say "ATTENTION Muse : redémarrage de bluetooth impossible — sudo /opt/opentv/bin/opentv-pi muse prepare-bluetooth"
+fi
 if [ "$ENABLE" = 1 ]; then
   # opentv-ap-guard.timer : garde root du Wi-Fi temporaire, indépendante du service Python
   # opentv-cec.timer : déclaration Playback « OpenTV » + remappage OK + UNE annonce de source active par démarrage

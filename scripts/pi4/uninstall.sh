@@ -13,10 +13,19 @@
 #                                            échoue — arrêt alors AVANT tout retrait, pour relancer), retire l'écran OpenTV et
 #                                            la condition getty de tty1, rend tty1, retire la promotion
 #                                            terrain de « Regarder » (/etc/opentv/playback-promoted), arrête le pont
-#                                            Muse et rend le service musegadget d'origine (démasqué s'il l'avait été).
-#                                            Le jeton TMDb (/etc/opentv/tmdb/token) et la source approuvée restent.
+#                                            Muse, retire la compatibilité BlueZ notée par OpenTV (ExchangeMTU,
+#                                            drop-in battery) et rend le service musegadget d'origine (démasqué s'il
+#                                            l'avait été). SANS --purge, l'état est CONSERVÉ (inactif, service et code
+#                                            retirés) : appariement Muse (pairing.json : jetons d'appareil),
+#                                            identité d'appareil (identity.json : clé privée), jeton SDK
+#                                            (/var/lib/opentv-muse), identité Agent Port muse-device (registre
+#                                            /var/lib/opentv) et son fichier client /etc/opentv/agents/
+#                                            agent-muse-device-<uid>.json — une réinstallation se reconnecte. Pour
+#                                            les effacer : sudo opentv-pi muse unpair --forget-token AVANT, ou --purge
+#                                            Le jeton TMDb (/etc/opentv/tmdb/token) et la source approuvée restent aussi.
 #   ... --purge                              efface aussi l'état (/var/lib/opentv*, /etc/opentv, appariement Muse,
-#                                            jeton TMDb compris, /var/cache/opentv)
+#                                            jeton TMDb compris, /var/cache/opentv) ; l'appareil reste à retirer dans
+#                                            l'app Muse
 #   ... --purge --forget-wifi                oublie aussi le Wi-Fi configuré par OpenTV (opentv-wifi)
 #   ... --dry-run | --root <dossier>         plan seul / rootfs de test
 set -Eeuo pipefail
@@ -34,7 +43,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1; shift ;;
     --purge) PURGE=1; shift ;;
     --forget-wifi) FORGET_WIFI=1; shift ;;
-    -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "option inconnue : $1" ;;
   esac
 done
@@ -529,6 +538,35 @@ if [ -f "$(dest /opt/opentv/bin/opentv-pi)" ]; then
   host python3 -I /opt/opentv/bin/opentv-pi cec-bootstrap --release
 fi
 if [ -e "$(dest /run/opentv-cec)" ] || [ -L "$(dest /run/opentv-cec)" ]; then act rm -rf -- "$(dest /run/opentv-cec)"; fi
+# 3b) compatibilité BlueZ du pont Muse (opentv_pi/musebluez.py, normal comme --purge) : seules les modifications notées
+#     dans muse-bluez.json sont retirées — main.conf rendu à l'octet s'il est inchangé depuis, sinon seule la ligne
+#     ExchangeMTU d'OpenTV (ligne d'origine rendue si --replace-mtu) ; drop-in retiré seulement s'il est encore le
+#     nôtre. Bluetooth redémarré seulement si quelque chose a changé (vraie racine). Échec : arrêt AVANT le retrait des
+#     fichiers, marqueur conservé pour relancer.
+BLUEZ_REC="$(dest /var/lib/opentv-install/muse-bluez.json)"
+if [ -e "$BLUEZ_REC" ] || [ -L "$BLUEZ_REC" ]; then
+  OTV_PI="$(dest /opt/opentv/bin/opentv-pi)"
+  [ -f "$OTV_PI" ] || OTV_PI="$HERE/bin/opentv-pi"
+  if [ ! -f "$OTV_PI" ] || ! command -v python3 >/dev/null 2>&1; then
+    die "compatibilité BlueZ notée mais opentv-pi ou python3 introuvable : rien retiré de BlueZ, corriger puis relancer"
+  fi
+  RARGS=(muse restore-bluetooth --root "$ROOT")
+  if [ "$DRY" = 1 ]; then RARGS+=(--dry-run); fi
+  BOUT="$(python3 -I "$OTV_PI" "${RARGS[@]}")" ||
+    die "BlueZ : retour arrière impossible (muse-bluez.json conservé) — corriger puis relancer sudo /opt/opentv/uninstall.sh"
+  while IFS= read -r l; do
+    case "$l" in
+      restart)
+        host systemctl daemon-reload
+        host systemctl try-restart bluetooth.service
+        say "Muse : compatibilité BlueZ d'OpenTV retirée (main.conf et drop-in rendus)" ;;
+      "kept "*) say "Muse : BlueZ — conservé (${l#kept }) : modifié localement depuis l'installation" ;;
+      "plan "*) say "[dry-run] Muse : ${l#plan }" ;;
+    esac
+  done <<EOF
+$BOUT
+EOF
+fi
 # 4) fichiers
 
 if [ -f "$MANIFEST" ]; then

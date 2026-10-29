@@ -137,7 +137,9 @@ def dispatch(ctx, agent, scopes, name, a):
             raise ToolError("foryou_unavailable")
         res = fy.catalogue_page(a["limit"], a["offset"])
     elif name == "search":
-        res = _cli(ctx, ["search", "--query", a["query"], "--limit", a["limit"], "--offset", a["offset"]])
+        # « --query=<texte> » (une seule option) : une requête qui commence par « - » (« -x », « --limit ») reste un
+        # titre littéral, jamais une option ni une erreur « usage » de l'analyseur du moteur
+        res = _cli(ctx, ["search", "--query=" + a["query"], "--limit", a["limit"], "--offset", a["offset"]])
     elif name == "feedback":
         res = _cli(ctx, ["feedback", "--id", a["id"], "--action", a["action"]])
     elif name == "history":

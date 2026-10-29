@@ -7,13 +7,17 @@ s'ils apparaissaient. Le pont enregistre sa PROPRE description d'appareil, limit
     opentv.status  opentv.search  opentv.recommend  opentv.catalogue_list  opentv.history
 
 Chaque appel est validé (schéma strict, bornes, aucune adresse), puis délégué au serveur MCP OpenTV (opentv_pi.mcp)
-qui parle à l'Agent Port Unix authentifié avec l'identité locale « muse » (scope read seulement, fichier client
-root:opentv-muse 0640 émis par `opentv-pi muse pair`). L'Agent Port reste la barrière d'autorisation : identité
-révoquée, scope retiré ou outil hors liste ⇒ refus. Les résultats repassent par un nettoyage récursif (aucune
-adresse, aucune clé de secret, tailles bornées). Aucun paramètre de commande shell, de chemin ni d'URL n'existe.
+qui parle à l'Agent Port Unix authentifié avec l'identité DÉDIÉE « muse-device » (scope read seulement, fichier
+client root:opentv-muse 0640 émis par `opentv-pi muse pair` ; jamais l'identité « muse » d'un autre client local).
+Son plafond est l'autorisation donnée à Muse sur la TV (agents.LINKED_POLICY). L'Agent Port reste la barrière
+d'autorisation : identité révoquée, scope retiré ou outil hors liste ⇒ refus. Les résultats repassent par un nettoyage
+récursif (aucune adresse, aucune clé de secret, tailles bornées). Aucun paramètre de commande shell, de chemin ni d'URL
+n'existe.
 
 Le pont tourne sous le compte opentv-muse (jamais root), sans accès au catalogue brut ni à l'état OpenTV. Aucun
-jeton (SDK, appareil, VM, Agent Port) n'est jamais journalisé : un filtre remplace toute occurrence connue.
+jeton (SDK, appareil, VM, Agent Port) n'est jamais journalisé : un filtre remplace toute occurrence connue, borne et
+neutralise chaque argument AVANT la mise en forme (noms de commande, raisons de fermeture venant du réseau) et rend
+les traces d'exception expurgées.
 La boucle de reconnexion reprend la logique publique de musegadget.service.Service (Apache-2.0, Meta Platforms)
 sans importer ce module (il importe la table des commandes par défaut d'executor).
 """
@@ -26,13 +30,15 @@ import logging
 import math
 import os
 import re
+import stat
 import sys
 import threading
 import time
 
-from . import VERSION, agentport, agents, config as otconfig, fsutil, mcp, tools, validate
+from . import VERSION, agentport, agents, config as otconfig, fsutil, mcp, tools
 
-MUSE_AGENT_ID = "muse"
+MUSE_AGENT_ID = "muse-device"                 # identité dédiée du pont (jamais « muse » : autre client local)
+LEGACY_AGENT_ID = "muse"                      # anciennes installations de développement (migration : museadmin)
 MUSE_SCOPES = ["read"]
 DEFAULT_STATE_DIR = "/var/lib/opentv-muse"
 RUN_STATUS = "/run/opentv-muse/status.json"
@@ -45,6 +51,7 @@ COMMAND_TIMEOUT_MS = 20000
 MAX_PAYLOAD_BYTES = 64 * 1024                 # /link-control accepte 256 Kio par message : large marge
 MAX_DEPTH, MAX_LIST, MAX_KEYS, MAX_STR = 8, 60, 48, 1200
 PAIR_TIMEOUT_S = 600
+NO_PYCACHE = os.path.join(os.devnull, "opentv-muse-no-pycache")
 BACKOFF_BASE_S, BACKOFF_MAX_S, AUTH_BACKOFF_MIN_S, HEALTHY_SESSION_S = 2.0, 60.0, 15.0, 30.0
 TOKEN_REFRESH_AGE_S, TOKEN_RETRY_S = 3 * 3600, 300
 MAX_CONCURRENT_INVOKES = 4
@@ -77,8 +84,47 @@ FORBIDDEN_MODULES = frozenset(("musegadget.executor", "musegadget.fileops", "mus
                                "musegadget.data"))
 ERROR_RE = re.compile(r"[a-z][a-z0-9_]{1,39}")
 _KEY_RE = re.compile(r"[a-z][a-z0-9_]{0,47}")
-_SECRET_KEY_RE = re.compile(r"token|secret|passw|psk|cookie|auth|url|uri|href|link|poster|path|src|socket", re.I)
+# clés retirées : segment EXACT (séparé par « _ ») dangereux — « author », « during », « favourites », « security »
+# restent ; « token », « access_token », « poster_url », « detail_path », « api_key »… partent
+SECRET_KEY_PARTS = frozenset((
+    "token", "tokens", "secret", "secrets", "password", "passwords", "passwd", "pwd", "pass", "passphrase", "psk",
+    "cookie", "cookies", "auth", "authorization", "bearer", "credential", "credentials", "apikey", "privatekey",
+    "url", "urls", "uri", "uris", "href", "hrefs", "link", "links", "poster", "posters", "path", "paths", "src",
+    "socket", "sockets", "host", "hostname", "ip", "ipv4", "ipv6", "mac", "ssid"))
+SECRET_KEY_PAIRS = frozenset(("api_key", "private_key", "access_key", "secret_key", "signing_key", "session_key",
+                              "client_key", "session_id"))
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+# Adresses (détecteur explicite et conservateur, au moins aussi strict que le moteur « Pour toi » : URL_RE de
+# scripts/nanopi/opentv_foryou.py, vérifié par les tests) : schéma://, www., //hôte, magnet:/data:/javascript:/
+# vbscript:/file:/blob: collés, http(s):, hôte.tld/chemin ou :port, IPv4, hôte nu d'un TLD courant, identifiants
+# user:mot@hôte, courriel, chemins absolus/personnels/relatifs/Windows. « Big Data: le film », « M.Butterfly »,
+# « Mr.Robot », « File: texte », « Data: texte », « Paris.Fin », « Mission // Impossible », « AC/DC » restent intacts.
+_ADDR_HOST = r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}"
+_ADDR_IPV4 = r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}"
+# TLD d'hôte nu : seulement ceux qui ne sont pas des mots courants (« Love.Me », « Save.Us », « Do.It » restent)
+_ADDR_TLDS = (r"com|net|org|edu|gov|mil|int|io|co|ca|fr|uk|eu|ch|lu|ru|cn|jp|br|au|nl|ly|tv|xyz|biz|app|dev|ai|gg|"
+              r"info|onion|arpa")
+_ADDR_ROOTS = r"etc|var|run|home|root|tmp|proc|sys|dev|opt|usr|srv|mnt|media|boot|lib|lib64|bin|sbin|private|users"
+_ADDR_ANY_HOST = "(?:" + _ADDR_HOST + "|" + _ADDR_IPV4 + "|localhost)"
+ADDRESS_RE = re.compile("(?:" + "|".join((
+    r"[a-z][a-z0-9+.-]{0,31}://",                                                 # schéma://…
+    r"https?:",                                                                   # http: / https: (moteur)
+    r"(?<![a-z0-9])www\.",                                                        # www.…
+    r"(?<!\S)//[^\s/]",                                                           # //hôte (moteur)
+    r"(?<![a-z0-9])(?:magnet|data|javascript|vbscript|file|blob):(?=\S)",         # schémas collés (moteur)
+    r"(?<![\w.@-])" + _ADDR_ANY_HOST + r"(?::[0-9]{1,5})?/",                       # hôte/chemin (moteur)
+    r"(?<![\w.@-])" + _ADDR_ANY_HOST + r":[0-9]{1,5}(?![0-9])",                    # hôte:port
+    r"(?<![\w.])" + _ADDR_IPV4 + r"(?![\w.])",                                     # IPv4 nue
+    r"(?<![\w.@-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:" + _ADDR_TLDS + r")(?![\w-])",   # hôte.tld courant
+    r"[^\s@/:]+:[^\s@/]+@" + _ADDR_ANY_HOST,                                       # user:secret@hôte
+    r"[\w.+-]+@" + _ADDR_HOST,                                                      # courriel
+    r"(?<![\w.~:/-])/(?:[\w.-]+/)+[\w.-]*",                                         # /chemin/absolu
+    r"(?<![\w.~:/-])/(?:" + _ADDR_ROOTS + r")(?![\w-])",                             # /etc, /var…
+    r"(?<!\S)~[a-z0-9_-]*/",                                                       # ~/… ~alex/…
+    r"(?<![\w.])\.{1,2}/",                                                         # ./… ../…
+    r"(?<![a-z0-9])[a-z]:\\",                                                      # C:\…
+    r"\\\\[^\s\\]+\\",                                                          # \\serveur\…
+)) + r")\S*", re.I)
 _HOST_RE = re.compile(r"(?=.{1,253}\Z)[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)+")
 PAIR_STATES = ("starting", "open", "paired", "already_paired", "invalid_sdk_token", "no_sdk_token", "window_closed",
                "error")
@@ -90,9 +136,51 @@ class BridgeError(Exception):
         self.code = code if isinstance(code, str) and ERROR_RE.fullmatch(code) else "failed"
 
 
+def has_address(s):
+    """Vrai si le texte contient une adresse (URL, hôte, IP, identifiants, chemin) — voir ADDRESS_RE."""
+    return isinstance(s, str) and ADDRESS_RE.search(s) is not None
+
+
+def strip_addresses(s):
+    """Retire chaque jeton-adresse (jusqu'au point fixe, comme clean_text du moteur) ; le reste du texte est gardé."""
+    if not ADDRESS_RE.search(s):
+        return s
+    while True:
+        t = ADDRESS_RE.sub(" ", s)
+        if t == s:
+            break
+        s = t
+    s = re.sub(r"\s+", " ", s).strip()
+    return "" if ADDRESS_RE.search(s) else s
+
+
+def secret_key(k):
+    """Clé à retirer des résultats : segment exact dangereux (token, url, path…) ou paire (api_key…)."""
+    parts = k.split("_")
+    if any(p in SECRET_KEY_PARTS for p in parts):
+        return True
+    return any("_".join(parts[i:i + 2]) in SECRET_KEY_PAIRS for i in range(len(parts) - 1))
+
+
 # ------------------------------------------------------------------------------------------------ secrets et journal
+MAX_LOG_ARG, MAX_LOG_MSG, MAX_LOG_EXC = 160, 1000, 4000
+# contrôle C0/C1, séparateurs de ligne/paragraphe, marques bidi et caractères invisibles : jamais dans le journal
+_LOG_UNSAFE_RE = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff\ufff9-\ufffb]")
+_LOG_UNSAFE_NL_RE = re.compile("[\x00-\x09\x0b-\x1f\x7f-\x9f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff"
+                               "\ufff9-\ufffb]")
+
+
+def _clip(text, n):
+    return text if len(text) <= n else text[:n] + "…[+%d]" % (len(text) - n)
+
+
 class SecretRedactor(logging.Filter):
-    """Remplace toute occurrence d'un secret connu (jetons SDK/appareil/VM/Agent Port) dans chaque ligne de journal."""
+    """Filtre de chaque ligne de journal (SDK épinglé compris, posé sur le gestionnaire) :
+    - chaque argument non numérique est converti, EXPURGÉ (secrets connus), neutralisé (contrôle, bidi) et borné AVANT
+      la mise en forme : un nom de commande ou une raison de fermeture de plusieurs Mio venus du réseau ne devient
+      jamais une ligne géante ni une fausse ligne ;
+    - le message final est expurgé puis borné ; une trace d'exception est rendue ici, expurgée, neutralisée (une
+      ligne par cadre) et bornée — le formateur ne la rend jamais lui-même."""
 
     def __init__(self):
         super().__init__()
@@ -112,12 +200,47 @@ class SecretRedactor(logging.Filter):
                 text = text.replace(s, "[secret]")
         return text
 
+    def clean(self, text, n, newlines=False):
+        """Expurgé AVANT d'être coupé (jamais un préfixe de secret), puis neutralisé et borné."""
+        text = self.redact(text)
+        return _clip((_LOG_UNSAFE_NL_RE if newlines else _LOG_UNSAFE_RE).sub("?", text), n)
+
+    def _arg(self, a):
+        if isinstance(a, (int, float)) and not isinstance(a, bool):
+            return a
+        try:
+            text = a if isinstance(a, str) else str(a)
+        except Exception:
+            text = "[%s]" % type(a).__name__
+        return self.clean(text, MAX_LOG_ARG)
+
     def filter(self, record):
         try:
-            msg = record.getMessage()
-        except Exception:   # message mal formé : jamais d'arguments bruts
-            msg = str(record.msg)
-        record.msg, record.args = self.redact(msg), None
+            args = record.args
+            if isinstance(args, tuple):
+                args = tuple(self._arg(a) for a in args[:16])
+            elif isinstance(args, dict):
+                args = {k: self._arg(v) for k, v in list(args.items())[:16]}
+            fmt = record.msg if isinstance(record.msg, str) else self._arg(record.msg)
+            fmt = fmt[:MAX_LOG_MSG * 2]
+            try:
+                msg = fmt % args if args else fmt
+            except (TypeError, ValueError, KeyError):   # message mal formé : jamais d'arguments bruts
+                msg = fmt + " [arguments]"
+        except Exception:
+            msg = "[ligne de journal illisible]"
+        record.msg, record.args = self.clean(msg, MAX_LOG_MSG), None
+        if record.exc_info:
+            try:
+                text = logging.Formatter().formatException(record.exc_info)
+            except Exception:
+                text = "[trace illisible]"
+            record.exc_text = self.clean(text, MAX_LOG_EXC, newlines=True)
+            record.exc_info = None
+        elif isinstance(record.exc_text, str):
+            record.exc_text = self.clean(record.exc_text, MAX_LOG_EXC, newlines=True)
+        if record.stack_info:
+            record.stack_info = self.clean(str(record.stack_info), MAX_LOG_EXC, newlines=True)
         return True
 
 
@@ -132,7 +255,7 @@ def log_event(event, **fields):
     """Une ligne JSON (journal systemd) : codes, noms de commande, durées — jamais paramètres, résultats ni jetons."""
     rec = {"ts": round(time.time(), 3), "event": event}
     rec.update(fields)
-    sys.stdout.write(REDACTOR.redact(json.dumps(rec, ensure_ascii=False, sort_keys=True)) + "\n")
+    sys.stdout.write(REDACTOR.clean(json.dumps(rec, ensure_ascii=False, sort_keys=True), MAX_LOG_MSG) + "\n")
     sys.stdout.flush()
 
 
@@ -189,6 +312,57 @@ def load_pin(d):
     return pin
 
 
+def _scan_sdk_tree(d, wheel_name, problems):
+    """Arborescence du SDK vérifiée SANS suivre de lien : au sommet, seuls PIN.json, LICENSE, musegadget/, la roue
+    épinglée et un __pycache__ réel sont admis (le dossier est en tête de sys.path : un ssl.py, un websockets/ ou un
+    .pth y masqueraient la bibliothèque standard ou la dépendance épinglée) ; dans musegadget/, seuls les dossiers du
+    sous-ensemble (et __pycache__, jamais lu : sys.pycache_prefix) ; aucun lien symbolique, aucun fichier spécial.
+    -> ensemble des fichiers réguliers de musegadget/ (chemins relatifs)."""
+    seen = set()
+    try:
+        st = os.lstat(d)
+    except OSError:
+        problems.append("sdk_missing")
+        return seen
+    if not stat.S_ISDIR(st.st_mode):
+        problems.append("sdk_not_directory")
+        return seen
+    top_files = {"PIN.json", "LICENSE"} | ({wheel_name} if wheel_name else set())
+    allowed_dirs = {"musegadget", "musegadget/noise"}
+    stack = [""]
+    while stack:
+        rel_dir = stack.pop()
+        try:
+            entries = sorted(os.scandir(os.path.join(d, rel_dir) if rel_dir else d), key=lambda e: e.name)
+        except OSError:
+            problems.append("unreadable:" + (rel_dir or "."))
+            continue
+        for e in entries:
+            rel = (rel_dir + "/" + e.name) if rel_dir else e.name
+            try:
+                est = e.stat(follow_symlinks=False)
+            except OSError:
+                problems.append("unreadable:" + rel)
+                continue
+            if stat.S_ISLNK(est.st_mode):
+                problems.append("symlink:" + rel)
+            elif stat.S_ISDIR(est.st_mode):
+                if e.name == "__pycache__":
+                    continue   # jamais lu (sys.pycache_prefix) ; un lien à sa place est refusé ci-dessus
+                if rel in allowed_dirs:
+                    stack.append(rel)
+                else:
+                    problems.append("unexpected:" + rel + "/")
+            elif not stat.S_ISREG(est.st_mode):
+                problems.append("special:" + rel)
+            elif not rel_dir:
+                if e.name not in top_files:
+                    problems.append("unexpected:" + rel)
+            else:
+                seen.add(rel)
+    return seen
+
+
 def verify_sdk(d):
     """-> {"ok", "commit", "problems": [...] , "websockets": "ok"|"missing"|"bad_hash"} ; jamais d'exception."""
     res = {"ok": False, "commit": None, "problems": [], "websockets": "missing", "dir": d}
@@ -202,22 +376,24 @@ def verify_sdk(d):
         return res
     res["commit"] = pin["commit"]
     want = pin["files"]
-    seen = set()
-    top = os.path.join(d, "musegadget")
-    for root, dirs, files in os.walk(top):
-        dirs[:] = [x for x in dirs if x != "__pycache__"]
-        for f in files:
-            rel = os.path.relpath(os.path.join(root, f), d).replace(os.sep, "/")
-            seen.add(rel)
-            if rel not in want:
-                res["problems"].append("unexpected:" + rel)
+    dep = ((pin.get("dependencies") or {}).get("websockets") or {})
+    wf = dep.get("file")
+    if not (isinstance(wf, str) and re.fullmatch(r"websockets-[0-9.]+-py3-none-any\.whl", wf)):
+        wf = None
+    seen = _scan_sdk_tree(d, wf, res["problems"])
+    for rel in sorted(seen):
+        if rel not in want:
+            res["problems"].append("unexpected:" + rel)
     for rel, digest in sorted(want.items()):
+        if not isinstance(rel, str) or not re.fullmatch(r"(?:LICENSE|musegadget/(?:noise/)?[a-z_]+\.py)", rel):
+            res["problems"].append("pin_invalid_entry")
+            continue
         p = os.path.join(d, rel)
         if rel.startswith("musegadget/"):
             if rel not in seen:
                 res["problems"].append("missing:" + rel)
                 continue
-        elif not os.path.exists(p):
+        elif not os.path.lexists(p):
             res["problems"].append("missing:" + rel)
             continue
         try:
@@ -228,9 +404,7 @@ def verify_sdk(d):
     for ex in pin.get("excluded") or []:
         if os.path.lexists(os.path.join(d, ex)):
             res["problems"].append("excluded_present:" + ex)
-    dep = ((pin.get("dependencies") or {}).get("websockets") or {})
-    wf = dep.get("file")
-    if isinstance(wf, str) and re.fullmatch(r"websockets-[0-9.]+-py3-none-any\.whl", wf):
+    if wf:
         p = os.path.join(d, wf)
         if os.path.lexists(p):
             try:
@@ -284,6 +458,10 @@ def load_sdk(d=None, require_websockets=True):
     v = verify_sdk(d)
     if not v["ok"]:
         raise BridgeError("sdk_unverified")
+    # jamais de bytecode en cache : un .pyc planté dans __pycache__ (non couvert par les empreintes) serait exécuté à
+    # la place de la source vérifiée ; ce préfixe ne peut pas exister (sous /dev/null) et rien n'y est écrit
+    sys.dont_write_bytecode = True
+    sys.pycache_prefix = NO_PYCACHE
     if d not in sys.path:
         sys.path.insert(0, d)
     if v["websockets"] == "ok":
@@ -336,6 +514,10 @@ def validate_params(cmd, params):
     if not isinstance(params, dict):
         raise BridgeError("invalid_params")
     sch = tools.TOOL_BY_NAME[tool]["inputSchema"]
+    # null JSON pour un paramètre FACULTATIF = omis (comme le SDK d'origine : params.get(x) or défaut) ; jamais pour un
+    # paramètre requis ni pour une clé inconnue
+    params = {k: v for k, v in params.items()
+              if not (v is None and k in sch["properties"] and k not in sch["required"])}
     if set(params) - set(sch["properties"]) or not set(sch["required"]) <= set(params):
         raise BridgeError("invalid_params")
     try:
@@ -343,14 +525,15 @@ def validate_params(cmd, params):
     except ValueError:
         raise BridgeError("invalid_params")
     for v in a.values():
-        if isinstance(v, str) and not validate.no_url(v):
+        if isinstance(v, str) and (has_address(v) or not v.strip()):
             raise BridgeError("invalid_params")
     return a
 
 
 def scrub(obj, depth=0):
-    """Nettoyage de défense en profondeur (le moteur nettoie déjà) : aucune chaîne ressemblant à une adresse, aucune
-    clé de secret/chemin/URL, caractères de contrôle retirés, profondeur/listes/clés/chaînes bornées."""
+    """Nettoyage de défense en profondeur (le moteur nettoie déjà) : jetons-adresses retirés des chaînes (le titre
+    reste), clés de secret/chemin/URL exactes retirées, caractères de contrôle retirés, profondeur/listes/clés/chaînes
+    bornées."""
     if depth > MAX_DEPTH:
         return None
     if obj is None or isinstance(obj, bool):
@@ -360,12 +543,11 @@ def scrub(obj, depth=0):
     if isinstance(obj, float):
         return obj if math.isfinite(obj) else None
     if isinstance(obj, str):
-        s = _CTRL_RE.sub(" ", obj)[:MAX_STR]
-        return s if validate.no_url(s) else ""
+        return strip_addresses(_CTRL_RE.sub(" ", obj[:MAX_STR * 2]))[:MAX_STR]
     if isinstance(obj, dict):
         out = {}
         for k, v in list(obj.items())[:MAX_KEYS]:
-            if isinstance(k, str) and _KEY_RE.fullmatch(k) and not _SECRET_KEY_RE.search(k):
+            if isinstance(k, str) and _KEY_RE.fullmatch(k) and not secret_key(k):
                 out[k] = scrub(v, depth + 1)
         return out
     if isinstance(obj, (list, tuple)):
@@ -373,9 +555,13 @@ def scrub(obj, depth=0):
     return None
 
 
+# erreurs du moteur rendues en codes stables (jamais « usage » d'un analyseur d'arguments vers Muse)
+ENGINE_ERRORS = {"usage": "invalid_params", "engine_output": "failed"}
+
+
 class AgentPortMCP:
-    """Client MCP en mémoire (opentv_pi.mcp.Session) devant l'Agent Port Unix, avec l'identité « muse » relue à chaque
-    appel (une révocation ou une rotation s'applique immédiatement). Le jeton ne quitte jamais cet objet."""
+    """Client MCP en mémoire (opentv_pi.mcp.Session) devant l'Agent Port Unix, avec l'identité « muse-device » relue à
+    chaque appel (une révocation ou une rotation s'applique immédiatement). Le jeton ne quitte jamais cet objet."""
 
     def __init__(self, client_config, call=agentport.call, timeout=CALL_TIMEOUT_S):
         self.client_config, self._call, self.timeout = client_config, call, timeout
@@ -429,7 +615,8 @@ class AgentPortMCP:
         if not isinstance(res, dict):
             raise BridgeError("failed")
         if res.get("isError"):   # sans appel au service : refus de la validation MCP locale
-            raise BridgeError((last.get("error") or "service_unavailable") if last.get("called") else "invalid_params")
+            code = (last.get("error") or "service_unavailable") if last.get("called") else "invalid_params"
+            raise BridgeError(ENGINE_ERRORS.get(code, code))
         return res.get("structuredContent")
 
 
@@ -541,7 +728,7 @@ class Bridge:
                     continue
                 await self._sleep(TOKEN_RETRY_S)
                 continue
-            # verrou OpenTV : identité « muse » authentifiée et STRICTEMENT en lecture avant tout enregistrement
+            # verrou OpenTV : identité « muse-device » authentifiée et STRICTEMENT en lecture avant tout enregistrement
             try:
                 scopes = await asyncio.to_thread(self.port.identity_scopes)
             except BridgeError as e:

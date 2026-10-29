@@ -1,6 +1,7 @@
 """opentv-pi : serve | preflight | health | net-helper | ap-guard | agent issue|list|revoke | setup reset | cec |
 cec-bootstrap | catalogue status|refresh|rollback|resume|ratings|ratings-retry|ratings-credential |
-muse status|pair|unpair | manifest verify."""
+muse status|pair|unpair|prepare-bluetooth|restore-bluetooth |
+manifest verify."""
 import argparse
 import json
 import os
@@ -248,6 +249,10 @@ def cmd_agent(a):
         except OSError as e:
             return _out({"ok": False, "error": _registry_os_error(e)}, 2)
         return _out({"ok": True, "revoked": gone})
+    if a.id in agents.LINKED_POLICY:   # identité dédiée du pont Muse : émise/révoquée seulement par `muse pair|unpair`
+        return _out({"ok": False, "error": "reserved_agent_id",
+                     "note": "Identité réservée au pont Muse : sudo /opt/opentv/bin/opentv-pi muse pair (ou unpair)."},
+                    2)
     scopes = [s for s in (a.scopes or "").split(",") if s]
     if root:
         return _issue_root(a, cfg, reg, ids, scopes)
@@ -737,13 +742,24 @@ def build_parser():
                                        "ratings-credential"))
     ca.add_argument("--env", default=argparse.SUPPRESS, help="fichier env (défaut : celui de opentv-pi --env)")
     mu = sub.add_parser("muse", help="pont Muse (SDK officiel = transport ; commandes OpenTV en lecture seule) : "
-                                     "status | pair (root, humain : jeton SDK masqué + app Muse) | unpair (root)")
-    mu.add_argument("action", choices=("status", "pair", "unpair"))
+                                     "status | pair (root, humain : jeton SDK masqué + app Muse) | unpair (root) | "
+                                     "prepare-bluetooth (root : compatibilité BlueZ du SDK, réversible) | "
+                                     "restore-bluetooth (uninstall.sh)")
+    mu.add_argument("action", choices=("status", "pair", "unpair", "prepare-bluetooth", "restore-bluetooth"))
     mu.add_argument("--token-stdin", action="store_true",
                     help="(pair) lire le jeton SDK sur stdin (une ligne) au lieu d'une saisie masquée ; jamais en argument")
     mu.add_argument("--replace-token", action="store_true", help="(pair) remplacer le jeton SDK enregistré")
     mu.add_argument("--force", action="store_true", help="(pair) nouvel appariement même si déjà apparié")
     mu.add_argument("--forget-token", action="store_true", help="(unpair) effacer aussi le jeton SDK")
+    mu.add_argument("--replace-identity", action="store_true",
+                    help="(pair) remplacer une identité muse-device existante non émise par muse pair (la révoque)")
+    mu.add_argument("--replace-mtu", action="store_true",
+                    help="(prepare-bluetooth) remplacer un ExchangeMTU local > 256 (ligne d'origine notée et rendue)")
+    mu.add_argument("--no-restart", action="store_true", help="(prepare-bluetooth) ne pas redémarrer bluetooth")
+    mu.add_argument("--dry-run", action="store_true", help="(prepare/restore-bluetooth) plan seul, rien écrit")
+    mu.add_argument("--root", default="/", help=argparse.SUPPRESS)          # racines de test / install.sh
+    mu.add_argument("--installer", action="store_true", help=argparse.SUPPRESS)   # install.sh (transaction)
+    mu.add_argument("--backup-dir", default=None, help=argparse.SUPPRESS)       # install.sh : sauvegardes $BK
     mu.add_argument("--env", default=argparse.SUPPRESS, help="fichier env (défaut : celui de opentv-pi --env)")
     ma = sub.add_parser("manifest", help="vérifie le manifeste SHA-256")
     ma.add_argument("action", choices=("verify",))
