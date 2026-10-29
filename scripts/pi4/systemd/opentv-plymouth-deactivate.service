@@ -1,0 +1,24 @@
+[Unit]
+Description=OpenTV Pi - Plymouth rend l'affichage avant le kiosque (deactivate, borne, sans TTY)
+Documentation=file:///opt/opentv/README.md
+# Tirée par opentv-kiosk.service (Wants=) et ordonnée AVANT lui ; aucune dépendance dure. Unité root dédiée SANS
+# option TTY (ni TTYPath, ni TTYReset/TTYVHangup/TTYVTDisallocate, ni entrée/sortie tty) : elle ne touche jamais
+# tty1 ni la session de Cage. Sans démon Plymouth (pid absent) : sautée.
+After=plymouth-start.service
+Before=opentv-kiosk.service
+ConditionPathExists=/run/plymouth/pid
+OnFailure=opentv-plymouth-failsafe.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /opt/opentv/bin/opentv-plymouth-handoff deactivate
+# échéance dure : ping 3 s + deactivate 5 s (bornés dans le script) ; le kiosque n'attend jamais davantage
+TimeoutStartSec=12
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0077

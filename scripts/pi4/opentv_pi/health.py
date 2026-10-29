@@ -11,7 +11,7 @@ from .nethelper import default_runner
 MANIFEST = "/opt/opentv/MANIFEST.sha256"
 LINE_RE = re.compile(r"([0-9a-f]{64})  (/[^\n]+)")
 UNITS_REQUIRED = ("opentv.service", "opentv-net-helper.path", "opentv-ap-guard.timer")
-UNITS_OPTIONAL = ("opentv-kiosk.service", "opentv-cec.timer")
+UNITS_OPTIONAL = ("opentv-kiosk.service", "opentv-cec.timer", "opentv-catalogue-refresh.timer")
 
 
 def sha256_file(path):
@@ -56,6 +56,58 @@ def http_ok(port, timeout=3.0):
         return False
 
 
+def _read_text(root, path, limit=65536):
+    try:
+        with open(os.path.join(root, path.lstrip("/")), "rb") as f:
+            return f.read(limit).decode("utf-8", "replace")
+    except OSError:
+        return None
+
+
+def plymouth_refused(words):
+    """Plymouth refusé sur la ligne noyau : nosplash, plymouth.enable / rd.plymouth = 0|false|no|off (respecté)."""
+    for w in words:
+        if w == "nosplash":
+            return True
+        k, sep, v = w.partition("=")
+        if sep and k in ("plymouth.enable", "rd.plymouth") and v.lower() in ("0", "n", "no", "false", "off"):
+            return True
+    return False
+
+
+def boot_splash(root="/"):
+    """Image de démarrage, en lecture seule (n'influe jamais sur « ok ») : arc-en-ciel du firmware (dernière valeur
+    effective de disable_splash dans les sections toujours appliquées à la Pi 4), thème Plymouth sélectionné, et mode
+    attendu au prochain démarrage (Plymouth si « splash » est dans cmdline.txt, sinon écran texte tty1)."""
+    cfg = _read_text(root, "/boot/firmware/config.txt")
+    rainbow = "unknown"
+    if cfg is not None:
+        sec, val, local = "all", None, False
+        for line in cfg.splitlines():
+            s = line.strip()
+            if s.startswith("[") and "]" in s:
+                sec = "on" if s[1:s.index("]")].lower() in ("all", "pi4") else "cond"
+            elif re.match(r"disable_splash\s*=", s):
+                v = s.split("=", 1)[1].strip()
+                if sec != "cond":
+                    val = v
+                local = local or v != "1"
+        rainbow = "disabled" if val == "1" and not local else "shown"
+    theme, sec = None, ""
+    for line in (_read_text(root, "/etc/plymouth/plymouthd.conf") or "").splitlines():
+        s = line.strip()
+        if s.startswith("["):
+            sec = s
+        elif sec == "[Daemon]" and re.match(r"Theme\s*=", s):
+            theme = s.split("=", 1)[1].strip()
+    cmd = (_read_text(root, "/boot/firmware/cmdline.txt") or "").split("\n", 1)[0].split()
+    splash = "splash" in cmd and not plymouth_refused(cmd)
+    return {"firmware_rainbow": rainbow, "plymouth_theme": theme or "default",
+            "next_boot": "plymouth" if splash else "text",
+            "plymouth_ready": splash and theme == "opentv",
+            "theme_installed": os.path.isfile(os.path.join(root, "usr/share/plymouth/themes/opentv/opentv.plymouth"))}
+
+
 def run(cfg, root="/", runner=default_runner, check_http=True):
     units = {}
     for u in UNITS_REQUIRED + UNITS_OPTIONAL:
@@ -66,4 +118,5 @@ def run(cfg, root="/", runner=default_runner, check_http=True):
     net = netstate.snapshot(runner)
     ok = man["ok"] and all(units[u] == "active" for u in UNITS_REQUIRED) and service is not False
     return {"ok": ok, "manifest": man, "units": units, "service_http": service,
-            "network": {"mode": net["mode"]}, "kiosk": units.get("opentv-kiosk.service")}
+            "network": {"mode": net["mode"]}, "kiosk": units.get("opentv-kiosk.service"),
+            "boot_splash": boot_splash(root)}

@@ -4,7 +4,47 @@
 # Chromium prennent le relais. Aucune entrée lue, aucun fichier écrit, aucun réseau. Police Terminus agrandie si la
 # distribution la fournit (console-setup/kbd, best effort borné à 2 s). Tout échec est toléré : code de sortie 0,
 # le démarrage n'attend jamais cet écran (unité oneshot bornée, aucune dépendance stricte).
+# Repli seulement : quand Plymouth affiche déjà l'image OpenTV (option « splash », démon plymouthd vivant), rien
+# n'est écrit sur tty1 — ce texte réapparaîtrait au passage au kiosque — et une ligne est notée dans le journal.
 set -u
+
+# Chemins fixes en root (unité systemd) ; variables OPENTV_* de test lues seulement hors root
+CMDLINE_F=/proc/cmdline
+PIDFILE=/run/plymouth/pid
+PROC=/proc
+if [ "${EUID:-0}" -ne 0 ]; then
+  CMDLINE_F="${OPENTV_PROC_CMDLINE:-$CMDLINE_F}"
+  PIDFILE="${OPENTV_PLYMOUTH_PIDFILE:-$PIDFILE}"
+  PROC="${OPENTV_PROC_ROOT:-$PROC}"
+fi
+plymouth_refused() {   # nosplash, plymouth.enable=0|false|no|off, rd.plymouth=0|false|no|off
+  local w v
+  set -f
+  for w in $1; do
+    case "$w" in
+      nosplash) set +f; return 0 ;;
+      plymouth.enable=*|rd.plymouth=*)
+        v="$(printf '%s' "${w#*=}" | tr '[:upper:]' '[:lower:]')"
+        case "$v" in 0|n|no|false|off) set +f; return 0 ;; esac ;;
+    esac
+  done
+  set +f
+  return 1
+}
+plymouth_active() {   # image Plymouth en cours : « splash » noyau (Plymouth non refusé) + plymouthd vivant
+  local cmd="" pid="" comm=""
+  IFS= read -r cmd 2>/dev/null < "$CMDLINE_F" || true
+  plymouth_refused "$cmd" && return 1
+  case " $cmd " in *" splash "*) ;; *) return 1 ;; esac
+  IFS= read -r pid 2>/dev/null < "$PIDFILE" || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  IFS= read -r comm 2>/dev/null < "$PROC/$pid/comm" || return 1
+  [ "$comm" = plymouthd ]
+}
+if plymouth_active; then
+  printf '%s\n' "opentv-splash: plymouth actif, écran texte non écrit (image OpenTV de Plymouth conservée)" >&2
+  exit 0
+fi
 
 FONT="/usr/share/consolefonts/Lat15-TerminusBold32x16.psf.gz"
 TTY="/dev/tty1"

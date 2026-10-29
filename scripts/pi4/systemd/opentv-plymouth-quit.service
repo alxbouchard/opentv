@@ -1,0 +1,24 @@
+[Unit]
+Description=OpenTV Pi - fin de Plymouth sans retour au texte une fois l'affichage vc4 tenu par le kiosque (borne)
+Documentation=file:///opt/opentv/README.md
+# Tirée par opentv-kiosk.service (Wants=) et ordonnée APRÈS lui. Lit le PID principal du kiosque (argv fixe :
+# systemctl show --property=MainPID --value opentv-kiosk.service), attend qu'il tienne le nœud DRM d'affichage vc4,
+# puis plymouth quit --retain-splash. Kiosque inactif/en échec ou délai de 25 s dépassé : plymouth quit ordinaire
+# (secours). Unité root SANS option TTY. Jamais After=plymouth-quit-wait.service (qui attend la fin de Plymouth :
+# interblocage) ; multi-user.target ne l'attend pas (tirée par le kiosque seulement).
+After=opentv-kiosk.service plymouth-start.service
+OnFailure=opentv-plymouth-failsafe.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /opt/opentv/bin/opentv-plymouth-handoff quit
+# échéance dure : attente 25 s + ping/quit/secours (≤ 13 s, bornés dans le script)
+TimeoutStartSec=45
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0077

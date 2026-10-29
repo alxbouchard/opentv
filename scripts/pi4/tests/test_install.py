@@ -21,10 +21,14 @@ UNINSTALL = os.path.join(PI4, "uninstall.sh")
 PREPARE = os.path.join(PI4, "prepare-pi.sh")
 SPLASH = os.path.join(PI4, "system", "opentv-splash")
 BOOT_CHECK = os.path.join(PI4, "system", "opentv-boot-check")
-SHELL_SCRIPTS = (INSTALL, UNINSTALL, PREPARE, os.path.join(PI4, "bin", "opentv-kiosk-browser"), SPLASH, BOOT_CHECK)
+SHELL_SCRIPTS = (INSTALL, UNINSTALL, PREPARE, os.path.join(PI4, "bin", "opentv-kiosk-browser"), SPLASH, BOOT_CHECK,
+                 os.path.join(PI4, "system", "opentv-plymouth-handoff"))
 UNITS = ("opentv.service", "opentv-kiosk.service", "opentv-net-helper.service", "opentv-net-helper.path",
          "opentv-ap-guard.service", "opentv-ap-guard.timer", "opentv-cec.service", "opentv-cec.timer",
-         "opentv-splash.service", "opentv-player.service", "opentv-player-keys.service")
+         "opentv-splash.service", "opentv-player.service", "opentv-player-keys.service",
+         "opentv-catalogue-refresh.service", "opentv-catalogue-refresh.timer",
+         "opentv-plymouth-deactivate.service", "opentv-plymouth-quit.service", "opentv-plymouth-failsafe.service",
+         "opentv-plymouth-failsafe.timer")
 
 
 def sha(p):
@@ -361,6 +365,7 @@ class TestUnitsAndKiosk(unittest.TestCase):
 
 # --------------------------------------------------------------------------- démarrage produit silencieux
 BOOT_ARGS = ["quiet", "loglevel=3", "logo.nologo", "vt.global_cursor_default=0", "systemd.show_status=false"]
+PLY_ARGS = ["splash", "plymouth.ignore-serial-consoles"]                  # seulement si Plymouth est utilisable
 VIDEO = "video=HDMI-A-1:1920x1080@60"
 PI_CMDLINE = "console=serial0,115200 console=tty1 root=PARTUUID=abcd-02 rootfstype=ext4 fsck.repair=yes rootwait " \
              "cfg80211.ieee80211_regdom=CA\n"
@@ -836,9 +841,12 @@ exit 0
         with open(INSTALL) as f:
             m = re.search(r"^BOOT_ARGS=\(([^)]*)\)$", f.read(), re.M)
         self.assertEqual(m.group(1).split(), BOOT_ARGS)
+        with open(INSTALL) as f:
+            m = re.search(r"^PLY_ARGS=\(([^)]*)\)$", f.read(), re.M)
+        self.assertEqual(m.group(1).split(), PLY_ARGS)
         with open(UNINSTALL) as f:
             m = re.search(r"^\s*(video=HDMI-A-1:1920x1080@60\|[^)]*)\)$", f.read(), re.M)
-        self.assertEqual(m.group(1).split("|"), [VIDEO] + BOOT_ARGS)
+        self.assertEqual(m.group(1).split("|"), [VIDEO] + BOOT_ARGS + PLY_ARGS)
         with open(BOOT_CHECK) as f:
             m = re.search(r"^for t in ([^;]*); do$", f.read(), re.M)
         self.assertEqual(m.group(1).split(), BOOT_ARGS + [VIDEO])
@@ -934,6 +942,8 @@ class TestSplashAndBootUnits(Base):
             ("getty@tty1.service", "DropInPaths"): "/usr/lib/systemd/system/getty@.service.d/x.conf "
                                                     "/etc/systemd/system/getty@tty1.service.d/opentv-kiosk.conf",
             ("opentv-kiosk.service", "ActiveState"): "active", ("opentv-kiosk.service", "NRestarts"): "0",
+            ("opentv-kiosk.service", "TTYReset"): "no", ("opentv-kiosk.service", "TTYVHangup"): "no",
+            ("opentv-kiosk.service", "TTYVTDisallocate"): "no",
             ("ssh.service", "ActiveState"): "active"}
     GOOD_LINE = PI_CMDLINE.rstrip("\n") + " " + VIDEO + " " + " ".join(BOOT_ARGS) + "\n"
 
@@ -942,7 +952,11 @@ class TestSplashAndBootUnits(Base):
         cf = os.path.join(d, "cmdline")
         with open(cf, "w") as f:
             f.write(cmdline)
-        env = dict(os.environ, PATH=d + os.pathsep + os.environ["PATH"], OPENTV_PROC_CMDLINE=cf, LC_ALL="C")
+        cfg = os.path.join(d, "config.txt")                                # arc-en-ciel du firmware retiré
+        with open(cfg, "w") as f:
+            f.write("[all]\ndtoverlay=vc4-kms-v3d\ndisable_splash=1\n")
+        env = dict(os.environ, PATH=d + os.pathsep + os.environ["PATH"], OPENTV_PROC_CMDLINE=cf, LC_ALL="C",
+                   OPENTV_CONFIG_TXT=cfg, OPENTV_PLYMOUTHD_CONF=os.path.join(d, "absent.conf"))
         return subprocess.run(["/bin/bash", BOOT_CHECK], capture_output=True, timeout=30, env=env)
 
     def test_boot_check_passes_on_expected_state(self):

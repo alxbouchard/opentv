@@ -1,0 +1,71 @@
+[Unit]
+Description=OpenTV Pi - rafraichissement du catalogue accepte (source approuvee ; candidat valide puis remplacement atomique, ancien catalogue conserve sur tout echec)
+Documentation=file:///opt/opentv/README.md
+# sans source approuvee configuree : unite sautee, aucune requete
+ConditionPathExists=/etc/opentv/source.env
+Wants=network-online.target
+After=network-online.target time-sync.target
+
+[Service]
+Type=oneshot
+User=opentv
+Group=opentv
+EnvironmentFile=-/etc/opentv/opentv.env
+ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-pi catalogue refresh
+# 75 = un autre passage tenait le verrou (rien touche) : pas un echec de l'unite
+SuccessExitStatus=75
+TimeoutStartSec=300
+# priorite basse : ne gene jamais la lecture ni l'accueil (aucun service redemarre ; l'accueil invalide son cache
+# sur remplacement du catalogue et la TV redemande les rangees toutes les 60 s)
+Nice=10
+IOSchedulingClass=idle
+CPUQuota=50%
+MemoryMax=256M
+TasksMax=16
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+# catalogue.json, son verrou, son candidat, son instantane .prev, le temoin de suspension .hold, le statut et le cache
+# du resolveur (source/). « - » : dossier absent => l'unite demarre quand meme et le passage refuse proprement
+# (unsafe_dir), jamais d'echec de montage.
+ReadWritePaths=-/var/lib/opentv
+# rien d'autre de l'etat OpenTV n'est utile a ce passage : appareil/configuration/point d'acces/Wi-Fi, jobs reseau,
+# « Pour toi », registre/audit des agents, telephones appaires, profil du kiosque, journal d'installation.
+# « - » : un chemin absent au demarrage est ignore (limite systemd : un nom absent ne peut pas etre masque ; le
+# passage partage de toute facon le compte opentv avec le service principal — defense en profondeur seulement).
+InaccessiblePaths=-/var/lib/opentv/device.json -/var/lib/opentv/setup-requested -/var/lib/opentv/hotspot.json
+InaccessiblePaths=-/var/lib/opentv/hotspot-rearm -/var/lib/opentv/wifi-apply.json
+InaccessiblePaths=-/var/lib/opentv/netjobs -/var/lib/opentv/netjobs-tmp -/var/lib/opentv/netresults
+InaccessiblePaths=-/var/lib/opentv/foryou -/var/lib/opentv/agents.json -/var/lib/opentv/agents.json.lock
+InaccessiblePaths=-/var/lib/opentv/audit.jsonl -/var/lib/opentv/remote.json
+InaccessiblePaths=-/var/lib/opentv-kiosk -/var/lib/opentv-install
+InaccessiblePaths=-/etc/opentv/agents -/etc/NetworkManager/system-connections
+# sockets locaux OpenTV (Agent Port, lecteur, aide des touches, CEC) : jamais joignables depuis ce passage. AF_UNIX
+# reste permis pour la resolution DNS (nss-resolve) seulement.
+InaccessiblePaths=-/run/opentv -/run/opentv-player -/run/opentv-player-keys -/run/opentv-cec
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# reseau : HTTPS sortant vers la source seulement ; jamais la boite elle-meme (API /tv locale), le lien local ni le
+# multicast. 127.0.0.53/54 : resolveur local eventuel. Le code refuse aussi toute adresse resolue non publique.
+IPAddressDeny=localhost link-local multicast
+IPAddressAllow=127.0.0.53/32 127.0.0.54/32
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native

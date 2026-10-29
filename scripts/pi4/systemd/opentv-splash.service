@@ -4,7 +4,9 @@ Documentation=file:///opt/opentv/README.md
 # Très tôt (sysinit) mais après le chargement de la police console ; aucune dépendance stricte : un échec ne retarde
 # ni n'empêche le démarrage. Seul le kiosque attend la fin de ce oneshot (au plus TimeoutStartSec).
 DefaultDependencies=no
-After=systemd-vconsole-setup.service console-setup.service local-fs.target
+# Après plymouth-start.service (ordre seul) : si Plymouth affiche déjà l'image OpenTV, le script n'écrit rien sur tty1
+# (le texte réapparaîtrait au passage au kiosque) ; sans Plymouth (absent, nosplash), il reste le repli.
+After=systemd-vconsole-setup.service console-setup.service local-fs.target plymouth-start.service
 Before=opentv-kiosk.service getty@tty1.service
 ConditionPathExists=/dev/tty1
 

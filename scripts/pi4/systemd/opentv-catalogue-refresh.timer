@@ -1,0 +1,13 @@
+[Unit]
+Description=OpenTV Pi - rafraichissement quotidien du catalogue accepte (rattrape au demarrage si manque, delai aleatoire borne)
+Documentation=file:///opt/opentv/README.md
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=45min
+Persistent=true
+AccuracySec=1min
+Unit=opentv-catalogue-refresh.service
+
+[Install]
+WantedBy=timers.target

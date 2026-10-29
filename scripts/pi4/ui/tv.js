@@ -167,11 +167,33 @@
   // (colonne mémorisée par rangée), ↓ descend ; seul ↑ depuis la première rangée (ou depuis une fiche) mène aux
   // Réglages = cercle en haut à droite (zone « top »), OK ouvre, Retour ferme — jamais une rangée cachée.
   // Retour remonte aussi d'une seule rangée, Accueil = tout début.
-  var ROWS = [], grid = [], heroId = null;
+  // Relecture « Pour toi » toutes les FY_REFRESH_MS (≤ 60 s) : le service recalcule dès que le catalogue est remplacé,
+  // donc un rafraîchissement quotidien réussi est visible à l'accueil en ≤ FY_REFRESH_MS + une période de poll (2 s).
+  // Réponse identique à celle affichée : rien n'est redessiné (focus, défilement et affiches intacts). Réponse
+  // différente pendant une fiche/feuille ou une lecture (chargement, lecture, fermeture) : gardée en attente et
+  // appliquée dès la fermeture/le retour ; le focus est alors réancré par identifiant stable du film (jamais par
+  // rangée/colonne), avec repli sur la même rangée si le film a disparu.
+  var FY_REFRESH_MS = 60000;
+  var ROWS = [], grid = [], heroId = null, fySig = null, fyPending = null;
   function loadForYou(force) {
-    if (!force && fy && Date.now() - fyAt < 120000) { return; }
+    if (!force && fy && Date.now() - fyAt < FY_REFRESH_MS) { return; }
     fyAt = Date.now();
-    api("GET", "/api/tv/foryou").then(function (d) { fy = d; renderRows(); }).catch(function (e) { fyAt = 0; onApiError(e); });
+    api("GET", "/api/tv/foryou").then(offerForYou).catch(function (e) { fyAt = 0; onApiError(e); });
+  }
+  function sigOf(d) { try { return JSON.stringify(d); } catch (e) { return null; } }
+  function fyBusy() { return !!(play || panel); }
+  function offerForYou(d) {
+    var sig = sigOf(d);
+    if (fy && sig !== null && sig === fySig) { fyPending = null; return; }   // inchangé : aucun nouveau rendu
+    if (fyBusy()) { fyPending = { d: d, sig: sig }; return; }               // fiche ou lecture : plus tard
+    applyForYou(d, sig);
+  }
+  function applyForYou(d, sig) { fyPending = null; fy = d; fySig = sig; renderRows(); }
+  function flushForYou() {   // -> true si une sélection en attente vient d'être appliquée (fiche/lecture fermée)
+    if (!fyPending || fyBusy()) { return false; }
+    var p = fyPending;
+    applyForYou(p.d, p.sig);
+    return true;
   }
   function badges(m) {
     var out = [];
@@ -240,9 +262,50 @@
     d.appendChild(ul);
     box.appendChild(d);
   }
+  // ---- focus par identifiant stable : relevé avant un nouveau rendu, réappliqué après (rangées réordonnées, titres
+  // ajoutés ou retirés) ; rangée identifiée par son id (« tonight », « top »…), sinon par sa position
+  function rowKey(r, i) { return r && r.id ? "r:" + r.id : "i:" + i; }
+  function anchor() {
+    var a = { id: null, key: null, row: focus.row, col: col(), cols: {}, colIdx: {} };
+    ROWS.forEach(function (r, ri) {
+      var c = focus.cols[ri] || 0, k = rowKey(r, ri);
+      a.colIdx[k] = c;
+      if (r.items[c]) { a.cols[k] = r.items[c].id; }
+      if (ri === focus.row) { a.key = k; a.id = r.items[c] ? r.items[c].id : null; }
+    });
+    return a;
+  }
+  function findItem(id, key) {   // -> {row, col} : même rangée d'abord, sinon la première qui contient ce film
+    var hit = null;
+    if (!id) { return null; }
+    ROWS.forEach(function (r, ri) {
+      r.items.forEach(function (it, ci) {
+        if (it.id === id && (!hit || (rowKey(r, ri) === key && hit.key !== key))) { hit = { row: ri, col: ci, key: rowKey(r, ri) }; }
+      });
+    });
+    return hit;
+  }
+  function reanchor(a) {
+    var cols = [];
+    ROWS.forEach(function (r, ri) {
+      var k = rowKey(r, ri), want = a.cols[k], c = -1;
+      if (want) { r.items.forEach(function (it, ci) { if (c < 0 && it.id === want) { c = ci; } }); }
+      cols[ri] = c >= 0 ? c : Math.min(a.colIdx[k] || 0, r.items.length - 1);
+    });
+    focus.cols = cols;
+    if (!ROWS.length) { return; }
+    var hit = findItem(a.id, a.key);
+    if (hit) { focus.row = hit.row; focus.cols[hit.row] = hit.col; return; }
+    // film retiré : même rangée (par id) à la même colonne bornée, sinon la position la plus proche
+    var same = -1;
+    ROWS.forEach(function (r, ri) { if (same < 0 && rowKey(r, ri) === a.key) { same = ri; } });
+    focus.row = same >= 0 ? same : Math.min(a.row, ROWS.length - 1);
+    focus.cols[focus.row] = Math.max(0, Math.min(a.col, ROWS[focus.row].items.length - 1));
+  }
   function renderRows() {
-    var box = $("rowsin");
+    var box = $("rowsin"), a = anchor();
     ROWS = rowsData(); grid = [];
+    reanchor(a);
     box.textContent = "";
     if (!ROWS.length) { renderEmpty(box); }
     ROWS.forEach(function (r) {
@@ -422,10 +485,17 @@
     $("playmsg").textContent = msg || MSG_PLAY_LOADING;
     $("playov").hidden = false;
   }
-  function restoreCard(p) {   // même rangée, même carte, fiche du film rouverte sur « Regarder »
-    focus.zone = "rows"; focus.row = p.row; focus.cols[p.row] = p.col;
+  function restoreCard(p) {   // même film (identifiant stable), fiche rouverte sur « Regarder »
+    var hit = findItem(p.it.id, p.key);
+    focus.zone = "rows";
+    if (!hit) {   // film absent des rangées affichées : position d'origine bornée, aucune fiche d'un titre disparu
+      if (ROWS.length) { focus.row = Math.min(p.row, ROWS.length - 1); focus.cols[focus.row] = p.col; }
+      paint();
+      return;
+    }
+    focus.row = hit.row; focus.cols[hit.row] = hit.col;
     paint();
-    openItem(p.it, ROWS[p.row]);
+    openItem(ROWS[hit.row].items[hit.col], ROWS[hit.row]);
   }
   // lecteur révélé ou fermeture demandée : la page /tv (sous la fenêtre du lecteur) montre DÉJÀ la destination du
   // retour — jamais un « Chargement… » périmé quand le lecteur disparaît
@@ -442,7 +512,8 @@
     return true;
   }
   function startPlay(it) {
-    play = { it: it, row: focus.row, col: col(), seq: -1, done: false, restored: false };
+    play = { it: it, row: focus.row, col: col(), key: rowKey(ROWS[focus.row], focus.row), seq: -1, done: false,
+             restored: false };
     closePanel();
     showPlayOverlay(it.title);
     api("POST", "/api/tv/play", { id: it.id }).then(function (r) {
@@ -472,6 +543,7 @@
     $("playov").hidden = true;
     if (p && p.it && !p.restored) { restoreCard(p); }
     if (v.state === "unavailable") { toast(MSG_PLAY_KO, true); }   // grand message centré : jamais sur la fiche
+    flushForYou();   // sans fiche rouverte (page rechargée en cours de lecture) : sélection en attente appliquée
     if (!local && typeof v.seq === "number" && v.seq >= 0) {   // repeint d'abord, puis acquittement au service
       requestAnimationFrame(function () { requestAnimationFrame(function () {
         api("POST", "/api/tv/play/ack", { seq: v.seq }).catch(onApiError);
@@ -546,7 +618,11 @@
       b[i].className = base + (i === panel.btn ? (base ? " " : "") + "focused" : "");
     }
   }
-  function closePanel() { panel = null; $("panel").hidden = true; $("pqrfig").hidden = true; paint(); if (state) { renderRemote(); } }
+  function closePanel() {   // fiche/feuille fermée : sélection « Pour toi » en attente appliquée maintenant
+    panel = null; $("panel").hidden = true; $("pqrfig").hidden = true;
+    if (!flushForYou()) { paint(); }
+    if (state) { renderRemote(); }
+  }
   function panelBack() {
     if (panel.kind === "agents") { cancelAgents(); }
     else if (panel.kind === "confirm") { openSettings(panel.what); } else { closePanel(); }
@@ -662,9 +738,14 @@
     var m = (fy.marks || {})[it.id] || {}, t = TOGGLE[a];
     var action = m[t[0]] === t[1] ? t[2] : a;
     api("POST", "/api/tv/feedback", { id: it.id, action: action }).then(function (r) {
-      if (r.ok && r.state) { fy.marks = fy.marks || {}; fy.marks[it.id] = r.state; }
+      if (r.ok && r.state) {
+        fy.marks = fy.marks || {}; fy.marks[it.id] = r.state;
+        // sélection en attente (reçue AVANT ce choix) : porte aussi le nouvel état, jamais un badge perdu
+        if (fyPending && fyPending.d) { fyPending.d.marks = fyPending.d.marks || {}; fyPending.d.marks[it.id] = r.state; }
+      }
       toast(r.message || "Action non enregistrée.");
       closePanel(); renderRows();
+      if (r.ok) { loadForYou(true); }   // état du service relu (redessiné seulement s'il diffère, focus gardé)
     }).catch(function (e) { if (!onApiError(e)) { toast("Action non enregistrée."); } });
   }
   // ---- télécommande : actions normalisées par keys.js (clavier, télécommande USB 2,4 GHz, HDMI-CEC)

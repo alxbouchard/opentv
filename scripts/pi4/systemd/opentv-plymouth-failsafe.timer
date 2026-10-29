@@ -1,0 +1,13 @@
+[Unit]
+Description=OpenTV Pi - secours Plymouth au plus 120 s apres le noyau
+Documentation=file:///opt/opentv/README.md
+
+[Timer]
+# filet absolu, indépendant de l'ordre des unités : même si aucune unité de passage n'a pu s'exécuter, Plymouth ne
+# reste jamais au-delà de ~2 min (sans Plymouth : le service ne fait rien)
+OnBootSec=120s
+AccuracySec=1s
+Unit=opentv-plymouth-failsafe.service
+
+[Install]
+WantedBy=timers.target

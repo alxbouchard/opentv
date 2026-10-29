@@ -1,9 +1,23 @@
 [Unit]
 Description=OpenTV Pi - kiosque Cage (Wayland) + Chromium Raspberry Pi OS sur HDMI (tty1)
 Documentation=file:///opt/opentv/README.md
-Wants=opentv.service
-After=systemd-user-sessions.service plymouth-quit-wait.service opentv.service getty@tty1.service
-Conflicts=getty@tty1.service
+# Image OpenTV de Plymouth jusqu'à Cage (schéma des gestionnaires de session graphique) : le kiosque REMPLACE
+# plymouth-quit.service (Conflicts : son « plymouth quit » ordinaire repasserait tty1 en mode texte et effacerait
+# l'écran). Le passage lui-même vit dans des unités root DÉDIÉES, sans aucune option TTY : jamais d'ExecStartPre /
+# ExecStartPost ici (systemd 252 applique les réglages TTY du service à CHAQUE commande ; avec TTYVHangup/TTYReset,
+# un ExecStartPost pouvait raccrocher tty1 et envoyer SIGHUP à Cage, en boucle) :
+#   opentv-plymouth-deactivate.service  AVANT Cage : plymouth deactivate (borné)
+#   opentv-plymouth-quit.service        APRÈS le démarrage : attend que le PID principal tienne l'affichage vc4, puis
+#                                       quit --retain-splash ; kiosque absent/en échec ou délai : quit ordinaire
+#   opentv-plymouth-failsafe.{timer,service}  secours borné (120 s après le noyau, et OnFailure= ci-dessous)
+# Jamais d'attente de plymouth-quit-wait.service (qui attend la fin de Plymouth, donc ce kiosque). Kiosque désactivé :
+# plymouth-quit.service s'exécute normalement (tty1 rendue). Sans Plymouth installé : unités sans effet.
+Wants=opentv.service opentv-plymouth-deactivate.service opentv-plymouth-quit.service
+After=systemd-user-sessions.service plymouth-start.service plymouth-quit.service opentv-plymouth-deactivate.service opentv.service getty@tty1.service
+Conflicts=getty@tty1.service plymouth-quit.service
+# équivalent sûr de « OnFailure=plymouth-quit.service » des gestionnaires de session : plymouth-quit.service est en
+# conflit avec ce kiosque (le démarrer arrêterait le kiosque) ; le secours OpenTV ne l'est pas
+OnFailure=opentv-plymouth-failsafe.service
 ConditionPathExists=/dev/tty1
 # jamais « failed » après une série de plantages : redémarrage illimité, espacé par RestartSec
 StartLimitIntervalSec=0
@@ -16,10 +30,12 @@ User=opentv-kiosk
 SupplementaryGroups=input
 PAMName=opentv-kiosk
 TTYPath=/dev/tty1
-TTYReset=yes
-TTYVHangup=yes
-# pas d'effacement de tty1 au lancement : l'écran OpenTV (opentv-splash) reste affiché jusqu'à ce que Cage passe la
-# console en mode graphique, et réapparaît (au lieu d'un terminal) si le kiosque redémarre
+# ni réinitialisation ni raccrochage de tty1 (aucun SIGHUP à Cage, à aucun démarrage ni redémarrage) ; la session
+# logind (PAMName) rend le clavier et le mode de la console à la fin de Cage
+TTYReset=no
+TTYVHangup=no
+# pas d'effacement de tty1 au lancement : l'image OpenTV (Plymouth ou opentv-splash) reste affichée jusqu'à ce que
+# Cage passe la console en mode graphique, et réapparaît (au lieu d'un terminal) si le kiosque redémarre
 TTYVTDisallocate=no
 StandardInput=tty-fail
 StandardOutput=journal

@@ -6,16 +6,31 @@
 # avec succès et avant le kiosque, getty@tty1 écarté par le drop-in OpenTV (ConditionResult=no), kiosque actif, SSH
 # actif (service ou socket), journal du noyau et des unités toujours complet.
 # Ne modifie rien, n'émet rien vers la TV (aucune commande CEC). Code 0 si tous les critères automatiques passent.
-# Le résultat VISUEL (écran noir puis « OpenTV / Démarrage... », jamais de texte Linux) reste à confirmer à l'écran.
+# Image de démarrage : arc-en-ciel du firmware retiré (disable_splash=1 effectif) ; avec « splash » : thème Plymouth
+# opentv sélectionné ET présent dans l'initramfs chargé, consoles série ignorées, écran texte NON écrit par-dessus,
+# passage au kiosque sans retour au texte (retain-splash après DRM vc4 tenu, opentv-plymouth-quit) sans secours, et
+# Plymouth terminé ; sans « splash » : repli texte tty1. Kiosque : NRestarts=0, aucun SIGHUP, TTYReset/TTYVHangup=no,
+# aucun ExecStartPre/Post. Chemins fixes en root ; variables OPENTV_* de test seulement hors root.
+# Le résultat VISUEL (image OpenTV puis accueil, jamais d'arc-en-ciel ni de texte Linux) reste à confirmer à l'écran.
 set -u
 
-PROC_CMDLINE="${OPENTV_PROC_CMDLINE:-/proc/cmdline}"
+PROC_CMDLINE=/proc/cmdline
+CONFIG_TXT=/boot/firmware/config.txt
+PLY_CONF=/etc/plymouth/plymouthd.conf
+INITRD=/boot/firmware/initramfs8
+if [ "${EUID:-0}" -ne 0 ]; then   # chemins de test seulement hors root (sudo : toujours les chemins réels)
+  PROC_CMDLINE="${OPENTV_PROC_CMDLINE:-$PROC_CMDLINE}"
+  CONFIG_TXT="${OPENTV_CONFIG_TXT:-$CONFIG_TXT}"
+  PLY_CONF="${OPENTV_PLYMOUTHD_CONF:-$PLY_CONF}"
+  INITRD="${OPENTV_INITRAMFS:-$INITRD}"
+fi
 OK=0
 KO=0
 pass() { printf 'OK     %s\n' "$*"; OK=$((OK + 1)); }
 bad() { printf 'ÉCHEC  %s\n' "$*"; KO=$((KO + 1)); }
 info() { printf 'info   %s\n' "$*"; }
 run() { timeout 10 "$@" 2>/dev/null; }   # chaque lecture bornée à 10 s
+LS_S=300   # lsinitramfs : même borne qu'install.sh / uninstall.sh (image zstd de 20-40 Mo, carte SD lente)
 prop() { run systemctl show -p "$2" --value "$1"; }
 
 cmd=""
@@ -70,7 +85,114 @@ case " $cmd " in
   *" console=tty1 "*) pass "noyau : console=tty1 conservée (mode de secours visible)" ;;
   *) info "noyau : console=tty1 absente de la ligne de commande d'origine" ;;
 esac
-case " $cmd " in *" splash "*|*" plymouth."*) info "noyau : option Plymouth présente (non ajoutée par OpenTV)" ;; esac
+
+# ---- image de démarrage : firmware puis Plymouth (ou repli texte)
+cfg_splash=""
+cfg_local=""
+if [ -r "$CONFIG_TXT" ]; then
+  sec=all
+  while IFS= read -r l || [ -n "$l" ]; do
+    l="${l%$'\r'}"
+    l="${l#"${l%%[![:space:]]*}"}"
+    case "$l" in
+      '['*']'*)
+        n="${l#[}"
+        n="$(printf '%s' "${n%%]*}" | tr '[:upper:]' '[:lower:]')"
+        case "$n" in all|pi4) sec=on ;; *) sec=cond ;; esac ;;
+      disable_splash=*|disable_splash[[:space:]]*)
+        v="${l#*=}"; v="${v%"${v##*[![:space:]]}"}"; v="${v#"${v%%[![:space:]]*}"}"
+        [ "$sec" = cond ] || cfg_splash="$v"
+        [ "$v" = 1 ] || cfg_local="${cfg_local:+$cfg_local }disable_splash=$v" ;;
+    esac
+  done < "$CONFIG_TXT"
+  if [ "$cfg_splash" = 1 ] && [ -z "$cfg_local" ]; then pass "firmware : arc-en-ciel désactivé (disable_splash=1)"
+  elif [ -n "$cfg_local" ]; then bad "firmware : $cfg_local réglé localement et respecté par OpenTV : arc-en-ciel affiché"
+  else bad "firmware : disable_splash=1 absent de config.txt (arc-en-ciel affiché au démarrage)"; fi
+else
+  bad "firmware : $CONFIG_TXT illisible (partition de démarrage montée ?)"
+fi
+
+ply_theme=""
+if [ -r "$PLY_CONF" ]; then
+  sec=""
+  while IFS= read -r l || [ -n "$l" ]; do
+    l="${l%$'\r'}"
+    l="${l#"${l%%[![:space:]]*}"}"
+    case "$l" in
+      '['*) sec="${l%"${l##*[![:space:]]}"}" ;;
+      Theme=*|Theme[[:space:]]*=*)
+        if [ "$sec" = "[Daemon]" ]; then
+          ply_theme="${l#*=}"; ply_theme="${ply_theme#"${ply_theme%%[![:space:]]*}"}"
+          ply_theme="${ply_theme%"${ply_theme##*[![:space:]]}"}"
+        fi ;;
+    esac
+  done < "$PLY_CONF"
+fi
+ply_refused() {   # nosplash, plymouth.enable=0|false|no|off, rd.plymouth=0|false|no|off
+  local w v
+  set -f
+  for w in $cmd; do
+    case "$w" in
+      nosplash) set +f; return 0 ;;
+      plymouth.enable=*|rd.plymouth=*)
+        v="$(printf '%s' "${w#*=}" | tr '[:upper:]' '[:lower:]')"
+        case "$v" in 0|n|no|false|off) set +f; return 0 ;; esac ;;
+    esac
+  done
+  set +f
+  return 1
+}
+ply_mode=0
+if ply_refused; then info "Plymouth désactivé localement (nosplash/plymouth.enable=0|false|no) : repli écran texte tty1"
+else
+  case " $cmd " in
+    *" splash "*) ply_mode=1 ;;
+    *) info "Plymouth non utilisé (option splash absente : Plymouth non installé ?) : repli écran texte tty1" ;;
+  esac
+fi
+if [ "$ply_mode" = 1 ]; then
+  if [ "$ply_theme" = opentv ]; then pass "Plymouth : thème opentv sélectionné"
+  else bad "Plymouth : thème « ${ply_theme:-défaut} » au lieu de opentv ($PLY_CONF)"; fi
+  case " $cmd " in
+    *" console=serial"*|*" console=ttyS"*|*" console=ttyAMA"*)
+      case " $cmd " in
+        *" plymouth.ignore-serial-consoles "*) pass "Plymouth : consoles série ignorées (image affichée malgré console=serial)" ;;
+        *) bad "Plymouth : console série sans plymouth.ignore-serial-consoles (image remplacée par du texte)" ;;
+      esac ;;
+  esac
+  if command -v lsinitramfs >/dev/null 2>&1; then
+    lrc=0
+    lst="$(timeout -k 10 "$LS_S" lsinitramfs "$INITRD" 2>/dev/null)" || lrc=$?
+    krel="$(uname -r 2>/dev/null)" || krel=""
+    case "$lrc:$lst" in
+      124:*|137:*) bad "initramfs : lecture de $INITRD au-delà de $LS_S s (lsinitramfs interrompu, contenu non vérifié)" ;;
+      *plymouth/themes/opentv/opentv.script*) pass "initramfs : thème opentv présent ($INITRD)" ;;
+      *) bad "initramfs : thème opentv absent de $INITRD (relancer sudo ./install.sh, ou régénérer le seul noyau" \
+           "exact : sudo update-initramfs -u -k ${krel:-<version>-v8})" ;;
+    esac
+  else
+    info "initramfs : lsinitramfs absent, contenu non vérifié"
+  fi
+  sj="$(run journalctl -b -q --no-pager -o cat -u opentv-splash.service)"
+  case "$sj" in
+    *"plymouth actif"*) pass "écran texte NON écrit par-dessus Plymouth (repli resté inactif)" ;;
+    *) bad "écran texte écrit alors que Plymouth était attendu (journalctl -b -u opentv-splash)" ;;
+  esac
+  # passage prouvé par l'unité dédiée : retain-splash APRÈS que le kiosque a tenu l'affichage vc4 ; tout secours
+  # (quit ordinaire : console texte rendue) est un échec visuel, même si Plymouth est bien terminé
+  qj="$(run journalctl -b -q --no-pager -o cat -u opentv-plymouth-quit.service)"
+  case "$qj" in
+    *"retain-splash"*"DRM vc4"*"tenu par le kiosque"*) pass "passage Plymouth -> kiosque sans retour au texte (retain-splash, DRM vc4 tenu)" ;;
+    *) bad "passage Plymouth -> kiosque non prouvé (journalctl -b -u opentv-plymouth-quit)" ;;
+  esac
+  fj="$(run journalctl -b -q --no-pager -o cat -u opentv-plymouth-quit.service -u opentv-plymouth-failsafe.service)"
+  case "$fj" in
+    *"secours :"*) bad "Plymouth terminé par le SECOURS (console texte rendue ; journalctl -b -u opentv-plymouth-quit -u opentv-plymouth-failsafe)" ;;
+    *) pass "aucun secours Plymouth nécessaire" ;;
+  esac
+  if command -v plymouth >/dev/null 2>&1 && run plymouth --ping; then bad "Plymouth encore actif après le kiosque"
+  else pass "Plymouth terminé (affichage rendu au kiosque)"; fi
+fi
 
 if [ "$(prop opentv-splash.service UnitFileState)" = enabled ]; then pass "écran OpenTV activé"; else bad "opentv-splash.service non activé"; fi
 res="$(prop opentv-splash.service Result)"
@@ -100,8 +222,25 @@ case " $dp " in
   *) bad "getty@tty1 : drop-in OpenTV non chargé ($dropin ; systemctl cat getty@tty1)" ;;
 esac
 if [ "$(prop opentv-kiosk.service ActiveState)" = active ]; then pass "kiosque actif"; else bad "opentv-kiosk.service inactif"; fi
+# boucle de redémarrage (ex. SIGHUP de tty1) : tout redémarrage du kiosque depuis le boot est un échec à expliquer
 nr="$(prop opentv-kiosk.service NRestarts)"
-case "$nr" in ''|*[!0-9]*) ;; 0) pass "kiosque : aucun redémarrage depuis le boot" ;; *) info "kiosque : $nr redémarrage(s) depuis le boot" ;; esac
+case "$nr" in
+  ''|*[!0-9]*) bad "kiosque : NRestarts illisible" ;;
+  0) pass "kiosque : aucun redémarrage depuis le boot (NRestarts=0)" ;;
+  *) bad "kiosque : $nr redémarrage(s) depuis le boot (boucle ? journalctl -b -u opentv-kiosk)" ;;
+esac
+kk="$(run journalctl -b -q --no-pager -o cat -u opentv-kiosk.service)"
+case "$kk" in
+  *"status=1/HUP"*|*SIGHUP*) bad "kiosque : Cage tué par SIGHUP ce boot (raccrochage de tty1 ; journalctl -b -u opentv-kiosk)" ;;
+  *) pass "kiosque : aucun SIGHUP ce boot" ;;
+esac
+# unité effective : jamais de réinitialisation/raccrochage de tty1 ni de commande annexe (ExecStartPre/Post)
+tr_="$(prop opentv-kiosk.service TTYReset)/$(prop opentv-kiosk.service TTYVHangup)/$(prop opentv-kiosk.service TTYVTDisallocate)"
+if [ "$tr_" = no/no/no ]; then pass "kiosque : TTYReset=no TTYVHangup=no TTYVTDisallocate=no"
+else bad "kiosque : TTYReset/TTYVHangup/TTYVTDisallocate = $tr_ (attendu no/no/no ; unité à jour ? daemon-reload)"; fi
+xp="$(prop opentv-kiosk.service ExecStartPre)$(prop opentv-kiosk.service ExecStartPost)"
+if [ -z "$xp" ]; then pass "kiosque : aucun ExecStartPre/ExecStartPost (passage Plymouth en unités dédiées)"
+else bad "kiosque : ExecStartPre/ExecStartPost présents (commande annexe sous réglages TTY du kiosque)"; fi
 ssh_ok=0
 for u in ssh.service sshd.service ssh.socket; do   # ssh.socket : SSH activé par socket (Debian/Raspberry Pi OS)
   [ "$(prop "$u" ActiveState)" = active ] && ssh_ok=1

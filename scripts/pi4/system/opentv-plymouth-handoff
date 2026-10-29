@@ -1,0 +1,138 @@
+#!/bin/bash
+# OpenTV Pi : passage Plymouth -> kiosque sans retour à l'écran texte. Lancé en root par des unités oneshot DÉDIÉES,
+# SANS aucune option TTY (systemd 252 applique TTYReset/TTYVHangup à CHAQUE commande d'une unité qui en porte : un
+# ExecStartPre/ExecStartPost dans opentv-kiosk.service pouvait raccrocher tty1 et envoyer SIGHUP à Cage en boucle).
+#
+#   deactivate  opentv-plymouth-deactivate.service (Before=opentv-kiosk) : Plymouth cesse de dessiner et rend le
+#               maître DRM ; sa dernière image OpenTV reste à l'écran jusqu'à la première image de Cage.
+#   quit        opentv-plymouth-quit.service (After=opentv-kiosk) : lit le PID principal du kiosque
+#               (systemctl show --property=MainPID --value opentv-kiosk.service, à chaque tour), attend (borné) que
+#               ce PID tienne le nœud DRM d'AFFICHAGE vc4 (/dev/dri/cardN dont le pilote est vc4-drm ; jamais
+#               « n'importe quel card* » : card0 peut être v3d, rendu seul), puis « plymouth quit --retain-splash ».
+#               Kiosque inactif/en échec (condition non remplie, arrêté) ou délai dépassé : SECOURS « plymouth quit »
+#               ordinaire (console texte rendue) — Plymouth n'est jamais laissé indéfiniment, et
+#               plymouth-quit-wait.service (qui attend la fin de Plymouth) se termine toujours.
+#   failsafe    opentv-plymouth-failsafe.service (minuterie 120 s après le noyau ; OnFailure= du kiosque et des
+#               unités de passage) : Plymouth encore actif ⇒ retain-splash si le kiosque tient vc4, sinon quit ordinaire.
+#
+# Sans démon Plymouth (paquet absent, déjà terminé, simple redémarrage du kiosque) : ne fait rien. Chaque appel borné,
+# aucune entrée lue, aucun fichier écrit, aucun réseau. Code 1 seulement si Plymouth survit au secours (OnFailure).
+# Chemins FIXES : les variables OPENTV_* ne sont lues que pour les tests (utilisateur non root ET OPENTV_HANDOFF_TEST=1).
+set -u
+
+PLY=/usr/bin/plymouth
+SYSTEMCTL=/usr/bin/systemctl
+PROC=/proc
+SYSFS=/sys
+WAIT_S=25   # délai pour que Cage ouvre l'affichage vc4 (unité : TimeoutStartSec=45)
+if [ "${EUID:-0}" -ne 0 ] && [ "${OPENTV_HANDOFF_TEST:-}" = 1 ]; then
+  PLY="${OPENTV_PLYMOUTH_BIN:-$PLY}"
+  SYSTEMCTL="${OPENTV_SYSTEMCTL_BIN:-$SYSTEMCTL}"
+  PROC="${OPENTV_PROC_ROOT:-$PROC}"
+  SYSFS="${OPENTV_SYS_ROOT:-$SYSFS}"
+  WAIT_S="${OPENTV_HANDOFF_WAIT_S:-$WAIT_S}"
+fi
+case "$WAIT_S" in ''|*[!0-9]*) WAIT_S=25 ;; esac
+[ "$WAIT_S" -le 60 ] || WAIT_S=60
+UNIT=opentv-kiosk.service
+
+log() { printf 'opentv-plymouth-handoff: %s\n' "$*" >&2; }
+bounded() {   # bounded <secondes> <commande…> : jamais d'attente illimitée sur le démon ou systemd
+  local s="$1"
+  shift
+  if [ -x /usr/bin/timeout ]; then /usr/bin/timeout -k 2 "$s" "$@"
+  elif command -v timeout >/dev/null 2>&1; then timeout -k 2 "$s" "$@"
+  else "$@"; fi
+}
+ply_alive() { bounded 3 "$PLY" --ping >/dev/null 2>&1; }
+kiosk_prop() {   # argv fixe : systemctl show --property=<P> --value opentv-kiosk.service
+  bounded 5 "$SYSTEMCTL" show --property="$1" --value "$UNIT" 2>/dev/null
+}
+kiosk_pid() {
+  local p
+  p="$(kiosk_prop MainPID)"
+  case "$p" in ''|*[!0-9]*) p=0 ;; esac
+  printf '%s' "$p"
+}
+vc4_nodes() {   # nœuds d'affichage vc4 : /sys/class/drm/cardN dont le pilote du périphérique est vc4-drm
+  local c n drv
+  for c in "$SYSFS"/class/drm/card*; do
+    n="${c##*/}"
+    case "$n" in card|card*[!0-9]*) continue ;; esac   # card1-HDMI-A-1 : connecteur, pas un nœud
+    drv="$(readlink "$c/device/driver" 2>/dev/null)" || continue
+    case "${drv##*/}" in vc4-drm|vc4) printf '/dev/dri/%s\n' "$n" ;; esac
+  done
+}
+HELD=""
+holds_vc4() {   # holds_vc4 <pid> <nœuds> : le processus tient l'un des nœuds vc4 (HELD = nœud tenu)
+  local fd t
+  [ "$1" != 0 ] && [ -n "$2" ] || return 1
+  for fd in "$PROC/$1/fd"/*; do
+    t="$(readlink "$fd" 2>/dev/null)" || continue
+    case $'\n'"$2"$'\n' in *$'\n'"$t"$'\n'*) HELD="$t"; return 0 ;; esac
+  done
+  return 1
+}
+normal_quit() {   # normal_quit <raison> : secours borné, console texte rendue ; 1 si Plymouth survit
+  bounded 5 "$PLY" quit >/dev/null 2>&1
+  if ply_alive; then
+    log "secours : plymouth quit a échoué, Plymouth encore actif ($1)"
+    return 1
+  fi
+  log "secours : plymouth quit ordinaire, console texte rendue ($1)"
+  return 0
+}
+retain_quit() {   # retain_quit <preuve> : fin de Plymouth sans retour au texte ; échec ⇒ secours ordinaire
+  if bounded 5 "$PLY" quit --retain-splash >/dev/null 2>&1; then
+    log "plymouth : terminé sans retour au texte (retain-splash ; $1)"
+    return 0
+  fi
+  normal_quit "quit --retain-splash a échoué ($1)"
+}
+
+mode="${1:-}"
+case "$mode" in deactivate|quit|failsafe) ;; *) log "usage : opentv-plymouth-handoff deactivate|quit|failsafe"; exit 2 ;; esac
+[ -x "$PLY" ] || exit 0
+if ! ply_alive; then
+  [ "$mode" = deactivate ] || log "plymouth : déjà terminé, rien à faire ($mode)"
+  exit 0
+fi
+
+case "$mode" in
+  deactivate)
+    if bounded 5 "$PLY" deactivate >/dev/null 2>&1; then log "plymouth : affichage rendu au kiosque (deactivate)"
+    else log "plymouth deactivate : échec ignoré (le passage reste borné)"; fi
+    exit 0
+    ;;
+  quit)
+    nodes="$(vc4_nodes)"
+    [ -n "$nodes" ] || log "aucun nœud DRM d'affichage vc4 (pilote vc4-drm) dans /sys/class/drm"
+    end=$((SECONDS + WAIT_S))   # échéance absolue (chaque appel systemctl est lui-même borné)
+    reason=""
+    while :; do
+      pid="$(kiosk_pid)"
+      if holds_vc4 "$pid" "$nodes"; then
+        retain_quit "DRM vc4 $HELD tenu par le kiosque, PID $pid"
+        exit $?
+      fi
+      if [ "$pid" = 0 ]; then
+        st="$(kiosk_prop ActiveState)"
+        case "$st" in inactive|failed) reason="kiosque $st (condition non remplie, arrêté ou en échec)"; break ;; esac
+      fi
+      if [ "$SECONDS" -ge "$end" ]; then reason="DRM vc4 non tenu par le kiosque après $WAIT_S s"; break; fi
+      sleep 0.2
+    done
+    normal_quit "$reason"
+    exit $?
+    ;;
+  failsafe)
+    nodes="$(vc4_nodes)"
+    pid="$(kiosk_pid)"
+    if holds_vc4 "$pid" "$nodes"; then
+      retain_quit "secours tardif : DRM vc4 $HELD tenu par le kiosque, PID $pid"
+      exit $?
+    fi
+    normal_quit "Plymouth encore actif sans kiosque affiché (minuterie ou échec)"
+    exit $?
+    ;;
+esac

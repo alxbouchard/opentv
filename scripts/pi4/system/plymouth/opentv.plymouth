@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=OpenTV
+Description=OpenTV : image de demarrage fixe, sans texte systeme
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/opentv
+ScriptFile=/usr/share/plymouth/themes/opentv/opentv.script

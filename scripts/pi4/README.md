@@ -7,8 +7,8 @@ checklist terrain ci-dessous n'est pas entièrement cochée sur une vraie Pi 4.
 La Pi est une **source HDMI** qui affiche le tableau de bord OpenTV (« Pour toi », état, messages d'agents). Elle ne
 remplace pas les applis Samsung (YouTube, Netflix…) qui restent lancées par OpenTV Tizen sur la TV, et elle ne
 touche ni à `native/` (Tizen v23) ni au NanoPi (`scripts/nanopi/`). Aucun flux média n'est extrait, relayé ou
-reconstruit : l'accueil n'affiche que des métadonnées du catalogue accepté (`/var/lib/opentv/catalogue.json`, produit
-ailleurs et copié sur la Pi). « Regarder » (§6 bis) réutilise le lecteur du site autorisé, sans jamais lire, extraire ni
+reconstruit : l'accueil n'affiche que des métadonnées du catalogue accepté (`/var/lib/opentv/catalogue.json`, copié
+une première fois depuis la chaîne acceptée puis, avec une source approuvée, rafraîchi chaque jour sur la Pi, §6 ter). « Regarder » (§6 bis) réutilise le lecteur du site autorisé, sans jamais lire, extraire ni
 relayer l'adresse du média ; il est **livré désactivé** et n'apparaît qu'après approbation de la source ET promotion
 terrain explicite (porte de production, §6 bis).
 
@@ -97,8 +97,71 @@ par `uninstall.sh` ; un `video=HDMI-A-1:` déjà présent est respecté ; effect
 `loglevel=3`, `logo.nologo`, `vt.global_cursor_default=0`, `systemd.show_status=false`) par écriture atomique et
 synchronisée de `cmdline.txt`; une valeur locale `debug`/`loglevel=` est respectée. Un splash tty1 affiche
 « OpenTV / Démarrage... » avant Cage, sans supprimer les journaux ni SSH. `opentv-boot-check` vérifie l'état après
-redémarrage. L'installation et la désinstallation conservent des marqueurs durables et refusent de continuer si la
-partition de démarrage ou `cmdline.txt` ne peut pas être restauré exactement.
+redémarrage.
+**Image OpenTV de bout en bout (Plymouth)** : l'arc-en-ciel du firmware est retiré par **un seul ajout en fin de
+`/boot/firmware/config.txt`** (`disable_splash=1`, précédé de `[all]` si la dernière section est conditionnelle ;
+octets exacts notés dans `/var/lib/opentv-install/config-splash.added` avant une écriture atomique synchronisée ; fin
+de ligne CRLF/absente et lignes existantes conservées ; une valeur locale `disable_splash=0` est respectée et signalée
+par `opentv-boot-check`). `prepare-pi.sh` installe le paquet `plymouth` (jamais `install.sh`). Si Plymouth est
+utilisable (plymouthd, module `script`, crochet initramfs, `update-initramfs`, `lsinitramfs`, `auto_initramfs=1`,
+`/boot/firmware/initramfs8`, un noyau v8 complet — `/boot/initrd.img-<version>-v8` et ses modules —, ni `nosplash`
+ni `plymouth.enable=0|false|no|off` / `rd.plymouth=…`), `install.sh` livre le thème
+`/usr/share/plymouth/themes/opentv` (image fixe 1920×1080 : fond sombre OpenTV v23, marque « OpenTV » centrée, petit
+« Démarrage… » ; bande sans libellé à l'arrêt ; aucun message système, aucune animation, aucun réseau), sélectionne
+`Theme=opentv` dans `/etc/plymouth/plymouthd.conf` (thème et contenu précédents notés durablement :
+`plymouth-theme.added`, `plymouthd.conf.orig`), ajoute `splash plymouth.ignore-serial-consoles` aux jetons notés de
+`cmdline.txt` (`console=serial0` et `console=tty1` conservés), puis — seulement après toutes ces vérifications et une
+fois le thème complet en place — régénère l'initramfs en **transaction** (`opentv-initramfs.sh`, partagé avec
+`uninstall.sh`). Sur Raspberry Pi OS, `update-initramfs` remplace `/boot/initrd.img-<v>` par renommage, mais le crochet
+`z50-raspi-firmware` **copie en place** vers `/boot/firmware/initramfs8` (troncature puis écriture : une coupure ou un
+arrêt pendant la copie le laisse tronqué). Donc : (1) noyau **exact** — le noyau v8 dont `initrd.img-<v>` est
+identique octet pour octet à `initramfs8`, sinon le v8 le plus récent — et `update-initramfs -u -k <v>`, jamais
+`-k all` ; (2) **avant** : copie durable (temp → fsync → renommage → fsync du dossier, relue) de `initramfs8`,
+`/boot/initrd.img-<v>` et `/var/lib/initramfs-tools/<v>` dans `backup-…/initramfs` avec SHA-256, taille et mode
+(`meta`), puis journal `/var/lib/opentv-install/initramfs.txn` ; (3) régénération bornée par **SIGTERM** (900 s,
+jamais SIGKILL), puis attente bornée de la fin de tout le groupe de processus (la copie du crochet) — un écrivain qui
+survit n'est jamais concurrencé : journal conservé ; (4) vérification : `lsinitramfs` borné (300 s) avec les entrées
+exactes du thème, `plymouthd`, module `script` et rendu DRM, **et** `initramfs8` identique à `initrd.img-<v>` ;
+(5) tout échec ⇒ thème, `plymouthd.conf`, `config.txt`, `cmdline.txt` et marqueurs restaurés, et les **octets
+d'origine** des trois fichiers restaurés (temp du même dossier → fsync → renommage → fsync du dossier) puis relus
+(SHA-256) **avant** tout changement de marqueur. Le journal n'est effacé qu'après le manifeste. Un journal resté
+(coupure, arrêt brutal) est **rejoué en premier** par le prochain `install.sh` ou `uninstall.sh` (octets d'avant
+restaurés et vérifiés ; une sauvegarde altérée ou un journal hors de `/var/lib/opentv-install` est refusé, rien
+d'autre n'est modifié), **puis seulement** le noyau exact est choisi sur l'`initramfs8` rétabli (un `initramfs8`
+tronqué ne correspond à aucun noyau ; le noyau noté au journal n'est retenu que s'il est validé et identique) et
+l'image OpenTV est régénérée pour ce même noyau. Si `opentv-boot-check` signale le thème absent de l'initramfs :
+relancer `sudo ./install.sh` (ou `sudo update-initramfs -u -k "$(uname -r)"`, jamais `-k all`). Toute régénération due à OpenTV (thème livré,
+`Theme=opentv`, jetons `splash`), **même si `Theme=opentv` était déjà choisi avant l'installation**, est notée
+durablement **avant** de lancer `update-initramfs` (`/var/lib/opentv-install/initramfs-plymouth.rebuilt`, fichier
+régulier validé ; un lien ou un non-fichier fait refuser installation et désinstallation avant toute modification).
+Après un échec, ce marqueur n'est rendu à son état précédent que si la restauration à l'octet a réussi ; sinon il reste
+(fail-closed). `uninstall.sh` régénère (même transaction) dès que ce marqueur existe, **après** avoir rétabli le thème
+tel qu'avant l'installation (fichiers OpenTV retirés, fichiers d'origine du dossier `opentv` restaurés, dossier créé
+par OpenTV retiré), vérifie qu'aucune entrée `plymouth/themes/opentv/*` sans fichier sur le disque ne subsiste et que
+`initramfs8` est identique à `initrd.img-<v>`, et n'efface le marqueur qu'ensuite. En cas d'échec, les octets d'avant
+la désinstallation (image OpenTV amorçable) sont restaurés et relus, puis la désinstallation **s'arrête** (code 1)
+avant l'arrêt des services et tout retrait de fichier : `/opt/opentv/uninstall.sh`, sa bibliothèque et le marqueur
+restent pour relancer (même avec `--purge`). Une réinstallation identique ne régénère rien. Sans Plymouth
+utilisable, rien de tout cela n'est activé : l'écran texte `opentv-splash` reste le repli (et `splash` n'est pas
+ajouté). Avec Plymouth actif, `opentv-splash` n'écrit **rien** sur tty1 (le texte réapparaîtrait au passage) et le
+note au journal. Passage au kiosque : `opentv-kiosk.service` remplace `plymouth-quit.service` (`Conflicts=`, comme un
+gestionnaire de session graphique ; n'attend jamais `plymouth-quit-wait.service`) et ne porte **aucune** commande
+annexe : `TTYReset=no`, `TTYVHangup=no`, `TTYVTDisallocate=no`, ni `ExecStartPre` ni `ExecStartPost` (systemd 252
+applique les réglages TTY d'un service à **chaque** commande : un `ExecStartPost` pouvait raccrocher tty1 et tuer Cage
+par SIGHUP, en boucle). Le passage vit dans des unités root dédiées, oneshot bornées, **sans aucune option TTY**,
+tirées par le kiosque (`Wants=`) : `opentv-plymouth-deactivate.service` (avant Cage, ≤ 12 s : `plymouth deactivate`,
+l'image reste affichée, le maître DRM est rendu) et `opentv-plymouth-quit.service` (après le démarrage, ≤ 45 s : lit
+`systemctl show --property=MainPID --value opentv-kiosk.service`, attend que ce PID tienne le nœud DRM **d'affichage
+vc4** — `/dev/dri/cardN` dont le pilote est `vc4-drm`, jamais un `card*` quelconque comme v3d — puis `plymouth quit
+--retain-splash` ; kiosque inactif/en échec ou 25 s dépassées : `plymouth quit` ordinaire, console rendue). Filet :
+`opentv-plymouth-failsafe.service`, déclenché par `OnFailure=` (kiosque et unités de passage — jamais
+`OnFailure=plymouth-quit.service`, en conflit avec le kiosque) et par `opentv-plymouth-failsafe.timer` 120 s après le
+noyau : Plymouth encore actif ⇒ `retain-splash` si le kiosque tient vc4, sinon quit ordinaire. Plymouth ne reste donc
+jamais indéfiniment (kiosque masqué, condition non remplie, échec), et `plymouth-quit-wait.service` se termine
+toujours. Kiosque désactivé : `plymouth-quit.service` s'exécute normalement et la console revient. Le mode de secours
+(`console=tty1`) quitte Plymouth lui-même et reste visible. Ces scripts root utilisent des chemins fixes (variables
+`OPENTV_*` de test ignorées en root). L'installation et la désinstallation conservent des marqueurs durables et
+refusent de continuer si la partition de démarrage ou `cmdline.txt` ne peut pas être restauré exactement.
 **Mise à jour** : les fichiers de l'ancien manifeste absents du nouveau sont retirés (sauvegardés ; jamais hors du
 périmètre OpenTV), puis `systemctl daemon-reload`, `enable` et **`restart`** des unités OpenTV (dont
 `opentv-ap-guard.timer` et `opentv-splash.service`) (un `enable --now` ne
@@ -114,7 +177,7 @@ Services :
 |---|---|
 | `opentv.service` | service Python stdlib (utilisateur `opentv`, `Type=notify`, watchdog 30 s — tick borné : `nmcli` 3 s + `ip` 2 s, groupe de processus tué à l'échéance, découverte CEC en thread —, durci) : page TV loopback `127.0.0.1:8080` (réservée au compte `opentv-kiosk` par l'UID du pair TCP, `/proc/net/tcp`), formulaire LAN `:8081` **seulement pendant la configuration**, Agent Port `/run/opentv/agent.sock` ; **télécommande téléphone** `<adresse LAN actuelle>:8082/r` (jamais `0.0.0.0`) seulement configuré et en ligne, écoute relancée si l'adresse change |
 | `opentv-kiosk.service` | Cage (Wayland) sur tty1 **sans `-s`** (aucun changement de console Ctrl+Alt+Fn : un clavier branché n'atteint aucune invite de connexion ; maintenance par SSH) + Chromium Raspberry Pi OS en kiosque, sous la politique gérée dédiée `opentv-kiosk.json` (DevTools, impression, téléchargements, boîtes de fichiers, extensions, navigation privée et toute navigation hors de `http://127.0.0.1`/page de secours bloqués), `Restart=always`, `RestartSec=5`, `StartLimitIntervalSec=0` (jamais bloqué en « failed » après une série de plantages). Profil Chromium **persistant** dédié (`/var/lib/opentv-kiosk/chromium`, verrous `Singleton*` effacés au lancement ; aucun secret durable : la clé de page change à chaque démarrage du service). Le lanceur teste seulement que le **port TCP** 127.0.0.1:8080 accepte une connexion (20 s), sinon il ouvre la page de secours locale `file://…/fallback.html`, qui interroge `/healthz` et revient au tableau de bord |
-| `opentv-splash.service` | oneshot tty1 borné à 5 s, sans réseau et durci : fond sombre « OpenTV / Démarrage... » avant le kiosque. Le drop-in `getty@tty1` retire l'invite de connexion seulement tant que le kiosque est activé; rien n'est masqué et SSH reste le chemin de récupération. |
+| `opentv-splash.service` | oneshot tty1 borné à 5 s, sans réseau et durci : fond sombre « OpenTV / Démarrage... » avant le kiosque — **repli** seulement : ordonné après `plymouth-start.service`, il n'écrit rien quand Plymouth affiche l'image OpenTV (`splash` + `plymouthd` vivant). Le drop-in `getty@tty1` retire l'invite de connexion seulement tant que le kiosque est activé; rien n'est masqué et SSH reste le chemin de récupération. |
 | `opentv-net-helper.path` / `.service` | helper root déclenché par un job : écrit le profil NetworkManager (keyfile 0600) et lance `nmcli` en argv fixe, sans shell. Dossier des jobs ouvert une fois sans suivre de lien (`O_DIRECTORY|O_NOFOLLOW`), lectures/suppressions relatives à ce descripteur ; résultats écrits par descripteur (`fchown`/`fchmod`, jamais de `chown`/`chmod` par chemin). **Wi-Fi transactionnel** : profil candidat `opentv-wifi-candidate` (UUID neuf, `autoconnect=false`) activé d'abord ; l'ancien `opentv-wifi` n'est remplacé (rename atomique du keyfile, UUID du candidat) qu'après succès ; échec ou délai ⇒ candidat supprimé, ancien profil remonté (ou hotspot en configuration hors ligne), dans une réserve de budget de 51 s gardée avant l'essai. Tout résidu du dossier des jobs (fichier/dossier caché, nom invalide, lien, fifo) est supprimé sans action (sans suivre de lien) : `DirectoryNotEmpty=` ne peut pas boucler. **Budget réel** d'une activation : 120 s pour tous les jobs (`TimeoutStartSec=180`) ; `nmcli --wait` courts (AP down 10 s, Wi-Fi up 35 s, AP up 20 s) + délai d'exécution = attente + 5 s tronqué au budget restant, groupe de processus tué à l'échéance ; un job qui ne tient plus attend l'activation suivante ; un `wifi-apply` pris plus de 60 s après son dépôt est refusé (`expired`) |
 | `opentv-ap-guard.timer` / `.service` | garde root du Wi-Fi temporaire (voir §3), indépendante du service Python ; oneshot, budget 40 s (`TimeoutStartSec=60`), seules commandes : `systemctl is-active opentv.service`, `nmcli`/`ip` en lecture, `nmcli connection down/delete id opentv-setup-ap` |
 | `opentv-player.service` | contrôleur du lecteur « Regarder » (`playerd`, compte `opentv-kiosk`, groupes effectifs `opentv-kiosk video render` — **jamais `input`**) ; Chromium séparé, CDP par tube seulement ; activé par l'installation mais **sans capacité de lecture** tant que la source n'est pas approuvée et la lecture promue sur le terrain (§6 bis) |
@@ -537,6 +600,79 @@ complet :
 `sudo systemctl disable --now opentv-player.service opentv-player-keys.service && sudo rm /etc/opentv/source.env &&
 sudo systemctl restart opentv.service` (ou `uninstall.sh`, qui arrête aussi le contrôleur et retire la promotion).
 
+## 6 ter. Catalogue : rafraîchissement quotidien
+
+`opentv-catalogue-refresh.timer` (activé par `install.sh`) lance une fois par jour (04 h 30 + délai aléatoire ≤ 45 min ;
+`Persistent=true` : un passage manqué, boîte éteinte, est rattrapé au démarrage suivant) le oneshot
+`opentv-catalogue-refresh.service`, **sauté sans `/etc/opentv/source.env`** (aucune requête). Avec un `source.env`
+présent mais non approuvé : passage `skipped`, aucune requête.
+
+- **Compte et bac à sable** : `opentv` (sans groupe supplémentaire), aucune capacité, `NoNewPrivileges`,
+  `ProtectSystem=strict` + écriture dans `/var/lib/opentv` seulement (`ReadWritePaths=-…` : dossier absent ⇒ refus
+  propre `unsafe_dir`, jamais d'échec de montage) ; inaccessibles : état appareil/configuration/point d'accès/Wi-Fi
+  (`device.json`, `setup-requested`, `hotspot.json`, `hotspot-rearm`, `wifi-apply.json`), jobs réseau, « Pour toi »,
+  registre/verrou/audit des agents, téléphones appairés, profil du kiosque, journal d'installation, fichiers clients,
+  profils Wi-Fi et sockets locaux `/run/opentv*` (Agent Port, lecteur, touches, CEC). Limite systemd : un de ces noms
+  absent au démarrage ne peut pas être masqué (le passage partage le compte `opentv` du service principal ; défense en
+  profondeur seulement). `PrivateDevices`, `@system-service`, réseau sortant
+  seulement (`IPAddressDeny=localhost link-local multicast` ; toute adresse résolue non publique — RFC 1918, CGNAT,
+  la boîte elle-même — est en plus refusée avant connexion). Priorité basse (`Nice=10`, E/S `idle`, `CPUQuota=50%`,
+  `MemoryMax=256M`) : la lecture et l'accueil ne sont pas gênés ; **aucun service n'est redémarré** : le service
+  recalcule « Pour toi » dès que la signature du catalogue (inode, taille, mtime_ns) change, et la TV redemande
+  `/api/tv/foryou` toutes les 60 s ⇒ un remplacement réussi est visible en ≤ ~62 s (60 s + un poll de 2 s).
+- **Moteur réutilisé** : `SourceConfig`/`Source` (même porte que « Regarder »), résolveur d'adresse changeante, analyse
+  de la page de liste et validation `clean_item`/`load_catalogue_meta` de `opentv_bridge.py`, inchangé. Son
+  `refresh_catalogue` n'est pas appelé (il écrit directement sa cible, accepte toute page non vide et perdrait les
+  champs TMDb bruts, `attribution` et les affiches TMDb).
+- **Verrou** `catalogue.json.lock` non bloquant : un passage concurrent sort aussitôt (`busy`, code 75, considéré comme
+  succès par l'unité), sans requête ni écriture.
+- **Candidat ensemencé** par le catalogue actuel : par `site_id` stable (sinon même chemin du même film), description,
+  affiche, IMDb, TMDb et tout autre champ d'enrichissement sont conservés ; seuls chemin/identifiant de l'époque, hôte
+  et titre/année/genre publiés viennent du site. Un nouveau film arrive sans note jusqu'au prochain enrichissement.
+- **Validation avant remplacement** (candidat `.catalogue.json.<hasard>.candidate` dans le même dossier, relu depuis le
+  disque) : JSON ≤ 8 Mio, `count == len(items)`, chaque élément accepté par le moteur avec titre non vide et
+  `site_id`, `site_id`/chemins/identifiants de lien uniques, au moins `OPENTV_CATALOGUE_MIN_ITEMS` (20) et au plus
+  2000 éléments, relecture par le moteur sans rien écarter. **Troncature suspecte refusée** : moins de
+  (100 − `OPENTV_CATALOGUE_MAX_DROP_PCT`) % (75 %) du nombre actuel, ou moins de 75 % des `site_id` actuels conservés.
+  Le catalogue actuel modifié pendant la passe (copie manuelle) ⇒ refus, la copie la plus récente reste.
+- **Écriture** : instantané `catalogue.json.prev`, catalogue actuel revérifié juste avant `os.replace` atomique puis
+  fsync du dossier ; candidats et `.tmp` orphelins de ce module (coupure) retirés sous le verrou. **Tout échec** (réseau,
+  source, page vide, candidat invalide, baisse, écriture) laisse `catalogue.json` intact octet pour octet et retire le
+  candidat ; liste identique ⇒ `unchanged`, rien n'est réécrit.
+- **Journal/sorties** : codes, nombres, durées, SHA-256 — jamais d'hôte, de préfixe, de jeton, d'URL ni de titre.
+
+```sh
+sudo /opt/opentv/bin/opentv-pi catalogue status     # nombre, taille, SHA-256, date ; instantané ; dernier passage
+sudo /opt/opentv/bin/opentv-pi catalogue refresh    # un passage MAINTENANT, via l'unité (jamais exécuté en root)
+systemctl list-timers opentv-catalogue-refresh.timer ; journalctl -u opentv-catalogue-refresh -n 20 --no-pager
+sudo /opt/opentv/bin/opentv-pi catalogue rollback   # catalogue précédent validé + rafraîchissement SUSPENDU
+sudo /opt/opentv/bin/opentv-pi catalogue resume     # reprise explicite : la minuterie peut de nouveau mettre à jour
+```
+
+**Retour arrière persistant.** `rollback` pose d'abord le témoin `/var/lib/opentv/catalogue.json.hold` (compte
+`opentv`, 0600), puis restaure `catalogue.json.prev` après les mêmes validations (sauf baisse/recouvrement) ; un
+rollback refusé (instantané absent ou invalide, écriture impossible) retire le témoin qu'il venait de poser et laisse
+le catalogue intact. Tant que le témoin existe, chaque passage — minuterie ou `catalogue refresh` — sort `held` (succès
+de l'unité) **avant toute requête et sans charger le moteur**, catalogue intact octet pour octet. Un témoin anormal
+(lien, FIFO, dossier, lien dur, autre propriétaire, > 4 Kio, contenu invalide) est traité comme une suspension :
+`hold_unsafe`, unité en échec, aucune requête. `catalogue status` affiche `hold` (`held`, `safe`). `resume` retire le
+nom sous le verrou (jamais suivi : un lien est retiré, pas sa cible) ; un dossier à la place du témoin est refusé
+(`hold_unsafe`) et demande un nettoyage manuel. Sous root, `rollback`/`resume` ne s'exécutent jamais en root : l'action
+fixe est déléguée au compte du service (`/usr/sbin/runuser -u opentv -- /usr/bin/python3 -I /opt/opentv/bin/opentv-pi
+--env … catalogue rollback|resume`, sans shell, environnement minimal, 120 s au plus ; compte root ou inconnu refusé) et
+seule sa ligne de résultat filtrée (codes, nombres) est rapportée. `install.sh` ne crée ni ne retire jamais le témoin
+(une mise à jour garde la suspension) ; `uninstall.sh` le garde aussi, sauf `--purge` (état effacé).
+
+**Accueil.** Une réponse « Pour toi » identique n'est jamais redessinée. Un nouveau catalogue arrive à l'accueil en
+≤ ~62 s ; pendant une fiche, une feuille ou une lecture (chargement, lecture, fermeture), il est gardé en attente et
+appliqué à la fermeture : le focus et le retour de « Regarder » suivent l'identifiant stable du film (pas sa
+rangée/colonne) ; film retiré ⇒ même rangée, colonne bornée.
+
+Un changement légitime de plus de 25 % est refusé chaque jour (unité en échec, `count_drop`/`low_overlap`) : relire la
+source, puis installer un catalogue accepté par la procédure manuelle (§8) ou ajuster
+`OPENTV_CATALOGUE_MAX_DROP_PCT` dans `/etc/opentv/opentv.env`. Désactiver : `sudo systemctl disable --now
+opentv-catalogue-refresh.timer`.
+
 ## 7. Retour arrière
 
 ```sh
@@ -548,6 +684,19 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
 ```
 `--dry-run` affiche le plan. `uninstall.sh` retire aussi exactement `video=HDMI-A-1:1920x1080@60` de `cmdline.txt`
 (s'il a été ajouté par OpenTV) ; copie d'origine dans `/var/lib/opentv-install/backup-*/boot/firmware/cmdline.txt`.
+Image de démarrage : `uninstall.sh` traite d'abord `cmdline.txt`, `config.txt` et `plymouthd.conf` — tous vérifiés
+avant la moindre écriture (partition montée, fichiers présents et attendus ; sinon refus, marqueurs et
+`uninstall.sh` conservés pour réessayer). Il retire `splash`/`plymouth.ignore-serial-consoles` s'ils ont été ajoutés,
+le suffixe `disable_splash=1` à l'octet près (s'il a été déplacé par une modification locale : seule la dernière ligne
+`disable_splash=1` ajoutée, et son `[all]` seulement si aucune ligne non vide ne le suit — sinon `[all]` reste, pour
+que les lignes ajoutées depuis n'héritent pas de la section conditionnelle précédente), rétablit `plymouthd.conf`
+d'origine s'il n'a pas changé depuis (sinon seule la ligne `Theme=opentv` redevient le thème précédent ; un thème
+choisi localement depuis est conservé), puis régénère l'initramfs en transaction (noyau v8 exact, sauvegarde SHA-256
+avant, `lsinitramfs` + `initramfs8` = `initrd.img-<v>` après) et vérifie que le thème OpenTV n'y est plus. Échec :
+octets d'avant restaurés et relus, puis **arrêt** (code 1) avant l'arrêt des services et le retrait des fichiers —
+`/opt/opentv/uninstall.sh` et le marqueur restent ; corriger puis relancer `sudo /opt/opentv/uninstall.sh`.
+Le paquet `plymouth` reste installé (sans `splash`, il n'affiche rien) ; `--purge` efface en plus l'état et les
+sauvegardes OpenTV, jamais un paquet.
 
 ## 8. Limites non vérifiées (honnêtes)
 
@@ -610,7 +759,7 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
 - Serveurs HTTP et Agent Port : 16 connexions servies au plus (503 / `busy` au-delà), échéance globale par connexion
   (15 s HTTP, 10 s Agent Port) ; l'écriture d'une réponse vers un client qui ne lit pas reste bornée par le délai du
   socket, pas par l'échéance globale.
-- « Pour toi » TV : la sélection est recalculée (catalogue relu + `Bridge.session`) toutes les 120 s ; coût CPU/mémoire de ce rechargement sur Pi 4 **à mesurer sur le terrain** (gros catalogue).
+- « Pour toi » TV : la sélection est recalculée (catalogue relu + `Bridge.session`) toutes les 120 s au plus et aussitôt que la signature du catalogue change ; la TV la redemande toutes les 60 s et ne redessine les rangées que si la réponse a changé (différé pendant une fiche ou une lecture) ; coût CPU/mémoire de ce rechargement sur Pi 4 **à mesurer sur le terrain** (gros catalogue).
 - Journal HTTP : erreurs et non-2xx toujours ; succès des polls (`/api/tv/*`, `/static/*`, `/healthz`) non
   journalisés, un échantillon agrégé `http_ok_sample` toutes les 600 requêtes.
 - **« Regarder » : vérifié hors matériel seulement.** Livré désactivé (porte de production §6 bis). Avant
@@ -620,8 +769,13 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
   (limite Chromium) ; F12/Ctrl+Maj+I sur un clavier branché ⇒ retour OpenTV sans DevTools visible ; `Target.getTargets`
   liste bien la cible DevTools et `Target.closeTarget` la ferme sur le Chromium de Raspberry Pi OS ; décodage et
   thermique pendant la lecture ; `uninstall.sh` puis réinstallation ⇒ bouton absent jusqu'à nouvelle promotion.
-- Catalogue : à copier dans `/var/lib/opentv/catalogue.json` (propriétaire `opentv`, 0600) depuis la chaîne acceptée ;
-  sans lui « Pour toi » affiche une sélection vide.
+- Catalogue : à copier une première fois dans `/var/lib/opentv/catalogue.json` (propriétaire `opentv`, 0600) depuis la
+  chaîne acceptée ; sans lui « Pour toi » affiche une sélection vide. Rafraîchissement quotidien (§6 ter) **vérifié hors
+  matériel seulement** : à prouver sur la Pi (`systemd-analyze verify`/`security opentv-catalogue-refresh`, résolution
+  DNS sous `IPAddressDeny`/`RestrictAddressFamilies`, un passage réel `updated` puis `unchanged`, `catalogue status`
+  cohérent, aucune adresse dans `journalctl -u opentv-catalogue-refresh`, accueil peuplé sans redémarrage). La page de
+  liste du site donne-t-elle bien tout le catalogue accepté (196 éléments au dernier relevé) ? Sinon chaque passage
+  sera refusé (`count_drop`) jusqu'à ce que la source fournisse une liste complète.
 
 ## 9. Checklist terrain (critères distincts)
 
@@ -635,9 +789,11 @@ sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : co
 | **Télécommande téléphone** | iPhone et Android sur le même Wi-Fi : QR de la colonne de droite → « Oui, utiliser ce téléphone » → les 7 touches agissent en < 0,5 s ; l'URL ouverte est `<nom>.local:8082` (sinon noter le repli) ; ancien QR refusé ; « Oublier les téléphones » (Réglages) ⇒ le pavé demande de rescanner ; `systemctl restart opentv` puis `sudo reboot` (heure avant NTP) ⇒ téléphone toujours appairé ; nouvelle adresse DHCP ⇒ téléphone toujours appairé ; `ss -ltn` : `:8082` lié à l'adresse LAN (jamais `0.0.0.0`), absent pendant « Reconfigurer » ; ajout à l'écran d'accueil iOS fonctionnel ; aucun jeton dans `journalctl -u opentv` |
 | **Télécommande USB** | télécommande 2,4 GHz branchée : flèches, OK, Retour, Accueil sur l'écran OpenTV ; Accueil/BrowserBack ne quittent jamais `/tv` ; écran QR : aucune touche n'agit ; **touche Power : la boîte reste allumée** (après redémarrage) ; clavier : F12/Ctrl+Maj+I, Ctrl+P, Ctrl+S, Ctrl+Alt+F2 sans effet |
 | **Décodage** | H.264 local 1080p60 pendant 30 min : `/dev/video10` ouvert à chaque sonde, horloge H.264 ≈ 500 MHz, maximum 0,372 % d'images perdues, température maximale 41,3 °C, `hvs_underrun=0`, `get_throttled=0x0` ; kiosque restauré et résidus supprimés. 4K/HEVC/VP9/AV1 Chromium hors cible. |
+| **Image de démarrage** | vidéo de la mise sous tension complète : **aucun arc-en-ciel**, image OpenTV (fond sombre, marque, « Démarrage… ») dès le noyau, sans texte Linux ni terminal, sans clignotement de console avant la première image de Chromium (au plus un noir bref de Cage) ; `sudo /opt/opentv/bin/opentv-boot-check` : `arc-en-ciel désactivé`, `thème opentv sélectionné`, `initramfs : thème opentv présent`, `écran texte NON écrit`, `retain-splash, DRM vc4`, `aucun secours Plymouth`, `Plymouth terminé`, `NRestarts=0`, `aucun SIGHUP`, `TTYReset=no TTYVHangup=no` ; `journalctl -b -u opentv-plymouth-quit` : `DRM vc4 /dev/dri/cardN tenu par le kiosque` ; `systemd-analyze verify` des unités kiosque/passage ; coupure secteur volontaire pendant `update-initramfs` NON exigée (prouvée hors matériel) ; arrêt/redémarrage : image sans « Démarrage… » ; mode de secours (`systemctl rescue` en essai contrôlé) : console visible ; `uninstall.sh` puis redémarrage : arc-en-ciel et démarrage d'origine rétablis |
 | **Rollback** | `uninstall.sh` ⇒ console tty1 de retour, `/opt/opentv` absent, fichiers d'origine restaurés ; réinstallation propre ; `--purge` sans perte du Wi-Fi |
 | **Assistants (Réglages)** | TV : Réglages → « Gérer les assistants » → « Non » au focus → « Oui » → QR dans la feuille, colonne Télécommande masquée ; iPhone (appareil photo) : 3 étapes, « Autorisé » et « Connecté » distincts, « Oui, enregistrer » ; TV : accueil + « C'est enregistré ! Assistants autorisés : N · connectés : M » ; `ss -ltn` : `:8081` lié à l'adresse LAN pendant le mode seulement, puis fermé ; Wi-Fi/nom inchangés (`nmcli -t device status`, `device.json`) ; aucun nouveau fichier dans `/etc/opentv/agents` ; second envoi du même QR refusé ; photo d'Alex |
 | **Regarder** | `opentv-pi playback status` → `promotion: missing` après installation (bouton absent même avec `source.env`) ; après les essais HDMI ci-dessus et `playback promote --field-validated` : bouton présent ; `playback demote` pendant une lecture ⇒ lecteur fermé, retour même carte, bouton absent en ≤ 10 s ; télécommande USB débranchée et CEC absent ⇒ bouton absent (`devices: 0`) ; unité du lecteur : décodage H.264 matériel toujours actif (`/dev/video10` tenu) avec `DevicePolicy=closed` + `SystemCallFilter=~@debug`, `systemd-analyze security opentv-player` relu, `/dev/cec0`/`/dev/input` inaccessibles depuis le lecteur, `curl http://127.0.0.1:<port TV>` refusé depuis l'unité ; groupes effectifs (`/proc/<pid>/status`) : Cage avec `input`, `playerd`/Chromium du lecteur sans `input`, `opentv-player-keys` avec `input` seulement ; photo/vidéo d'Alex |
+| **Catalogue quotidien** | `systemctl list-timers opentv-catalogue-refresh.timer` : prochain passage planifié ; `sudo /opt/opentv/bin/opentv-pi catalogue refresh` → `updated` (ou `unchanged`), puis `catalogue status` : nombre attendu, `snapshot` présent, SHA-256 lu ; second passage → `unchanged` sans réécriture ; `catalogue rollback` → `rolled_back`, `hold.held: true`, puis `catalogue refresh` → `held` et SHA-256 inchangé ; `catalogue resume` → `resumed`, passage suivant `updated`/`unchanged` ; fiche ouverte ou lecture pendant un remplacement ⇒ Retour sur la même carte (photo) ; `ls -l /var/lib/opentv/catalogue.json*` : tout `opentv` ; Wi-Fi coupé → `discovery_failed` et SHA-256 inchangé ; accueil peuplé avec le nouveau catalogue en ≤ 120 s (attendu ≤ ~62 s) sans redémarrage de service ; `journalctl -u opentv-catalogue-refresh` sans hôte, préfixe, jeton ni URL ; `systemd-analyze security opentv-catalogue-refresh` relu |
 | **Agent** | `opentv-mcp` depuis le compte de l'agent : `tools/list` filtré par scopes, `recommend` sans URL, scope refusé, audit présent sans secret |
 
 ## 10. Développement
@@ -652,4 +808,15 @@ python3.11 -m unittest discover -s scripts/pi4/tests -t scripts/pi4   # version 
 #    « Regarder » : tests/e2e_play.js, captures item/loading/playing/held/returned/unavailable.png ;
 #    validation des calques du lecteur dans un vrai Chromium : tests/e2e_assist.js)
 ./scripts/pi4/install.sh --dry-run ; ./scripts/pi4/install.sh --root /tmp/rfs --skip-preflight
+# image Plymouth : régénérée (Chromium headless, aucun réseau) puis réencodée en PNG RVB déterministe ; fichiers livrés
+#   scripts/pi4/system/plymouth/opentv.png (1920×1080) et opentv-mask.png (bande sans « Démarrage… »)
+python3 scripts/pi4/tools/make-plymouth-theme.py
 ```
+`tests/test_plymouth.py` simule Plymouth et initramfs-tools dans des racines de test (fichiers Debian + faux
+`update-initramfs`/`lsinitramfs` dans le PATH, activés par `OPENTV_INSTALL_TEST_BOOTCMDS=1` hors vraie racine
+seulement ; le faux `update-initramfs` imite Raspberry Pi OS : `initrd.img-<v>` renommé, puis copie EN PLACE vers
+`initramfs8`, avec troncature, blocage, écrivain qui ignore SIGTERM et SIGKILL d'`install.sh`/`uninstall.sh` simulés).
+Ils prouvent l'ordre (thème complet et `Theme=opentv` avant la régénération), le noyau exact, l'idempotence, les
+retours arrière et la restauration à l'octet après coupure (installation, retour arrière, désinstallation), la
+désinstallation exacte, et l'absence de commande annexe sous réglages TTY (unités) — pas l'affichage : l'image réelle, l'absence d'arc-en-ciel/texte et le passage
+sans clignotement restent la porte terrain « Image de démarrage » (§9).

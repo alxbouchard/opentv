@@ -1,5 +1,5 @@
 """opentv-pi : serve | preflight | health | net-helper | ap-guard | agent issue|list|revoke | setup reset | cec |
-cec-bootstrap | manifest verify."""
+cec-bootstrap | catalogue status|refresh|rollback|resume | manifest verify."""
 import argparse
 import json
 import os
@@ -465,6 +465,98 @@ def cmd_playback(a):
                  "removed": removed, "session_closed": closed})
 
 
+CATALOGUE_UNIT_TIMEOUT_S = 330   # > TimeoutStartSec=300 de opentv-catalogue-refresh.service (oneshot attendu)
+# rollback/resume sous root : action FIXE déléguée au compte du service (jamais exécutée en root : les fichiers du
+# compte opentv ne doivent jamais devenir root:root), argv sans shell, environnement minimal, durée bornée
+RUNUSER = "/usr/sbin/runuser"
+OPENTV_PI = "/opt/opentv/bin/opentv-pi"
+CATALOGUE_DELEGATE_TIMEOUT_S = 120
+CATALOGUE_DELEGATED = ("rollback", "resume")
+CATALOGUE_HELD_NOTE = ("Rafraîchissement suspendu depuis un retour arrière : "
+                       "sudo /opt/opentv/bin/opentv-pi catalogue resume pour le reprendre.")
+
+
+def _unit_exit_status(unit):
+    """ExecMainStatus entier de l'unité (argv fixe, borné) ; None si illisible. Aucune sortie brute rapportée."""
+    rc, out = nethelper.default_runner(["systemctl", "show", "--property=ExecMainStatus", "--value", unit],
+                                       CEC_STATUS_TIMEOUT_S)
+    v = (out or "").strip()
+    return int(v) if rc == 0 and v.isdigit() and len(v) <= 3 else None
+
+
+def _catalogue_delegate(cfg, env, action):
+    """root -> `runuser -u <compte du service> -- python3 -I opentv-pi --env <env> catalogue <action>`.
+
+    Seules les actions de CATALOGUE_DELEGATED ; compte refusé s'il est root ou inconnu ; sortie relue comme une ligne
+    JSON puis filtrée par la liste blanche du statut (codes, nombres) — jamais de sortie brute relayée."""
+    import pwd
+    from . import catalogue
+    if action not in CATALOGUE_DELEGATED:
+        raise ValueError(action)
+    try:
+        uid = pwd.getpwnam(cfg.service_user).pw_uid
+    except KeyError:
+        return _out({"ok": False, "error": "service_user_missing"}, 1)
+    if uid == 0:
+        return _out({"ok": False, "error": "service_user_is_root"}, 2)
+    if not (isinstance(env, str) and os.path.isabs(env) and len(env) <= 1024 and env.isprintable()):
+        return _out({"ok": False, "error": "env_path_invalid"}, 2)
+    argv = [RUNUSER, "-u", cfg.service_user, "--", "/usr/bin/python3", "-I", OPENTV_PI, "--env", env, "catalogue",
+            action]
+    rc, out = nethelper.default_runner(argv, CATALOGUE_DELEGATE_TIMEOUT_S)
+    last = None
+    for line in reversed((out or "").splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                last = json.loads(line)
+            except ValueError:
+                last = None
+            break
+    res = catalogue._status_clean(last) if isinstance(last, dict) else {}
+    if rc in (0, 1, catalogue.BUSY_EXIT) and "result" in res:
+        rep = dict(res, ok=bool(res.get("ok")), delegated_to=cfg.service_user)
+        return _out(rep, 0 if rep["ok"] else (catalogue.BUSY_EXIT if res["result"] == "busy" else 1))
+    return _out({"ok": False, "error": "delegate_failed", "exit": rc if isinstance(rc, int) else None}, 1)
+
+
+def cmd_catalogue(a):
+    """Catalogue accepté : status (lecture seule, sans hôte ni titre) ; refresh = un passage du rafraîchissement
+    quotidien ; rollback = retour validé à catalogue.json.prev ET suspension du rafraîchissement ; resume = reprise.
+
+    Sous root, rien n'est jamais écrit en root : refresh démarre l'unité bac à sable opentv-catalogue-refresh.service
+    puis relit le statut qu'elle a écrit ; rollback/resume délèguent l'action fixe au compte du service (runuser).
+    Sous le compte du service (l'unité, ou la délégation) : passage direct, une ligne JSON, code 0 / 1 / 75."""
+    from . import catalogue
+    cfg = config.Config.load(a.env)
+    if a.action == "status":
+        rep = catalogue.status(cfg)
+        return _out(rep, 0 if rep["ok"] else 1)
+    if os.geteuid() == 0:
+        if a.action in CATALOGUE_DELEGATED:
+            return _catalogue_delegate(cfg, a.env, a.action)
+        before = catalogue.last_finished(cfg)
+        rc, _ = nethelper.default_runner(["systemctl", "start", catalogue.UNIT], CATALOGUE_UNIT_TIMEOUT_S)
+        rep = catalogue.status(cfg)
+        last = rep.get("refresh") or {}
+        if last.get("finished_at") is not None and last.get("finished_at") != before:
+            out = {"ok": bool(last.get("ok")), "unit": catalogue.UNIT, "refresh": last,
+                   "catalogue": rep.get("catalogue"), "hold": rep.get("hold")}
+            if last.get("result") in ("held", "hold_unsafe"):
+                out["note"] = CATALOGUE_HELD_NOTE
+            return _out(out, 0 if last.get("ok") else 1)
+        if _unit_exit_status(catalogue.UNIT) == catalogue.BUSY_EXIT:
+            return _out({"ok": False, "unit": catalogue.UNIT, "result": "busy",
+                         "note": "Un passage était déjà en cours : réessayer dans quelques minutes."},
+                        catalogue.BUSY_EXIT)
+        return _out({"ok": False, "unit": catalogue.UNIT, "result": "not_run", "service_ok": rc == 0,
+                     "note": "journalctl -u %s -n 20 --no-pager (source.env absent : unité sautée)"
+                             % catalogue.UNIT}, 1)
+    res = catalogue.run(cfg, a.action, log=log)
+    code = 0 if res["ok"] else (catalogue.BUSY_EXIT if res["result"] == "busy" else 1)
+    return _line(dict(res, event="catalogue_" + a.action), code)
+
+
 def cmd_manifest(a):
     rep = health.verify_manifest(a.root)
     return _out(rep, 0 if rep["ok"] else 1)
@@ -528,6 +620,11 @@ def build_parser():
     pb.add_argument("--field-validated", action="store_true",
                     help="(promote) confirme la validation HDMI réelle Regarder -> lecture -> Retour même carte")
     pb.add_argument("--env", default=config.ENV_FILE)
+    ca = sub.add_parser("catalogue", help="catalogue accepté : status | refresh (rafraîchissement quotidien, source "
+                                          "approuvée) | rollback (catalogue.json.prev validé + suspension) | resume "
+                                          "(reprise du rafraîchissement)")
+    ca.add_argument("action", choices=("status", "refresh", "rollback", "resume"))
+    ca.add_argument("--env", default=argparse.SUPPRESS, help="fichier env (défaut : celui de opentv-pi --env)")
     ma = sub.add_parser("manifest", help="vérifie le manifeste SHA-256")
     ma.add_argument("action", choices=("verify",))
     ma.add_argument("--root", default="/")
@@ -541,4 +638,4 @@ def main(argv):
     return {"serve": cmd_serve, "player-daemon": cmd_player_daemon, "player-keys": cmd_player_keys,
             "playback": cmd_playback, "preflight": cmd_preflight, "health": cmd_health, "net-helper": cmd_net_helper,
             "ap-guard": cmd_ap_guard, "agent": cmd_agent, "setup": cmd_setup, "cec": cmd_cec,
-            "cec-bootstrap": cmd_cec_bootstrap, "manifest": cmd_manifest}[a.cmd](a)
+            "cec-bootstrap": cmd_cec_bootstrap, "catalogue": cmd_catalogue, "manifest": cmd_manifest}[a.cmd](a)

@@ -60,6 +60,9 @@ def choice_changes(x, new):
     return new != x["level"] or not set(x["have"] or ()) <= set(AGENT_LEVELS[new])
 AP_PSK_ALPHABET = "abcdefghijkmnopqrstuvwxyz23456789"
 AP_RETRY_S = 120.0
+# « Pour toi » TV : sélection recalculée au plus tard toutes les FORYOU_TTL_S, et aussitôt que la signature du
+# catalogue (périphérique, inode, taille, mtime_ns) change — un remplacement atomique (rafraîchissement quotidien,
+# rollback, copie manuelle) atteint donc la TV à la prochaine requête /api/tv/foryou (tv.js : toutes les 60 s).
 FORYOU_TTL_S = 120.0
 # Échéance d'un wifi-apply côté service : le helper refuse un job plus vieux que WIFI_APPLY_PICKUP_MAX_S et termine
 # toute exécution en RUN_BUDGET_S ; au-delà, le job est abandonné (échec honnête, résultat tardif ignoré).
@@ -179,7 +182,7 @@ class App:
         self.mdns = {"ip": None, "ok": False}   # dernière vérification : le nom mDNS désigne-t-il l'adresse liée ?
         self._mdns_thread, self.mdns_at = None, -1e9
         self.bad_token_ips = {}       # ip -> [horodatages monotones] des POST à jeton faux (borné)
-        self.fy_session, self.fy_at = None, -1e9
+        self.fy_session, self.fy_at, self.fy_sig = None, -1e9, None
         self.cec, self.cec_at = {"adapters": [], "discovery_only": True}, -1e9
         self._cec_thread = None
         self._scan_thread, self.scan_prime_at = None, -1e9
@@ -988,12 +991,29 @@ class App:
                     "foryou": self.foryou is not None, "remote": self._remote_view(),
                     "playback": self.playback.view()}
 
+    def _catalogue_sig(self):
+        """Signature du catalogue (périphérique, inode, taille, mtime_ns) ; None si illisible (repli : TTL seul)."""
+        try:
+            st = os.stat(self.cfg.catalogue_file)
+        except (OSError, ValueError):
+            return None
+        return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns
+
+    def _fy_rebuild(self):
+        # signature relevée AVANT la lecture : un remplacement pendant la construction relance la suivante
+        sig = self._catalogue_sig()
+        self.fy_session, self.fy_at, self.fy_sig = self.foryou.tv_session(), self.mono(), sig
+
     def tv_foryou(self):
         if self.foryou is None:
             return {"rows": [], "note": "« Pour toi » est indisponible sur cette boîte.", "marks": {}, "buttons": []}
         with self.fy_lock:
             if self.fy_session is None or self.mono() - self.fy_at >= FORYOU_TTL_S:
-                self.fy_session, self.fy_at = self.foryou.tv_session(), self.mono()
+                self._fy_rebuild()
+            else:
+                sig = self._catalogue_sig()
+                if sig is not None and sig != self.fy_sig:   # catalogue remplacé : nouvelle sélection sans attendre
+                    self._fy_rebuild()
             return self.fy_session["data"]
 
     def tv_feedback(self, uid, action):
@@ -1001,7 +1021,7 @@ class App:
             return None, "« Pour toi » est indisponible."
         with self.fy_lock:
             if self.fy_session is None:
-                self.fy_session, self.fy_at = self.foryou.tv_session(), self.mono()
+                self._fy_rebuild()
             return self.foryou.tv_feedback(self.fy_session, uid, action)
 
     # -- contexte des outils agents

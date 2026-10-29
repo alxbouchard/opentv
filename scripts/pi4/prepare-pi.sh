@@ -63,7 +63,9 @@ CHROMIUM="chromium"
 if [ "$LIVE" = 1 ] && command -v apt-cache >/dev/null 2>&1 && ! has_candidate chromium; then
   CHROMIUM="chromium-browser"
 fi
-PKGS="cage wlr-randr $CHROMIUM v4l-utils dnsmasq-base network-manager python3 fonts-noto-core fonts-dejavu-core"
+# plymouth : image OpenTV de démarrage (thème livré et activé par install.sh, initramfs régénéré et vérifié) ; le
+# paquet seul fournit plymouthd, le module script, le rendu DRM et le crochet initramfs (aucun thème tiers requis)
+PKGS="cage wlr-randr $CHROMIUM v4l-utils dnsmasq-base network-manager python3 fonts-noto-core fonts-dejavu-core plymouth"
 sys apt-get update
 # shellcheck disable=SC2086
 sys apt-get install -y --no-install-recommends $PKGS

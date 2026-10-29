@@ -1,0 +1,21 @@
+[Unit]
+Description=OpenTV Pi - secours borne : Plymouth jamais laisse indefiniment (kiosque absent, en echec ou masque)
+Documentation=file:///opt/opentv/README.md
+# Déclenchée par opentv-plymouth-failsafe.timer (120 s après le noyau) et par OnFailure= du kiosque et des unités de
+# passage. Plymouth encore actif : quit --retain-splash si le kiosque tient l'affichage vc4, sinon plymouth quit
+# ordinaire (console rendue, plymouth-quit-wait.service se termine). Sans Plymouth : rien. Unité root SANS option TTY,
+# jamais en conflit avec le kiosque (contrairement à plymouth-quit.service).
+After=plymouth-start.service opentv-plymouth-quit.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /opt/opentv/bin/opentv-plymouth-handoff failsafe
+TimeoutStartSec=30
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0077

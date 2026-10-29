@@ -56,6 +56,11 @@ DEFAULTS = {
     "OPENTV_PLAYER_KEYS_SOCKET": "/run/opentv-player-keys/keys.sock",
     "OPENTV_PLAYER_USER": "opentv-kiosk",
     "OPENTV_PLAYER_KEYS_USER": "opentv-keys",
+    # rafraîchissement quotidien du catalogue (opentv-catalogue-refresh.timer, source approuvée seulement) : un candidat
+    # est refusé sous OPENTV_CATALOGUE_MIN_ITEMS éléments, ou s'il perd plus de OPENTV_CATALOGUE_MAX_DROP_PCT % du
+    # catalogue valide actuel (nombre ou site_id conservés) — l'ancien catalogue reste alors en place
+    "OPENTV_CATALOGUE_MIN_ITEMS": "20",
+    "OPENTV_CATALOGUE_MAX_DROP_PCT": "25",
 }
 
 
@@ -151,6 +156,14 @@ class Config:
         self.player_keys_socket = e["OPENTV_PLAYER_KEYS_SOCKET"]
         self.player_user = e["OPENTV_PLAYER_USER"]
         self.player_keys_user = e["OPENTV_PLAYER_KEYS_USER"]
+        if not re.fullmatch(r"[0-9]{1,4}", e["OPENTV_CATALOGUE_MIN_ITEMS"]) or \
+                not 1 <= int(e["OPENTV_CATALOGUE_MIN_ITEMS"]) <= 2000:
+            raise ValueError("config: OPENTV_CATALOGUE_MIN_ITEMS invalide (1 à 2000)")
+        self.catalogue_min_items = int(e["OPENTV_CATALOGUE_MIN_ITEMS"])
+        if not re.fullmatch(r"[0-9]{1,2}", e["OPENTV_CATALOGUE_MAX_DROP_PCT"]) or \
+                not 0 <= int(e["OPENTV_CATALOGUE_MAX_DROP_PCT"]) <= 90:
+            raise ValueError("config: OPENTV_CATALOGUE_MAX_DROP_PCT invalide (0 à 90)")
+        self.catalogue_max_drop_pct = int(e["OPENTV_CATALOGUE_MAX_DROP_PCT"])
         s = self.state_dir
         self.device_file = os.path.join(s, "device.json")
         self.setup_flag = os.path.join(s, "setup-requested")

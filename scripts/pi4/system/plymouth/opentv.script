@@ -1,0 +1,77 @@
+# OpenTV: static Plymouth theme (script module). One 1920x1080 image (opentv.png) scaled to cover the screen and
+# centred; no animation, no network, no system message shown (no SetMessageFunction, no progress).
+# Shutdown/reboot: the "Demarrage" band is covered by opentv-mask.png (same background, without the label).
+# A password/question request (never expected on the box) stays usable: centred prompt.
+
+IMG_W = 1920;
+IMG_H = 1080;
+MASK_Y = 618;
+MASK_H = 96;
+
+Window.SetBackgroundTopColor(0.02, 0.03, 0.05);
+Window.SetBackgroundBottomColor(0.02, 0.03, 0.05);
+
+sw = Window.GetWidth();
+sh = Window.GetHeight();
+scale = sw / IMG_W;
+if (sh / IMG_H > scale) scale = sh / IMG_H;
+dw = Math.Int(IMG_W * scale + 0.5);
+dh = Math.Int(IMG_H * scale + 0.5);
+ox = Window.GetX() + Math.Int((sw - dw) / 2);
+oy = Window.GetY() + Math.Int((sh - dh) / 2);
+
+bg_image = Image("opentv.png");
+if (dw == IMG_W && dh == IMG_H) bg_scaled = bg_image;
+else bg_scaled = bg_image.Scale(dw, dh);
+bg_sprite = Sprite(bg_scaled);
+bg_sprite.SetPosition(ox, oy, -10);
+
+if (Plymouth.GetMode() != "boot") {
+  mask_image = Image("opentv-mask.png");
+  mh = Math.Int(MASK_H * scale + 0.5);
+  if (dw == IMG_W && mh == MASK_H) mask_scaled = mask_image;
+  else mask_scaled = mask_image.Scale(dw, mh);
+  mask_sprite = Sprite(mask_scaled);
+  mask_sprite.SetPosition(ox, oy + Math.Int(MASK_Y * scale + 0.5), -9);
+}
+
+prompt_sprite = Sprite();
+entry_sprite = Sprite();
+
+fun show_prompt(text, value) {
+  t = Image.Text(text, 0.96, 0.97, 0.98, 1, "Sans 24");
+  if (t) {
+    prompt_sprite.SetImage(t);
+    prompt_sprite.SetPosition(Window.GetX() + Math.Int((sw - t.GetWidth()) / 2), oy + Math.Int(760 * scale), 10);
+    prompt_sprite.SetOpacity(1);
+  }
+  e = Image.Text(value, 0.96, 0.97, 0.98, 1, "Sans 24");
+  if (e) {
+    entry_sprite.SetImage(e);
+    entry_sprite.SetPosition(Window.GetX() + Math.Int((sw - e.GetWidth()) / 2), oy + Math.Int(810 * scale), 10);
+    entry_sprite.SetOpacity(1);
+  }
+}
+
+fun display_password(prompt, bullets) {
+  s = "";
+  i = 0;
+  while (i < bullets) {
+    s = s + "*";
+    i = i + 1;
+  }
+  show_prompt(prompt, s);
+}
+
+fun display_question(prompt, entry) {
+  show_prompt(prompt, entry);
+}
+
+fun display_normal() {
+  prompt_sprite.SetOpacity(0);
+  entry_sprite.SetOpacity(0);
+}
+
+Plymouth.SetDisplayPasswordFunction(display_password);
+Plymouth.SetDisplayQuestionFunction(display_question);
+Plymouth.SetDisplayNormalFunction(display_normal);
