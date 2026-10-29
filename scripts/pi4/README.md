@@ -476,17 +476,28 @@ Sécurité :
   `Referrer-Policy: no-referrer`, CSP même origine sans `unsafe-inline`. Le jeton n'apparaît dans aucune réponse,
   page, URL, journal, audit, état TV, fichier résultat ni stockage du navigateur.
 - **Remise privilégiée** : le service (compte `opentv`) écrit **un** job `pair` 0600 (rename atomique) dans
-  `/var/lib/opentv/musejobs` (0700) ; `opentv-muse-setup.path` lance `opentv-muse-setup.service` (root, oneshot,
+  `/run/opentv-musejobs/queue` (0700, **tmpfs** créé par tmpfiles : le jeton n'est jamais écrit sur la carte SD et une
+  coupure de courant l'efface ; brouillon dans `/run/opentv-musejobs/tmp`, même montage) ; `opentv-muse-setup.path` lance `opentv-muse-setup.service` (root, oneshot,
   sans réseau, `ProtectSystem=strict`, capacités `CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER` seulement), qui exécute
   `opentv-pi muse-setup-helper` (`musehelper.py`). Le helper n'accepte que quatre schémas fixes (`pair` avec
   `consent: "tv"`, `cancel`, `unpair` avec `confirm: "tv"`, `probe` sans champ : relecture de l'état public), ouverts sans suivre de lien (`O_NOFOLLOW`), fichier
-  régulier, propriétaire `opentv`, mode 0600, un seul lien, ≤ 2 Kio, âge borné ; tout le reste est retiré sans
-  action. Aucun chemin, argument ni commande ne vient du job ; il appelle `museadmin` en interne
+  régulier, propriétaire `opentv`, mode 0600, un seul lien, ≤ 2 Kio, schéma v2, âge borné selon l'horloge du
+  démarrage (`at` = `CLOCK_BOOTTIME`, commune aux processus : un saut de l'heure murale n'expire ni ne ranime un job) ;
+  tout le reste est retiré sans action. **Réclamation = point de linéarisation** : après lecture et contrôles, le
+  helper retire le nom exact du job ; seul un retrait réussi l'autorise à agir. Le service retire ce même nom pour
+  annuler, à l'échéance et à son démarrage (jobs orphelins d'une séance morte, sauf `cancel` sans secret) : exactement
+  l'un des deux gagne (ENOENT côté helper ⇒ rien exécuté ; échec côté service ⇒ demande `cancel` au helper). Aucun chemin, argument ni commande ne vient du job ; il appelle `museadmin` en interne
   (comparaison du jeton local, `authorize-control --yes`, puis `pair --token-stdin` en mode « jeton conservé »),
   **jamais** `--replace-token`, `--force` ni
   `--replace-identity` : une identité `muse-device` étrangère reste intacte (« Une autre installation de Muse existe
-  déjà »). Journal de reprise root (`/var/lib/opentv-muse-setup`, sans jeton) : après un plantage, fenêtre fermée,
-  identité inachevée retirée et autorisation précédente rendue, sauf si l'appariement avait abouti. Les unités de
+  déjà »). Journal de reprise root (`/var/lib/opentv-muse-setup`, sans jeton) : l'intention d'autoriser le pilotage et
+  l'instantané exact d'avant (plafond + empreinte de l'état lu, base de l'écriture compare-and-set) y sont écrits
+  (fsync) **avant** l'écriture de l'autorisation. Après un plantage : fenêtre fermée, identité inachevée retirée,
+  autorisation rendue par compare-and-set si elle vaut encore exactement le pilotage (jamais d'écrasement d'une
+  décision du propriétaire ; registre illisible ⇒ rien écrit, issue « recovery_incomplete »), sauf si l'appariement
+  avait abouti : alors appariement, identité, jeton et pilotage sont gardés (« paired_incomplete », « Reconnecter »
+  reprend sans Bluetooth) — de même pour une annulation qui perd la course contre l'appariement et pour un pont qui
+  ne démarre pas après un appariement réussi. Les unités de
   catalogue n'accèdent pas à ces dossiers (`InaccessiblePaths`) ; `net-helper` et l'Agent Port sont inchangés.
 
 ## 6. Agent MCP (Muse, Hermit, Hermes sur la boîte)

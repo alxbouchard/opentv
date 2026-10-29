@@ -6,9 +6,18 @@ propriétaire, sur la TV, page loopback du kiosque) ⇒ une séance à usage uni
     paire RSA-2048 neuve (museseal, mémoire seulement), clé CSRF propre ; échéance SESSION_TTL_S (≤ 10 min) pour
     recevoir le jeton ; états strictement croissants (STATES/RANK), finaux immuables ;
   - le téléphone envoie {s, c, ct} : ct = RSA-OAEP({v, s, f, t}) ; contrôle (s, f, forme du jeton) puis UN job
-    « pair » 0600 dans musejobs (même système de fichiers, rename atomique), consommé par opentv-muse-setup.service
-    (root, musehelper) qui appelle le `muse pair` existant ; le jeton n'est jamais renvoyé, journalisé, audité ni écrit
-    ailleurs que dans ce job (dossier 0700 du service, supprimé par le helper AVANT d'agir, retiré ici à l'annulation) ;
+    « pair » 0600 dans /run/opentv-musejobs/queue (tmpfs : jamais sur la carte SD, effacé par une coupure de courant ;
+    brouillon dans …/tmp, même montage, rename atomique), consommé par opentv-muse-setup.service (root, musehelper) qui
+    appelle le `muse pair` existant ; le jeton n'est jamais renvoyé, journalisé, audité ni écrit ailleurs que dans ce
+    job (dossier 0700 du service) ;
+  - point de linéarisation service ↔ helper : le RETRAIT DU NOM du job. Le helper le réclame en le retirant avec
+    succès AVANT toute action ; le service le retire à l'annulation, à l'échéance et à son démarrage. Exactement l'un
+    des deux réussit : retrait réussi ici (True) ⇒ le helper n'exécutera jamais ce job ; échec ⇒ déjà réclamé ;
+  - âge des jobs : champ « at » = horloge du démarrage (CLOCK_BOOTTIME, commune aux processus, insensible aux sauts
+    de l'heure murale) ; schéma v2 seulement ;
+  - démarrage du service : toute séance précédente est morte ; les jobs encore en file (non réclamés) sont retirés
+    avant toute nouvelle séance (sauf « cancel », sans secret), les brouillons aussi ; le travail déjà réclamé par le
+    helper n'est plus dans la file et n'est jamais touché ;
   - progression lue dans museresults (préparation → en attente de Muse → connexion → connectée), échéances bornées.
 QR : adresse de la boîte par son NOM mDNS vérifié seulement (`<nom>.local`, même vérification que la télécommande
 téléphone : il doit se résoudre exactement vers l'adresse LAN liée). Jamais d'adresse IP dans le QR, l'état TV ou une
@@ -34,6 +43,7 @@ donne aucun pouvoir nouveau ; il ne contient que des champs fixes (aucun chemin,
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -54,6 +64,7 @@ BOX_NAME = "box.json"           # état public de la boîte, écrit par le helpe
 BOX_MAX_BYTES = 1024
 MAX_ATTEMPTS = 5                # envois refusés (déchiffrement, forme) avant fermeture de la séance
 JOB_MAX_BYTES = 2048
+JOB_V = 2                       # v2 : âge par l'horloge du démarrage (« at ») ; v1 (« created », heure murale) refusé
 SID_RE = re.compile(r"[A-Za-z0-9_-]{22}")
 JOB_ID_RE = re.compile(r"[a-z0-9]{16}")
 SDK_TOKEN_RE = re.compile(r"mgst_[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]")   # = museadmin.SDK_TOKEN_RE (testé)
@@ -90,7 +101,8 @@ MESSAGES = {
     "bluetooth_not_ready": "Le Bluetooth de la boîte n'est pas prêt. Redémarre la boîte, puis recommence.",
     "muse_unavailable": "Muse n'est pas disponible sur cette boîte : son installation est incomplète.",
     "registry_unavailable": "Les assistants de la boîte sont illisibles : rien n'a été changé.",
-    "bridge_not_started": "Muse est appairée mais ne démarre pas. Redémarre la boîte, puis réessaie.",
+    # pont non démarré SANS appariement conservé (après un appariement réussi, l'issue est « paired_incomplete »)
+    "bridge_not_started": "Muse n'a pas démarré. Recommence depuis Réglages → Gérer les assistants → Muse.",
     # plantage du helper APRÈS l'appariement (pont pas prouvé connecté) : appariement et pilotage gardés
     "paired_incomplete": ("Muse est appairée, mais la connexion doit être reprise : choisis « Reconnecter » dans "
                           "Réglages → Gérer les assistants → Muse."),
@@ -118,6 +130,27 @@ def message_for(code):
 
 def _noop(event, **fields):
     pass
+
+
+def boot_clock():
+    """Horloge du démarrage courant (secondes), la même pour tous les processus de ce démarrage : CLOCK_BOOTTIME
+    (suspension comprise) ; jamais modifiée par un réglage de l'heure murale (NTP, Pi sans RTC). Repli : monotone."""
+    c = getattr(time, "CLOCK_BOOTTIME", None)
+    if c is not None:
+        try:
+            return float(time.clock_gettime(c))
+        except OSError:
+            pass
+    return float(time.monotonic())
+
+
+def job_age(job, now):
+    """Âge d'un job (schéma v2) selon l'horloge du démarrage -> secondes ; ValueError si « at » est absent, non
+    numérique, booléen, non fini ou négatif."""
+    at = job.get("at") if isinstance(job, dict) else None
+    if not isinstance(at, (int, float)) or isinstance(at, bool) or not math.isfinite(at) or at < 0:
+        raise ValueError("bad_age")
+    return now - at
 
 
 def new_job_id():
@@ -154,7 +187,9 @@ def write_job(jobs_dir, tmp_dir, body):
 
 
 def withdraw_job(jobs_dir, jid):
-    """Job encore en file ⇒ retiré (le jeton qu'il porte disparaît avec lui). -> True si retiré."""
+    """Retire un job encore en file (le jeton qu'il porte disparaît avec lui). Point de linéarisation avec le helper
+    root, qui réclame un job en retirant ce même nom avant d'agir : True ⇒ retiré ICI, le helper ne l'exécutera
+    jamais ; False ⇒ déjà réclamé (ou retrait impossible) : l'issue ne peut venir que du helper."""
     if not JOB_ID_RE.fullmatch(jid or ""):
         return False
     try:
@@ -162,6 +197,61 @@ def withdraw_job(jobs_dir, jid):
         return True
     except OSError:
         return False
+
+
+def _job_action(dfd, name):
+    """Action d'un job de la file (lecture bornée sans lien suivi) ou None (illisible, anormal)."""
+    try:
+        fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) |
+                     getattr(os, "O_CLOEXEC", 0), dir_fd=dfd)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not (st.st_mode & 0o170000 == 0o100000) or st.st_nlink != 1 or st.st_size > JOB_MAX_BYTES:
+            return None
+        d = json.loads(os.read(fd, JOB_MAX_BYTES + 1).decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+        return None
+    finally:
+        os.close(fd)
+    return d.get("action") if isinstance(d, dict) and d.get("v") == JOB_V else None
+
+
+def purge_orphans(jobs_dir, tmp_dir):
+    """Démarrage du service : toute séance précédente est morte avec l'ancien processus. Chaque job encore EN FILE
+    n'a pas été réclamé par le helper (réclamer = retirer le nom) : il est retiré ici (même point de linéarisation ;
+    un helper qui le lit au même instant perd la course et n'exécute rien). Seuls les « cancel » (aucun secret) sont
+    gardés : ils ne peuvent que fermer une fenêtre Bluetooth ouverte par un pair DÉJÀ réclamé. Brouillons (…/tmp)
+    retirés. Le travail réclamé (hors de la file, journal root) n'est jamais touché. Dossiers ouverts sans lien
+    suivi ; seules des entrées non-dossiers sont retirées. -> {"withdrawn", "kept", "staged"}."""
+    out = {"withdrawn": 0, "kept": 0, "staged": 0}
+    for d, key in ((jobs_dir, "withdrawn"), (tmp_dir, "staged")):
+        try:
+            dfd = os.open(d, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) |
+                          getattr(os, "O_CLOEXEC", 0))
+        except OSError:
+            continue
+        try:
+            for name in sorted(os.listdir(dfd))[:4096]:
+                try:
+                    st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+                except OSError:
+                    continue
+                if st.st_mode & 0o170000 == 0o040000:
+                    continue                      # jamais de dossier ici (le helper retire les résidus vides)
+                if key == "withdrawn" and re.fullmatch(r"[a-z0-9]{16}\.json", name) and \
+                        _job_action(dfd, name) == "cancel":
+                    out["kept"] += 1
+                    continue
+                try:
+                    os.unlink(name, dir_fd=dfd)
+                    out[key] += 1
+                except OSError:
+                    pass                          # déjà réclamé par le helper (ENOENT) : son issue fera foi
+        finally:
+            os.close(dfd)
+    return out
 
 
 def read_results(results_dir, cap=32):
@@ -236,8 +326,9 @@ class _Session:
 
 
 class MuseSetup:
-    def __init__(self, cfg, mono=time.monotonic, clock=time.time, log=_noop, keygen=None, async_keygen=True):
-        self.cfg, self.mono, self.clock, self.log = cfg, mono, clock, log
+    def __init__(self, cfg, mono=time.monotonic, clock=time.time, log=_noop, keygen=None, async_keygen=True,
+                 boot=boot_clock):
+        self.cfg, self.mono, self.clock, self.log, self.boot = cfg, mono, clock, log, boot
         self.keygen = keygen or (lambda: museseal.PrivateKey())
         self.async_keygen = async_keygen
         self.lock = threading.RLock()
@@ -251,6 +342,12 @@ class MuseSetup:
         self.reconcile_cancel = False      # … après une annulation demandée (sinon : délai dépassé)
         self.box = None                    # état public de la boîte (helper root), relu à chaque tick
         self.probe_at = -1e18
+        # démarrage : aucun job d'une séance morte ne peut s'exécuter sans suivi (avant toute nouvelle séance)
+        self.log("muse_setup_purge", **purge_orphans(cfg.muse_jobs_dir, cfg.muse_jobs_tmp))
+
+    def _stamp(self):
+        """Horodatage d'un job : horloge du démarrage (jamais l'heure murale, qui peut sauter)."""
+        return round(self.boot(), 3)
 
     # -- petits outils
     def _bump(self):
@@ -374,8 +471,8 @@ class MuseSetup:
                 s.cancel_requested = True
                 try:
                     s.cancel_job = write_job(self.cfg.muse_jobs_dir, self.cfg.muse_jobs_tmp,
-                                             {"v": 1, "id": new_job_id(), "action": "cancel", "target": s.job,
-                                              "created": round(self.clock(), 3)})
+                                             {"v": JOB_V, "id": new_job_id(), "action": "cancel",
+                                              "target": s.job, "at": self._stamp()})
                 except (OSError, ValueError) as e:
                     self.log("muse_setup_cancel_error", error=type(e).__name__)
                 s.deadline = min(s.deadline or 1e18, self.mono() + CANCEL_WAIT_S)
@@ -410,7 +507,7 @@ class MuseSetup:
             self.probe_at = self.mono()
             try:
                 write_job(self.cfg.muse_jobs_dir, self.cfg.muse_jobs_tmp,
-                          {"v": 1, "id": new_job_id(), "action": "probe", "created": round(self.clock(), 3)})
+                          {"v": JOB_V, "id": new_job_id(), "action": "probe", "at": self._stamp()})
             except (OSError, ValueError) as e:
                 self.log("muse_probe_error", error=type(e).__name__)
                 return False
@@ -445,8 +542,8 @@ class MuseSetup:
                 return False, "busy"
             try:
                 jid = write_job(self.cfg.muse_jobs_dir, self.cfg.muse_jobs_tmp,
-                                {"v": 1, "id": new_job_id(), "action": "unpair", "confirm": "tv",
-                                 "created": round(self.clock(), 3)})
+                                {"v": JOB_V, "id": new_job_id(), "action": "unpair", "confirm": "tv",
+                                 "at": self._stamp()})
             except (OSError, ValueError) as e:
                 self.log("muse_disconnect_error", error=type(e).__name__)
                 return False, "unavailable"
@@ -523,7 +620,7 @@ class MuseSetup:
             jid = new_job_id()
             try:
                 write_job(self.cfg.muse_jobs_dir, self.cfg.muse_jobs_tmp,
-                          {"v": 1, "id": jid, "action": "pair", "consent": "tv", "created": round(self.clock(), 3),
+                          {"v": JOB_V, "id": jid, "action": "pair", "consent": "tv", "at": self._stamp(),
                            "token": tok})
             except (OSError, ValueError) as e:
                 self.log("muse_setup_job_error", error=type(e).__name__)

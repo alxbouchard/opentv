@@ -865,8 +865,14 @@ class Admin:
             self._unlink(dfd, musebridge.PAIR_STATUS_NAME)
 
             def failed(error, code, **extra):
-                """Échec : fenêtre fermée, identité tout juste émise révoquée et son fichier client retiré."""
+                """Échec : fenêtre fermée (arrêt attendu : plus aucun processus d'appariement ne peut écrire), PUIS
+                appariement relu. Absent ⇒ identité tout juste émise révoquée et son fichier client retiré. Présent
+                (l'iPhone a terminé pendant l'annulation ou l'échéance) ⇒ RIEN révoqué : appariement, identité et
+                jeton gardés (paired=True ; reprise sans Bluetooth par un nouveau `muse pair`)."""
                 self.systemctl("stop", PAIR_UNIT)
+                if self.entry(dfd, "pairing.json") == "present":
+                    return dict(base, ok=False, error=error, pair_window="closed", paired=True,
+                                identity_kept="paired", **extra), code
                 return dict(base, ok=False, error=error, pair_window="closed", identity=self.discard_identity(pw),
                             **extra), code
             if not self.systemctl("start", "--no-block", PAIR_UNIT):
@@ -941,7 +947,10 @@ class Admin:
         return out, 0 if out["ok"] else 1
 
     # -- autorisation explicite du pilotage (root, décision d'Alex sur la boîte)
-    def _control_change(self, grant, yes):
+    def _control_change(self, grant, yes, intent=None):
+        """`intent` (helper TV) : appelé APRÈS la lecture de l'état et AVANT l'écriture avec {before, after, fp} — fp =
+        empreinte de l'état exact lu, sur laquelle porte l'écriture compare-and-set (un état différent ⇒ « stale »,
+        rien écrit). Un échec de `intent` (journal d'intention impossible) ⇒ « journal_failed », rien écrit."""
         if self.euid() != 0:
             return {"ok": False, "error": "root_required",
                     "note": "sudo /opt/opentv/bin/opentv-pi muse %s" % ("authorize-control --yes" if grant else
@@ -965,6 +974,11 @@ class Admin:
                         note="Autorise Muse à proposer des films à l'écran, naviguer dans OpenTV et lancer un film du "
                              "catalogue accepté par le lecteur officiel quand tu le lui demandes. Relancer avec --yes "
                              "pour confirmer ; retrait : opentv-pi muse revoke-control (ou Gérer les assistants)."), 2
+        if intent is not None:
+            try:
+                intent({"before": sorted(before), "after": sorted(after), "fp": fp})
+            except (OSError, ValueError, TypeError):
+                return dict(plan, ok=False, error="journal_failed", changed=False), 2
         try:
             changed = reg.apply_policy_changes({LEGACY_ID: after}, KNOWN_AGENTS, fp, **self.service_ids())
         except ValueError as e:
@@ -980,8 +994,8 @@ class Admin:
             out["bridge"] = "refuse de s'enregistrer tant que le pilotage n'est pas réautorisé"
         return out, 0
 
-    def authorize_control(self, yes=False):
-        return self._control_change(True, yes)
+    def authorize_control(self, yes=False, intent=None):
+        return self._control_change(True, yes, intent=intent)
 
     def revoke_control(self):
         return self._control_change(False, True)

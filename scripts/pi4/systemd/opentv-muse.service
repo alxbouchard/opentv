@@ -39,6 +39,7 @@ ReadWritePaths=/var/lib/opentv-muse /run/opentv-muse
 InaccessiblePaths=-/var/lib/opentv -/var/lib/opentv-kiosk -/var/lib/opentv-install
 InaccessiblePaths=-/etc/opentv/tmdb -/etc/opentv/source.env -/etc/opentv/playback-promoted
 InaccessiblePaths=-/etc/NetworkManager/system-connections -/run/opentv-player -/run/opentv-player-keys -/run/opentv-cec
+InaccessiblePaths=-/run/opentv-musejobs
 InaccessiblePaths=-/run/dbus
 ProtectHome=yes
 PrivateTmp=yes

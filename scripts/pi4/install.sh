@@ -1010,6 +1010,17 @@ fi
 # opentv-muse.service n'est activé que par un appariement humain réussi (sudo opentv-pi muse pair) ; une mise à jour
 # ne fait que le redémarrer s'il tournait déjà (try-restart). opentv-muse-pair.service n'a pas de section [Install].
 post systemctl try-restart opentv-muse.service
+# Connexion de Muse depuis la TV : les jobs (jeton SDK) vivent désormais sur tmpfs (/run/opentv-musejobs, tmpfiles
+# ci-dessus). Ancien emplacement sur la carte SD (versions précédentes, avant le redémarrage du service ci-dessus) : un
+# job encore en file peut porter un jeton — retiré (fichiers réguliers seulement, jamais un lien suivi), puis les
+# dossiers vides supprimés ; le nouveau helper ne lit jamais l'ancien emplacement.
+for d in /var/lib/opentv/musejobs /var/lib/opentv/musejobs-tmp; do
+  dd="$(dest "$d")"
+  if [ -d "$dd" ] && [ ! -L "$dd" ]; then
+    act find "$dd" -mindepth 1 -maxdepth 1 -type f -delete || say "ATTENTION Muse : $d non vidé"
+    act rmdir -- "$dd" 2>/dev/null || say "ATTENTION Muse : $d conservé (non vide)"
+  fi
+done
 # Service musegadget d'origine (system.run, file.read, file.write, device.health) : masqué tant qu'aucune unité
 # étrangère n'existe (lien /dev/null noté, retiré par uninstall.sh) ; s'il est déjà installé, le pont refuse de
 # s'apparier (opentv-pi muse status/pair le signalent) et rien d'étranger n'est modifié.

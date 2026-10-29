@@ -15,20 +15,30 @@ faire que quatre choses, à champs fixes, sans chemin, commande, argument ni opt
                  si l'identité muse-device est étrangère ;
   - « probe »  : aucune action ; republie l'état public de la boîte (box.json : owned/foreign, sans secret), comme
                  après toute activation utile.
-Contrôles de chaque job (dossier du service ouvert sans suivre de lien, propriétaire opentv, 0700) : fichier régulier,
-un seul lien, propriétaire opentv, mode exactement 0600, ≤ 2 Kio, JSON strict à clés exactes, âge borné ; il est
-SUPPRIMÉ avant toute action (consommation unique) ; tout résidu (lien, FIFO, dossier, nom invalide) est retiré sans rien
-exécuter. Le jeton n'existe que dans ce processus, le temps de le passer à `muse pair` par un flux mémoire.
-Reprise après plantage : un journal root (/var/lib/opentv-muse-setup/inflight.json, 0600) est écrit AVANT l'autorisation ;
-au démarrage suivant, une séance interrompue est nettoyée : fenêtre Bluetooth arrêtée, identité émise sans appariement
-révoquée (la nôtre seulement), jeton local écrit par cette séance retiré (même inode, aucun appariement), autorisation
-rendue si elle vient de cette séance et n'a pas changé depuis. Issue publiée VRAIE (jamais « rien n'a changé » sans
-preuve) : appariement présent ⇒ « paired_incomplete » (appariement, identité, jeton et pilotage gardés ; pont pas prouvé
-connecté : à reprendre par « Reconnecter », ou « Déconnecter Muse ») ; état d'avant entièrement rendu ⇒ « interrupted » ;
-sinon ⇒ « recovery_incomplete ». Une annulation en direct suit la même règle.
+Contrôles de chaque job (file /run/opentv-musejobs/queue sur tmpfs, ouverte sans suivre de lien, propriétaire opentv,
+0700) : fichier régulier, un seul lien, propriétaire opentv, mode exactement 0600, ≤ 2 Kio, JSON strict à clés exactes
+(schéma v2), âge borné selon l'horloge du démarrage (« at », CLOCK_BOOTTIME : un saut de l'heure murale n'expire ni ne
+ranime aucun job). RÉCLAMATION = point de linéarisation avec le service : après lecture et contrôles, le nom exact est
+retiré AVEC SUCCÈS avant toute analyse ou action. ENOENT ⇒ le service l'a retiré (annulation, échéance, redémarrage) :
+rien exécuté, aucune issue ; nom désignant un autre fichier ou autre échec ⇒ rien exécuté (fail-closed). Tout résidu
+(lien, FIFO, dossier, nom invalide) est retiré sans rien exécuter. Le jeton n'existe que dans ce processus, le temps de
+le passer à `muse pair` par un flux mémoire.
+Reprise après plantage : un journal root (/var/lib/opentv-muse-setup/inflight.json, 0600, jamais de jeton) est écrit
+avant toute action ; l'INTENTION d'autoriser le pilotage et l'instantané exact d'avant (plafond « muse » + empreinte de
+l'état lu, sur laquelle porte l'écriture compare-and-set) y sont écrits (fsync) AVANT l'écriture de l'autorisation.
+Au démarrage suivant, une séance interrompue est nettoyée : fenêtre Bluetooth arrêtée, identité émise sans appariement
+révoquée (la nôtre seulement), jeton local écrit par cette séance retiré (même inode, aucun appariement) ; autorisation :
+plafond égal à l'instantané ⇒ jamais écrite (ou déjà rendue) ; égal au pilotage ⇒ rendue par compare-and-set (une
+écriture concurrente fait échouer la CAS : rien écrasé) ; autre valeur ⇒ décision du propriétaire, gardée ; registre
+illisible ⇒ rien écrit. Issue publiée VRAIE (jamais « rien n'a changé » sans preuve) : appariement présent ⇒
+« paired_incomplete » (appariement, identité, jeton et pilotage gardés ; pont pas prouvé connecté : à reprendre par
+« Reconnecter », sans Bluetooth, ou « Déconnecter Muse ») ; état d'avant entièrement rendu ⇒ « interrupted » ; sinon ⇒
+« recovery_incomplete ». Une annulation en direct et un pont non démarré après un appariement réussi suivent la même
+règle (identité jamais révoquée une fois l'appariement présent).
 """
 import io
 import json
+import math
 import os
 import re
 import stat
@@ -40,15 +50,18 @@ from . import fsutil, museadmin, musesetup
 NAME_RE = re.compile(r"([a-z0-9]{16})\.json")
 JOURNAL_DIR = "/var/lib/opentv-muse-setup"
 JOURNAL = "inflight.json"
+JOURNAL_V = 2                   # v2 : intention d'autorisation + instantané exact écrits AVANT l'écriture
+AGE_SKEW_S = 1.0                # même horloge du démarrage, lue par deux processus (arrondi à la ms) : tolérance
+NO_RESULT = ("gone", "claim_failed", "replaced")   # job non réclamé : l'issue appartient au service, jamais au helper
 PAIR_PICKUP_MAX_S = 120.0
 CANCEL_MAX_AGE_S = musesetup.PAIR_BUDGET_S + 60.0
 UNPAIR_MAX_AGE_S = 120.0
 MAX_JOBS = 16
 PROBE_MAX_AGE_S = 120.0
-KEYS = {"pair": {"v", "id", "action", "consent", "created", "token"},
-        "cancel": {"v", "id", "action", "target", "created"},
-        "unpair": {"v", "id", "action", "confirm", "created"},
-        "probe": {"v", "id", "action", "created"}}
+KEYS = {"pair": {"v", "id", "action", "consent", "at", "token"},
+        "cancel": {"v", "id", "action", "target", "at"},
+        "unpair": {"v", "id", "action", "confirm", "at"},
+        "probe": {"v", "id", "action", "at"}}
 # État public de la boîte (aucun secret) publié pour la TV dans le dossier des issues : la TV propose
 # « Déconnecter Muse » seulement quand la boîte possède un appariement, un jeton local ou SA propre identité
 BOX_NAME = musesetup.BOX_NAME
@@ -148,10 +161,19 @@ def _refuse_prompt(*_a, **_k):
     raise ValueError("token_input_required")
 
 
+def _no_constant(_name):
+    raise ValueError("non_finite")   # NaN / Infinity : jamais acceptés dans un job
+
+
+def _scopes_list(x):
+    return isinstance(x, list) and len(x) <= 16 and all(isinstance(s, str) and len(s) <= 32 for s in x)
+
+
 class MuseHelper:
     def __init__(self, cfg, owner_uid, admin_factory=None, clock=time.time, sleep=time.sleep, log=_stderr_log,
-                 chown=True, journal_dir=JOURNAL_DIR, journal_uid=0):
+                 chown=True, journal_dir=JOURNAL_DIR, journal_uid=0, boot=musesetup.boot_clock):
         self.cfg, self.owner_uid, self.clock, self.real_sleep, self.log = cfg, owner_uid, clock, sleep, log
+        self.boot = boot   # âge des jobs : horloge du démarrage (jamais l'heure murale)
         self.chown, self.journal_dir, self.journal_uid = chown, journal_dir, journal_uid
         self.admin_factory = admin_factory or (lambda **kw: WizardAdmin(cfg, **kw))
         self.queue = []          # jobs lus pendant un appariement (traités ensuite)
@@ -184,8 +206,32 @@ class MuseHelper:
         except OSError as e:
             self.log("muse_job_junk", removed=False, error=type(e).__name__)
 
+    def _claim(self, dfd, name, st):
+        """Réclamation = point de linéarisation avec le service (musesetup.withdraw_job / purge_orphans retirent ce
+        même nom) : retrait RÉUSSI du nom exact, relatif au dossier. -> "claimed" | "gone" (ENOENT : le service a
+        gagné, rien ne doit être exécuté) | "replaced" (le nom désigne un autre fichier que celui lu : laissé, rien
+        exécuté) | "claim_failed" (tout autre échec : fail-closed, rien exécuté)."""
+        if st is not None:
+            try:
+                cur = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+            except FileNotFoundError:
+                return "gone"
+            except OSError:
+                return "claim_failed"
+            if (cur.st_dev, cur.st_ino) != (st.st_dev, st.st_ino):
+                return "replaced"
+        try:
+            os.unlink(name, dir_fd=dfd)
+        except FileNotFoundError:
+            return "gone"
+        except OSError:
+            return "claim_failed"
+        return "claimed"
+
     def _take(self, dfd, name):
-        """-> (dict | None, erreur | None) ; le fichier est TOUJOURS retiré avant toute action."""
+        """-> (dict | None, erreur | None). Ordre strict : fichier ouvert sans lien suivi et contrôlé (fstat), contenu
+        lu (borné), PUIS réclamé (_claim : retrait réussi du nom exact), PUIS seulement analysé ; aucune action n'est
+        possible sur un job non réclamé (« gone » / « replaced » / « claim_failed » : rien exécuté, aucune issue)."""
         try:
             st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
         except FileNotFoundError:
@@ -193,14 +239,16 @@ class MuseHelper:
         if not stat.S_ISREG(st.st_mode):
             self._discard(dfd, name, st)
             return None, "bad_type"
-        raw, err = None, None
+        raw, err, opened = None, None, None
         try:
             fd = os.open(name, os.O_RDONLY | fsutil.O_NOFOLLOW | fsutil.O_NONBLOCK | fsutil.O_CLOEXEC, dir_fd=dfd)
+        except FileNotFoundError:
+            return None, "gone"
         except OSError:
             err = "unreadable"
         else:
             try:
-                f = os.fstat(fd)
+                f = opened = os.fstat(fd)
                 if not stat.S_ISREG(f.st_mode):
                     err = "bad_type"
                 elif f.st_nlink != 1:
@@ -217,14 +265,14 @@ class MuseHelper:
                         raw, err = None, "too_big"
             finally:
                 os.close(fd)
-        try:
-            os.unlink(name, dir_fd=dfd)
-        except OSError:
-            pass
+        claim = self._claim(dfd, name, opened)
+        if claim != "claimed":
+            raw = None
+            return None, claim
         if err:
             return None, err
         try:
-            job = json.loads(raw.decode("utf-8"))
+            job = json.loads(raw.decode("utf-8"), parse_constant=_no_constant)
         except (ValueError, UnicodeDecodeError, RecursionError):
             return None, "bad_json"
         finally:
@@ -233,18 +281,18 @@ class MuseHelper:
 
     def _check(self, job, jid):
         """Schéma strict (clés exactes par action, âge borné). -> job validé ; ValueError(code) sinon."""
-        if not isinstance(job, dict) or job.get("v") != 1 or job.get("id") != jid:
-            raise ValueError("bad_job")
+        if not isinstance(job, dict) or job.get("v") != musesetup.JOB_V or job.get("id") != jid:
+            raise ValueError("bad_job")          # ancien schéma (v1, heure murale) compris
         action = job.get("action")
         if action not in KEYS or set(job) != KEYS[action]:
             raise ValueError("bad_fields")
-        created = job.get("created")
-        if not isinstance(created, (int, float)) or isinstance(created, bool):
-            raise ValueError("bad_job")
-        age = self.clock() - created
+        try:
+            age = musesetup.job_age(job, self.boot())
+        except ValueError:
+            raise ValueError("bad_job") from None
         limit = {"pair": PAIR_PICKUP_MAX_S, "cancel": CANCEL_MAX_AGE_S, "unpair": UNPAIR_MAX_AGE_S,
                  "probe": PROBE_MAX_AGE_S}[action]
-        if not -60 <= age <= limit:
+        if not math.isfinite(age) or not -AGE_SKEW_S <= age <= limit:
             raise ValueError("expired")
         if action == "pair":
             if job["consent"] != "tv":
@@ -292,7 +340,7 @@ class MuseHelper:
                 if err is not None:
                     job = None
                     self.log("muse_job_refused", id=jid, error=err)
-                    if err not in ("gone",):
+                    if err not in NO_RESULT:   # job réclamé puis refusé : issue « refused » (rien exécuté)
                         self._result(jid, "done", ok=False, result="refused")
                     continue
                 if job["action"] == "cancel":
@@ -366,7 +414,7 @@ class MuseHelper:
                 return {"v": 1, "id": None, "changed": False}, "journal_unsafe"
             finally:
                 os.close(fd)
-            if not isinstance(d, dict) or d.get("v") != 1:
+            if not isinstance(d, dict) or d.get("v") not in (1, JOURNAL_V):
                 return {"v": 1, "id": None, "changed": False}, "journal_unsafe"
             return d, None
         finally:
@@ -384,23 +432,76 @@ class MuseHelper:
         finally:
             os.close(dfd)
 
-    # -- autorisation du pilotage et son retour arrière (compare-and-set)
-    def _rollback_grant(self, adm, before):
-        """Rend la ligne « muse » à `before` SEULEMENT si elle vaut encore exactement ce que la séance a écrit
-        (pilotage) : une décision du propriétaire prise entre-temps n'est jamais écrasée."""
+    # -- autorisation du pilotage : intention journalisée AVANT l'écriture, retour arrière compare-and-set
+    def _settle_grant(self, adm, before):
+        """Ligne « muse » après une écriture d'autorisation dont l'intention (instantané `before`) est journalisée.
+        -> "unchanged" : vaut `before` (écriture jamais faite, ou déjà rendue) — rien écrit ;
+           "restored"  : valait exactement le pilotage (ce que la séance écrit) — rendue à `before` par une écriture
+                         compare-and-set sur l'état relu (une écriture concurrente ⇒ CAS perdue ⇒ "kept") ;
+           "kept"      : autre valeur (décision du propriétaire) ou CAS perdue — jamais écrasée ;
+           "unreadable": registre illisible/partiel (ou intention illisible) — rien écrit ;
+           "error"     : écriture impossible (verrou occupé, disque)."""
         from .app import AGENT_LEVELS, KNOWN_AGENTS
-        if not isinstance(before, list) or not all(isinstance(x, str) for x in before):
-            return "skipped"
+        if not _scopes_list(before):
+            return "unreadable"
         try:
             reg = adm.registry()
             view, fp, corrupt = reg.snapshot(KNOWN_AGENTS)
-            if corrupt or sorted(view["muse"]["allowed"]) != sorted(AGENT_LEVELS["control"]):
+            if corrupt:
+                return "unreadable"
+            cur = sorted(view["muse"]["allowed"])
+            if cur == sorted(before):
+                return "unchanged"
+            if cur != sorted(AGENT_LEVELS["control"]):
                 return "kept"
             reg.apply_policy_changes({"muse": sorted(before)}, KNOWN_AGENTS, fp, **adm.service_ids())
             return "restored"
-        except (OSError, ValueError, KeyError) as e:
+        except ValueError as e:
+            if str(e) == "stale":
+                return "kept"
+            self.log("muse_grant_rollback_error", error="ValueError")
+            return "unreadable"
+        except (OSError, KeyError, TypeError) as e:
             self.log("muse_grant_rollback_error", error=type(e).__name__)
             return "error"
+
+    def _grant_unknown(self, adm):
+        """Journal sans intention exploitable (ancienne version : « changed » écrit APRÈS l'autorisation ; journal
+        illisible) : une autorisation a pu être écrite sans trace. -> "unknown" si le pilotage est présent (jamais
+        « rien n'a changé »), "unchanged" sinon, "unreadable" si le registre l'est."""
+        from .app import KNOWN_AGENTS
+        try:
+            view, _fp, corrupt = adm.registry().snapshot(KNOWN_AGENTS)
+        except (OSError, ValueError, KeyError, TypeError):
+            return "unreadable"
+        if corrupt:
+            return "unreadable"
+        return "unknown" if "control" in view["muse"]["allowed"] else "unchanged"
+
+    @staticmethod
+    def _journal_grant(j):
+        """-> (intention {"before": [...]} | None, indécidable: bool)."""
+        if j.get("v") == JOURNAL_V:
+            g = j.get("grant")
+            if g is None:
+                return None, False
+            if isinstance(g, dict) and _scopes_list(g.get("before")):
+                return {"before": list(g["before"])}, False
+            return None, True
+        if j.get("changed") is True and _scopes_list(j.get("before")):   # v1 : écriture faite et notée
+            return {"before": list(j["before"])}, False
+        return None, True                                                 # v1 « changed » faux : trou possible
+
+    def _journal_intent(self, jid, plan):
+        """Intention d'autoriser + instantané exact (plafond « muse » lu et empreinte de l'état sur laquelle porte la
+        CAS), ajoutés au journal de la séance et rendus durables (fsync) AVANT l'écriture de l'autorisation. Tout
+        échec lève : l'autorisation n'est alors PAS écrite (« journal_failed »)."""
+        j, problem = self._journal_read()
+        if problem is not None or not isinstance(j, dict) or j.get("id") != jid:
+            raise OSError("journal_unavailable")
+        gi = {"before": sorted(plan["before"]), "fp": str(plan["fp"])}
+        self._journal_write(dict(j, grant=gi, at=round(self.clock(), 3)))
+        return gi
 
     @staticmethod
     def _state_entries(adm, pw):
@@ -450,6 +551,7 @@ class MuseHelper:
                                  err=io.StringIO())
         adm.systemctl("stop", museadmin.PAIR_UNIT)
         report = {"identity": None, "grant": None, "token": None}
+        gi, undecidable = self._journal_grant(j)
         pw, _why = adm.muse_account()
         ent = self._state_entries(adm, pw)
         paired = None if ent["pairing"] is None else ent["pairing"] == "present"
@@ -460,8 +562,11 @@ class MuseHelper:
                     all(isinstance(x, int) and not isinstance(x, bool) for x in created):
                 # jeton écrit par cette séance (aucun avant) : retiré s'il s'agit encore du même fichier
                 report["token"] = adm._rollback_created_token((pw, created[0], created[1]))
-        if j.get("changed") and paired is not True:
-            report["grant"] = self._rollback_grant(adm, j.get("before"))
+        if paired is not True:   # apparié : pilotage gardé (« paired_incomplete »)
+            if gi is not None:
+                report["grant"] = self._settle_grant(adm, gi["before"])
+            elif undecidable:
+                report["grant"] = self._grant_unknown(adm)
         if paired is True:
             code = "paired_incomplete"
         else:
@@ -470,7 +575,7 @@ class MuseHelper:
                                                            after["sdk_token"] == "absent")
             undone = paired is False and ent["pairing"] == "absent" and after["pairing"] == "absent" and \
                 self._identity_undone(report["identity"]) and token_ok and \
-                (not j.get("changed") or report["grant"] == "restored")
+                report["grant"] in (None, "unchanged", "restored")
             code = "interrupted" if undone else "recovery_incomplete"
         jid = j.get("id")
         if isinstance(jid, str) and musesetup.JOB_ID_RE.fullmatch(jid):
@@ -512,7 +617,7 @@ class MuseHelper:
         paired_before = self._paired_now(pre)
         # présence d'un jeton local AVANT la séance (absent | same ; aucun secret) : la reprise ne dira « rien n'a
         # changé » qu'après avoir retiré le jeton que la séance a écrit
-        jbase = {"v": 1, "id": jid, "changed": False, "before": None,
+        jbase = {"v": JOURNAL_V, "id": jid, "grant": None,
                  "token_before": match if match in ("absent", "same") else None}
         try:
             self._journal_write(dict(jbase, at=round(self.clock(), 3)))
@@ -525,17 +630,19 @@ class MuseHelper:
                                  progress=lambda phase, **x: self._result(jid, phase, **x),
                                  token_created=lambda dev, ino: self._journal_token(jid, dev, ino))
         self.admin = adm
-        changed, before, code, registered, res, called = False, None, "helper_error", None, None, False
+        gstate = {"intent": None}
+
+        def intent(plan):   # appelé par authorize_control entre sa lecture et son écriture compare-and-set
+            gstate["intent"] = self._journal_intent(jid, plan)
+        code, registered, res, called = "helper_error", None, None, False
         try:
             self._result(jid, "preparing")
-            grant, gcode = adm.authorize_control(yes=True)
+            grant, gcode = adm.authorize_control(yes=True, intent=intent)
             if gcode != 0 or not grant.get("ok"):
-                code = "registry_unavailable" if str(grant.get("error", "")).startswith("registry") or \
-                    grant.get("error") == "stale" else "muse_unavailable"
+                err = str(grant.get("error", ""))
+                code = "registry_unavailable" if err.startswith("registry") or err == "stale" else \
+                    "helper_error" if err == "journal_failed" else "muse_unavailable"
             else:
-                changed, before = bool(grant.get("changed")), grant.get("policy_before")
-                if changed:
-                    self._journal_write(dict(jbase, changed=True, before=before, at=round(self.clock(), 3)))
                 self.poll()
                 if jid in self.cancel_for:
                     code = "interrupted"
@@ -552,15 +659,22 @@ class MuseHelper:
             stdin.close()
             self.admin = None
         ok = code == "connected"
-        if code == "interrupted" and paired_before is not True:
+        if not ok:
             now = self._paired_now(adm)
-            if now is not False:
+            if called and now is True and (paired_before is not True or code == "bridge_not_started"):
+                # appariement présent (fait par cette séance, ou pont non démarré après lui) : jamais révoqué ni
+                # « annulé » ; identité, jeton et pilotage gardés — « Reconnecter » reprend sans Bluetooth
+                code = "paired_incomplete"
+            elif code == "interrupted" and paired_before is not True and now is not False:
                 # annulation lue alors que l'iPhone venait d'apparier (ou état illisible) : jamais « annulé »
                 code = "paired_incomplete" if now else "recovery_incomplete"
-        rolled = None
-        if not ok and changed and code != "paired_incomplete":   # apparié : pilotage gardé (comme la reprise)
-            rolled = self._rollback_grant(adm, before)
-        if code == "interrupted" and not self._undone_live(res, changed, rolled, called):
+        gi, rolled = gstate["intent"], None
+        if not ok and code != "paired_incomplete" and gi is not None:
+            # autorisation tentée (intention journalisée) : rendue par compare-and-set, jamais écrasée
+            rolled = self._settle_grant(adm, gi["before"])
+            if rolled in ("unreadable", "error"):
+                code = "recovery_incomplete"     # pilotage peut-être encore accordé : jamais « rien n'a changé »
+        if code == "interrupted" and not self._undone_live(res, gi, rolled, called):
             code = "recovery_incomplete"
         self._journal_clear()
         self.current = None
@@ -577,10 +691,10 @@ class MuseHelper:
         p = self._state_entries(adm, pw)["pairing"]
         return None if p not in ("absent", "present") else p == "present"
 
-    def _undone_live(self, res, changed, rolled, called):
+    def _undone_live(self, res, gi, rolled, called):
         """Annulation en direct : état d'avant rendu ? (identité tout juste émise révoquée, jeton écrit retiré,
-        autorisation rendue). Annulée avant `muse pair` : seule l'autorisation compte."""
-        if changed and rolled != "restored":
+        autorisation rendue ou jamais écrite). Annulée avant `muse pair` : seule l'autorisation compte."""
+        if gi is not None and rolled not in ("unchanged", "restored"):
             return False
         if not called:
             return True

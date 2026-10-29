@@ -506,9 +506,10 @@ host systemctl stop opentv-catalogue-refresh.timer opentv-catalogue-ratings-retr
 host systemctl stop opentv-catalogue-refresh.service
 host systemctl stop opentv-catalogue-ratings.service opentv-catalogue-ratings-retry.service
 # connexion de Muse depuis la TV : plus aucun job pris (surveillance puis helper arrêtés, fenêtre Bluetooth avec eux) ;
-# un job encore en file peut porter un jeton SDK : retiré (fichiers réguliers seulement, jamais un lien suivi)
+# un job encore en file peut porter un jeton SDK : retiré (fichiers réguliers seulement, jamais un lien suivi) — file
+# et brouillons sur tmpfs (/run/opentv-musejobs) et ancien emplacement sur la carte SD (versions précédentes)
 host systemctl stop opentv-muse-setup.path opentv-muse-setup.service
-for d in /var/lib/opentv/musejobs /var/lib/opentv/musejobs-tmp; do
+for d in /run/opentv-musejobs/queue /run/opentv-musejobs/tmp /var/lib/opentv/musejobs /var/lib/opentv/musejobs-tmp; do
   dd="$(dest "$d")"
   if [ -d "$dd" ] && [ ! -L "$dd" ]; then act find "$dd" -mindepth 1 -maxdepth 1 -type f -delete; fi
 done
@@ -520,6 +521,18 @@ host systemctl disable --now opentv-player.service opentv-player-keys.service op
   opentv-catalogue-ratings-retry.service opentv-plymouth-failsafe.timer \
   opentv-plymouth-failsafe.service opentv-plymouth-deactivate.service opentv-plymouth-quit.service \
   opentv-muse.service opentv-muse-pair.service opentv-muse-setup.path opentv-muse-setup.service
+# service arrêté : plus aucun écrivain de jobs Muse — dernier passage (job déposé entre-temps), puis dossiers tmpfs
+# retirés (vides seulement ; tmpfiles ne les recrée plus une fois sa configuration retirée)
+for d in /run/opentv-musejobs/queue /run/opentv-musejobs/tmp; do
+  dd="$(dest "$d")"
+  if [ -d "$dd" ] && [ ! -L "$dd" ]; then
+    act find "$dd" -mindepth 1 -maxdepth 1 -type f -delete
+    act rmdir -- "$dd" 2>/dev/null || true
+  fi
+done
+if [ -d "$(dest /run/opentv-musejobs)" ] && [ ! -L "$(dest /run/opentv-musejobs)" ]; then
+  act rmdir -- "$(dest /run/opentv-musejobs)" 2>/dev/null || true
+fi
 # « Regarder » : la promotion terrain ne survit jamais à une désinstallation (même sans --purge) — une réinstallation
 # exige une nouvelle validation HDMI ; la source approuvée (source.env, configuration locale) reste jusqu'à --purge
 PROMO="$(dest /etc/opentv/playback-promoted)"

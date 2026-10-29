@@ -276,7 +276,8 @@ class TestConsentAndSession(unittest.TestCase):
         st = os.lstat(p)
         self.assertEqual((stat.S_IMODE(st.st_mode), st.st_nlink), (0o600, 1))
         j = read_job(a, names[0])
-        self.assertEqual(set(j), {"v", "id", "action", "consent", "created", "token"})
+        self.assertEqual(set(j), {"v", "id", "action", "consent", "at", "token"})
+        self.assertEqual(j["v"], musesetup.JOB_V)
         self.assertEqual((j["action"], j["consent"], j["token"]), ("pair", "tv", TOKEN))
         self.assertEqual(os.listdir(a.cfg.muse_jobs_tmp), [])
         # double envoi (double toucher, rechargement) : jamais un second job ni un nouvel essai
@@ -439,7 +440,7 @@ class TestProgressCancelAndDisconnect(unittest.TestCase):
         self.assertEqual(len(names), 1)
         j = read_job(a, names[0])
         self.assertEqual((j["action"], j["target"]), ("cancel", jid))
-        self.assertEqual(set(j), {"v", "id", "action", "target", "created"})
+        self.assertEqual(set(j), {"v", "id", "action", "target", "at"})
         self.assertTrue(a.muse_view()["cancelling"])
         self.assertTrue(a.muse_view()["active"])                    # rien d'annoncé avant l'issue du helper
         tv(s, "/api/tv/muse/cancel", {})
@@ -537,7 +538,7 @@ class TestProgressCancelAndDisconnect(unittest.TestCase):
         code, _, out = tv(s, "/api/tv/muse/disconnect", {"confirm": True})
         self.assertEqual(code, 200, out)
         j = read_job(a, jobs(a)[0])
-        self.assertEqual(set(j), {"v", "id", "action", "confirm", "created"})
+        self.assertEqual(set(j), {"v", "id", "action", "confirm", "at"})
         self.assertEqual((j["action"], j["confirm"]), ("unpair", "tv"))
         self.assertEqual(tv(s, "/api/tv/muse/disconnect", {"confirm": True})[0], 409)   # une à la fois
         self.assertEqual(tv(s, "/api/tv/muse/start", {"consent": True})[0], 409)        # jamais pendant
@@ -842,7 +843,7 @@ class TestDisconnectNeedsBoxOwnership(unittest.TestCase):
         names = jobs(a)
         self.assertEqual(len(names), 1)
         j = read_job(a, names[0])
-        self.assertEqual((set(j), j["action"]), ({"v", "id", "action", "created"}, "probe"))
+        self.assertEqual((set(j), j["action"]), ({"v", "id", "action", "at"}, "probe"))
         for _ in range(3):
             tv(s, "/api/tv/muse/probe", {})
         self.assertEqual(len(jobs(a)), 1)                                # au plus une par PROBE_MIN_S
@@ -955,25 +956,27 @@ class HelperBase(unittest.TestCase):
     def setUp(self):
         d = tempfile.mkdtemp(prefix="otvmh", dir="/tmp")
         self.addCleanup(shutil.rmtree, d, True)
-        self.cfg = config.Config({"OPENTV_STATE_DIR": os.path.join(d, "state")})
-        for p in (self.cfg.state_dir, self.cfg.muse_jobs_dir, self.cfg.muse_jobs_tmp, self.cfg.muse_results_dir):
+        self.cfg = config.Config({"OPENTV_STATE_DIR": os.path.join(d, "state"), "OPENTV_RUN_DIR": os.path.join(d, "run")})
+        for p in (self.cfg.state_dir, self.cfg.muse_run_dir, self.cfg.muse_jobs_dir, self.cfg.muse_jobs_tmp,
+                  self.cfg.muse_results_dir):
             os.makedirs(p, mode=0o700, exist_ok=True)
             os.chmod(p, 0o700)
         self.journal = os.path.join(d, "journal")
         os.makedirs(self.journal, mode=0o700)
         self.logs = []
-        self.now = 1000000.0
+        self.now = 1000000.0       # horloge murale (peut sauter : NTP, RTC absente)
+        self.boot = 5000.0         # horloge du démarrage (CLOCK_BOOTTIME) : seule base de l'âge des jobs
 
     def helper(self, admin_factory=None):
         return musehelper.MuseHelper(self.cfg, os.getuid(), admin_factory=admin_factory or NoAdmin(self),
-                                     clock=lambda: self.now, sleep=lambda s: None, chown=False,
+                                     clock=lambda: self.now, boot=lambda: self.boot, sleep=lambda s: None, chown=False,
                                      log=lambda ev, **f: self.logs.append(dict(f, event=ev)),
                                      journal_dir=self.journal, journal_uid=os.getuid())
 
     def job(self, body, name=None, mode=0o600):
         body = dict(body)
-        body.setdefault("v", 1)
-        body.setdefault("created", self.now)
+        body.setdefault("v", musesetup.JOB_V)
+        body.setdefault("at", self.boot)
         name = name or body["id"] + ".json"
         p = os.path.join(self.cfg.muse_jobs_dir, name)
         with open(p, "w", encoding="utf-8") as f:
@@ -1000,7 +1003,7 @@ class TestHelperJobValidation(HelperBase):
             "c" * 16: dict(action="pair", token=TOKEN),                               # consentement absent
             "d" * 16: dict(action="pair", consent="tv", token=TOKEN + "x"),           # jeton invalide
             "e" * 16: dict(action="pair", consent="tv", token=TOKEN, argv=["sh", "-c", "id"]),   # champ en trop
-            "f" * 16: dict(action="pair", consent="tv", token=TOKEN, created=self.now - 3600),   # trop vieux
+            "f" * 16: dict(action="pair", consent="tv", token=TOKEN, at=self.boot - 3600),   # trop vieux
             "g" * 16: dict(action="exec", path="/etc/shadow"),                        # action inconnue
             "h" * 16: dict(action="unpair", confirm="phone"),
             "i" * 16: dict(action="cancel", target="../../etc"),
@@ -1016,7 +1019,7 @@ class TestHelperJobValidation(HelperBase):
         os.chmod(os.path.join(self.cfg.muse_jobs_dir, "n" * 16 + ".json"), 0o600)
         target = os.path.join(self.cfg.state_dir, "victim.json")
         with open(target, "w") as f:
-            json.dump({"id": "o" * 16, "v": 1, "action": "unpair", "confirm": "tv", "created": self.now}, f)
+            json.dump({"id": "o" * 16, "v": 2, "action": "unpair", "confirm": "tv", "at": self.boot}, f)
         os.symlink(target, os.path.join(self.cfg.muse_jobs_dir, "o" * 16 + ".json"))   # lien symbolique
         os.mkfifo(os.path.join(self.cfg.muse_jobs_dir, "p" * 16 + ".json"))            # FIFO
         os.mkdir(os.path.join(self.cfg.muse_jobs_dir, "q" * 16 + ".json"))             # dossier
@@ -1065,10 +1068,10 @@ class TestHelperJobValidation(HelperBase):
                         "replace_identity=True", "force=True", "replace_token=True"):
                 self.assertNotIn(bad, src, (mod, bad))
         self.assertEqual(musehelper.KEYS, {
-            "pair": {"v", "id", "action", "consent", "created", "token"},
-            "cancel": {"v", "id", "action", "target", "created"},
-            "unpair": {"v", "id", "action", "confirm", "created"},
-            "probe": {"v", "id", "action", "created"}})
+            "pair": {"v", "id", "action", "consent", "at", "token"},
+            "cancel": {"v", "id", "action", "target", "at"},
+            "unpair": {"v", "id", "action", "confirm", "at"},
+            "probe": {"v", "id", "action", "at"}})
         self.assertEqual(sorted(musebridge.COMMANDS), tmb.EXPECTED)           # exactement les 11 commandes
         for bad in ("system.run", "file.read", "file.write", "device.health"):
             self.assertNotIn(bad, musebridge.COMMANDS)
@@ -1078,7 +1081,11 @@ class TestHelperJobValidation(HelperBase):
 class RealAdminHelperBase(tmb.AdminBase):
     def setUp(self):
         super().setUp()
-        for p in (self.cfg.muse_jobs_dir, self.cfg.muse_jobs_tmp, self.cfg.muse_results_dir):
+        # même disposition qu'en production : jobs (jeton) sur /run (tmpfs), issues sans secret dans /var/lib/opentv
+        self.cfg.muse_run_dir = self.j(config.Config({}).muse_run_dir)
+        self.cfg.muse_jobs_dir = os.path.join(self.cfg.muse_run_dir, "queue")
+        self.cfg.muse_jobs_tmp = os.path.join(self.cfg.muse_run_dir, "tmp")
+        for p in (self.cfg.muse_run_dir, self.cfg.muse_jobs_dir, self.cfg.muse_jobs_tmp, self.cfg.muse_results_dir):
             os.makedirs(p, mode=0o700, exist_ok=True)
             os.chmod(p, 0o700)
         self.journal = self.j("/var/lib/opentv-muse-setup")
@@ -1107,7 +1114,7 @@ class RealAdminHelperBase(tmb.AdminBase):
                                      journal_uid=os.getuid(), log=lambda ev, **f: self.hlogs.append(dict(f, event=ev)))
 
     def put(self, body):
-        body = dict(body, v=1, created=time.time())
+        body = dict(body, v=musesetup.JOB_V, at=round(musesetup.boot_clock(), 3))
         p = os.path.join(self.cfg.muse_jobs_dir, body["id"] + ".json")
         with open(p, "w") as f:
             json.dump(body, f)
@@ -1320,8 +1327,8 @@ class TestHelperWithRealAdmin(RealAdminHelperBase):
     def test_crash_during_bridge_start_after_pairing_reports_paired_and_keeps_everything(self):
         class Crash(Exception):
             pass
-        self.pair_job()
         ms = self.tracked(cancel=True)                                        # annulation demandée en plus
+        self.pair_job()
         with mock.patch.object(museadmin.Admin, "start_bridge", side_effect=Crash()):
             with self.assertRaises(Crash):                                    # plantage après pairing.json
                 self.helper().run()
@@ -1357,13 +1364,22 @@ class TestHelperWithRealAdmin(RealAdminHelperBase):
             tmb.fsutil.atomic_write_path(self.j("/var/lib/opentv-muse/pairing.json"), "{}")
             self.put({"id": "c" * 16, "action": "cancel", "target": "a" * 16})
         self.on_window = on_window
-        self.pair_job()
         ms = self.tracked(cancel=True)
+        self.pair_job()
         self.assertEqual(self.helper().run(), ["paired_incomplete"])
         self.assertEqual(self.result("a" * 16)["result"], "paired_incomplete")
         self.assertTrue(os.path.exists(self.j("/var/lib/opentv-muse/pairing.json")))
         self.assertTrue(os.path.exists(self.j("/var/lib/opentv-muse/sdk_token")))
         self.assertEqual(sorted(self.policy()), CONTROL)
+        # l'identité émise pour CET appariement est gardée (jamais révoquée par l'annulation perdue) : la fenêtre
+        # Bluetooth est d'abord arrêtée, PUIS l'appariement relu ; présent ⇒ identité, jeton et pilotage gardés
+        ident = agents.Registry(self.cfg.registry_file).list().get(musebridge.MUSE_AGENT_ID)
+        self.assertIsNotNone(ident)
+        self.assertEqual(ident["scopes"], CONTROL)
+        cmds = self.cmds()
+        self.assertIn("stop %s" % museadmin.PAIR_UNIT, cmds)
+        self.assertFalse([c for c in cmds if "disable" in c])
+        self.assertEqual(musesetup.read_box(self.cfg.muse_results_dir)["owned"], True)
         ms.tick()
         self.assert_paired_incomplete(ms)
 
@@ -1458,7 +1474,7 @@ class TestExistingPairingIsPreserved(RealAdminHelperBase):
         self.unit.gone(1)                                               # reconnexion échouée : pont arrêté
         self.unit.crash_next = 1                                       # le prochain démarrage échoue aussi
         self.put({"id": "b" * 16, "action": "pair", "consent": "tv", "token": tmb.SDK_TOKEN})
-        self.assertEqual(self.helper().run(), ["bridge_not_started"])
+        self.assertEqual(self.helper().run(), ["paired_incomplete"])   # apparié, pont à reprendre (jamais « redémarre »)
         self.assertEqual(self.snap(), before)
         self.assertFalse([c for c in self.cmds() if museadmin.PAIR_UNIT in c])   # aucun Bluetooth rouvert
         started, _rb = self.factory().start_bridge()                   # l'ancien appariement reste utilisable
@@ -1526,6 +1542,419 @@ class TestExistingPairingIsPreserved(RealAdminHelperBase):
         self.assertFalse([c for c in self.cmds() if "disable" in c])
 
 
+# --------------------------------------------------------------------------- B1 : réclamation = point de linéarisation
+class RecordingAdmin:
+    """Aucune administration ne doit être appelée ; tout appel est noté (et fait échouer le test)."""
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, **kw):
+        self.calls.append(sorted(kw))
+        raise AssertionError("administration Muse appelée pour un job retiré")
+
+
+class TestJobClaimIsTheLinearizationPoint(HelperBase):
+    """Le service retire un job (annulation, échéance, redémarrage) et le helper root le réclame : exactement l'un des
+    deux gagne. Réclamer = retirer avec succès le nom exact AVANT toute action ; ENOENT = le service a gagné."""
+
+    def ms(self):
+        return musesetup.MuseSetup(self.cfg, keygen=fast_key, async_keygen=False, boot=lambda: self.boot)
+
+    def test_service_withdraw_after_helper_read_but_before_claim_wins_and_nothing_runs(self):
+        self.pair_job()
+        adm = RecordingAdmin()
+        h = self.helper(admin_factory=adm)
+        real_claim, seen = musehelper.MuseHelper._claim, {}
+        real_read = os.read
+
+        def read(fd, n):
+            seen["read"] = True
+            return real_read(fd, n)
+
+        def claim(helper, dfd, name, st):
+            self.assertTrue(seen.get("read"))                         # contenu déjà lu et fichier contrôlé (fstat)
+            seen["withdrawn"] = musesetup.withdraw_job(self.cfg.muse_jobs_dir, "a" * 16)   # le service gagne ICI
+            return real_claim(helper, dfd, name, st)
+        with mock.patch.object(musehelper.os, "read", read), \
+                mock.patch.object(musehelper.MuseHelper, "_claim", claim):
+            self.assertEqual(h.run(), [])
+        self.assertIs(seen["withdrawn"], True)                        # retrait réussi ⇒ le helper n'a RIEN fait
+        self.assertEqual(adm.calls, [])                               # ni autorisation, ni pair, ni écriture de jeton
+        self.assertEqual(h.queue, [])
+        self.assertNotIn("a" * 16, self.results())                    # aucune issue : la séance a déjà sa vérité
+        self.assertEqual(os.listdir(self.journal), [])
+        self.assertEqual(os.listdir(self.cfg.muse_jobs_dir), [])
+        self.assertNotIn(TOKEN, json.dumps(self.logs))
+        self.assertIn({"event": "muse_job_refused", "id": "a" * 16, "error": "gone"}, self.logs)
+
+    def test_helper_claim_first_makes_the_service_withdraw_fail_and_ask_for_a_cancel(self):
+        ms = self.ms()
+        self.assertEqual(ms.start(True), (True, None))
+        s = ms.cur
+        s.job = musesetup.write_job(self.cfg.muse_jobs_dir, self.cfg.muse_jobs_tmp,
+                                    {"v": musesetup.JOB_V, "id": "a" * 16, "action": "pair", "consent": "tv",
+                                     "at": self.boot, "token": TOKEN})
+        ms._set(s, "submitted")
+        h = self.helper()
+        h.poll()                                                      # réclamé (nom retiré), mis en file
+        self.assertEqual([j["id"] for j in h.queue], ["a" * 16])
+        self.assertFalse(musesetup.withdraw_job(self.cfg.muse_jobs_dir, "a" * 16))
+        self.assertTrue(ms.cancel("tv"))
+        self.assertNotEqual(ms.cur.state, "cancelled")                # jamais « annulé » sans l'issue du helper
+        names = os.listdir(self.cfg.muse_jobs_dir)
+        self.assertEqual(len(names), 1)
+        with open(os.path.join(self.cfg.muse_jobs_dir, names[0])) as f:
+            self.assertEqual(json.load(f)["action"], "cancel")
+
+    def test_claim_failure_other_than_enoent_fails_closed(self):
+        self.pair_job()
+        real_unlink = os.unlink
+
+        def unlink(name, *a, **kw):
+            if name == "a" * 16 + ".json":
+                raise PermissionError(13, "denied")
+            return real_unlink(name, *a, **kw)
+        with mock.patch.object(musehelper.os, "unlink", unlink):
+            self.assertEqual(self.helper(admin_factory=RecordingAdmin()).run(), [])
+        self.assertEqual(os.listdir(self.cfg.muse_jobs_dir), ["a" * 16 + ".json"])   # jamais exécuté
+        self.assertNotIn("a" * 16, self.results())   # aucune issue : le service retire le job à son échéance
+        self.assertIn({"event": "muse_job_refused", "id": "a" * 16, "error": "claim_failed"}, self.logs)
+        self.assertTrue(musesetup.withdraw_job(self.cfg.muse_jobs_dir, "a" * 16))
+
+    def test_name_replaced_between_read_and_claim_is_never_executed(self):
+        self.pair_job()
+        real_claim = musehelper.MuseHelper._claim
+
+        def claim(helper, dfd, name, st):   # le nom désigne désormais un AUTRE fichier que celui lu
+            p = os.path.join(self.cfg.muse_jobs_dir, name)
+            q = self.job({"id": "a" * 16, "action": "unpair", "confirm": "tv"}, name="new.tmp")
+            os.replace(q, p)                       # nouveau fichier créé AVANT la libération de l'ancien inode
+            return real_claim(helper, dfd, name, st)
+        with mock.patch.object(musehelper.MuseHelper, "_claim", claim):
+            self.assertEqual(self.helper(admin_factory=RecordingAdmin()).run(), [])
+        self.assertIn({"event": "muse_job_refused", "id": "a" * 16, "error": "replaced"}, self.logs)
+
+
+# --------------------------------------------------------------------------- âge des jobs : horloge du démarrage
+class TestJobAgeUsesTheBootClock(HelperBase):
+    def cancel_job(self, jid="c" * 16, **kw):
+        return self.job(dict({"id": jid, "action": "cancel", "target": "a" * 16}, **kw))
+
+    def test_wall_clock_steps_never_expire_or_revive_a_job(self):
+        for i, step in enumerate((+7200.0, -7200.0, +86400 * 365.0)):
+            self.now = 1000000.0 + step                                 # NTP / RTC : l'heure murale saute
+            jid = "x%015d" % i
+            self.cancel_job(jid=jid)
+            self.helper().run()
+            self.assertEqual(self.results()[jid]["result"], "cancelled", step)
+        # l'horloge du démarrage avance : âge réel au-delà de la limite ⇒ refusé, quelle que soit l'heure murale
+        self.cancel_job(jid="y" * 16)
+        self.boot += musehelper.CANCEL_MAX_AGE_S + 1
+        self.now -= 86400
+        self.helper().run()
+        self.assertEqual(self.results()["y" * 16]["result"], "refused")
+        self.assertIn({"event": "muse_job_refused", "id": "y" * 16, "error": "expired"}, self.logs)
+
+    def test_old_schema_and_malformed_age_values_are_refused_without_action(self):
+        bad = {"a" * 16: {"v": 1, "created": self.now},                 # ancien schéma (heure murale)
+               "b" * 16: {"v": 1, "at": self.boot},
+               "c" * 16: {"at": "5000"},
+               "d" * 16: {"at": True},
+               "e" * 16: {"at": None},
+               "f" * 16: {"at": self.boot + 30},                         # dans le futur de ce démarrage
+               "g" * 16: {"at": -1.0},
+               "h" * 16: {"at": self.boot - musehelper.PAIR_PICKUP_MAX_S - 1}}
+        for jid, extra in bad.items():
+            body = dict({"id": jid, "action": "pair", "consent": "tv", "token": TOKEN}, **extra)
+            self.job(body)
+        for jid, raw in (("i" * 16, '"at": NaN'), ("j" * 16, '"at": Infinity'), ("k" * 16, '"at": -Infinity'),
+                         ("m" * 16, '"at": 1e400')):
+            p = os.path.join(self.cfg.muse_jobs_dir, jid + ".json")
+            with open(p, "w") as f:
+                f.write('{"v": 2, "id": "%s", "action": "pair", "consent": "tv", "token": "%s", %s}' % (jid, TOKEN, raw))
+            os.chmod(p, 0o600)
+        self.assertEqual(self.helper(admin_factory=RecordingAdmin()).run(), [])
+        res = self.results()
+        for jid in list(bad) + ["i" * 16, "j" * 16, "k" * 16, "m" * 16]:
+            self.assertEqual((res[jid]["ok"], res[jid]["result"]), (False, "refused"), jid)
+        self.assertEqual(os.listdir(self.cfg.muse_jobs_dir), [])
+        self.assertNotIn(TOKEN, json.dumps(res) + json.dumps(self.logs))
+
+    def test_service_stamps_jobs_with_the_boot_clock_never_the_wall_clock(self):
+        ms = musesetup.MuseSetup(self.cfg, clock=lambda: 42.0, boot=lambda: self.boot, keygen=fast_key,
+                                 async_keygen=False)
+        self.assertTrue(ms.probe())
+        names = os.listdir(self.cfg.muse_jobs_dir)
+        with open(os.path.join(self.cfg.muse_jobs_dir, names[0])) as f:
+            j = json.load(f)
+        self.assertEqual((j["v"], j["at"]), (musesetup.JOB_V, self.boot))
+        self.assertNotIn("created", j)
+        b = musesetup.boot_clock()
+        self.assertIsInstance(b, float)
+        self.assertGreaterEqual(musesetup.boot_clock(), b)
+
+
+# --------------------------------------------------------------------------- redémarrage du service : orphelins
+class TestServiceRestartWithdrawsOrphanJobs(HelperBase):
+    def test_restart_withdraws_unclaimed_jobs_before_any_new_session_and_keeps_claimed_work(self):
+        ms1 = musesetup.MuseSetup(self.cfg, boot=lambda: self.boot, keygen=fast_key, async_keygen=False)
+        for body in ({"id": "a" * 16, "action": "pair", "consent": "tv", "token": TOKEN},
+                     {"id": "u" * 16, "action": "unpair", "confirm": "tv"},
+                     {"id": "p" * 16, "action": "probe"},
+                     {"id": "c" * 16, "action": "cancel", "target": "z" * 16}):
+            musesetup.write_job(self.cfg.muse_jobs_dir, self.cfg.muse_jobs_tmp,
+                                dict(body, v=musesetup.JOB_V, at=self.boot))
+        # pair déjà RÉCLAMÉ par le helper avant le redémarrage : plus dans la file, son journal root est intact
+        with open(os.path.join(self.journal, "inflight.json"), "w") as f:
+            json.dump({"v": 2, "id": "z" * 16, "grant": None, "token_before": "absent"}, f)
+        stray = os.path.join(self.cfg.muse_jobs_tmp, "b" * 16 + ".json")      # brouillon interrompu (jeton)
+        with open(stray, "w") as f:
+            f.write(TOKEN)
+        del ms1                                                              # le service meurt
+        logs = []
+        ms2 = musesetup.MuseSetup(self.cfg, boot=lambda: self.boot, keygen=fast_key, async_keygen=False,
+                                  log=lambda ev, **f: logs.append(dict(f, event=ev)))
+        # avant toute nouvelle séance : seuls restent les « cancel » (sans secret, ils ne peuvent que fermer une
+        # fenêtre Bluetooth ouverte par un pair déjà réclamé)
+        self.assertEqual(os.listdir(self.cfg.muse_jobs_dir), ["c" * 16 + ".json"])
+        self.assertEqual(os.listdir(self.cfg.muse_jobs_tmp), [])
+        self.assertEqual(os.listdir(self.journal), ["inflight.json"])     # travail réclamé : jamais touché
+        self.assertIn({"event": "muse_setup_purge", "withdrawn": 3, "kept": 1, "staged": 1}, logs)
+        self.assertNotIn(TOKEN, json.dumps(logs))
+        self.assertEqual(ms2.start(True), (True, None))
+        # aucun pair orphelin ne peut plus s'exécuter sans suivi
+        adm = RecordingAdmin()
+        h = self.helper(admin_factory=adm)
+        with mock.patch.object(musehelper.MuseHelper, "recover", return_value=None):
+            self.assertEqual(h.run(), [])
+        self.assertEqual(adm.calls, [])
+        self.assertEqual(self.results()["c" * 16]["result"], "cancelled")
+
+    def test_restart_purge_races_a_helper_claim_and_exactly_one_wins(self):
+        musesetup.write_job(self.cfg.muse_jobs_dir, self.cfg.muse_jobs_tmp,
+                            {"v": musesetup.JOB_V, "id": "a" * 16, "action": "pair", "consent": "tv",
+                             "at": self.boot, "token": TOKEN})
+        real_claim, won = musehelper.MuseHelper._claim, {}
+
+        def claim(helper, dfd, name, st):   # le service redémarre exactement entre la lecture et la réclamation
+            musesetup.MuseSetup(self.cfg, boot=lambda: self.boot)
+            return real_claim(helper, dfd, name, st)
+        adm = RecordingAdmin()
+        with mock.patch.object(musehelper.MuseHelper, "_claim", claim):
+            self.assertEqual(self.helper(admin_factory=adm).run(), [])
+        self.assertEqual(adm.calls, [])
+        self.assertEqual(os.listdir(self.cfg.muse_jobs_dir), [])
+
+    def test_app_startup_purges_before_serving(self):
+        a = make_app(self)
+        musesetup.write_job(a.cfg.muse_jobs_dir, a.cfg.muse_jobs_tmp,
+                            {"v": musesetup.JOB_V, "id": "a" * 16, "action": "pair", "consent": "tv",
+                             "at": round(musesetup.boot_clock(), 3), "token": TOKEN})
+        from opentv_pi import app as appmod
+        b = appmod.App(a.cfg, runner=a.runner, mono=a.mono_clock, log=lambda ev, **f: None,
+                       proc_root=os.path.join(os.path.dirname(a.cfg.state_dir), "proc"))   # redémarrage du service
+        self.addCleanup(b.close)
+        self.assertEqual(os.listdir(a.cfg.muse_jobs_dir), [])
+
+
+# --------------------------------------------------------------------------- B2 : journal d'intention AVANT l'autorisation
+class Crash(Exception):
+    """Plantage simulé (équivalent SIGKILL : aucun nettoyage du helper ne s'exécute après)."""
+
+
+class TestGrantIsWriteAheadJournaled(RealAdminHelperBase):
+    def jread(self):
+        with open(os.path.join(self.journal, "inflight.json")) as f:
+            return json.load(f)
+
+    def crash_after_grant(self):
+        """Plantage EXACTEMENT après l'écriture de l'autorisation (registre déjà modifié, sur disque), avant tout
+        retour au helper : aucune écriture « après » du journal ne peut avoir eu lieu."""
+        real = agents.Registry.apply_policy_changes
+
+        def apply(reg, changes, *a, **kw):
+            out = real(reg, changes, *a, **kw)
+            if sorted(changes.get("muse") or []) == CONTROL:
+                raise Crash()
+            return out
+        return mock.patch.object(agents.Registry, "apply_policy_changes", apply)
+
+    def test_intent_and_exact_prior_snapshot_are_journaled_before_the_grant_write(self):
+        real = agents.Registry.apply_policy_changes
+        seen = []
+
+        def apply(reg, changes, known, expect, *a, **kw):
+            if sorted(changes.get("muse") or []) == CONTROL:
+                j = self.jread()                                         # déjà sur disque AVANT l'écriture
+                seen.append(j)
+                self.assertEqual(j["grant"]["before"], ["feedback", "read"])
+                self.assertEqual(j["grant"]["fp"], expect)                 # CAS sur l'instantané journalisé exact
+                self.assertEqual(sorted(self.policy()), ["feedback", "read"])
+            return real(reg, changes, known, expect, *a, **kw)
+        self.pair_job()
+        with mock.patch.object(agents.Registry, "apply_policy_changes", apply):
+            self.assertEqual(self.helper().run(), ["connected"])
+        self.assertEqual(len(seen), 1)
+        self.assertNotIn(tmb.SDK_TOKEN, json.dumps(seen))
+
+    def test_crash_right_after_grant_is_rolled_back_and_reported_truthfully(self):
+        self.window = None
+        self.pair_job()
+        with self.crash_after_grant():
+            with self.assertRaises(Crash):
+                self.helper().run()
+        self.assertEqual(sorted(self.policy()), CONTROL)                   # le pilotage A été accordé
+        j = self.jread()
+        self.assertEqual(j["grant"]["before"], ["feedback", "read"])
+        self.assertNotIn(tmb.SDK_TOKEN, json.dumps(j))
+        self.calls.clear()
+        self.helper().run()                                                # redémarrage : reprise
+        self.assertEqual(sorted(self.policy()), ["feedback", "read"])      # rendu (compare-and-set)
+        r = self.result("a" * 16)
+        self.assertEqual((r["ok"], r["result"]), (False, "interrupted"))   # « rien n'a changé » désormais VRAI
+        self.assertEqual(os.listdir(self.journal), [])
+
+    def test_sigkill_right_after_grant_in_a_real_process_is_recovered(self):
+        """Vrai SIGKILL du processus helper juste après l'écriture de l'autorisation."""
+        self.pair_job()
+        script = r"""
+import io, json, os, signal, sys
+sys.path.insert(0, sys.argv[1])
+from unittest import mock
+from opentv_pi import agents, config, museadmin, musehelper
+a = json.loads(sys.argv[2])
+cfg = config.Config({"OPENTV_STATE_DIR": a["state"], "OPENTV_AGENT_CLIENTS_DIR": a["clients"]})
+cfg.muse_run_dir, cfg.muse_jobs_dir, cfg.muse_jobs_tmp = a["run"], a["queue"], a["tmp"]
+cfg.muse_results_dir = a["results"]
+class Pw:
+    pw_uid, pw_gid, pw_name = os.getuid(), os.getgid(), "opentv"
+class Adm(museadmin.Admin):
+    def local_token_match(self, tok): return "absent"
+    def muse_account(self): return None, "test"
+real = agents.Registry.apply_policy_changes
+def apply(reg, changes, *x, **kw):
+    out = real(reg, changes, *x, **kw)
+    if "control" in (changes.get("muse") or []):
+        os.kill(os.getpid(), signal.SIGKILL)
+    return out
+agents.Registry.apply_policy_changes = apply
+fac = lambda **kw: Adm(cfg, euid=lambda: 0, pwd_mod=mock.Mock(getpwnam=lambda n: Pw), **{k: v for k, v in kw.items() if k in ("sleep", "stdin", "err", "prompt")})
+h = musehelper.MuseHelper(cfg, os.getuid(), admin_factory=fac, chown=False, journal_dir=a["journal"], journal_uid=os.getuid(), log=lambda ev, **f: None)
+h.run()
+print("NOT KILLED")
+"""
+        args = {"state": self.cfg.state_dir, "clients": self.cfg.agent_clients_dir, "run": self.cfg.muse_run_dir,
+                "queue": self.cfg.muse_jobs_dir, "tmp": self.cfg.muse_jobs_tmp, "results": self.cfg.muse_results_dir,
+                "journal": self.journal}
+        p = subprocess.run([__import__("sys").executable, "-I", "-c", script, PI4, json.dumps(args)],
+                           capture_output=True, timeout=60)
+        self.assertEqual(p.returncode, -9, p.stderr.decode()[-2000:])
+        self.assertNotIn(b"NOT KILLED", p.stdout)
+        self.assertEqual(sorted(self.policy()), CONTROL)
+        self.assertEqual(self.jread()["grant"]["before"], ["feedback", "read"])
+        self.helper().run()
+        self.assertEqual(sorted(self.policy()), ["feedback", "read"])
+        self.assertEqual(self.result("a" * 16)["result"], "interrupted")
+        self.assertEqual(os.listdir(self.journal), [])
+
+    def write_journal(self, grant):
+        with open(os.path.join(self.journal, "inflight.json"), "w") as f:
+            json.dump({"v": 2, "id": "a" * 16, "grant": grant, "token_before": "absent", "at": 1.0}, f)
+
+    def intent(self):
+        v, fp, _ = agents.Registry(self.cfg.registry_file).snapshot(("muse", "hermit", "hermes"))
+        return {"before": sorted(v["muse"]["allowed"]), "fp": fp}
+
+    def test_recovery_with_intent_but_no_mutation_changes_nothing(self):
+        self.write_journal(self.intent())                                  # plantage AVANT l'écriture
+        st = os.stat(self.cfg.registry_file)
+        self.helper().run()
+        self.assertEqual(sorted(self.policy()), ["feedback", "read"])
+        st2 = os.stat(self.cfg.registry_file)
+        self.assertEqual((st.st_ino, st.st_mtime_ns), (st2.st_ino, st2.st_mtime_ns))   # aucune écriture
+        self.assertEqual(self.result("a" * 16)["result"], "interrupted")
+
+    def test_recovery_never_clobbers_a_concurrent_owner_decision(self):
+        self.write_journal(self.intent())
+        reg = agents.Registry(self.cfg.registry_file)
+        v, fp, _ = reg.snapshot(("muse", "hermit", "hermes"))
+        reg.apply_policy_changes({"muse": ["read"]}, ("muse", "hermit", "hermes"), fp)   # Alex décide autre chose
+        self.helper().run()
+        self.assertEqual(self.policy(), ["read"])                          # jamais écrasé
+        r = self.result("a" * 16)
+        self.assertEqual(r["result"], "recovery_incomplete")               # jamais « rien n'a changé » sans preuve
+
+    def test_recovery_cas_loses_to_a_write_racing_the_rollback(self):
+        reg = agents.Registry(self.cfg.registry_file)
+        self.write_journal(self.intent())
+        v, fp, _ = reg.snapshot(("muse", "hermit", "hermes"))
+        reg.apply_policy_changes({"muse": CONTROL}, ("muse", "hermit", "hermes"), fp)   # écriture de la séance
+        real = agents.Registry.apply_policy_changes
+        once = {}
+
+        def apply(r, changes, known, expect, *a, **kw):
+            if not once:   # le propriétaire écrit entre la relecture de la reprise et sa CAS
+                once["x"] = True
+                other = agents.Registry(self.cfg.registry_file)
+                _v, f2, _ = other.snapshot(known)
+                real(other, {"hermit": ["read"]}, known, f2)
+            return real(r, changes, known, expect, *a, **kw)
+        with mock.patch.object(agents.Registry, "apply_policy_changes", apply):
+            self.helper().run()
+        self.assertEqual(sorted(self.policy()), CONTROL)                   # CAS perdue : rien écrasé
+        self.assertEqual(agents.Registry(self.cfg.registry_file).policy()["hermit"], ["read"])
+        self.assertEqual(self.result("a" * 16)["result"], "recovery_incomplete")
+
+    def test_recovery_with_unreadable_registry_writes_nothing_and_never_says_unchanged(self):
+        self.write_journal(self.intent())
+        with open(self.cfg.registry_file, "w") as f:
+            f.write("{partial")
+        with open(self.cfg.registry_file, "rb") as f:
+            raw = f.read()
+        self.helper().run()
+        with open(self.cfg.registry_file, "rb") as f:
+            self.assertEqual(f.read(), raw)
+        self.assertEqual(self.result("a" * 16)["result"], "recovery_incomplete")
+
+    def test_journal_failure_before_the_grant_writes_nothing(self):
+        real = musehelper.MuseHelper._journal_write
+
+        def jw(h, data):
+            if data.get("grant"):
+                raise OSError(28, "no space")
+            return real(h, data)
+        self.pair_job()
+        with mock.patch.object(musehelper.MuseHelper, "_journal_write", jw):
+            self.assertEqual(self.helper().run(), ["helper_error"])
+        self.assertEqual(sorted(self.policy()), ["feedback", "read"])
+        self.assertFalse([c for c in self.cmds() if museadmin.PAIR_UNIT in c])
+
+
+# --------------------------------------------------------------------------- pont non démarré après un appariement réussi
+class TestBridgeFailureAfterPairingIsResumable(RealAdminHelperBase):
+    def test_first_pairing_then_bridge_failure_keeps_pairing_control_and_reconnect_needs_no_bluetooth(self):
+        self.unit.crash_next = 1                                            # le premier démarrage du pont échoue
+        self.pair_job()
+        self.assertEqual(self.helper().run(), ["paired_incomplete"])
+        r = self.result("a" * 16)
+        self.assertEqual((r["ok"], r["result"]), (False, "paired_incomplete"))
+        self.assertEqual(sorted(self.policy()), CONTROL)                   # pilotage gardé : jamais un pont en pause
+        ident = agents.Registry(self.cfg.registry_file).list().get(musebridge.MUSE_AGENT_ID)
+        self.assertEqual(ident["scopes"], CONTROL)
+        self.assertTrue(os.path.exists(self.j("/var/lib/opentv-muse/pairing.json")))
+        self.assertTrue(os.path.exists(self.j("/var/lib/opentv-muse/sdk_token")))
+        msg = musesetup.message_for("paired_incomplete")
+        self.assertNotIn("Redémarre", msg)
+        self.assertIn("Reconnecter", msg)
+        self.assertEqual(musesetup.read_box(self.cfg.muse_results_dir)["owned"], True)
+        # « Reconnecter » : même jeton, aucune fenêtre Bluetooth, pont démarré ⇒ connectée
+        self.calls.clear()
+        self.put({"id": "b" * 16, "action": "pair", "consent": "tv", "token": tmb.SDK_TOKEN})
+        self.assertEqual(self.helper().run(), ["connected"])
+        self.assertFalse([c for c in self.cmds() if museadmin.PAIR_UNIT in c])
+        self.assertEqual(self.unit.active, "active")
+
+
 # --------------------------------------------------------------------------- unités, installation
 def unit(name):
     cp = configparser.ConfigParser(strict=False, interpolation=None)
@@ -1538,8 +1967,10 @@ def unit(name):
 
 class TestUnits(unittest.TestCase):
     def test_path_and_root_helper_units_are_narrow_and_sandboxed(self):
+        c = config.Config({})
         cp, _ = unit("opentv-muse-setup.path")
-        self.assertEqual(cp["Path"]["DirectoryNotEmpty"], "/var/lib/opentv/musejobs")
+        self.assertEqual(cp["Path"]["DirectoryNotEmpty"], "/run/opentv-musejobs/queue")
+        self.assertEqual(cp["Path"]["DirectoryNotEmpty"], c.muse_jobs_dir)
         self.assertEqual(cp["Path"]["Unit"], "opentv-muse-setup.service")
         self.assertEqual(cp["Install"]["WantedBy"], "multi-user.target")
         cp, text = unit("opentv-muse-setup.service")
@@ -1549,8 +1980,9 @@ class TestUnits(unittest.TestCase):
         self.assertEqual(s["ExecStart"], "/usr/bin/python3 -I /opt/opentv/bin/opentv-pi muse-setup-helper")
         self.assertEqual(s["Type"], "oneshot")
         self.assertEqual(set(s["CapabilityBoundingSet"].split()), {"CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FOWNER"})
-        self.assertEqual(set(s["ReadWritePaths"].split()), {"/var/lib/opentv", "/var/lib/opentv-muse",
-                                                            "/var/lib/opentv-muse-setup", "/etc/opentv/agents"})
+        self.assertEqual(set(s["ReadWritePaths"].split()), {"/var/lib/opentv", "-/run/opentv-musejobs",
+                                                            "/var/lib/opentv-muse", "/var/lib/opentv-muse-setup",
+                                                            "/etc/opentv/agents"})
         for k, v in (("NoNewPrivileges", "yes"), ("ProtectSystem", "strict"), ("PrivateNetwork", "yes"),
                      ("RestrictAddressFamilies", "AF_UNIX"), ("ProtectHome", "yes"), ("PrivateDevices", "yes"),
                      ("MemoryDenyWriteExecute", "yes"), ("SystemCallFilter", "@system-service")):
@@ -1565,21 +1997,48 @@ class TestUnits(unittest.TestCase):
         _, nh = unit("opentv-net-helper.service")
         self.assertNotIn("muse", nh)
 
-    def test_job_dirs_private_and_masked_from_other_service_account_units(self):
+    def test_token_jobs_live_only_on_tmpfs_and_never_under_var_lib(self):
+        """Le job « pair » porte le jeton SDK en clair le temps de la prise en charge : file et brouillons sur /run
+        (tmpfs : une coupure de courant les efface ; jamais écrits sur la carte SD). Seuls le journal root (sans
+        jeton) et les issues/état public (sans secret) restent persistants."""
+        c = config.Config({})
+        self.assertEqual(c.muse_run_dir, "/run/opentv-musejobs")
+        for p in (c.muse_jobs_dir, c.muse_jobs_tmp):
+            self.assertTrue(p.startswith(c.muse_run_dir + "/"), p)
+            self.assertFalse(p.startswith("/var/"), p)
+            self.assertFalse(p.startswith(c.state_dir), p)
+        self.assertEqual(os.path.dirname(c.muse_jobs_dir), os.path.dirname(c.muse_jobs_tmp))   # rename atomique
+        self.assertTrue(c.muse_results_dir.startswith(c.state_dir + "/"))     # sans secret : peut persister
         with open(os.path.join(PI4, "system", "tmpfiles-opentv.conf"), encoding="utf-8") as f:
             tmp = f.read()
-        for line in ("d /var/lib/opentv/musejobs 0700 opentv opentv -",
-                     "d /var/lib/opentv/musejobs-tmp 0700 opentv opentv -",
+        for line in ("d /run/opentv-musejobs 0700 opentv opentv -",
+                     "d /run/opentv-musejobs/queue 0700 opentv opentv -",
+                     "d /run/opentv-musejobs/tmp 0700 opentv opentv -",
                      "d /var/lib/opentv/museresults 0700 opentv opentv -",
                      "d /var/lib/opentv-muse-setup 0700 root root -"):
             self.assertIn(line, tmp)
+        self.assertNotIn("/var/lib/opentv/musejobs", tmp)
+        # aucun chemin de job/jeton sous /var/lib dans le code, les unités, l'installation ni la documentation
+        for rel in ("opentv_pi/config.py", "opentv_pi/musesetup.py", "opentv_pi/musehelper.py",
+                    "systemd/opentv-muse-setup.path", "systemd/opentv-muse-setup.service", "systemd/opentv.service",
+                    "system/tmpfiles-opentv.conf"):
+            with open(os.path.join(PI4, rel), encoding="utf-8") as f:
+                self.assertNotRegex(f.read(), r"/var/lib/opentv/musejobs", rel)
+        # service : file et brouillons dans UN SEUL montage inscriptible (rename sans EXDEV)
+        cp, _ = unit("opentv.service")
+        rw = cp["Service"]["ReadWritePaths"].split()
+        self.assertIn("-/run/opentv-musejobs", rw)
+        self.assertFalse([x for x in rw if x.lstrip("-").startswith(c.muse_run_dir + "/")], rw)
+
+    def test_job_dirs_private_and_masked_from_other_service_account_units(self):
         c = config.Config({})
         for name in ("opentv-catalogue-refresh.service", "opentv-catalogue-ratings.service",
-                     "opentv-catalogue-ratings-retry.service"):
+                     "opentv-catalogue-ratings-retry.service", "opentv-muse.service", "opentv-muse-pair.service"):
             _, text = unit(name)
             inacc = {p[1:] for p in " ".join(re.findall(r"^InaccessiblePaths=(.+)$", text, re.M)).split()}
-            for p in (c.muse_jobs_dir, c.muse_jobs_tmp, c.muse_results_dir):
-                self.assertIn(p, inacc, (name, p))
+            self.assertIn(c.muse_run_dir, inacc, name)
+            if name.startswith("opentv-catalogue"):
+                self.assertIn(c.muse_results_dir, inacc, name)
         for name in ("opentv-muse.service", "opentv-muse-pair.service"):   # le pont ne voit jamais /var/lib/opentv
             _, text = unit(name)
             self.assertIn("-/var/lib/opentv ", text)
@@ -1592,10 +2051,17 @@ class TestUnits(unittest.TestCase):
         self.assertIn("opentv-muse-setup.path opentv-muse-setup.service; do", ins)
         self.assertIn("remote.js muse.js fallback.html", ins)
         self.assertRegex(ins, r"post systemctl enable [^\n]*(\\\n[^\n]*)*opentv-muse-setup\.path")
+        # mise à jour : ancien emplacement sur la carte SD (jobs pouvant porter un jeton) vidé puis retiré, APRÈS
+        # tmpfiles (nouvel emplacement prêt) et le redémarrage du service (plus aucun écrivain de l'ancien chemin)
+        self.assertIn("for d in /var/lib/opentv/musejobs /var/lib/opentv/musejobs-tmp; do", ins)
+        legacy = ins.index("for d in /var/lib/opentv/musejobs /var/lib/opentv/musejobs-tmp; do")
+        self.assertLess(ins.index("post systemd-tmpfiles --create"), legacy)
+        self.assertLess(ins.index("post systemctl restart opentv-net-helper.path"), legacy)
         self.assertIn("host systemctl stop opentv-muse-setup.path opentv-muse-setup.service", uni)
         self.assertIn("opentv-muse-pair.service opentv-muse-setup.path opentv-muse-setup.service\n", uni)
         self.assertLess(uni.index("systemctl stop opentv-muse-setup.path"), uni.index("-type f -delete"))
-        self.assertIn("/var/lib/opentv/musejobs /var/lib/opentv/musejobs-tmp", uni)
+        self.assertIn("for d in /run/opentv-musejobs/queue /run/opentv-musejobs/tmp /var/lib/opentv/musejobs "
+                      "/var/lib/opentv/musejobs-tmp; do", uni)
         self.assertIn("/var/lib/opentv-muse-setup", uni)
 
 
@@ -1969,11 +2435,13 @@ class E2EAdmin:
         return {"paired": E2EAdmin.paired, "token": E2EAdmin.paired, "identity": "owned" if present else "absent",
                 "identity_present": present, "foreign": False}
 
-    def authorize_control(self, yes=False):
+    def authorize_control(self, yes=False, intent=None):
         E2EAdmin.calls.append(("authorize_control", yes))
         reg = self.app.registry
         v, fp, _ = reg.snapshot(("muse", "hermit", "hermes"))
         before = list(v["muse"]["allowed"])
+        if intent is not None:   # journal d'intention AVANT l'écriture (comme museadmin)
+            intent({"before": before, "after": CONTROL, "fp": fp})
         reg.apply_policy_changes({"muse": CONTROL}, ("muse", "hermit", "hermes"), fp)
         return {"ok": True, "changed": True, "policy_before": before}, 0
 

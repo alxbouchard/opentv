@@ -200,9 +200,13 @@ class Config:
         self.jobs_tmp = os.path.join(s, "netjobs-tmp")
         self.results_dir = os.path.join(s, "netresults")
         # connexion de Muse depuis la TV : jobs 0600 du service (jeton SDK le temps de la prise en charge par le helper
-        # root opentv-muse-setup) et progression déposée par ce helper ; jamais lus par une autre unité
-        self.muse_jobs_dir = os.path.join(s, "musejobs")
-        self.muse_jobs_tmp = os.path.join(s, "musejobs-tmp")
+        # root opentv-muse-setup) sur tmpfs SEULEMENT (/run/opentv-musejobs, tmpfiles : jamais écrits sur la carte SD,
+        # effacés par une coupure de courant) ; file et brouillons sous un même parent (rename atomique, un seul
+        # montage inscriptible). Progression et état public déposés par ce helper (sans secret) : /var/lib/opentv.
+        # Jamais lus par une autre unité.
+        self.muse_run_dir = self.run_dir.rstrip("/") + "-musejobs"
+        self.muse_jobs_dir = os.path.join(self.muse_run_dir, "queue")
+        self.muse_jobs_tmp = os.path.join(self.muse_run_dir, "tmp")
         self.muse_results_dir = os.path.join(s, "museresults")
         self.registry_file = os.path.join(s, "agents.json")
         self.audit_file = os.path.join(s, "audit.jsonl")
@@ -218,9 +222,16 @@ class Config:
 
     def ensure_dirs(self):
         for d in (self.state_dir, self.jobs_dir, self.jobs_tmp, self.results_dir, self.foryou_state,
-                  self.muse_jobs_dir, self.muse_jobs_tmp, self.muse_results_dir):
+                  self.muse_results_dir):
             os.makedirs(d, mode=0o700, exist_ok=True)
         os.makedirs(self.run_dir, mode=0o750, exist_ok=True)
+        # /run/opentv-musejobs : créé par tmpfiles (au démarrage et à l'installation) ; ici seulement s'il manque
+        # (tests, développement). Échec : la connexion de Muse depuis la TV reste indisponible, rien d'autre.
+        for d in (self.muse_run_dir, self.muse_jobs_dir, self.muse_jobs_tmp):
+            try:
+                os.makedirs(d, mode=0o700, exist_ok=True)
+            except OSError:
+                break
 
 
 def load_device(cfg):
