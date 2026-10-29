@@ -654,6 +654,18 @@ class Admin:
             if paired and not force and not token_written and ident_state["state"] == "owned":
                 healthy = self.healthy_bridge()
                 if healthy is not None:
+                    # `healthy_bridge()` attend volontairement deux lectures stables. La politique ou l'identité peut
+                    # changer pendant cette attente : ne jamais rendre un faux succès à partir de l'instantané pris
+                    # au début de `pair`. Tous les writers produit réduisent l'identité liée dans la même transaction
+                    # que le plafond ; relire les DEUX ici rend cette réduction visible avant le retour idempotent.
+                    ident_state = self.identity_state(pw)
+                    try:
+                        allowed = agents.ceiling(self.registry().policy(), AGENT_ID)
+                    except (OSError, ValueError):
+                        allowed = None
+                    if ident_state["state"] != "owned" or sorted(allowed or []) != list(musebridge.MUSE_SCOPES):
+                        healthy = None
+                if healthy is not None:
                     if healthy["enabled"] != "enabled":
                         self.systemctl("enable", UNIT)
                         healthy = self.unit_state()

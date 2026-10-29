@@ -783,11 +783,14 @@ class Bridge:
         """Statut d'exécution (aucun secret). `pid` : `muse pair` le compare au MainPID systemd (jamais un statut
         laissé par un autre processus). Après un refus d'identité définitif, seul « refused » est écrit (jamais
         « registered »/« disconnected » d'une session condamnée)."""
-        if self.fatal is not None:
-            state, extra = "refused", {"reason": self.fatal}
-        if self.status_path:
-            write_json_status(self.status_path, dict({"v": 1, "state": state, "since": round(time.time(), 3),
-                                                      "pid": os.getpid(), "commands": sorted(COMMANDS)}, **extra))
+        # Le test de `fatal` et l'écriture forment une seule section critique avec halt() : un fil qui avait préparé
+        # « registered » ne peut jamais l'écrire après que l'autre a publié « refused ».
+        with self._halt_lock:
+            if self.fatal is not None:
+                state, extra = "refused", {"reason": self.fatal}
+            if self.status_path:
+                write_json_status(self.status_path, dict({"v": 1, "state": state, "since": round(time.time(), 3),
+                                                          "pid": os.getpid(), "commands": sorted(COMMANDS)}, **extra))
 
     async def _sleep(self, seconds):
         try:

@@ -664,6 +664,30 @@ class TestPairRestartRace(tmb.AdminBase):
         self.assertEqual(self.unit.pid, pid)
         self.assertEqual(self.unit.spawned, [self.first_pid])          # un seul processus depuis l'appariement
 
+    def test_policy_change_during_healthy_check_is_re_read_before_success(self):
+        """La révocation/réautorisation peut tomber pendant les deux lectures de santé. L'instantané d'identité pris
+        avant cette attente devient périmé : `pair` doit relire plafond + identité, arrêter l'ancien pont et réémettre,
+        jamais rendre `already_paired` pour un processus qui sortira ensuite avec 78."""
+        old = self.token()
+        original = museadmin.Admin.healthy_bridge
+        raced = []
+
+        def healthy_then_change(adm):
+            answer = original(adm)
+            if not raced:
+                raced.append(True)
+                adm.revoke_control()                 # réduit l'identité liée dans la même écriture que la politique
+                adm.authorize_control(yes=True)      # rétablit le plafond, mais ne réémet volontairement pas l'identité
+                self.unit.doom(after=8.0, refused=False)
+            return answer
+
+        with mock.patch.object(museadmin.Admin, "healthy_bridge", healthy_then_change):
+            r, code = self.pair(stdin="")
+        self.assertTrue(raced)
+        self.assert_new_bridge_survives(r, code)
+        self.assertTrue(r["identity_reissued"])
+        self.assertIsNone(self.reg().authenticate("muse-device", old))
+
     def test_bridge_that_never_stops_changes_nothing_and_says_so(self):
         self.admin().revoke_control()
         self.unit.hang_stop = True
