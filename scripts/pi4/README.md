@@ -498,7 +498,8 @@ queued, appliqué, en lecture et fermé restent quatre faits distincts. Sans `co
 `control: {enabled: false}` — ni film en cours, ni état de lecture, ni actions TV (moindre privilège).
 `play_title` ne part que d'un lecteur `idle` : tant qu'une fin (`closed`/`unavailable`) n'est pas acquittée par la
 page `/tv` (retour sur la fiche précédente en cours), il est refusé `player_returning` (vérifié sous le verrou de
-`Playback.start` ; « Regarder » d'Alex garde son contrat). Priorité humaine : configuration ou « Gérer les
+`Playback.start` ; « Regarder » d'Alex garde son contrat) ; pendant ce même retour, `present_title` et
+`remote_control` (toutes touches) sont aussi refusés `player_returning`, `close_player` restant permis. Priorité humaine : configuration ou « Gérer les
 assistants » ouverts ⇒ `tv_setup_active`/`tv_busy` ; pendant une lecture, aucune fiche ni touche (`player_active`)
 sauf fermeture ; une touche **ou une fiche proposée** (`present_title`) mise en file moins de 2 s après une touche de
 la télécommande ou du téléphone (ou suivie d'une touche avant d'être appliquée) est refusée (`human_active`) : la
@@ -511,15 +512,31 @@ Muse » et la phrase de l'assistant ; après une lecture, Retour revient sur cet
 l'agent propriétaire (`agents.canonical_agent` : « Proposé par Muse », « Message de Muse », jamais l'identifiant
 brut) et ses budgets de débit (`TOOL_RATES`, appels/s, intervalle des messages et des propositions) sont **partagés**
 avec `muse` : deux identités ne doublent jamais le débit. L'audit et le journal gardent l'identité réellement
-authentifiée.
+authentifiée. Dans « Gérer les assistants », l'en-tête TV et les compteurs, `muse-device` est **replié sur Muse**
+(`app.assistant_row`) : droits effectifs = scopes enregistrés plafonnés par l'autorisation de Muse (ce que l'Agent
+Port accorde), pont **prêt** seulement avec exactement `agents.LINKED_REQUIRED` (`musebridge.MUSE_SCOPES` en
+dérive) — Muse est alors « Connecté (piloter OpenTV) » et « Connectés : Muse » ; un appel authentifié réussi le
+marque « actif » au nom de Muse. Réduit en dessous (pilotage → lecture/avis/messages), le pont reste installé mais
+**en pause** (il refuse de s'enregistrer, exit 78, et reste arrêté) : non compté connecté, affiché « Non : pont Muse
+installé mais en pause », et la confirmation l'annonce (« Muse perd tout de suite le pilotage… le pont reste
+installé… il faudra réautoriser le pilotage puis réinstaller le pont ») ; « Aucun accès » révoque son identité
+(« Le pont Muse sera révoqué tout de suite »). Le pont entre dans l'empreinte de confirmation (installé/retiré
+entre-temps ⇒ 409).
 
 **Texte libre** (`display_message`, phrase de `present_title`) : 1–140 caractères, inséré par `textContent`
 seulement ; refusés : contrôles et formats Unicode (surcharges/isolats/marques bidi, largeur nulle, BOM, tiret
 conditionnel, étiquettes), U+2028/U+2029, usage privé/non attribués, espaces exotiques (seuls espace, insécable,
 fine insécable et fine sont admis), plus de 3 diacritiques empilés, écritures de droite à gauche, et toute adresse —
 y compris déguisée : pleine chasse, point idéographique/pleine chasse/petite forme, lettres non latines
-(squelette NFKC + accents retirés), ou nom d'hôte suivi d'un mot (« evil.com ce soir »). Les titres français
-(accents, « », ’, E.T., O.S.S. 117, WALL·E, 8.1/10, émojis) restent intacts.
+(squelette NFKC + accents retirés), ou nom d'hôte suivi d'un mot (« evil.com ce soir »), points de substitution
+(point médian, katakana, puce, opérateur point, point arménien…), point ASCII entouré d'espaces (« evil . com »),
+point épelé ou entre crochets vers une extension courante (« evil dot com », « evil [.] fr », « evil (point) net »),
+IPv4 courte/hexadécimale (« 127.1 », « 10.0.1 », « 0x7f.1 », « 127.1:80 »), IPv6 (« [::1] », « fe80::1 »), schémas
+faibles (« http:/x », « mailto : », « tel: », « //evil », `\\serveur`, « localhost »), caractères vides de
+catégorie admise (U+3164 et autres remplissages hangûl, U+2800, joncteur de graphèmes) et sélecteurs de variation
+hors émoji (U+FE0E/U+FE0F seulement après un symbole ou un chiffre de touche). Les titres français (accents, « », ’,
+E.T., O.S.S. 117, WALL·E, « Drame · Comédie », 7.8/10, 20:30, émojis ❤️ 1️⃣) restent intacts ; limite connue :
+l'écriture inclusive au point médian (« spectateur·rice·s ») est refusée, comme sa forme au point ASCII.
 
 ### 6 · Muse. Pont Muse (SDK Linux officiel, transport seulement)
 

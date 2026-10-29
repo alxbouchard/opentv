@@ -61,8 +61,9 @@ TOOLS = [
      "description": "Montre sur la TV la fiche d'un film du catalogue accepté (identifiant stable de recommend, search "
                     "ou catalogue_list), avec une courte phrase d'explication facultative. Choisis toi-même le film "
                     "(goûts « Pour toi », historique, notes), explique ton choix en une phrase, puis appelle cet outil : "
-                    "Alex décide avec sa télécommande ou en te demandant de le lancer. Refusé pendant une lecture ou "
-                    "un réglage en cours. Résultat : action mise en file (queued) ; suivre son état avec status.",
+                    "Alex décide avec sa télécommande ou en te demandant de le lancer. Refusé pendant une lecture, "
+                    "pendant le retour qui la suit ou un réglage en cours. Résultat : action mise en file (queued) ; "
+                    "suivre son état avec status.",
      "inputSchema": _obj({"id": {"type": "string", "pattern": UID_PATTERN, "description": ID_DESC},
                           "text": {"type": "string", "minLength": 1, "maxLength": 140,
                                    "description": "Pourquoi ce film, en une phrase"}}, ("id",))},
@@ -81,7 +82,8 @@ TOOLS = [
      "description": "Une touche de navigation dans OpenTV (haut, bas, gauche, droite, OK, retour, accueil). Préfère "
                     "present_title/play_title/close_player ; débit borné, la télécommande d'Alex reste prioritaire, "
                     "jamais d'accès aux Réglages ni de lancement de film par OK (utiliser play_title). Pendant une "
-                    "lecture, seules back/home sont acceptées (elles ferment le lecteur).",
+                    "lecture, seules back/home sont acceptées (elles ferment le lecteur) ; pendant le retour qui suit "
+                    "une lecture, refusée (player_returning).",
      "inputSchema": _obj({"key": {"type": "string", "enum": list(NAV_KEYS), "description": "Touche"}}, ("key",))},
 ]
 TOOL_BY_NAME = {t["name"]: t for t in TOOLS}

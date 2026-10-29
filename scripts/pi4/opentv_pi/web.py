@@ -696,6 +696,7 @@ class LANHandler(_Base):
 AGENT_STEPS = 3
 LEVEL_SHORT = {"none": "Aucun accès", "read": "Voir seulement", "feedback": "Voir + donner mon avis",
                "full": "Avis + messages sur la TV", "control": "Piloter OpenTV : proposer et lancer des films"}
+BRIDGE_NEEDS = "Piloter OpenTV"   # niveau dont le pont lié a besoin (agents.LINKED_REQUIRED = niveau « control »)
 AGENTS_DENIED = ("Ce QR a expiré ou a déjà servi. Sur la TV : Réglages, puis «\u00a0Gérer les assistants\u00a0» pour "
                  "en afficher un nouveau.")
 
@@ -731,10 +732,17 @@ def _agent_status_html(x):
     e = html.escape
     auth = ("<li class=\"st %s\"><b>Autorisé</b><span>%s</span></li>"
             % ("yes" if x["authorized"] else "no", e(LEVEL_SHORT[x["level"]] if x["authorized"] else "Non")))
+    b = x.get("bridge")
+    paused = bool(b) and b["state"] == "paused"
     if x["connected"]:
         act = (" · actif " + _ago(x["seen_s"])) if x.get("seen_s") is not None else " · pas encore actif"
+        if paused:   # autre identité connectée, mais le pont dédié lié ne tourne pas
+            act += " · pont %s en pause" % x["name"]
         conn = ("<li class=\"st yes\"><b>Connecté</b><span>Oui, installé sur la boîte (%s)%s</span></li>"
                 % (e(LEVEL_SHORT[x["connected_level"]].lower()), e(act)))
+    elif paused:   # identité du pont toujours installée, droits insuffisants : jamais « pas installé »
+        conn = ("<li class=\"st no\"><b>Connecté</b><span>Non : pont %s installé mais en pause (il ne fonctionne "
+                "qu'avec «\u00a0%s\u00a0»)</span></li>" % (e(x["name"]), e(BRIDGE_NEEDS)))
     else:
         conn = "<li class=\"st no\"><b>Connecté</b><span>Non, pas installé sur la boîte</span></li>"
     return "<ul class=\"status\">%s%s</ul>" % (auth, conn)
@@ -794,17 +802,43 @@ def agents_plan(lst, values):
 
 
 def _consequence(x, new):
-    """Effet réel d'un choix sur un assistant (jamais d'affirmation de connexion pour un assistant absent)."""
+    """Effet réel d'un choix sur un assistant (jamais d'affirmation de connexion pour un assistant absent).
+
+    Deux faits distincts : son identité du même nom (« client ») et, pour Muse, le pont dédié lié (« bridge ») dont
+    les droits suivent cette autorisation dans la même écriture. Le pont ne fonctionne qu'avec « Piloter OpenTV » :
+    le réduire le met en pause (identité toujours installée, il refuse de s'enregistrer et reste arrêté), « Aucun
+    accès » révoque son identité ; dans les deux cas il faudra le réinstaller sur la boîte."""
     rank = {"none": 0, "read": 1, "feedback": 2, "full": 3, "control": 4}
-    if x["connected"] and new == "none":
-        return "Il sera déconnecté tout de suite (il faudra le réinstaller pour lui redonner accès)."
-    if x["connected"] and rank[new] < rank[x["connected_level"]]:
-        return "Il perd tout de suite les droits retirés."
-    if not x["connected"] and new != "none":
-        return "Pas installé sur la boîte : cette autorisation ne le connecte pas."
-    if x["connected"] and rank[new] > rank[x["connected_level"]]:
-        return "Ses droits actuels restent les mêmes tant qu'il n'est pas réinstallé sur la boîte."
-    return None
+    cl = x["client"] if "client" in x else (x["connected_level"] if x["connected"] else None)
+    b, name, out = x.get("bridge"), x["name"], []
+    if cl is not None:
+        if new == "none":
+            out.append("Il sera déconnecté tout de suite (il faudra le réinstaller pour lui redonner accès).")
+        elif rank[new] < rank[cl]:
+            out.append("Il perd tout de suite les droits retirés.")
+        elif rank[new] > rank[cl]:
+            out.append("Ses droits actuels restent les mêmes tant qu'il n'est pas réinstallé sur la boîte.")
+    if b:
+        need = "«\u00a0%s\u00a0»" % BRIDGE_NEEDS
+        if new == "none":
+            out.append("Le pont %s sera révoqué tout de suite : %s ne pourra plus rien faire sur la TV par ce pont. "
+                       "Pour le rétablir, il faudra autoriser %s puis réinstaller le pont sur la boîte."
+                       % (name, name, need))
+        elif b["state"] == "ready" and new != "control":
+            out.append("%s perd tout de suite le pilotage%s. Le pont %s reste installé sur la boîte, mais il se met en "
+                       "pause (il ne fonctionne qu'avec %s) : pour le relancer, il faudra réautoriser le pilotage puis "
+                       "réinstaller le pont." % (name, " et les autres droits retirés" if rank[new] < rank["full"]
+                                                 else "", name, need))
+        elif b["state"] == "paused" and new == "control":
+            out.append("Le pont %s est en pause : cette autorisation ne le relance pas tout seul, il faudra le "
+                       "réinstaller sur la boîte." % name)
+        elif b["state"] == "paused":
+            out.append("%sLe pont %s reste installé mais en pause : il ne fonctionne qu'avec %s."
+                       % ("Il perd tout de suite les droits retirés. " if rank[new] < rank[b["level"]] else "",
+                          name, need))
+    elif cl is None and new != "none":
+        out.append("Pas installé sur la boîte : cette autorisation ne le connecte pas.")
+    return " ".join(out) or None
 
 
 def agents_confirm_page(token, csrf, plan, fp):
@@ -829,6 +863,8 @@ def agents_confirm_page(token, csrf, plan, fp):
             cons = _consequence(x, p["new"])
         elif x["connected"]:   # vrai pour une identité au-delà de son autorisation : elle n'est pas touchée
             cons = "Reste connecté (%s) : rien ne change pour lui." % LEVEL_SHORT[x["connected_level"]].lower()
+        elif x.get("bridge"):   # pont lié en pause : toujours installé, jamais présenté comme absent
+            cons = "Pont %s toujours en pause : rien ne change pour lui." % x["name"]
         else:
             cons = None
         parts.append("<li><b>%s</b><span>%s</span>%s</li>" % (e(x["name"]), line,

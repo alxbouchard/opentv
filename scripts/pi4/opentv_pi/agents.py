@@ -28,6 +28,15 @@ LOCK_TIMEOUT_S = 5.0
 # retirent Muse réduisent ou révoquent aussi l'identité du pont, dans la MÊME écriture ; l'authentification applique
 # ce plafond à chaque appel (aucun plafond ⇒ refus). L'identité « muse » d'un autre client local n'est jamais touchée.
 LINKED_POLICY = {"muse-device": "muse"}
+# Scopes dont une identité liée a EXACTEMENT besoin pour fonctionner : le pont Muse refuse de s'enregistrer avec moins
+# (identity_scope_mismatch, exit 78). En dessous, l'identité reste installée mais le pont est « en pause » : la TV ne
+# compte alors pas Muse comme connecté par ce pont (musebridge.MUSE_SCOPES en dérive : une seule source).
+LINKED_REQUIRED = {"muse-device": ("control", "display", "feedback", "read")}
+
+
+def linked_of(parent):
+    """Identités dédiées liées à `parent` (ordre stable)."""
+    return tuple(sorted(c for c, p in LINKED_POLICY.items() if p == parent))
 
 
 def canonical_agent(agent):
@@ -156,8 +165,11 @@ def _valid_scopes(v):
 
 def view_of(data, known):
     """Lecture validée unique, la même pour l'affichage et pour l'écriture : {agent: {"allowed": [...],
-    "have": [...] | None}}. Entrée de politique absente/invalide ⇒ [] ; identité absente ⇒ None ; scopes d'identité
-    invalides ⇒ [] (l'Agent Port la refuse déjà)."""
+    "have": [...] | None[, "linked": {identité liée: [...] | None}]}}. Entrée de politique absente/invalide ⇒ [] ;
+    identité absente ⇒ None ; scopes d'identité invalides ⇒ [] (l'Agent Port la refuse déjà). « have » ne décrit
+    QUE l'identité du même nom ; les identités dédiées liées (« muse-device » pour « muse ») sont lues à part dans
+    « linked » (scopes enregistrés, non plafonnés) : elles entrent dans l'empreinte, donc un pont installé ou retiré
+    entre l'affichage et l'envoi rend la confirmation périmée."""
     pol = data.get("policy") if isinstance(data.get("policy"), dict) else {}
     ags = data.get("agents") if isinstance(data.get("agents"), dict) else {}
     out = {}
@@ -165,6 +177,10 @@ def view_of(data, known):
         e = ags.get(a)
         out[a] = {"allowed": _valid_scopes(pol.get(a)),
                   "have": _valid_scopes(e.get("scopes")) if isinstance(e, dict) else None}
+        kids = linked_of(a)
+        if kids:
+            out[a]["linked"] = {c: (_valid_scopes(ags[c].get("scopes")) if isinstance(ags.get(c), dict) else None)
+                                for c in kids}
     return out
 
 

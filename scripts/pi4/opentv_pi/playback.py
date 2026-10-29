@@ -93,6 +93,11 @@ class Playback:
         with self.lock:
             return self.state in ACTIVE
 
+    def returning(self):
+        """Fin (closed/unavailable) pas encore acquittée par la page /tv : la TV revient encore sur la fiche."""
+        with self.lock:
+            return self.state in ("closed", "unavailable")
+
     def _set(self, state, reason=None):   # sous self.lock
         self.state, self.reason = state, (_reason(reason) if reason else None)
         self.seq += 1

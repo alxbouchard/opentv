@@ -62,6 +62,41 @@ def choice_changes(x, new):
     if new == AGENT_KEEP:
         return False
     return new != x["level"] or not set(x["have"] or ()) <= set(AGENT_LEVELS[new])
+
+
+def assistant_row(a, v, seen_at, now):
+    """Ligne honnête d'un assistant connu, identités liées REPLIÉES sur l'agent propriétaire.
+
+    - « client » : niveau de l'identité du même nom (« muse » : autre client local), None si absente/sans scope ;
+    - « bridge » : pont dédié lié (« muse-device ») — None si absent, sinon {"state": "ready"|"paused", "level"} :
+      ses droits EFFECTIFS sont ses scopes enregistrés plafonnés par l'autorisation du propriétaire (ce que l'Agent
+      Port accorde à chaque appel) ; « ready » seulement s'ils valent exactement agents.LINKED_REQUIRED (sinon le pont
+      refuse de s'enregistrer : installé, mais « en pause ») ;
+    - « connected » : identité du même nom installée OU pont prêt ; « connected_level » : niveau de ces identités ;
+    - « have » : union des droits effectifs de toutes les identités installées (pont en pause compris) : c'est ce
+      que choice_changes compare au choix du téléphone, et ce que apply_policy_changes réduit dans la même écriture ;
+    - « over » : identité du même nom installée au-delà de son autorisation (un pont lié est toujours plafonné)."""
+    allowed = list(v["allowed"])
+    lvl = level_of(allowed)
+    own = v["have"] or []
+    have, conn, bridge = set(own), set(own), None
+    for child, sc in sorted((v.get("linked") or {}).items()):
+        if sc is None:
+            continue
+        eff = [x for x in sc if x in allowed]
+        if not eff:   # plus aucun droit effectif : l'Agent Port la refuse, comme une identité absente
+            continue
+        ready = sorted(eff) == sorted(agents.LINKED_REQUIRED.get(child, ()))
+        bridge = {"state": "ready" if ready else "paused", "level": level_of(eff)}
+        have |= set(eff)
+        if ready:
+            conn |= set(eff)
+    connected = bool(own) or (bridge is not None and bridge["state"] == "ready")
+    return {"id": a, "name": AGENT_NAMES[a], "level": lvl, "authorized": bool(allowed), "allowed": allowed,
+            "have": sorted(have), "connected": connected, "connected_level": level_of(conn) if connected else None,
+            "client": level_of(own) if own else None, "bridge": bridge,
+            "over": bool(own) and not set(own) <= set(AGENT_LEVELS[lvl]),
+            "seen_s": int(max(0, now - seen_at)) if (have and seen_at is not None) else None}
 AP_PSK_ALPHABET = "abcdefghijkmnopqrstuvwxyz23456789"
 AP_RETRY_S = 120.0
 # « Pour toi » TV : sélection recalculée au plus tard toutes les FORYOU_TTL_S, et aussitôt que la signature du
@@ -778,10 +813,13 @@ class App:
 
     # -- gestion des assistants (Réglages TV -> QR -> téléphone) : aucun effet réseau, aucune identité émise
     def agent_seen(self, agent):
-        """Agent Port : appel authentifié réussi (preuve d'activité réelle, mémoire seulement)."""
-        if agent in KNOWN_AGENTS:
+        """Agent Port : appel authentifié réussi (preuve d'activité réelle, mémoire seulement). Une identité liée
+        (« muse-device ») est vue au nom de son agent PROPRIÉTAIRE (« muse ») : c'est lui que montre la TV. L'audit
+        et le journal de l'Agent Port gardent l'identité authentifiée."""
+        owner = agents.canonical_agent(agent)
+        if owner in KNOWN_AGENTS:
             with self.lock:
-                self.agent_seen_at[agent] = self.mono()
+                self.agent_seen_at[owner] = self.mono()
 
     def assistants(self):
         return self._assistants_read()[0]
@@ -804,14 +842,7 @@ class App:
         with self.lock:
             seen = dict(self.agent_seen_at)
         for a in KNOWN_AGENTS:
-            allowed, have = view[a]["allowed"], view[a]["have"] or []
-            lvl = level_of(allowed)
-            t = seen.get(a)
-            out.append({"id": a, "name": AGENT_NAMES[a], "level": lvl, "authorized": bool(allowed),
-                        "allowed": list(allowed), "have": list(have),
-                        "connected": bool(have), "connected_level": level_of(have) if have else None,
-                        "over": bool(have) and not set(have) <= set(AGENT_LEVELS[lvl]),
-                        "seen_s": int(max(0, now - t)) if (have and t is not None) else None})
+            out.append(assistant_row(a, view[a], seen.get(a), now))
         return out, fp, corrupt
 
     def _assistants_summary(self):
@@ -1081,8 +1112,10 @@ class App:
 
         Priorité humaine : configuration ou « Gérer les assistants » ouverts ⇒ refus ; pendant une lecture, seule la
         fermeture (close_player, back/home) est acceptée — jamais une fiche ni une touche qui volerait le focus du
-        lecteur. Le lancement passe par Playback.start, exactement comme « Regarder » (source approuvée, promotion
-        terrain, contrôleur prêt) : aucune porte n'est contournée et aucune adresse n'est vue ni produite ici."""
+        lecteur ; tant que la fin d'une lecture n'est pas acquittée par la page (retour sur la fiche), fiche, touche et
+        lancement sont refusés « player_returning » (close_player reste permis). Le lancement passe par
+        Playback.start, exactement comme « Regarder » (source approuvée, promotion terrain, contrôleur prêt) : aucune
+        porte n'est contournée et aucune adresse n'est vue ni produite ici."""
         # fermer le lecteur est toujours permis (jamais de focus volé : on rend la main à OpenTV), même pendant un
         # réglage ; tout le reste attend que l'humain ait fini (configuration, « Gérer les assistants »)
         if name == "close_player" or (name == "remote_control" and a["key"] in ("back", "home") and
@@ -1099,6 +1132,10 @@ class App:
                 raise tools.ToolError("tv_setup_active")
             if self.agents_mode:
                 raise tools.ToolError("tv_busy")
+        if name in ("remote_control", "present_title") and self.playback.returning():
+            # fin de lecture pas encore acquittée : la page /tv revient sur la fiche du film ; une touche ou une fiche
+            # d'assistant ferait courir ce retour contre elle (même refus que play_title). close_player reste permis.
+            raise tools.ToolError("player_returning")
         if name == "remote_control":
             if self.playback.active():   # lecteur au premier plan : seules Retour/Accueil (ci-dessus) le ferment
                 raise tools.ToolError("player_active")

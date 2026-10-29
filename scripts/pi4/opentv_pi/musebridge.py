@@ -47,7 +47,7 @@ from . import VERSION, agentport, agents, config as otconfig, fsutil, mcp, tools
 MUSE_AGENT_ID = "muse-device"                 # identité dédiée du pont (jamais « muse » : autre client local)
 LEGACY_AGENT_ID = "muse"                      # anciennes installations de développement (migration : museadmin)
 # scopes EXACTS de l'identité du pont (triés) : ni lecture seule, ni plus ; vérifiés avant tout enregistrement
-MUSE_SCOPES = ["control", "display", "feedback", "read"]
+MUSE_SCOPES = sorted(agents.LINKED_REQUIRED[MUSE_AGENT_ID])   # une seule source (sinon : pont « en pause » sur la TV)
 DEFAULT_STATE_DIR = "/var/lib/opentv-muse"
 RUN_STATUS = "/run/opentv-muse/status.json"
 PAIR_STATUS_NAME = "pair-status.json"
