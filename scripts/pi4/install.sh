@@ -183,7 +183,7 @@ add "$HERE/system/opentv-initramfs.sh" /opt/opentv/lib/opentv-initramfs.sh 644
 for t in opentv.plymouth opentv.script opentv.png opentv-mask.png; do
   add "$HERE/system/plymouth/$t" "/usr/share/plymouth/themes/opentv/$t" 644
 done
-for u in tv.html tv.js keys.js tv.css setup.css setup.js remote.css remote.js fallback.html; do add "$HERE/ui/$u" "/opt/opentv/share/ui/$u" 644; done
+for u in tv.html tv.js keys.js tv.css setup.css setup.js remote.css remote.js muse.js fallback.html; do add "$HERE/ui/$u" "/opt/opentv/share/ui/$u" 644; done
 add "$REPO/native/app/qrcode.js" /opt/opentv/share/ui/qrcode.js 644                  # réutilisé tel quel
 add "$REPO/scripts/nanopi/opentv_foryou.py" /opt/opentv/lib/foryou/opentv_foryou.py 644  # moteur « Pour toi »
 add "$REPO/scripts/nanopi/opentv_bridge.py" /opt/opentv/lib/foryou/opentv_bridge.py 644  # load_catalogue_meta
@@ -194,7 +194,8 @@ for u in opentv.service opentv-kiosk.service opentv-net-helper.service opentv-ne
          opentv-catalogue-refresh.service opentv-catalogue-refresh.timer opentv-catalogue-ratings.service \
          opentv-catalogue-ratings-retry.service opentv-catalogue-ratings-retry.timer \
          opentv-plymouth-deactivate.service opentv-plymouth-quit.service opentv-plymouth-failsafe.service \
-         opentv-plymouth-failsafe.timer opentv-muse.service opentv-muse-pair.service; do
+         opentv-plymouth-failsafe.timer opentv-muse.service opentv-muse-pair.service \
+         opentv-muse-setup.path opentv-muse-setup.service; do
   add "$HERE/systemd/$u" "/etc/systemd/system/$u" 644
 done
 # aucune invite de connexion sur tty1 tant que opentv-kiosk.service est activé (condition seule, rien de masqué)
@@ -994,12 +995,16 @@ if [ "$ENABLE" = 1 ]; then
   # opentv-plymouth-failsafe.timer : filet absolu (120 s après le noyau) contre un Plymouth laissé indéfiniment ;
   # activé pour le prochain démarrage seulement (jamais démarré ici). Les unités de passage deactivate/quit n'ont pas
   # de section [Install] : tirées par opentv-kiosk.service (Wants=), elles ne s'activent ni ne s'exécutent seules.
+  # opentv-muse-setup.path : connexion de Muse depuis la TV (Réglages > Gérer les assistants > Muse). Le helper root
+  # ne fait rien sans job du service, et le service n'en dépose qu'après « Autoriser et connecter » confirmé sur la TV
+  # (aucun pilotage accordé par l'installation). opentv-muse-setup.service n'a pas de section [Install].
   post systemctl enable opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
     opentv-cec.timer opentv-splash.service opentv-player-keys.service opentv-player.service \
-    opentv-catalogue-refresh.timer opentv-catalogue-ratings-retry.timer opentv-plymouth-failsafe.timer
+    opentv-catalogue-refresh.timer opentv-catalogue-ratings-retry.timer opentv-plymouth-failsafe.timer \
+    opentv-muse-setup.path
   post systemctl restart opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
     opentv-cec.timer opentv-player-keys.service opentv-player.service opentv-catalogue-refresh.timer \
-    opentv-catalogue-ratings-retry.timer
+    opentv-catalogue-ratings-retry.timer opentv-muse-setup.path
 fi
 # ---------------------------------------------------------------- pont Muse : jamais activé par l'installation
 # opentv-muse.service n'est activé que par un appariement humain réussi (sudo opentv-pi muse pair) ; une mise à jour
@@ -1025,7 +1030,7 @@ else
   say "Muse : service musegadget d'origine masqué (jamais activable à côté d'OpenTV)"
 fi
 if [ -n "$MUSE_DEP" ]; then
-  say "Muse : SDK épinglé et dépendance websockets installés, NON apparié (porte humaine : sudo /opt/opentv/bin/opentv-pi muse pair, après avoir autorisé Muse en lecture sur la TV)"
+  say "Muse : SDK épinglé et dépendance websockets installés, NON apparié (sur la TV : Réglages > Gérer les assistants > Muse > Autoriser et connecter ; secours administrateur : sudo /opt/opentv/bin/opentv-pi muse pair)"
 else
   say "Muse : dépendance websockets absente (sudo ./prepare-pi.sh --yes) — pont Muse indisponible, rien d'apparié"
 fi

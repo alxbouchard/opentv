@@ -1,6 +1,9 @@
 #!/bin/bash
-# Mac d'Alex -> boîte OpenTV : autorisation du pilotage par Muse puis appariement du pont, sans jamais exposer le
-# jeton SDK Muse. Jamais installé sur la Pi, jamais lancé par un agent : Alex le lance lui-même dans son terminal.
+# RÉCUPÉRATION ADMINISTRATEUR SEULEMENT. Le parcours normal est sur la TV : Réglages → Gérer les assistants → Muse →
+# « Autoriser et connecter » (QR, jeton chiffré par le téléphone, helper root dédié ; README §5 ter). Ce script reste
+# pour un administrateur qui a SSH (ex. TV indisponible) ; il n'est proposé nulle part dans l'interface.
+# Mac -> boîte OpenTV : autorisation du pilotage par Muse puis appariement du pont, sans jamais exposer le
+# jeton SDK Muse. Jamais installé sur la Pi, jamais lancé par un agent : l'administrateur le lance dans son terminal.
 #
 #   bash scripts/pi4/tools/muse-pair-from-mac.sh <admin>@<hôte-opentv>
 #

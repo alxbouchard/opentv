@@ -77,10 +77,14 @@
     <p id="pkicker" class="kicker"></p>
     <h2 id="ptitle"></h2>
     <p id="pmeta" class="pmeta"></p>
+    <!-- « Connecter Muse » : ce que Muse pourra faire (texte fixe, jamais un texte d'assistant) -->
+    <ul id="pcaps" class="pcaps" hidden></ul>
     <!-- « Gérer les assistants » seulement : QR dédié (jamais le Wi-Fi ni le nom), dans la feuille Réglages -->
     <figure id="pqrfig" class="pqr" hidden><canvas id="aqr" width="300" height="300" data-size="300" data-qr=""></canvas>
       <p id="aqrmsg" class="aqrmsg" role="status" hidden>QR indisponible, réessaie.</p>
       <ol id="psteps" class="psteps"></ol></figure>
+    <!-- « Connecter Muse » après l'envoi du jeton : avancement réel (Préparation → … → Muse est connectée) -->
+    <ol id="pphases" class="pphases" hidden></ol>
     <div id="pbtns" class="pbtns"></div>
   </div>
 

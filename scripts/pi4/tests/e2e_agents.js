@@ -34,6 +34,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     out.settings_text = await tv.textContent("#panel");
     await key("ArrowDown");
     await shot("tv-agents-settings.png");
+    await key("Enter");                                                        // Gérer les assistants : Muse | Droits
+    out.assistants_buttons = await tv.$$eval("#pbtns button", (bs) => bs.map((b) => b.getAttribute("data-label") || b.textContent));
+    await key("ArrowDown");
     await key("Enter");
     out.confirm_focus = await tv.textContent("#pbtns .focused");
     await shot("tv-agents-confirm.png");
@@ -115,6 +118,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await key("ArrowUp");                                                      // accueil, rangée 0 : Réglages
     await key("Enter");
     await key("ArrowDown");
+    await key("Enter");                                                        // Gérer les assistants
+    await key("ArrowDown");                                                    // Droits des assistants
     await key("Enter");
     await key("ArrowUp");
     await key("Enter");

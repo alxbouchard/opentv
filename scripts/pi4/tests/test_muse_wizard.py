@@ -1,0 +1,1379 @@
+"""« Connecter Muse » depuis la TV : consentement explicite, séance courte à usage unique, jeton SDK chiffré par le
+téléphone, helper root dédié (jobs à champs fixes), progression monotone, annulation, déconnexion, reprise après plantage.
+
+Adversarial : séance expirée/rejouée/croisée, CSRF/Origin/en-tête, jeton jamais dans une réponse/journal/audit/URL/QR,
+jeton malformé/trop long/bidi, job lien symbolique/lien dur/propriétaire/mode/taille/schéma, courses d'annulation,
+identité étrangère, double envoi, plantage du helper, aucun pilotage sans confirmation TV, aucune commande SDK
+dangereuse, aucun fichier/shell générique.
+"""
+import configparser
+import http.client
+import socket
+import threading
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import tempfile
+import time
+import unittest
+import urllib.parse
+from unittest import mock
+
+from tests._common import PI4
+from tests.test_service import find_chromium, make_app
+from tests.test_remote import NODE, remote_servers, tmpdir
+from tests import test_agents_manage as tam
+from tests import test_muse_bridge as tmb
+from opentv_pi import agents, config, museadmin, musebridge, musehelper, museseal, musesetup, museweb, tools
+
+LAN = "192.168.2.40"
+TOKEN = "mgst_" + "Zx9_-" * 8 + "ab" + "w"          # 42 + 1 caractères après mgst_, dernier dans l'alphabet canonique
+assert musesetup.SDK_TOKEN_RE.fullmatch(TOKEN)
+CONTROL = ["control", "display", "feedback", "read"]
+_TEMPLATE = museseal.PrivateKey()
+
+
+def fast_key():
+    """Clé RSA-2048 réelle, copiée d'un gabarit (la génération prend ~1 s) : chaque séance reçoit son objet propre."""
+    k = object.__new__(museseal.PrivateKey)
+    k.__dict__.update(_TEMPLATE.__dict__)
+    return k
+
+
+def other_key():
+    return museseal.PrivateKey()
+
+
+def wizard(tc, **env):
+    a = make_app(tc, **env)
+    config.save_device(a.cfg, {"name": "Salon"})
+    a.reload_device()
+    a.muse.keygen, a.muse.async_keygen = fast_key, False
+    s = remote_servers(tc, a)
+    return a, s
+
+
+def tv(s, path, body):
+    return s.req("POST", path, json.dumps(body), {"X-OpenTV-TV": s.app.tv_key, "Content-Type": "application/json"})
+
+
+def start(tc, a, s):
+    code, _, body = tv(s, "/api/tv/muse/start", {"consent": True})
+    tc.assertEqual(code, 200, body)
+    v = a.muse_view()
+    tc.assertTrue(v["active"])
+    u = urllib.parse.urlsplit(v["url"])
+    sid = urllib.parse.parse_qs(u.query)["s"][0]
+    return sid, u.fragment, MPhone(tc, a, s)
+
+
+def seal(jwk, doc):
+    n, e = museseal.public_from_jwk(jwk)
+    return museseal.b64u(museseal.encrypt(n, e, json.dumps(doc).encode("utf-8")))
+
+
+class MPhone:
+    def __init__(self, tc, a, s):
+        self.tc, self.a, self.s = tc, a, s
+
+    @property
+    def port(self):
+        return self.s.web.lan_port()
+
+    @property
+    def host(self):
+        return "%s:%d" % (LAN, self.port)
+
+    def req(self, method, path, body=None, headers=None, host=None):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        h = {"Host": self.host if host is None else host}
+        if isinstance(body, dict):
+            body = json.dumps(body)
+            h["Content-Type"] = "application/json"
+        h.update(headers or {})
+        c.request(method, path, body=body, headers=h)
+        r = c.getresponse()
+        data = r.read().decode("utf-8", "replace")
+        hdrs = {k.lower(): v for k, v in r.getheaders()}
+        c.close()
+        return r.status, hdrs, data
+
+    def page(self, sid, step=1):
+        return self.req("GET", "/muse?" + urllib.parse.urlencode({"s": sid, "step": step}))
+
+    def jwk_csrf(self, sid):
+        code, _, body = self.page(sid, 2)
+        self.tc.assertEqual(code, 200, body)
+        n = re.search(r'data-n="([A-Za-z0-9_-]+)"', body).group(1)
+        e = re.search(r'data-e="([A-Za-z0-9_-]+)"', body).group(1)
+        c = re.search(r'data-c="([0-9a-f]{32})"', body).group(1)
+        return {"kty": "RSA", "n": n, "e": e}, c
+
+    def post(self, path, body, origin=True, header=True, extra=None):
+        h = {}
+        if origin:
+            h["Origin"] = "http://" + self.host
+        if header:
+            h["X-OpenTV-Muse"] = "1"
+        h.update(extra or {})
+        return self.req("POST", path, body, h)
+
+    def submit(self, sid, f, tok=TOKEN, doc=None, c=None, **kw):
+        jwk, csrf = self.jwk_csrf(sid)
+        ct = seal(jwk, doc if doc is not None else {"v": 1, "s": sid, "f": f, "t": tok})
+        code, _, body = self.post("/muse/submit", {"s": sid, "c": c or csrf, "ct": ct}, **kw)
+        return code, json.loads(body), ct
+
+
+def jobs(a):
+    return sorted(os.listdir(a.cfg.muse_jobs_dir))
+
+
+def read_job(a, name):
+    with open(os.path.join(a.cfg.muse_jobs_dir, name), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def result(a, jid, phase, ok=None, res=None, **extra):
+    body = {"v": 1, "id": jid, "phase": phase}
+    if phase == "done":
+        body.update(ok=ok, result=res)
+    body.update(extra)
+    with open(os.path.join(a.cfg.muse_results_dir, jid + ".json"), "w", encoding="utf-8") as f:
+        json.dump(body, f)
+
+
+def everything_text(a, s, *extra):
+    """Tout ce qu'un observateur pourrait lire : journal, audit, état TV, fichiers résultats, pages."""
+    parts = [json.dumps(a.test_logs, ensure_ascii=False), json.dumps(a.tv_state(), ensure_ascii=False)]
+    if os.path.exists(a.cfg.audit_file):
+        with open(a.cfg.audit_file, encoding="utf-8") as f:
+            parts.append(f.read())
+    for d in (a.cfg.muse_results_dir,):
+        for n in os.listdir(d):
+            with open(os.path.join(d, n), encoding="utf-8") as f:
+                parts.append(f.read())
+    return "\n".join(parts + [str(x) for x in extra])
+
+
+# --------------------------------------------------------------------------- service + téléphone (HTTP réel)
+class TestConsentAndSession(unittest.TestCase):
+    def test_selecting_muse_grants_nothing_start_requires_exact_explicit_consent(self):
+        a, s = wizard(self)
+        before = a.registry.policy()
+        for body in ({}, {"consent": "true"}, {"consent": 1}, {"consent": False}, {"consent": [True]}):
+            code, _, out = tv(s, "/api/tv/muse/start", body)
+            self.assertEqual(code, 409, (body, out))
+            self.assertEqual(json.loads(out)["error"], "consent_required")
+        self.assertFalse(a.muse_view()["active"])
+        self.assertEqual(a.lan_purpose(), None)                 # aucune page LAN sans consentement
+        self.assertEqual(a.registry.policy(), before)           # jamais d'autorisation implicite
+        self.assertEqual(jobs(a), [])
+        # sans clé TV (autre processus local) : refus
+        code, _, _ = s.req("POST", "/api/tv/muse/start", json.dumps({"consent": True}),
+                           {"Content-Type": "application/json"})
+        self.assertEqual(code, 403)
+        sid, f, ph = start(self, a, s)
+        self.assertEqual(a.lan_purpose(), "muse")
+        self.assertEqual(a.registry.policy(), before)           # la séance seule n'accorde toujours rien
+        self.assertEqual(jobs(a), [])
+
+    def test_tv_view_carries_only_qr_url_and_never_key_material(self):
+        a, s = wizard(self)
+        sid, f, ph = start(self, a, s)
+        v = a.tv_state()["muse"]
+        self.assertRegex(v["url"], r"^http://192\.168\.2\.40:\d+/muse\?s=[A-Za-z0-9_-]{22}#[A-Za-z0-9_-]{22}$")
+        dump = json.dumps(a.tv_state())
+        k = a.muse.cur.key
+        for secret in (museseal.b64u(k.n.to_bytes(256, "big")), str(k._d), a.muse.csrf(a.muse.cur)):
+            self.assertNotIn(secret, dump)
+        self.assertEqual(v["state"], "await_token")
+        self.assertIsNone(v["bridge"])
+
+    def test_phone_pages_headers_three_steps_fail_closed_and_no_secret(self):
+        a, s = wizard(self)
+        sid, f, ph = start(self, a, s)
+        for step in (1, 2, 3):
+            code, h, body = ph.page(sid, step)
+            self.assertEqual(code, 200, body)
+            self.assertEqual(h["cache-control"], "no-store")
+            self.assertEqual(h["referrer-policy"], "no-referrer")
+            self.assertIn("connect-src 'self'", h["content-security-policy"])
+            self.assertNotIn("unsafe-inline", h["content-security-policy"])
+            self.assertIn('<meta name="referrer" content="no-referrer">', body)
+            self.assertNotIn(f, body)                            # secret du QR : jamais servi
+            self.assertNotIn("mgst_", body)
+            self.assertNotIn("sudo", body)
+            self.assertNotIn("ssh", body.lower())
+            self.assertIn("Étape %d sur 3" % (1 if step == 3 else step), body)   # étape 3 : seulement après le jeton
+        _, _, p1 = ph.page(sid, 1)
+        self.assertIn('href="%s"' % museweb.OFFICIAL_TOKEN_PAGE, p1)
+        self.assertIn('rel="noopener noreferrer"', p1)
+        self.assertEqual(p1.count('class="primary"'), 1)        # une action principale…
+        self.assertRegex(p1, r'<a class="primary" id="next" href="[^"]*step=2">Utiliser mon jeton existant</a>')
+        self.assertNotRegex(p1, r'class="primary"[^>]*id="official"')   # …qui réutilise le jeton existant
+        # un seul jeton par compte, valable pour plusieurs appareils : réutiliser, jamais en créer un second
+        self.assertIn("valable pour plusieurs appareils (jusqu'à 50)", p1)
+        self.assertIn("inutile d'en créer un autre", p1)
+        self.assertIn("Ne révoque pas ce jeton\u00a0: tes autres gadgets Muse seraient déconnectés.", p1)
+        self.assertIn("ne peut pas être recopié de là", p1)     # début masqué : note de reprise honnête
+        _, _, p2 = ph.page(sid, 2)
+        inp = re.search(r"<input[^>]*>", p2).group(0)
+        self.assertIn('type="password"', inp)
+        self.assertNotIn(" name=", inp)                          # jamais envoyé par un formulaire
+        self.assertIn("le même que pour tes autres appareils Muse", p2)
+        self.assertRegex(p2, r'<form id="seal"[^>]*hidden')       # caché tant que muse.js n'a rien vérifié
+        self.assertIn("<noscript>", p2)
+        self.assertEqual(p2.count('class="primary"'), 1)
+        # aucune requête GET/POST sans JavaScript ne transporte de jeton : /muse/nojs ne lit rien
+        code, _, body = ph.req("POST", "/muse/nojs", "tok=" + TOKEN, {"Content-Type": "application/x-www-form-urlencoded"})
+        self.assertEqual(code, 400)
+        self.assertNotIn(TOKEN, body)
+        self.assertEqual(jobs(a), [])
+        # étranger : Host, pair, chemin
+        self.assertEqual(ph.req("GET", "/muse?s=" + sid, host="evil.example:%d" % ph.port)[0], 421)
+        self.assertEqual(ph.req("GET", "/setup?t=x")[0], 404)
+        self.assertEqual(ph.req("GET", "/assistants?t=x")[0], 404)
+        self.assertEqual(ph.req("GET", "/static/tv.js")[0], 404)
+
+    def test_full_submit_writes_exactly_one_private_job_and_never_echoes_the_token(self):
+        a, s = wizard(self)
+        sid, f, ph = start(self, a, s)
+        code, out, ct = ph.submit(sid, f)
+        self.assertEqual((code, out), (200, {"ok": True, "state": "submitted"}))
+        names = jobs(a)
+        self.assertEqual(len(names), 1)
+        p = os.path.join(a.cfg.muse_jobs_dir, names[0])
+        st = os.lstat(p)
+        self.assertEqual((stat.S_IMODE(st.st_mode), st.st_nlink), (0o600, 1))
+        j = read_job(a, names[0])
+        self.assertEqual(set(j), {"v", "id", "action", "consent", "created", "token"})
+        self.assertEqual((j["action"], j["consent"], j["token"]), ("pair", "tv", TOKEN))
+        self.assertEqual(os.listdir(a.cfg.muse_jobs_tmp), [])
+        # double envoi (double toucher, rechargement) : jamais un second job ni un nouvel essai
+        jwk = {"kty": "RSA", "n": museseal.b64u(_TEMPLATE.n.to_bytes(256, "big")), "e": "AQAB"}
+        c = a.muse.csrf(a.muse.cur)
+        code2, _, body2 = ph.post("/muse/submit", {"s": sid, "c": c, "ct": seal(jwk, {"v": 1, "s": sid, "f": f,
+                                                                                       "t": TOKEN})})
+        self.assertEqual((code2, json.loads(body2)["error"]), (409, "already_submitted"))
+        code3, _, body3 = ph.post("/muse/submit", {"s": sid, "c": c, "ct": ct})   # rejeu exact
+        self.assertEqual(code3, 409)
+        self.assertEqual(len(jobs(a)), 1)
+        # clé privée et secret f effacés dès la remise : un rejeu ne peut même plus être déchiffré
+        self.assertIsNone(a.muse.cur.key)
+        self.assertIsNone(a.muse.cur.f)
+        # jamais dans une réponse, l'état TV, le journal, l'audit ni les pages
+        _, _, page3 = ph.page(sid, 3)
+        _, _, status = ph.req("GET", "/muse/status?s=" + sid)
+        txt = everything_text(a, s, out, body2, body3, page3, status)
+        self.assertNotIn(TOKEN, txt)
+        self.assertNotIn(TOKEN[5:20], txt)
+        self.assertNotIn(f, txt)
+        self.assertNotIn(ct, txt)
+
+    def test_csrf_origin_header_content_type_and_size_are_enforced_before_anything(self):
+        a, s = wizard(self)
+        sid, f, ph = start(self, a, s)
+        jwk, c = ph.jwk_csrf(sid)
+        good = {"s": sid, "c": c, "ct": seal(jwk, {"v": 1, "s": sid, "f": f, "t": TOKEN})}
+        cases = [
+            (dict(good, c="0" * 32), {}, 403),
+            (good, {"origin": False}, 403),                                  # ni Origin ni Sec-Fetch-Site
+            (good, {"extra": {"Origin": "http://evil.example"}}, 403),
+            (good, {"origin": False, "extra": {"Origin": "null"}}, 403),       # null sans Sec-Fetch-Site
+            (good, {"origin": False, "extra": {"Origin": "null", "Sec-Fetch-Site": "cross-site"}}, 403),
+            (good, {"header": False}, 403),                                  # pas d'en-tête X-OpenTV-Muse
+            (dict(good, extra="x"), {}, 400),
+        ]
+        for body, kw, want in cases:
+            extra = kw.pop("extra", None)
+            if extra and "Origin" in extra:
+                kw["origin"] = False
+            code, _, out = ph.post("/muse/submit", body, extra=extra, **kw)
+            self.assertEqual(code, want, (body.keys(), kw, extra, out))
+        code, _, _ = ph.req("POST", "/muse/submit", urllib.parse.urlencode(good),
+                            {"Content-Type": "application/x-www-form-urlencoded", "Origin": "http://" + ph.host,
+                             "X-OpenTV-Muse": "1"})
+        self.assertEqual(code, 415)
+        code, _, _ = ph.req("POST", "/muse/submit", "{" + " " * 3000 + "}",
+                            {"Content-Type": "application/json", "Origin": "http://" + ph.host, "X-OpenTV-Muse": "1"})
+        self.assertEqual(code, 413)
+        self.assertEqual(jobs(a), [])
+        self.assertEqual(a.muse.cur.state, "await_token")
+        # Origin « null » + Sec-Fetch-Site same-origin (navigateur en no-referrer) : accepté
+        code, out, _ = ph.submit(sid, f, origin=False, extra={"Origin": "null", "Sec-Fetch-Site": "same-origin"})
+        self.assertEqual(code, 200, out)
+
+    def test_cross_session_expired_and_replayed_sessions_are_refused(self):
+        a, s = wizard(self)
+        sid1, f1, ph = start(self, a, s)
+        jwk1, c1 = ph.jwk_csrf(sid1)
+        ct1 = seal(jwk1, {"v": 1, "s": sid1, "f": f1, "t": TOKEN})
+        a.muse.keygen = other_key
+        tv(s, "/api/tv/muse/start", {"consent": True})            # nouvelle séance : l'ancienne est annulée
+        v = a.muse_view()
+        u = urllib.parse.urlsplit(v["url"])
+        sid2, f2 = urllib.parse.parse_qs(u.query)["s"][0], u.fragment
+        self.assertNotEqual(sid1, sid2)
+        self.assertEqual(ph.page(sid1, 1)[0], 403)               # ancienne séance : refusée
+        code, _, out = ph.post("/muse/submit", {"s": sid1, "c": c1, "ct": ct1})
+        self.assertEqual((code, json.loads(out)["error"]), (403, "expired"))
+        jwk2, c2 = ph.jwk_csrf(sid2)
+        # chiffré de la séance 1 présenté à la séance 2 (autre clé) : refusé, compté comme essai
+        code, _, out = ph.post("/muse/submit", {"s": sid2, "c": c2, "ct": ct1})
+        self.assertEqual((code, json.loads(out)["error"]), (400, "sealed_rejected"))
+        # bonne clé mais document lié à la séance 1 (s/f) : refusé
+        for doc in ({"v": 1, "s": sid1, "f": f2, "t": TOKEN}, {"v": 1, "s": sid2, "f": f1, "t": TOKEN}):
+            code, _, out = ph.post("/muse/submit", {"s": sid2, "c": c2, "ct": seal(jwk2, doc)})
+            self.assertEqual(code, 400, out)
+        # CSRF de la séance 1 sur la séance 2 : refusé
+        code, _, _ = ph.post("/muse/submit", {"s": sid2, "c": c1, "ct": seal(jwk2, {"v": 1, "s": sid2, "f": f2,
+                                                                                    "t": TOKEN})})
+        self.assertEqual(code, 403)
+        self.assertEqual(jobs(a), [])
+        # expiration (≤ 10 min) : QR, page et envoi refusés, la TV l'annonce
+        a.mono_clock.t += musesetup.SESSION_TTL_S + 1
+        self.assertLessEqual(musesetup.SESSION_TTL_S, 600)
+        a.tick()
+        code, _, body = ph.page(sid2, 2)                          # l'issue reste lisible un court instant…
+        self.assertEqual(code, 200)
+        self.assertIn("QR expiré", body)
+        self.assertNotIn("data-n=", body)                           # …mais plus aucun champ ni clé
+        self.assertEqual(ph.post("/muse/submit", {"s": sid2, "c": c2, "ct": seal(jwk2, {"v": 1, "s": sid2, "f": f2,
+                                                                                       "t": TOKEN})})[0], 403)
+        self.assertEqual(a.muse_view()["state"], "expired")
+        self.assertEqual(a.muse_view()["last"]["state"], "expired")
+        a.mono_clock.t += musesetup.LINGER_S + 1
+        self.assertIsNone(a.lan_purpose())                        # page LAN fermée ensuite
+
+    def test_malformed_oversize_bidi_tokens_and_attempt_budget(self):
+        a, s = wizard(self)
+        sid, f, ph = start(self, a, s)
+        bad = [TOKEN + " ", " " + TOKEN, TOKEN[:-1], TOKEN + "A", TOKEN.replace("Z", "\u202e", 1),
+               TOKEN.replace("x", "\u200b", 1), "MGST_" + TOKEN[5:], TOKEN[:-1] + "B", "x" * 100]
+        for i, t in enumerate(bad[:musesetup.MAX_ATTEMPTS - 1]):
+            code, out, _ = ph.submit(sid, f, tok=t)
+            self.assertEqual((code, out["error"]), (400, "invalid_token"), repr(t))
+            self.assertNotIn(t, json.dumps(out))
+        code, out, _ = ph.submit(sid, f, tok=bad[-1])
+        self.assertEqual((code, out["error"]), (403, "too_many_attempts"))
+        self.assertEqual(a.muse_view()["last"]["state"], "failed")
+        self.assertEqual(jobs(a), [])
+        # documents non conformes : clés en trop/manquantes, mauvaise version, non-JSON, chiffré trop long
+        a.muse.keygen = other_key
+        sid, f, ph = start(self, a, s)
+        jwk, c = ph.jwk_csrf(sid)
+        n, e = museseal.public_from_jwk(jwk)
+        for raw in (json.dumps({"v": 1, "s": sid, "f": f, "t": TOKEN, "argv": ["sh"]}).encode(),
+                    json.dumps({"v": 2, "s": sid, "f": f, "t": TOKEN}).encode(), b"not json"):
+            ct = museseal.b64u(museseal.encrypt(n, e, raw))
+            code, _, out = ph.post("/muse/submit", {"s": sid, "c": c, "ct": ct})
+            self.assertEqual((code, json.loads(out)["error"]), (400, "sealed_rejected"))
+        code, _, out = ph.post("/muse/submit", {"s": sid, "c": c, "ct": "A" * 900})   # trop long : 4e essai
+        self.assertEqual((code, json.loads(out)["error"]), (400, "sealed_rejected"))
+        code, _, out = ph.post("/muse/submit", {"s": sid, "c": c, "ct": "A" * 342})
+        self.assertEqual(code, 403)
+        self.assertEqual(json.loads(out)["error"], "too_many_attempts")
+        self.assertEqual(jobs(a), [])
+
+    def test_wrong_session_ids_are_rate_limited_per_ip(self):
+        a, s = wizard(self)
+        sid, f, ph = start(self, a, s)
+        for i in range(30):
+            self.assertEqual(ph.req("GET", "/muse?s=%s" % ("A" * 22))[0], 403)
+        self.assertEqual(ph.req("GET", "/muse?s=" + sid)[0], 429)   # même la bonne séance attend
+        self.assertEqual(ph.req("GET", "/muse?s=" + sid + "&s=" + sid)[0], 429)
+
+
+class TestProgressCancelAndDisconnect(unittest.TestCase):
+    def submitted(self):
+        a, s = wizard(self)
+        sid, f, ph = start(self, a, s)
+        self.assertEqual(ph.submit(sid, f)[0], 200)
+        return a, s, sid, ph, jobs(a)[0][:-5]
+
+    def test_cancel_before_pickup_withdraws_job_and_token(self):
+        a, s, sid, ph, jid = self.submitted()
+        code, _, body = tv(s, "/api/tv/muse/cancel", {})
+        self.assertEqual(code, 200, body)
+        self.assertEqual(jobs(a), [])                              # le jeton disparaît avec le job
+        self.assertEqual(a.muse_view()["last"]["state"], "cancelled")
+        self.assertEqual(os.listdir(a.cfg.muse_jobs_tmp), [])
+
+    def test_cancel_after_pickup_asks_the_helper_and_never_reports_early(self):
+        a, s, sid, ph, jid = self.submitted()
+        os.remove(os.path.join(a.cfg.muse_jobs_dir, jid + ".json"))   # pris par le helper
+        result(a, jid, "preparing")
+        a.tick()
+        tv(s, "/api/tv/muse/cancel", {})
+        names = jobs(a)
+        self.assertEqual(len(names), 1)
+        j = read_job(a, names[0])
+        self.assertEqual((j["action"], j["target"]), ("cancel", jid))
+        self.assertEqual(set(j), {"v", "id", "action", "target", "created"})
+        self.assertTrue(a.muse_view()["cancelling"])
+        self.assertTrue(a.muse_view()["active"])                    # rien d'annoncé avant l'issue du helper
+        tv(s, "/api/tv/muse/cancel", {})
+        self.assertEqual(len(jobs(a)), 1)                           # une seule demande
+        result(a, jid, "done", ok=False, res="cancelled")
+        a.tick()
+        self.assertEqual(a.muse_view()["last"]["state"], "cancelled")
+        # issue « connectée » arrivée malgré l'annulation (trop tard) : dite telle quelle, jamais révoquée ici
+        a2, s2, sid2, ph2, jid2 = self.submitted()
+        os.remove(os.path.join(a2.cfg.muse_jobs_dir, jid2 + ".json"))
+        result(a2, jid2, "waiting_muse")
+        a2.tick()
+        tv(s2, "/api/tv/muse/cancel", {})
+        result(a2, jid2, "done", ok=True, res="connected")
+        a2.tick()
+        self.assertEqual(a2.muse_view()["last"]["state"], "connected")
+
+    def test_progress_is_monotonic_and_foreign_or_late_results_are_ignored(self):
+        a, s, sid, ph, jid = self.submitted()
+        os.remove(os.path.join(a.cfg.muse_jobs_dir, jid + ".json"))
+        result(a, "f" * 16, "done", ok=True, res="connected")       # autre job : ignoré
+        a.tick()
+        self.assertEqual(a.muse_view()["state"], "submitted")
+        result(a, jid, "connecting")
+        a.tick()
+        result(a, jid, "preparing")                                 # retour en arrière : ignoré
+        a.tick()
+        self.assertEqual(a.muse_view()["state"], "connecting")
+        with open(os.path.join(a.cfg.muse_results_dir, jid + ".json"), "w") as f:
+            json.dump({"v": 1, "id": jid, "phase": "done", "ok": True, "result": "connected", "token": TOKEN,
+                       "ble_name": "MuseGadget0A0B0C; rm -rf /"}, f)
+        a.tick()
+        v = a.muse_view()
+        self.assertEqual(v["last"]["state"], "connected")
+        self.assertEqual(v["message"], "Muse est connectée.")
+        self.assertNotIn(TOKEN, json.dumps(a.tv_state()))
+        result(a, jid, "done", ok=False, res="helper_error")        # final : immuable
+        a.tick()
+        self.assertEqual(a.muse_view()["last"]["state"], "connected")
+        _, _, st = ph.req("GET", "/muse/status?s=" + sid)
+        self.assertEqual(json.loads(st)["state"], "connected")
+
+    def test_helper_that_never_picks_up_fails_honestly_and_withdraws(self):
+        a, s, sid, ph, jid = self.submitted()
+        a.mono_clock.t += musesetup.PICKUP_S + 1
+        a.tick()
+        self.assertEqual(jobs(a), [])
+        self.assertEqual(a.muse_view()["last"]["error"], "helper_unavailable")
+        # pris mais jamais fini : échéance globale bornée
+        a, s, sid, ph, jid = self.submitted()
+        os.remove(os.path.join(a.cfg.muse_jobs_dir, jid + ".json"))
+        result(a, jid, "waiting_muse", ble_name="MuseGadget0A0B0C")
+        a.tick()
+        self.assertEqual(a.muse_view()["ble_name"], "MuseGadget0A0B0C")
+        a.mono_clock.t += musesetup.PAIR_BUDGET_S + 1
+        a.tick()
+        self.assertEqual(a.muse_view()["last"]["error"], "timeout")
+
+    def test_human_priority_agents_mode_and_setup_exclusivity(self):
+        a, s = wizard(self)
+        sid, f, ph = start(self, a, s)
+        with self.assertRaises(tools.ToolError) as cm:
+            a.agent_control("muse-device", "remote_control", {"key": "ok"})
+        self.assertEqual(str(cm.exception.args[0]), "tv_busy")
+        self.assertEqual(a.request_agents(), (False, "busy"))      # un seul QR LAN à la fois
+        a.cancel_agents("tv")
+        tv(s, "/api/tv/muse/cancel", {})
+        ok, _ = a.request_agents()
+        self.assertTrue(ok)
+        start(self, a, s)                                            # Muse ferme la gestion des assistants
+        self.assertFalse(a.agents_mode)
+        a.request_setup()                                            # Reconfigurer : QR Muse inutilisé fermé
+        a.tick()
+        self.assertFalse(a.muse_view()["active"])
+        code, _, out = tv(s, "/api/tv/muse/start", {"consent": True})
+        self.assertEqual((code, json.loads(out)["error"]), (409, "setup"))
+
+    def test_phone_cancel_only_for_its_own_session(self):
+        a, s = wizard(self)
+        sid, f, ph = start(self, a, s)
+        _, c = ph.jwk_csrf(sid)
+        code, _, _ = ph.post("/muse/cancel", {"s": "B" * 22, "c": c})
+        self.assertEqual(code, 403)
+        self.assertTrue(a.muse_view()["active"])
+        code, _, out = ph.post("/muse/cancel", {"s": sid, "c": c})
+        self.assertEqual((code, json.loads(out)["state"]), (200, "cancelled"))
+
+    def test_disconnect_requires_explicit_confirmation_then_one_unpair_job(self):
+        a, s = wizard(self)
+        for body in ({}, {"confirm": "yes"}, {"confirm": 1}):
+            code, _, _ = tv(s, "/api/tv/muse/disconnect", body)
+            self.assertEqual(code, 409)
+        self.assertEqual(jobs(a), [])
+        code, _, out = tv(s, "/api/tv/muse/disconnect", {"confirm": True})
+        self.assertEqual(code, 200, out)
+        j = read_job(a, jobs(a)[0])
+        self.assertEqual(set(j), {"v", "id", "action", "confirm", "created"})
+        self.assertEqual((j["action"], j["confirm"]), ("unpair", "tv"))
+        self.assertEqual(tv(s, "/api/tv/muse/disconnect", {"confirm": True})[0], 409)   # une à la fois
+        self.assertEqual(tv(s, "/api/tv/muse/start", {"consent": True})[0], 409)        # jamais pendant
+        os.remove(os.path.join(a.cfg.muse_jobs_dir, jobs(a)[0]))
+        result(a, j["id"], "done", ok=True, res="disconnected")
+        a.tick()
+        v = a.muse_view()
+        self.assertEqual(v["disconnect"]["state"], "done")
+        self.assertEqual(v["disconnect"]["message"], "Muse est déconnectée.")
+        self.assertGreater(v["disconnect_last"]["seq"], 0)
+
+    def test_offline_or_unconfigured_never_opens_the_page(self):
+        from tests.test_service import Net, OFF_DEV
+        a = make_app(self, net=Net(dev=OFF_DEV, ip=""))
+        config.save_device(a.cfg, {"name": "Salon"})
+        a.reload_device()
+        a.tick()
+        self.assertEqual(a.muse_start(True), (False, "offline"))
+        b = make_app(self)
+        b.tick()
+        self.assertEqual(b.muse_start(True), (False, "setup"))
+
+
+# --------------------------------------------------------------------------- chiffrement (Python ↔ cryptography ↔ JS)
+class TestSeal(unittest.TestCase):
+    def test_roundtrip_tamper_and_no_oracle(self):
+        k = fast_key()
+        n, e = museseal.public_from_jwk(k.public_jwk())
+        self.assertEqual(set(k.public_jwk()), {"kty", "alg", "n", "e"})
+        ct = museseal.encrypt(n, e, b"bonjour")
+        self.assertEqual(k.decrypt(ct), b"bonjour")
+        for bad in (ct[:-1], ct + b"\0", bytes([ct[0] ^ 1]) + ct[1:], ct[:100] + bytes([ct[100] ^ 4]) + ct[101:],
+                    b"\0" * 256, (k.n + 1).to_bytes(257, "big")[1:]):
+            with self.assertRaises(museseal.SealError) as cm:
+                k.decrypt(bad)
+            self.assertEqual(str(cm.exception), "seal_rejected")
+        self.assertNotIn(str(k._d)[:12], repr(k))
+        k.wipe()
+        with self.assertRaises(museseal.SealError):
+            k.decrypt(ct)
+        with self.assertRaises(museseal.SealError):
+            museseal.b64u_dec("ab=cd", 400)
+
+    @unittest.skipUnless(tmb.HAVE_CRYPTO, "cryptography absente")
+    def test_interop_with_cryptography_both_ways(self):
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding, rsa
+        oaep = padding.OAEP(mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
+        k = fast_key()
+        pub = rsa.RSAPublicNumbers(k.e, k.n).public_key()
+        self.assertEqual(k.decrypt(pub.encrypt(b"x" * 190, oaep)), b"x" * 190)
+        priv = rsa.generate_private_key(65537, 2048)
+        pn = priv.public_key().public_numbers()
+        self.assertEqual(priv.decrypt(museseal.encrypt(pn.n, pn.e, b"abc"), oaep), b"abc")
+
+    @unittest.skipUnless(NODE, "node absent")
+    def test_phone_script_seal_is_decrypted_by_the_box(self):
+        """muse.js (tel que servi au téléphone) chiffre ; museseal déchiffre. SHA-256 vérifié sur vecteurs connus."""
+        k = fast_key()
+        jwk = k.public_jwk()
+        doc = json.dumps({"v": 1, "s": "S" * 22, "f": "F" * 22, "t": TOKEN})
+        script = r"""
+        const vm = require('vm'), fs = require('fs'), crypto = require('crypto');
+        const win = { crypto: { getRandomValues: (a) => crypto.randomFillSync(a) } };
+        const ctx = vm.createContext({ window: win, atob, btoa, BigInt, Uint8Array, unescape, encodeURIComponent });
+        vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), ctx);
+        const M = win.OpenTVMuseSeal, inp = JSON.parse(process.argv[2]);
+        const hex = (b) => Buffer.from(b).toString('hex');
+        const out = { selfTest: M.selfTest(), empty: hex(M.sha256([])), long: hex(M.sha256(M.utf8('a'.repeat(1000)))),
+          cts: [] };
+        for (let i = 0; i < 3; i++) out.cts.push(M.seal(inp.n, inp.e, M.utf8(inp.doc), (n) => {
+          const a = new Uint8Array(n); crypto.randomFillSync(a); return Array.from(a); }));
+        console.log(JSON.stringify(out));
+        """
+        p = subprocess.run([NODE, "-e", script, os.path.join(PI4, "ui", "muse.js"),
+                            json.dumps({"n": jwk["n"], "e": jwk["e"], "doc": doc})],
+                           capture_output=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr.decode())
+        out = json.loads(p.stdout)
+        import hashlib
+        self.assertTrue(out["selfTest"])
+        self.assertEqual(out["empty"], hashlib.sha256(b"").hexdigest())
+        self.assertEqual(out["long"], hashlib.sha256(b"a" * 1000).hexdigest())
+        self.assertEqual(len(set(out["cts"])), 3)                   # aléa frais à chaque envoi
+        for ct in out["cts"]:
+            self.assertEqual(k.decrypt(museseal.b64u_dec(ct, 400)).decode(), doc)
+
+    def test_service_and_admin_token_shapes_match_the_pinned_sdk(self):
+        self.assertEqual(musesetup.SDK_TOKEN_RE.pattern, museadmin.SDK_TOKEN_RE.pattern)
+        with open(os.path.join(PI4, "ui", "muse.js"), encoding="utf-8") as f:
+            js = f.read()
+        self.assertIn("/^mgst_[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/", js)
+        for bad in ("localStorage", "sessionStorage", "document.cookie", "console.", "location.search =", "eval(",
+                    "innerHTML", "crypto.subtle"):
+            self.assertNotIn(bad, js)
+
+
+# --------------------------------------------------------------------------- helper root : validation des jobs
+class NoAdmin:
+    def __init__(self, tc):
+        self.tc = tc
+
+    def __call__(self, **kw):
+        self.tc.fail("aucune administration Muse ne doit être appelée")
+
+
+class HelperBase(unittest.TestCase):
+    def setUp(self):
+        d = tempfile.mkdtemp(prefix="otvmh", dir="/tmp")
+        self.addCleanup(shutil.rmtree, d, True)
+        self.cfg = config.Config({"OPENTV_STATE_DIR": os.path.join(d, "state")})
+        for p in (self.cfg.state_dir, self.cfg.muse_jobs_dir, self.cfg.muse_jobs_tmp, self.cfg.muse_results_dir):
+            os.makedirs(p, mode=0o700, exist_ok=True)
+            os.chmod(p, 0o700)
+        self.journal = os.path.join(d, "journal")
+        os.makedirs(self.journal, mode=0o700)
+        self.logs = []
+        self.now = 1000000.0
+
+    def helper(self, admin_factory=None):
+        return musehelper.MuseHelper(self.cfg, os.getuid(), admin_factory=admin_factory or NoAdmin(self),
+                                     clock=lambda: self.now, sleep=lambda s: None, chown=False,
+                                     log=lambda ev, **f: self.logs.append(dict(f, event=ev)),
+                                     journal_dir=self.journal, journal_uid=os.getuid())
+
+    def job(self, body, name=None, mode=0o600):
+        body = dict(body)
+        body.setdefault("v", 1)
+        body.setdefault("created", self.now)
+        name = name or body["id"] + ".json"
+        p = os.path.join(self.cfg.muse_jobs_dir, name)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(body, f)
+        os.chmod(p, mode)
+        return p
+
+    def pair_job(self, jid="a" * 16, **kw):
+        return self.job(dict({"id": jid, "action": "pair", "consent": "tv", "token": TOKEN}, **kw))
+
+    def results(self):
+        out = {}
+        for n in sorted(os.listdir(self.cfg.muse_results_dir)):
+            with open(os.path.join(self.cfg.muse_results_dir, n), encoding="utf-8") as f:
+                out[n[:-5]] = json.load(f)
+        return out
+
+
+class TestHelperJobValidation(HelperBase):
+    def test_every_malformed_or_unsafe_job_is_removed_without_any_action(self):
+        h = self.helper()
+        cases = {
+            "b" * 16: dict(action="pair", consent="phone", token=TOKEN),             # pas de consentement TV
+            "c" * 16: dict(action="pair", token=TOKEN),                               # consentement absent
+            "d" * 16: dict(action="pair", consent="tv", token=TOKEN + "x"),           # jeton invalide
+            "e" * 16: dict(action="pair", consent="tv", token=TOKEN, argv=["sh", "-c", "id"]),   # champ en trop
+            "f" * 16: dict(action="pair", consent="tv", token=TOKEN, created=self.now - 3600),   # trop vieux
+            "g" * 16: dict(action="exec", path="/etc/shadow"),                        # action inconnue
+            "h" * 16: dict(action="unpair", confirm="phone"),
+            "i" * 16: dict(action="cancel", target="../../etc"),
+            "j" * 16: dict(action="unpair", confirm="tv", replace_identity=True),
+        }
+        for jid, body in cases.items():
+            self.job(dict(body, id=jid))
+        self.job({"id": "k" * 16, "action": "pair", "consent": "tv", "token": TOKEN}, mode=0o644)   # mode
+        p = self.job({"id": "m" * 16, "action": "pair", "consent": "tv", "token": TOKEN})
+        os.link(p, os.path.join(self.cfg.state_dir, "hl"))                            # lien dur
+        with open(os.path.join(self.cfg.muse_jobs_dir, "n" * 16 + ".json"), "w") as f:
+            f.write("{" * 5000)                                                       # trop gros / non JSON
+        os.chmod(os.path.join(self.cfg.muse_jobs_dir, "n" * 16 + ".json"), 0o600)
+        target = os.path.join(self.cfg.state_dir, "victim.json")
+        with open(target, "w") as f:
+            json.dump({"id": "o" * 16, "v": 1, "action": "unpair", "confirm": "tv", "created": self.now}, f)
+        os.symlink(target, os.path.join(self.cfg.muse_jobs_dir, "o" * 16 + ".json"))   # lien symbolique
+        os.mkfifo(os.path.join(self.cfg.muse_jobs_dir, "p" * 16 + ".json"))            # FIFO
+        os.mkdir(os.path.join(self.cfg.muse_jobs_dir, "q" * 16 + ".json"))             # dossier
+        self.job({"id": "r" * 16, "action": "pair", "consent": "tv", "token": TOKEN}, name="evil name.json")
+        self.assertEqual(h.run(), [])                                                 # rien exécuté
+        self.assertEqual(os.listdir(self.cfg.muse_jobs_dir), [])                      # tout retiré
+        self.assertTrue(os.path.exists(target))                                       # cible du lien intacte
+        res = self.results()
+        for jid in list(cases) + ["k" * 16, "m" * 16, "n" * 16]:
+            self.assertEqual((res[jid]["phase"], res[jid]["ok"], res[jid]["result"]), ("done", False, "refused"), jid)
+        self.assertNotIn(TOKEN, json.dumps(res) + json.dumps(self.logs))
+
+    def test_wrong_owner_unsafe_directory_and_symlinked_directory_are_refused(self):
+        self.pair_job()
+        real_fstat = os.fstat
+
+        def fstat(fd):
+            st = real_fstat(fd)
+            if stat.S_ISREG(st.st_mode):
+                lst = list(st)
+                lst[stat.ST_UID] = st.st_uid + 1
+                return os.stat_result(lst)
+            return st
+        with mock.patch.object(musehelper.os, "fstat", fstat):
+            self.assertEqual(self.helper().run(), [])
+        self.assertEqual(self.results()["a" * 16]["result"], "refused")
+        self.assertIn("bad_owner", json.dumps(self.logs))
+        # dossier des jobs ouvert à d'autres : aucun job lu (fail-closed), rien supprimé
+        self.pair_job(jid="b" * 16)
+        os.chmod(self.cfg.muse_jobs_dir, 0o755)
+        self.assertEqual(self.helper().run(), [])
+        self.assertEqual(len(os.listdir(self.cfg.muse_jobs_dir)), 1)
+        os.chmod(self.cfg.muse_jobs_dir, 0o700)
+        # dossier remplacé par un lien : refusé
+        real = self.cfg.muse_jobs_dir + ".real"
+        os.rename(self.cfg.muse_jobs_dir, real)
+        os.symlink(real, self.cfg.muse_jobs_dir)
+        self.assertEqual(self.helper().run(), [])
+        self.assertEqual(len(os.listdir(real)), 1)
+
+    def test_no_generic_shell_file_or_identity_replacement_in_the_helper(self):
+        for mod in ("musehelper.py", "musesetup.py", "museweb.py", "museseal.py"):
+            with open(os.path.join(PI4, "opentv_pi", mod), encoding="utf-8") as f:
+                src = re.sub(r'""".*?"""', "", f.read(), flags=re.S)
+            for bad in ("shell=True", "os.system", "subprocess", "eval(", "exec(", "os.popen", "pickle",
+                        "replace_identity=True", "force=True"):
+                self.assertNotIn(bad, src, (mod, bad))
+        self.assertEqual(musehelper.KEYS, {
+            "pair": {"v", "id", "action", "consent", "created", "token"},
+            "cancel": {"v", "id", "action", "target", "created"},
+            "unpair": {"v", "id", "action", "confirm", "created"}})
+        self.assertEqual(sorted(musebridge.COMMANDS), tmb.EXPECTED)           # exactement les 11 commandes
+        for bad in ("system.run", "file.read", "file.write", "device.health"):
+            self.assertNotIn(bad, musebridge.COMMANDS)
+
+
+# --------------------------------------------------------------------------- helper root + vrai `muse pair`
+class TestHelperWithRealAdmin(tmb.AdminBase):
+    def setUp(self):
+        super().setUp()
+        for p in (self.cfg.muse_jobs_dir, self.cfg.muse_jobs_tmp, self.cfg.muse_results_dir):
+            os.makedirs(p, mode=0o700, exist_ok=True)
+            os.chmod(p, 0o700)
+        self.journal = self.j("/var/lib/opentv-muse-setup")
+        os.makedirs(self.journal, mode=0o700)
+        os.chmod(self.journal, 0o700)
+        reg = agents.Registry(self.cfg.registry_file)
+        reg.set_policy({"muse": ["feedback", "read"], "hermit": [], "hermes": []})   # pilotage PAS encore accordé
+        self.hlogs = []
+        self.on_window = None
+
+    def runner(self, argv, timeout):
+        out = super().runner(argv, timeout)
+        if argv[:3] == ["systemctl", "start", "--no-block"] and argv[3] == museadmin.PAIR_UNIT and self.on_window:
+            self.on_window()
+        return out
+
+    def factory(self, **kw):
+        pwd_mod = mock.Mock(getpwnam=lambda n: self.pwmap[n])
+        return musehelper.WizardAdmin(self.cfg, root=self.r, runner=self.runner, euid=lambda: 0, pwd_mod=pwd_mod,
+                                      grp_mod=self.groups, sdk_dir=self.sdk, clock=self.fake_clock,
+                                      trusted_uids=(0, os.getuid()), **kw)
+
+    def helper(self, sleep=None):
+        return musehelper.MuseHelper(self.cfg, os.getuid(), admin_factory=self.factory, clock=time.time,
+                                     sleep=sleep or self.fake_sleep, chown=False, journal_dir=self.journal,
+                                     journal_uid=os.getuid(), log=lambda ev, **f: self.hlogs.append(dict(f, event=ev)))
+
+    def put(self, body):
+        body = dict(body, v=1, created=time.time())
+        p = os.path.join(self.cfg.muse_jobs_dir, body["id"] + ".json")
+        with open(p, "w") as f:
+            json.dump(body, f)
+        os.chmod(p, 0o600)
+
+    def pair_job(self, jid="a" * 16):
+        self.put({"id": jid, "action": "pair", "consent": "tv", "token": tmb.SDK_TOKEN})
+
+    def policy(self):
+        return agents.Registry(self.cfg.registry_file).policy()["muse"]
+
+    def phases(self, jid):
+        return [x.get("phase") for x in self.hlogs if x.get("id") == jid]
+
+    def result(self, jid):
+        with open(os.path.join(self.cfg.muse_results_dir, jid + ".json")) as f:
+            return json.load(f)
+
+    def test_tv_confirmed_pair_grants_control_pairs_and_reports_progress_without_the_token(self):
+        seen = []
+        real = musehelper.MuseHelper._result
+
+        def spy(h, jid, phase, **kw):
+            seen.append((phase, kw.get("ble_name"), kw.get("result")))
+            return real(h, jid, phase, **kw)
+        self.pair_job()
+        with mock.patch.object(musehelper.MuseHelper, "_result", spy):
+            self.assertEqual(self.helper().run(), ["connected"])
+        self.assertEqual([x[0] for x in seen], ["preparing", "waiting_muse", "connecting", "done"])
+        self.assertEqual(seen[1][1], "MuseGadget0A0B0C")
+        self.assertEqual(seen[-1][2], "connected")
+        self.assertEqual(sorted(self.policy()), CONTROL)                     # accordé PAR ce consentement
+        reg = agents.Registry(self.cfg.registry_file)
+        self.assertEqual(reg.list()[musebridge.MUSE_AGENT_ID]["scopes"], CONTROL)
+        self.assertTrue(os.path.exists(self.j("/var/lib/opentv-muse/pairing.json")))
+        self.assertEqual(os.listdir(self.cfg.muse_jobs_dir), [])
+        self.assertEqual(os.listdir(self.journal), [])
+        r = self.result("a" * 16)
+        self.assertEqual((r["ok"], r["result"]), (True, "connected"))
+        blob = json.dumps(self.hlogs) + json.dumps(r) + self.err.getvalue()
+        self.assertNotIn(tmb.SDK_TOKEN, blob)
+        cmds = self.cmds()
+        self.assertIn("start --no-block %s" % museadmin.PAIR_UNIT, cmds)
+        self.assertFalse([c for c in cmds if "replace" in c or "force" in c])
+
+    def test_window_failure_revokes_issued_identity_and_restores_the_previous_policy(self):
+        self.window = "window_closed"
+        self.pair_job()
+        self.assertEqual(self.helper().run(), ["window_closed"])
+        self.assertEqual(sorted(self.policy()), ["feedback", "read"])        # rien n'a changé pour Muse
+        self.assertNotIn(musebridge.MUSE_AGENT_ID, agents.Registry(self.cfg.registry_file).list())
+        self.assertEqual(self.result("a" * 16)["result"], "window_closed")
+        self.assertEqual(os.listdir(self.journal), [])
+
+    def test_owner_decision_during_pairing_is_never_overwritten_by_the_rollback(self):
+        self.window = "window_closed"
+        real = self.fake_sleep
+
+        def sleep(s):   # pendant la fenêtre, Alex retire lui-même tout accès à Muse depuis la TV
+            reg = agents.Registry(self.cfg.registry_file)
+            v, fp, _ = reg.snapshot(("muse", "hermit", "hermes"))
+            if sorted(v["muse"]["allowed"]) == CONTROL:
+                reg.apply_policy_changes({"muse": ["read"]}, ("muse", "hermit", "hermes"), fp)
+            return real(s)
+        self.pair_job()
+        self.helper(sleep=sleep).run()
+        self.assertEqual(self.policy(), ["read"])
+
+    def test_cancel_during_the_bluetooth_wait_closes_the_window_and_changes_nothing(self):
+        self.window = None                                                    # l'iPhone ne vient jamais
+        self.on_window = lambda: self.put({"id": "c" * 16, "action": "cancel", "target": "a" * 16})
+        self.pair_job()
+        self.assertEqual(self.helper().run(), ["interrupted"])
+        self.assertEqual(self.result("a" * 16)["result"], "cancelled")
+        self.assertIn("stop %s" % museadmin.PAIR_UNIT, self.cmds())          # fenêtre fermée
+        self.assertNotIn(musebridge.MUSE_AGENT_ID, agents.Registry(self.cfg.registry_file).list())
+        self.assertEqual(sorted(self.policy()), ["feedback", "read"])
+        self.assertFalse(os.path.exists(self.j("/var/lib/opentv-muse/pairing.json")))
+
+    def test_cancel_queued_with_the_pair_job_runs_nothing(self):
+        self.pair_job()
+        self.put({"id": "c" * 16, "action": "cancel", "target": "a" * 16})
+        self.assertEqual(self.helper().run(), ["cancelled"])
+        self.assertEqual(sorted(self.policy()), ["feedback", "read"])
+        self.assertFalse([c for c in self.cmds() if museadmin.PAIR_UNIT in c])
+
+    def test_foreign_identity_is_never_replaced_and_policy_restored(self):
+        agents.Registry(self.cfg.registry_file).set_policy({"muse": CONTROL, "hermit": [], "hermes": []})
+        agents.Registry(self.cfg.registry_file).issue(musebridge.MUSE_AGENT_ID, CONTROL)   # émise par un autre
+        agents.Registry(self.cfg.registry_file).set_policy({"muse": ["feedback", "read"], "hermit": [], "hermes": []})
+        before = agents.Registry(self.cfg.registry_file).list()[musebridge.MUSE_AGENT_ID]
+        self.pair_job()
+        self.assertEqual(self.helper().run(), ["foreign_identity"])
+        after = agents.Registry(self.cfg.registry_file).list().get(musebridge.MUSE_AGENT_ID)
+        self.assertIsNotNone(after)                                           # jamais révoquée
+        self.assertEqual(after.get("token_sha256"), before.get("token_sha256"))
+        self.assertEqual(sorted(self.policy()), ["feedback", "read"])
+        self.assertFalse([c for c in self.cmds() if museadmin.PAIR_UNIT in c])
+
+    def test_helper_crash_mid_pairing_is_cleaned_up_on_restart(self):
+        self.window = None
+
+        class Crash(Exception):
+            pass
+        n = {"i": 0}
+
+        def crashing(s):
+            n["i"] += 1
+            if n["i"] > 3:
+                raise Crash()
+            self.fake_sleep(s)
+        self.pair_job()
+        with self.assertRaises(Crash):
+            self.helper(sleep=crashing).run()
+        self.assertEqual(os.listdir(self.journal), ["inflight.json"])         # journal root laissé par le plantage
+        self.assertEqual(sorted(self.policy()), CONTROL)
+        self.assertIn(musebridge.MUSE_AGENT_ID, agents.Registry(self.cfg.registry_file).list())
+        with open(os.path.join(self.journal, "inflight.json")) as f:
+            self.assertNotIn(tmb.SDK_TOKEN, f.read())
+        self.calls.clear()
+        self.helper().run()                                                   # redémarrage : reprise
+        self.assertIn("stop %s" % museadmin.PAIR_UNIT, self.cmds())
+        self.assertNotIn(musebridge.MUSE_AGENT_ID, agents.Registry(self.cfg.registry_file).list())
+        self.assertEqual(sorted(self.policy()), ["feedback", "read"])
+        self.assertEqual(os.listdir(self.journal), [])
+        self.assertEqual(self.result("a" * 16)["result"], "interrupted")
+
+    def test_crash_after_successful_pairing_never_revokes_the_paired_muse(self):
+        fsutil = tmb.fsutil
+        fsutil.atomic_write_path(self.j("/var/lib/opentv-muse/pairing.json"), "{}")
+        with open(os.path.join(self.journal, "inflight.json"), "w") as f:
+            json.dump({"v": 1, "id": "a" * 16, "changed": True, "before": ["feedback", "read"]}, f)
+        agents.Registry(self.cfg.registry_file).set_policy({"muse": CONTROL, "hermit": [], "hermes": []})
+        self.helper().run()
+        self.assertEqual(sorted(self.policy()), CONTROL)
+        self.assertEqual(os.listdir(self.journal), [])
+
+    def test_unpair_job_unpairs_forgets_token_and_revokes_control(self):
+        self.pair_job()
+        self.helper().run()
+        self.assertEqual(sorted(self.policy()), CONTROL)
+        self.unit.stop_delay = 0
+        self.put({"id": "u" * 16, "action": "unpair", "confirm": "tv"})
+        self.assertEqual(self.helper().run(), ["disconnected"])
+        self.assertNotIn(musebridge.MUSE_AGENT_ID, agents.Registry(self.cfg.registry_file).list())
+        self.assertNotIn("control", self.policy())
+        self.assertFalse(os.path.exists(self.j("/var/lib/opentv-muse/pairing.json")))
+        self.assertFalse(os.path.exists(self.j("/var/lib/opentv-muse/sdk_token")))
+        self.assertEqual(self.result("u" * 16)["result"], "disconnected")
+
+
+# --------------------------------------------------------------------------- unités, installation
+def unit(name):
+    cp = configparser.ConfigParser(strict=False, interpolation=None)
+    cp.optionxform = str
+    with open(os.path.join(PI4, "systemd", name), encoding="utf-8") as f:
+        text = f.read()
+    cp.read_string(text)
+    return cp, text
+
+
+class TestUnits(unittest.TestCase):
+    def test_path_and_root_helper_units_are_narrow_and_sandboxed(self):
+        cp, _ = unit("opentv-muse-setup.path")
+        self.assertEqual(cp["Path"]["DirectoryNotEmpty"], "/var/lib/opentv/musejobs")
+        self.assertEqual(cp["Path"]["Unit"], "opentv-muse-setup.service")
+        self.assertEqual(cp["Install"]["WantedBy"], "multi-user.target")
+        cp, text = unit("opentv-muse-setup.service")
+        s = cp["Service"]
+        self.assertNotIn("Install", cp.sections())
+        self.assertNotIn("User", s)                                           # root, mais borné
+        self.assertEqual(s["ExecStart"], "/usr/bin/python3 -I /opt/opentv/bin/opentv-pi muse-setup-helper")
+        self.assertEqual(s["Type"], "oneshot")
+        self.assertEqual(set(s["CapabilityBoundingSet"].split()), {"CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FOWNER"})
+        self.assertEqual(set(s["ReadWritePaths"].split()), {"/var/lib/opentv", "/var/lib/opentv-muse",
+                                                            "/var/lib/opentv-muse-setup", "/etc/opentv/agents"})
+        for k, v in (("NoNewPrivileges", "yes"), ("ProtectSystem", "strict"), ("PrivateNetwork", "yes"),
+                     ("RestrictAddressFamilies", "AF_UNIX"), ("ProtectHome", "yes"), ("PrivateDevices", "yes"),
+                     ("MemoryDenyWriteExecute", "yes"), ("SystemCallFilter", "@system-service")):
+            self.assertEqual(s[k], v, k)
+        self.assertGreater(int(s["TimeoutStartSec"]), museadmin.PAIR_WAIT_S + museadmin.STOP_WAIT_S)
+        self.assertLess(int(s["TimeoutStartSec"]), musesetup.PAIR_BUDGET_S)
+        inacc = " ".join(re.findall(r"^InaccessiblePaths=(.+)$", text, re.M)).split()
+        for p in ("-/etc/opentv/tmdb", "-/etc/opentv/source.env", "-/etc/NetworkManager/system-connections"):
+            self.assertIn(p, inacc)
+        self.assertIn("ConditionPathExists=!/run/opentv-uninstalling", text)
+        # le helper réseau n'est pas élargi
+        _, nh = unit("opentv-net-helper.service")
+        self.assertNotIn("muse", nh)
+
+    def test_job_dirs_private_and_masked_from_other_service_account_units(self):
+        with open(os.path.join(PI4, "system", "tmpfiles-opentv.conf"), encoding="utf-8") as f:
+            tmp = f.read()
+        for line in ("d /var/lib/opentv/musejobs 0700 opentv opentv -",
+                     "d /var/lib/opentv/musejobs-tmp 0700 opentv opentv -",
+                     "d /var/lib/opentv/museresults 0700 opentv opentv -",
+                     "d /var/lib/opentv-muse-setup 0700 root root -"):
+            self.assertIn(line, tmp)
+        c = config.Config({})
+        for name in ("opentv-catalogue-refresh.service", "opentv-catalogue-ratings.service",
+                     "opentv-catalogue-ratings-retry.service"):
+            _, text = unit(name)
+            inacc = {p[1:] for p in " ".join(re.findall(r"^InaccessiblePaths=(.+)$", text, re.M)).split()}
+            for p in (c.muse_jobs_dir, c.muse_jobs_tmp, c.muse_results_dir):
+                self.assertIn(p, inacc, (name, p))
+        for name in ("opentv-muse.service", "opentv-muse-pair.service"):   # le pont ne voit jamais /var/lib/opentv
+            _, text = unit(name)
+            self.assertIn("-/var/lib/opentv ", text)
+
+    def test_install_uninstall_ship_and_remove_the_wizard(self):
+        with open(os.path.join(PI4, "install.sh"), encoding="utf-8") as f:
+            ins = f.read()
+        with open(os.path.join(PI4, "uninstall.sh"), encoding="utf-8") as f:
+            uni = f.read()
+        self.assertIn("opentv-muse-setup.path opentv-muse-setup.service; do", ins)
+        self.assertIn("remote.js muse.js fallback.html", ins)
+        self.assertRegex(ins, r"post systemctl enable [^\n]*(\\\n[^\n]*)*opentv-muse-setup\.path")
+        self.assertIn("host systemctl stop opentv-muse-setup.path opentv-muse-setup.service", uni)
+        self.assertIn("opentv-muse-pair.service opentv-muse-setup.path opentv-muse-setup.service\n", uni)
+        self.assertLess(uni.index("systemctl stop opentv-muse-setup.path"), uni.index("-type f -delete"))
+        self.assertIn("/var/lib/opentv/musejobs /var/lib/opentv/musejobs-tmp", uni)
+        self.assertIn("/var/lib/opentv-muse-setup", uni)
+
+
+class TestTokenReuseCopy(unittest.TestCase):
+    """Un compte Muse : UN jeton actif, valable pour plusieurs appareils. Aucune surface (téléphone, TV, messages
+    d'échec, script) ne conseille d'en créer un second ni de le révoquer ; seule mention de révocation : l'avertir."""
+    SURFACES = ("opentv_pi/museweb.py", "opentv_pi/musesetup.py", "ui/muse.js", "ui/tv.js")
+    BAD = (r"cr[ée]e(r|z)? (un )?(nouveau|autre|second) jeton", r"nouveau jeton", r"g[ée]n[èe]re", r"r[ée]voque-le",
+           r"r[ée]voquez", r"supprime(r|z)? (ton|le|votre) jeton", r"revoke", r"regenerate", r"new token")
+
+    def texts(self):
+        out = {}
+        for rel in self.SURFACES:
+            with open(os.path.join(PI4, rel), encoding="utf-8") as f:
+                out[rel] = f.read().replace("/api/tv/remote/revoke", "")   # « oublier les téléphones » : sans rapport
+        return out
+
+    def test_no_surface_recommends_a_new_token_or_revocation(self):
+        for rel, txt in self.texts().items():
+            for bad in self.BAD:
+                self.assertIsNone(re.search(bad, txt, re.I), (rel, bad))
+            for m in re.finditer(r"r[ée]voqu\w*", txt, re.I):   # révocation : seulement dans l'avertissement
+                ctx = txt[max(0, m.start() - 40):m.end() + 80]
+                if rel.startswith("ui/tv.js") or rel.endswith("musesetup.py"):
+                    continue   # vocabulaire interne (agents, pont), jamais affiché sur le chemin du jeton
+                self.assertTrue("Ne révoque pas" in ctx or "révoquer déconnecterait" in ctx or "jamais" in ctx,
+                                (rel, ctx))
+        for code, msg in musesetup.MESSAGES.items():
+            self.assertNotIn("nouveau", msg.lower(), code)
+            self.assertNotIn("révoqu", msg.lower(), code)
+        self.assertIn("le même que pour tes autres", musesetup.message_for("invalid_sdk_token"))
+
+    def test_masked_prefix_is_explained_never_accepted(self):
+        js = self.texts()["ui/muse.js"]
+        self.assertIn("Ceci n'est que le début masqué du jeton", js)
+        for masked in ("mgst_Ab12\u2022\u2022\u2022\u2022", "mgst_Ab12…", "mgst_Ab12****", "mgst_Ab12..."):
+            self.assertIsNone(musesetup.SDK_TOKEN_RE.fullmatch(masked))
+
+    def test_pages_show_multi_device_copy_and_one_primary_action(self):
+        v = {"csrf": "c" * 32, "jwk": {"n": "AQAB", "e": "AQAB"}, "state": "await_token"}
+        p1 = museweb.render("S" * 22, v, 1)
+        p2 = museweb.render("S" * 22, v, 2)
+        self.assertIn("Utiliser mon jeton existant", p1)
+        self.assertIn("plusieurs appareils", p1)
+        self.assertIn("Ne révoque pas", p1)
+        self.assertEqual(p1.count('class="primary"'), 1)
+        self.assertEqual(p2.count('class="primary"'), 1)
+        for p in (p1, p2):
+            self.assertNotRegex(p, r"mgst_[A-Za-z0-9_-]{4}")      # aucun jeton (ni même un début) dans une page
+
+
+# --------------------------------------------------------------------------- tv.js réel (harnais Chromium, 1920×1080)
+MUSE_SNAP = tam.AGENT_DRIVER.replace(
+    "agentsnote: vis($(\"agentsnote\")) ? $(\"agentsnote\").textContent : null };",
+    "agentsnote: null, pmeta: vis(pan) ? $(\"pmeta\").textContent : null,"
+    " caps: Array.prototype.map.call(document.querySelectorAll(\"#pcaps:not([hidden]) li\"), function (x) {"
+    " return x.textContent; }), phases: Array.prototype.map.call(document.querySelectorAll("
+    "\"#pphases:not([hidden]) li\"), function (x) { return [x.textContent, x.className]; }),"
+    " bodies: (window.__BODIES__ || []).slice(), text: document.body.innerText };")
+assert MUSE_SNAP != tam.AGENT_DRIVER
+
+
+@unittest.skipUnless(find_chromium(), "Chromium introuvable")
+class TestMuseTvInChromium(unittest.TestCase):
+    URL = "http://192.168.2.40:8081/muse?s=" + "S" * 22 + "#" + "F" * 22
+    T = tam.TestAgentsTvInChromium
+    FY, STATE, REMOTE1, render = T.FY, T.STATE, T.REMOTE1, T.render
+
+    def st(self, active=False, state=None, url=None, lseq=0, last=None, bridge=None, phone=False, ble=None,
+           message=None, disc=None, cancelling=False):
+        base = self.T.st(self.T)
+        base["muse"] = {"seq": lseq, "last": {"seq": lseq, "state": last, "error": None}, "active": active,
+                        "state": state, "url": url if active else None, "phone": phone, "ble_name": ble,
+                        "message": message, "bridge": bridge, "cancelling": cancelling, "expires_in": 600,
+                        "disconnect": None, "disconnect_last": disc or {"seq": 0, "state": None}}
+        return base
+
+    def live(self, script, plan, delay, answer=None):
+        """États successifs (au temps donné ; la TV relit l'état toutes les 2 s), réponses imposées pour
+        /api/tv/muse/* (corps des POST enregistrés)."""
+        inject = ("<script>(function(){var f=window.fetch;window.__ST__=%s;window.__BODIES__=[];"
+                  "window.fetch=function(p,o){var m=(o&&o.method)||'GET';"
+                  "if(p.indexOf('/api/tv/state')===0){__CALLS__.push(m+' '+p);var d=window.__ST__;"
+                  "return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(d);}});}"
+                  "if(p.indexOf('/api/tv/muse/')===0){__CALLS__.push(m+' '+p);__BODIES__.push(p+' '+(o&&o.body));"
+                  "var r=%s;return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(r);}});}"
+                  "return f(p,o);};%s})();</script>"
+                  % (json.dumps(script[0][1]), json.dumps(answer or {"ok": True, "error": None}),
+                     "".join("setTimeout(function(){window.__ST__=%s;},%d);" % (json.dumps(x), at)
+                             for at, x in script[1:])))
+        res = self.render(self.st(), [], delay=delay, inject=inject + self.T.TOAST_SPY +
+                          "<script>window.__PLAN__=%s;</script>%s" % (json.dumps(plan), MUSE_SNAP))
+        return res, {x["tag"]: x for x in res["extra"]}
+
+    TO_MUSE = ["ArrowUp", "Enter", "ArrowDown", "Enter", "Enter"]
+
+    def test_selecting_muse_shows_capabilities_and_safe_default_then_explicit_consent(self):
+        plan = [{"at": 1200, "keys": ["ArrowUp", "Enter", "ArrowDown", "Enter"], "tag": "sheet"},
+                {"at": 1300, "keys": ["Enter"], "tag": "consent"},
+                {"at": 1400, "keys": ["Enter"], "tag": "later"},          # OK sur « Pas maintenant »
+                {"at": 1500, "keys": ["Enter"], "tag": "again"},
+                {"at": 1600, "keys": ["ArrowUp"], "tag": "focus-yes"},
+                {"at": 1700, "keys": ["Enter"], "tag": "yes"},
+                {"at": 2600, "keys": [], "tag": "qr"}]
+        script = [(0, self.st()), (1900, self.st(active=True, state="await_token", url=self.URL))]
+        res, s = self.live(script, plan, delay=3200, answer={"ok": True, "error": None,
+                                                             "muse": {"last": {"seq": 0}}})
+        sh = s["sheet"]
+        self.assertEqual((sh["ptitle"], sh["btns"], sh["focused"]), ("Gérer les assistants",
+                                                                     ["Muse", "Droits des assistants", "Retour"], "Muse"))
+        self.assertEqual(sh["subs"][0], "Connecter")
+        c = s["consent"]
+        self.assertEqual((c["ptitle"], c["btns"], c["focused"]),
+                         ("Connecter Muse", ["Autoriser et connecter", "Pas maintenant"], "Pas maintenant"))
+        self.assertEqual(c["caps"][:4], ["Te proposer des films à l'écran", "Apprendre tes goûts et gérer tes listes",
+                                         "Naviguer dans OpenTV", "Lancer ou fermer un film quand tu le lui demandes"])
+        self.assertEqual(c["clip"], [], c)
+        self.assertEqual(c["posts"], [])                                  # choisir Muse n'accorde rien
+        self.assertEqual(s["later"]["ptitle"], "Gérer les assistants")
+        self.assertEqual(s["again"]["posts"], [])
+        self.assertEqual(s["focus-yes"]["focused"], "Autoriser et connecter")
+        self.assertEqual(s["yes"]["bodies"], ['/api/tv/muse/start {"consent":true}'])
+        q = s["qr"]
+        self.assertEqual((q["ptitle"], q["btns"], q["qr"]), ("Connecter Muse", ["Annuler"], "ok"))
+        self.assertTrue(q["qrVisible"] and q["qrTop"], q)
+        self.assertFalse(q["remotebox"])                                  # un seul QR à l'écran
+        self.assertEqual(q["clip"], [], q)
+        for x in res["extra"]:
+            for bad in ("192.168", "mgst_", "sudo", "ssh", "jeton SDK", "token"):
+                self.assertNotIn(bad, x["text"], (x["tag"], bad))
+
+    def test_progress_phases_then_connected_announcement_once(self):
+        def a(st, **k):
+            return self.st(active=True, state=st, url=self.URL if st == "await_token" else None, **k)
+        script = [(0, self.st()), (1500, a("await_token")), (3500, a("await_token", phone=True)),
+                  (5500, a("preparing")), (7500, a("waiting_muse", ble="MuseGadget0A0B0C")),
+                  (9500, a("connecting")), (11500, self.st(lseq=6, last="connected", state="connected",
+                                                           bridge="ready"))]
+        plan = [{"at": 1200, "keys": self.TO_MUSE + ["ArrowUp", "Enter"], "tag": "go"},
+                {"at": 2600, "keys": [], "tag": "qr"}, {"at": 4800, "keys": [], "tag": "phone"},
+                {"at": 6800, "keys": [], "tag": "prep"},
+                {"at": 8800, "keys": ["ArrowDown", "ArrowLeft"], "tag": "wait"}, {"at": 10800, "keys": [], "tag": "conn"},
+                {"at": 12800, "keys": [], "tag": "done"}, {"at": 16000, "keys": [], "tag": "later"}]
+        res, s = self.live(script, plan, delay=16500)
+        self.assertEqual(s["qr"]["qr"], "ok")
+        self.assertIn("Téléphone connecté", s["phone"]["pmeta"])
+        self.assertEqual(s["prep"]["phases"], [["Préparation", "on"], ["En attente de Muse", ""], ["Connexion", ""],
+                                               ["Muse est connectée", ""]])
+        self.assertFalse(s["prep"]["qrVisible"])                          # plus de QR après le jeton
+        w = s["wait"]
+        self.assertEqual(w["phases"][:2], [["Préparation", "done"], ["En attente de Muse", "on"]])
+        self.assertIn("Muse → Réglages → Appareils → Mode développeur → + → OpenTV", w["pmeta"])
+        self.assertIn("MuseGadget0A0B0C", w["pmeta"])
+        self.assertEqual(w["clip"], [], w)
+        self.assertTrue(w["panel"])                                       # flèches : sans effet
+        self.assertEqual(s["conn"]["phases"][2], ["Connexion", "on"])
+        d = s["done"]
+        self.assertFalse(d["panel"])
+        self.assertTrue(d["toastBig"])
+        self.assertTrue(d["toast"].startswith("Muse est connectée !"), d)
+        self.assertEqual(sum(1 for t in s["later"]["toasts"] if t.startswith("Muse est connectée")), 1)
+        self.assertEqual([b for b in s["later"]["bodies"] if "cancel" in b], [])
+
+    def test_cancel_before_and_after_token_and_failure_offers_one_recovery(self):
+        qr = self.st(active=True, state="await_token", url=self.URL)
+        script = [(0, self.st()), (1500, qr), (3000, self.st(lseq=1, last="cancelled", state="cancelled"))]
+        plan = [{"at": 1200, "keys": self.TO_MUSE + ["ArrowUp", "Enter"], "tag": "go"},
+                {"at": 2600, "keys": ["Escape"], "tag": "cancel"}, {"at": 4800, "keys": [], "tag": "after"}]
+        res, s = self.live(script, plan, delay=5200)
+        self.assertFalse(s["cancel"]["panel"])
+        self.assertEqual(s["cancel"]["toast"], "Annulé : rien n'a changé.")
+        self.assertIn("/api/tv/muse/cancel {}", s["after"]["bodies"])
+        self.assertEqual(s["after"]["toasts"].count("Annulé : rien n'a changé."), 1)   # jamais annoncé deux fois
+        # appariement en cours : Annuler attend l'issue réelle (fenêtre fermée par la boîte)
+        wait = self.st(active=True, state="waiting_muse")
+        script = [(0, self.st()), (1500, wait), (3500, self.st(active=True, state="waiting_muse", cancelling=True)),
+                  (4500, self.st(lseq=4, last="cancelled", state="cancelled"))]
+        plan = [{"at": 1200, "keys": self.TO_MUSE + ["ArrowUp", "Enter"], "tag": "go"},
+                {"at": 2600, "keys": ["Escape"], "tag": "cancel"}, {"at": 4600, "keys": [], "tag": "cancelling"},
+                {"at": 6800, "keys": [], "tag": "after"}]
+        res, s = self.live(script, plan, delay=7200)
+        self.assertTrue(s["cancel"]["panel"])
+        self.assertEqual(s["cancel"]["pmeta"], "Annulation en cours…")
+        self.assertTrue(s["cancelling"]["panel"])
+        self.assertEqual(s["cancelling"]["pmeta"], "Annulation en cours…")
+        self.assertFalse(s["after"]["panel"])
+        self.assertEqual(s["after"]["toast"], "Annulé : rien n'a changé.")
+        # échec : une seule action de reprise, qui revient au consentement (jamais de relance implicite)
+        msg = musesetup.message_for("window_closed")
+        script = [(0, self.st()), (1500, wait), (2500, self.st(lseq=4, last="failed", state="failed", message=msg))]
+        plan = [{"at": 1200, "keys": self.TO_MUSE + ["ArrowUp", "Enter"], "tag": "go"},
+                {"at": 4600, "keys": [], "tag": "failed"}, {"at": 4800, "keys": ["Enter"], "tag": "retry"}]
+        res, s = self.live(script, plan, delay=5200)
+        f = s["failed"]
+        self.assertEqual((f["ptitle"], f["btns"], f["focused"], f["pmeta"]),
+                         ("Muse n'est pas connectée", ["Réessayer", "Fermer"], "Réessayer", msg))
+        r = s["retry"]
+        self.assertEqual((r["ptitle"], r["focused"]), ("Connecter Muse", "Pas maintenant"))
+        self.assertEqual([b for b in r["bodies"] if "start" in b], ['/api/tv/muse/start {"consent":true}'])
+
+    def test_connected_muse_disconnect_needs_confirmation_with_safe_default(self):
+        ready = self.st(bridge="ready")
+        plan = [{"at": 1200, "keys": ["ArrowUp", "Enter", "ArrowDown", "Enter"], "tag": "sheet"},
+                {"at": 1300, "keys": ["Enter"], "tag": "muse"}, {"at": 1400, "keys": ["ArrowUp", "Enter"], "tag": "ask"},
+                {"at": 1500, "keys": ["Enter"], "tag": "no"}, {"at": 1600, "keys": ["ArrowUp", "Enter"], "tag": "ask2"},
+                {"at": 1700, "keys": ["ArrowUp", "Enter"], "tag": "yes"},
+                {"at": 4800, "keys": [], "tag": "done"}]
+        script = [(0, ready), (2400, self.st(bridge=None, disc={"seq": 9, "state": "done"}))]
+        res, s = self.live(script, plan, delay=5200)
+        self.assertEqual(s["sheet"]["subs"][0], "Connectée · Déconnecter")
+        m = s["muse"]
+        self.assertEqual((m["ptitle"], m["btns"], m["focused"]), ("Muse est connectée", ["Déconnecter Muse", "Retour"],
+                                                                  "Retour"))
+        a = s["ask"]
+        self.assertEqual((a["ptitle"], a["focused"]), ("Déconnecter Muse ?", "Non"))
+        self.assertEqual(a["pmeta"], "Muse ne pourra plus rien faire sur la TV. Ton jeton et tes autres gadgets Muse "
+                                     "ne changent pas.")                 # local seulement : jamais le jeton chez Muse
+        self.assertEqual(a["clip"], [], a)
+        self.assertEqual(s["no"]["ptitle"], "Muse est connectée")
+        self.assertEqual(s["no"]["bodies"], [])
+        self.assertEqual(s["yes"]["bodies"], ['/api/tv/muse/disconnect {"confirm":true}'])
+        self.assertEqual(s["done"]["toast"], "Muse est déconnectée.")
+
+    def test_reload_during_connection_reopens_the_sheet_and_announces_nothing_old(self):
+        st = self.st(active=True, state="waiting_muse", lseq=7)
+        st["muse"]["last"] = {"seq": 6, "state": "cancelled", "error": "cancelled"}
+        res, s = self.live([(0, st)], [{"at": 1500, "keys": [], "tag": "x"}], delay=2000)
+        x = s["x"]
+        self.assertTrue(x["panel"])
+        self.assertEqual(x["ptitle"], "Connecter Muse")
+        self.assertIsNone(x["toast"])
+
+
+# --------------------------------------------------------------------------- bout en bout réel (Playwright)
+class E2EAdmin:
+    """Administration Muse simulée pour le bout en bout : mêmes appels que museadmin.Admin depuis MuseHelper ;
+    l'appariement passe par les vraies phases (fenêtre ouverte, connexion) et le vrai registre."""
+    calls = []
+
+    def __init__(self, app, progress=None, stdin=None, **kw):
+        self.app, self.progress, self.stdin = app, progress or (lambda *a, **k: None), stdin
+        self.waiting = False
+
+    def authorize_control(self, yes=False):
+        E2EAdmin.calls.append(("authorize_control", yes))
+        reg = self.app.registry
+        v, fp, _ = reg.snapshot(("muse", "hermit", "hermes"))
+        before = list(v["muse"]["allowed"])
+        reg.apply_policy_changes({"muse": CONTROL}, ("muse", "hermit", "hermes"), fp)
+        return {"ok": True, "changed": True, "policy_before": before}, 0
+
+    def pair(self, **kw):
+        E2EAdmin.calls.append(("pair", kw, self.stdin.readline()))
+        self.progress("waiting_muse", ble_name="MuseGadget0A0B0C")
+        time.sleep(3.0)
+        self.progress("connecting")
+        time.sleep(1.0)
+        self.app.registry.issue("muse-device", CONTROL)
+        return {"ok": True, "registered": True}, 0
+
+    def registry(self):
+        return self.app.registry
+
+    def service_ids(self):
+        return {"uid": None, "gid": None}
+
+
+@unittest.skipUnless(find_chromium() and NODE and os.environ.get("OPENTV_TEST_PLAYWRIGHT"),
+                     "bout en bout : OPENTV_TEST_PLAYWRIGHT=<module playwright> + Chromium + node")
+class TestMuseEndToEnd(unittest.TestCase):
+    def test_tv_consent_phone_encrypts_helper_pairs_tv_and_phone_follow(self):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        a = make_app(self, OPENTV_SETUP_PORT=str(port))
+        config.save_device(a.cfg, {"name": "Salon"})
+        a.reload_device()
+        a.registry.set_policy({"muse": ["feedback", "read"], "hermit": [], "hermes": []})
+        a.muse.keygen = fast_key
+        s = remote_servers(self, a)
+        journal = tmpdir(self, "otvmj")
+        os.chmod(journal, 0o700)
+        E2EAdmin.calls = []
+        helper = musehelper.MuseHelper(a.cfg, os.getuid(), admin_factory=lambda **kw: E2EAdmin(a, **kw),
+                                       chown=False, journal_dir=journal, journal_uid=os.getuid(),
+                                       log=lambda ev, **f: None)
+        stop, errors = threading.Event(), []
+
+        def service():   # boucle du service (tic) : indépendante du helper, comme sur la boîte
+            while not stop.is_set():
+                try:
+                    a.tick()
+                except Exception as e:   # remonté au test (un fil ne doit jamais échouer en silence)
+                    errors.append("service " + repr(e))
+                    return
+                stop.wait(0.2)
+
+        def path_unit():   # opentv-muse-setup.path -> .service (root), processus séparé sur la boîte
+            while not stop.is_set():
+                try:
+                    if os.listdir(a.cfg.muse_jobs_dir):
+                        helper.run()
+                except Exception as e:
+                    errors.append("helper " + repr(e))
+                    return
+                stop.wait(0.2)
+        threads = [threading.Thread(target=f, daemon=True) for f in (service, path_unit)]
+        for t in threads:
+            t.start()
+            self.addCleanup(t.join, 10)
+        self.addCleanup(stop.set)
+        shots = os.environ.get("OPENTV_TEST_SHOTS") or tmpdir(self, "otvshots")
+        os.makedirs(shots, exist_ok=True)
+        cfg = {"chromium": find_chromium(), "tv": "http://127.0.0.1:%d/tv" % s.web.tv_port(), "shots": shots,
+               "lan_port": port, "token": TOKEN}
+        p = subprocess.run([NODE, os.path.join(PI4, "tests", "e2e_muse.js"), os.environ["OPENTV_TEST_PLAYWRIGHT"],
+                            json.dumps(cfg)], capture_output=True, timeout=240)
+        self.assertEqual(errors, [])
+        self.assertEqual(p.returncode, 0, p.stderr.decode()[-3000:])
+        res = json.loads(p.stdout.decode().strip().splitlines()[-1])
+        # TV : consentement explicite, QR seul, rien de technique à l'écran
+        self.assertEqual(res["assistants"]["btns"], ["Muse", "Droits des assistants", "Retour"])
+        c = res["consent"]
+        self.assertEqual((c["title"], c["focused"]), ("Connecter Muse", "Pas maintenant"))
+        self.assertEqual(res["posts_before_consent"], 0)
+        q = res["qr"]
+        self.assertEqual((q["qr"], q["panel_in_view"], q["remotebox_hidden"], q["clipped"]), ("ok", True, True, []))
+        for snap in (res["consent"], res["qr"], res["waiting"], res["connected"]):
+            for bad in ("192.168", "127.0.0.1", "mgst_", "sudo", "ssh"):
+                self.assertNotIn(bad, snap["text"], bad)
+        self.assertEqual(res["origin"], "http://%s:%d" % (LAN, port))
+        # téléphone sans JavaScript : champ jamais affiché, rien envoyé
+        self.assertIn("JavaScript désactivé", res["nojs_step2"]["text"])
+        self.assertFalse(res["nojs_step2"]["input_visible"] or res["nojs_step2"]["form_visible"])
+        # téléphone avec JavaScript sur http://<LAN> : contexte non sécurisé, sans crypto.subtle
+        self.assertEqual(res["secure_context"], [False, False])
+        st1 = res["step1"]
+        self.assertEqual((st1["official"], st1["target"]), (museweb.OFFICIAL_TOKEN_PAGE, "_blank"))
+        self.assertIn("noreferrer", st1["rel"])
+        self.assertGreaterEqual(st1["next_h"], 56)                               # « Utiliser mon jeton existant »
+        self.assertIn("plusieurs appareils", st1["text"])
+        self.assertIn("Ne révoque pas ce jeton", st1["text"])
+        self.assertIn("step=2", res["step2_url"])
+        self.assertIn("#", res["step2_url"])                                     # secret du QR gardé au rechargement
+        self.assertEqual((res["step2"]["type"], res["step2"]["name"]), ("password", None))
+        self.assertIn("jeton Muse complet", res["bad"]["err"])
+        self.assertEqual(res["bad"]["value"], "")                                # jamais réaffiché
+        self.assertIn("step=3", res["step3_url"])
+        self.assertEqual(res["storage"], [0, 0, ""])
+        for r in res["requests"]:                                                 # ni URL, ni corps, ni en-tête
+            blob = r["url"] + r["body"] + json.dumps(r["headers"])
+            self.assertNotIn(TOKEN, blob)
+            self.assertNotIn(TOKEN[5:25], blob)
+        submits = [r for r in res["requests"] if r["url"].endswith("/muse/submit")]
+        self.assertEqual(len(submits), 1)
+        self.assertEqual(submits[0]["headers"].get("origin"), res["origin"])     # vraie Origin, même origine
+        self.assertEqual(set(json.loads(submits[0]["body"])), {"s", "c", "ct"})
+        # helper : consentement TV -> autorisation, puis pair avec les options figées et le jeton
+        self.assertEqual(E2EAdmin.calls[0], ("authorize_control", True))
+        self.assertEqual(E2EAdmin.calls[1], ("pair", {"token_stdin": True, "replace_token": True, "force": False,
+                                                      "replace_identity": False}, TOKEN + "\n"))
+        self.assertEqual(res["waiting"]["phases"][1], ["En attente de Muse", "on"])
+        self.assertIn("Mode développeur", res["waiting"]["meta"])
+        self.assertTrue(res["phone_waiting"].startswith("En attente de Muse"))
+        self.assertTrue(res["connected"]["toast"].startswith("Muse est connectée !"))
+        self.assertTrue(res["phone_connected"].startswith("Muse est connectée"))
+        self.assertNotIn("step=3", res["back"]["url"])                          # l'étape 2 a été remplacée
+        self.assertFalse(res["back"]["input"])                                   # Retour : jamais redemandé
+        self.assertIn("Termine dans l'app Muse", res["back"]["text"])
+        self.assertEqual(res["assistants_after"]["btns"][0], "Muse")
+        self.assertEqual((res["muse_connected"]["title"], res["muse_connected"]["focused"]),
+                         ("Muse est connectée", "Retour"))
+        self.assertEqual((res["disconnect_confirm"]["title"], res["disconnect_confirm"]["focused"]),
+                         ("Déconnecter Muse ?", "Non"))
+        self.assertTrue(res["after_escape"]["hidden"])
+        self.assertEqual(sorted(a.registry.policy()["muse"]), CONTROL)
+        self.assertEqual(jobs(a), [])
+        self.assertNotIn(TOKEN, json.dumps(a.test_logs))
+
+
+if __name__ == "__main__":
+    unittest.main()

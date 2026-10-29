@@ -697,6 +697,7 @@ NODE = shutil.which("node")
 KEYS_JS = os.path.join(PI4, "ui", "keys.js")
 TV_JS = os.path.join(PI4, "ui", "tv.js")
 REMOTE_JS = os.path.join(PI4, "ui", "remote.js")
+MUSE_JS = os.path.join(PI4, "ui", "muse.js")   # téléphone, mais ES5 aussi (navigateurs anciens : échec fermé)
 
 KEY_CASES = [
     # (événement, action attendue)
@@ -764,7 +765,7 @@ class TestEs5(unittest.TestCase):
     ES6 = re.compile(r"(?<![\w$.])(let|const|class)\s|=>|`|\.\.\.[A-Za-z_$\[]|\bfor\s*\([^)]*\bof\b")
 
     def test_no_es2015_tokens(self):
-        for f in (KEYS_JS, TV_JS, REMOTE_JS):
+        for f in (KEYS_JS, TV_JS, REMOTE_JS, MUSE_JS):
             with open(f, encoding="utf-8") as fh:
                 code = "\n".join(x for x in fh.read().splitlines() if not x.lstrip().startswith(("//", "*", "/*")))
             m = self.ES6.search(code)
@@ -774,7 +775,8 @@ class TestEs5(unittest.TestCase):
     def test_acorn_ecma5(self):
         code = ("var a=require(process.argv[1]),fs=require('fs');"
                 "process.argv.slice(2).forEach(function(f){a.parse(fs.readFileSync(f,'utf8'),{ecmaVersion:5});});")
-        p = subprocess.run([NODE, "-e", code, find_acorn(), KEYS_JS, TV_JS, REMOTE_JS], capture_output=True,
+        p = subprocess.run([NODE, "-e", code, find_acorn(), KEYS_JS, TV_JS, REMOTE_JS, MUSE_JS],
+                           capture_output=True,
                            timeout=60)
         self.assertEqual(p.returncode, 0, p.stderr.decode())
 
@@ -1222,7 +1224,8 @@ class TestTvKeysInChromium(unittest.TestCase):
             self.assertEqual(lay["panel_hidden_by"], [], (t, lay))
         self.assertEqual((s["Enter:confirm"]["ptitle"], s["Enter:confirm"]["btn"]),
                          ("Afficher un nouveau QR de configuration ?", "Non"))   # « Non » par défaut, visible
-        self.assertEqual(s["Enter:forget"]["btn"], "Non")
+        # 2e ligne des Réglages : « Gérer les assistants » (Muse | Droits), focus sur la première ligne, rien demandé
+        self.assertEqual((s["Enter:forget"]["ptitle"], s["Enter:forget"]["btn"]), ("Gérer les assistants", "Muse"))
         self.assertTrue(s["Escape:closed"]["layout"]["banner_visible"])        # panneau fermé : message revient
         self.assertIn("Message de Muse", res["banner"])
         for x in res["steps"]:

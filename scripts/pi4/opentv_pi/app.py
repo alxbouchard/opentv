@@ -13,8 +13,8 @@ import string
 import threading
 import time
 
-from . import (VERSION, agents, bootid, cec, config, fsutil, netjobs, netstate, nethelper, peeruid, phoneremote,
-               tools, tvcontrol, validate, wifiscan)
+from . import (VERSION, agents, bootid, cec, config, fsutil, musesetup, netjobs, netstate, nethelper, peeruid,
+               phoneremote, tools, tvcontrol, validate, wifiscan)
 from .foryou import ForYou, EngineError
 from . import promotion
 from . import source as sourcemod
@@ -192,6 +192,8 @@ class App:
         # « applying » puis au résultat Wi-Fi, pour que la TV et le téléphone ne disent jamais « tout est prêt » à tort
         self.setup_agents = None
         self.agent_seen_at = {}       # agent -> dernier appel authentifié par l'Agent Port (depuis ce démarrage)
+        # « Connecter Muse » (Réglages TV → Gérer les assistants → Muse) : séance courte + jobs root dédiés
+        self.muse = musesetup.MuseSetup(cfg, mono=mono, log=log)
         self.audit = agents.Audit(cfg.audit_file)
         try:
             self.foryou = ForYou(cfg.engine_dir, cfg.foryou_state, cfg.catalogue_file, cfg.source_id, log=log)
@@ -475,6 +477,7 @@ class App:
     def tick(self):
         net = netstate.snapshot(self.runner)
         results = netjobs.read_results(self.cfg.results_dir)
+        self.muse.tick()   # progression du helper root (fichiers du service) ; verrou propre, jamais sous self.lock
         with self.lock:
             self.net = net
             if net["mode"] == "offline":
@@ -495,6 +498,11 @@ class App:
             self._hotspot_guard()
             if self.setup_mode:
                 self._hotspot()
+            if self.setup_mode or self.net["mode"] not in ("ethernet", "wifi") or not self.net["ip"]:
+                # configuration ou hors ligne : un QR Muse pas encore utilisé est fermé (un appariement déjà lancé
+                # continue côté root et rend son issue)
+                if self.muse.busy() and not self.muse.submitted():
+                    self.muse.cancel("setup" if self.setup_mode else "offline")
             if self.agents_mode:
                 if self.setup_mode:
                     self._agents_end("cancelled", "setup")
@@ -632,6 +640,8 @@ class App:
                 return "setup" if self.net["mode"] != "offline" else None
             if self.agents_mode and self.net["mode"] in ("ethernet", "wifi") and self.net["ip"]:
                 return "agents"
+            if self.net["mode"] in ("ethernet", "wifi") and self.net["ip"] and self.muse.listening():
+                return "muse"
             return None
 
     def lan_ip(self):
@@ -847,10 +857,21 @@ class App:
 
     def _assistants_summary(self):
         lst, _fp, corrupt = self._assistants_read()
+        muse = next((x for x in lst if x["id"] == "muse"), None)
         return {"authorized": sum(1 for x in lst if x["authorized"]),
                 "connected": sum(1 for x in lst if x["connected"]), "total": len(lst),
                 "list": [{"id": x["id"], "authorized": x["authorized"], "connected": x["connected"]} for x in lst],
-                "unreadable": corrupt}
+                "unreadable": corrupt,
+                # pont Muse dédié (« muse-device ») : ready = connecté et autorisé à piloter ; paused = installé mais
+                # en pause (droits réduits) ; None = pas installé
+                "muse_bridge": (muse.get("bridge") or {}).get("state") if muse else None}
+
+    def _muse_tv(self, assistants):   # sous self.lock
+        ip = self.net["ip"] if self.net["mode"] in ("ethernet", "wifi") else None
+        port = self.lan_port_actual if (self.lan_purpose() == "muse") else None
+        v = self.muse.tv_view(ip, port)
+        v["bridge"] = assistants.get("muse_bridge")
+        return v
 
     def request_agents(self):
         """Réglages TV « Gérer les assistants » (confirmé sur la TV) -> (ok, raison). Jamais en configuration ni
@@ -860,6 +881,8 @@ class App:
                 return False, "setup"
             if self.net["mode"] not in ("ethernet", "wifi") or not self.net["ip"]:
                 return False, "offline"
+            if self.muse.busy():   # une seule page LAN à la fois : connexion de Muse en cours
+                return False, "busy"
             self.agents_token.issue()
             self.agents_mode = True
         self.tv_actions.cancel_queued("tv_busy")   # jamais une action d'assistant sur la feuille des assistants
@@ -892,6 +915,47 @@ class App:
         self.agents_last = {"seq": self.agents_last["seq"] + 1, "kind": kind}
         self.log("agents_manage", state=kind, reason=reason)
         return True
+
+    # -- « Connecter Muse » (TV loopback : consentement explicite ; téléphone : séance courte) ----------------
+    def muse_start(self, consent):
+        """« Autoriser et connecter » confirmé sur la TV -> (ok, raison). consent doit valoir exactement True ; jamais
+        en configuration ni hors ligne ; la gestion des assistants (autre QR) est fermée d'abord."""
+        if consent is not True:
+            return False, "consent_required"
+        with self.lock:
+            if self.setup_mode or self.device is None:
+                return False, "setup"
+            if self.net["mode"] not in ("ethernet", "wifi") or not self.net["ip"]:
+                return False, "offline"
+            if self.agents_mode:
+                self._agents_end("cancelled", "muse")
+        ok, why = self.muse.start(consent)
+        if ok:
+            self.tv_actions.cancel_queued("tv_busy")   # jamais une action d'assistant pendant la connexion de Muse
+        return ok, why
+
+    def muse_cancel(self, origin, sid=None):
+        return self.muse.cancel(origin, sid=sid)
+
+    def muse_disconnect(self, confirm):
+        """« Déconnecter Muse » confirmé sur la TV (confirm doit valoir exactement True) -> (ok, raison)."""
+        if confirm is not True:
+            return False, "confirmation_required"
+        with self.lock:
+            if self.setup_mode or self.device is None:
+                return False, "setup"
+        return self.muse.disconnect(confirm)
+
+    def muse_unavailable(self):
+        """Écoute /muse impossible : la séance (pas encore utilisée) est annulée, la TV l'annonce."""
+        if not self.muse.submitted():
+            self.muse.cancel("bind")
+
+    def muse_view(self):
+        with self.lock:
+            ip = self.net["ip"] if self.net["mode"] in ("ethernet", "wifi") else None
+            port = self.lan_port_actual if self.lan_purpose() == "muse" else None
+        return self.muse.tv_view(ip, port)
 
     def agents_csrf(self, tok):
         """Jeton anti-CSRF lié au QR courant (HMAC d'une clé tirée à chaque démarrage) : jamais stocké ni journalisé."""
@@ -1026,6 +1090,7 @@ class App:
                     "agents": [x["id"] for x in assistants["list"] if x["connected"]],
                     "cec": {"adapters": len(self.cec["adapters"])},
                     "assistants": dict(assistants, manage=self._agents_view()),
+                    "muse": self._muse_tv(assistants),
                     "foryou": self.foryou is not None, "remote": self._remote_view(),
                     "playback": self.playback.view(),
                     # pilotage par assistant : actions en attente (fiche, film lancé, touche), à réclamer une fois
@@ -1132,6 +1197,8 @@ class App:
                 raise tools.ToolError("tv_setup_active")
             if self.agents_mode:
                 raise tools.ToolError("tv_busy")
+        if self.muse.busy():   # connexion/déconnexion de Muse en cours sur la TV : l'humain d'abord
+            raise tools.ToolError("tv_busy")
         if name in ("remote_control", "present_title") and self.playback.returning():
             # fin de lecture pas encore acquittée : la page /tv revient sur la fiche du film ; une touche ou une fiche
             # d'assistant ferait courir ce retour contre elle (même refus que play_title). close_player reste permis.

@@ -722,18 +722,25 @@ class TestAgentsTvInChromium(unittest.TestCase):
         self.assertEqual(res["extra"], {"text": "", "hidden": True})
 
     def test_settings_row_counts_and_default_safe_confirmation(self):
-        steps = [["ArrowUp"], ["Enter", {"tag": "open"}], ["ArrowDown", {"tag": "down"}], ["Enter", {"tag": "ask"}],
+        steps = [["ArrowUp"], ["Enter", {"tag": "open"}], ["ArrowDown", {"tag": "down"}], ["Enter", {"tag": "sheet"}],
+                 ["ArrowDown", {"tag": "rights"}], ["Enter", {"tag": "ask"}],
                  ["Enter", {"tag": "no"}], ["Enter", {"tag": "ask2"}], ["ArrowUp", {"tag": "yes"}],
-                 ["Escape", {"tag": "back"}], ["Escape", {"tag": "closed"}]]
+                 ["Escape", {"tag": "back"}], ["Escape", {"tag": "back2"}], ["Escape", {"tag": "closed"}]]
         res = self.render(self.st(), steps)
         s = {x["s"]: x for x in res["steps"]}
         self.assertEqual(s["Enter:open"]["btns"], ["Reconfigurer", "Gérer les assistants", "Oublier les téléphones",
                                                    "Fermer"])
         self.assertEqual(s["ArrowDown:down"]["btn"], "Gérer les assistants")
+        # « Gérer les assistants » : Muse (connexion guidée) ou les droits de chaque assistant (QR existant)
+        self.assertEqual((s["Enter:sheet"]["ptitle"], s["Enter:sheet"]["btns"], s["Enter:sheet"]["btn"]),
+                         ("Gérer les assistants", ["Muse", "Droits des assistants", "Retour"], "Muse"))
+        self.assertEqual(s["ArrowDown:rights"]["btn"], "Droits des assistants")
         self.assertEqual((s["Enter:ask"]["ptitle"], s["Enter:ask"]["btn"]), ("Gérer les assistants ?", "Non"))
-        self.assertEqual((s["Enter:no"]["ptitle"], s["Enter:no"]["btn"]), ("Réglages", "Gérer les assistants"))
+        self.assertEqual((s["Enter:no"]["ptitle"], s["Enter:no"]["btn"]), ("Gérer les assistants",
+                                                                           "Droits des assistants"))
         self.assertEqual(s["ArrowUp:yes"]["btn"], "Oui, afficher le QR")
-        self.assertEqual(s["Escape:back"]["ptitle"], "Réglages")                 # Retour : un niveau, rien demandé
+        self.assertEqual(s["Escape:back"]["ptitle"], "Gérer les assistants")      # Retour : un niveau, rien demandé
+        self.assertEqual((s["Escape:back2"]["ptitle"], s["Escape:back2"]["btn"]), ("Réglages", "Gérer les assistants"))
         self.assertFalse(s["Escape:closed"]["panel"])
         self.assertEqual([c for c in res["calls"] if c.startswith("POST")], [])   # rien sans « Oui »
         for x in res["steps"]:
@@ -742,7 +749,7 @@ class TestAgentsTvInChromium(unittest.TestCase):
     def test_qr_sheet_then_phone_save_returns_home_with_confirmation(self):
         states = [self.st(), self.st(active=True), self.st(active=True), self.st(seq=1, kind="saved", authorized=1)]
         plan = [{"at": 1200, "keys": ["ArrowDown", "ArrowRight", "ArrowUp", "ArrowUp", "Enter"], "tag": "settings"},
-                {"at": 1300, "keys": ["ArrowDown", "Enter"], "tag": "confirm"},
+                {"at": 1300, "keys": ["ArrowDown", "Enter", "ArrowDown", "Enter"], "tag": "confirm"},
                 {"at": 1400, "keys": ["ArrowUp", "Enter"], "tag": "asked"},
                 {"at": 1900, "keys": [], "tag": "qr"},
                 {"at": 3200, "keys": ["ArrowDown", "ArrowLeft"], "tag": "qr-keys"},
@@ -776,7 +783,7 @@ class TestAgentsTvInChromium(unittest.TestCase):
 
     def test_back_cancels_without_double_toast_and_expiry_is_announced(self):
         states = [self.st(), self.st(active=True), self.st(active=True), self.st(seq=1, kind="cancelled")]
-        plan = [{"at": 1200, "keys": ["ArrowUp", "Enter", "ArrowDown", "Enter", "ArrowUp", "Enter"], "tag": "open"},
+        plan = [{"at": 1200, "keys": ["ArrowUp", "Enter", "ArrowDown", "Enter", "ArrowDown", "Enter", "ArrowUp", "Enter"], "tag": "open"},
                 {"at": 2600, "keys": ["Escape"], "tag": "cancel"},
                 {"at": 4800, "keys": [], "tag": "after"}]
         res, s = self.run_plan(states, plan, delay=5200)
@@ -786,7 +793,7 @@ class TestAgentsTvInChromium(unittest.TestCase):
                          ["POST /api/tv/agents", "POST /api/tv/agents/cancel"])
         self.assertEqual(s["after"]["toast"], "Annulé : rien n'a changé.")      # pas de seconde annonce
         states = [self.st(), self.st(active=True), self.st(active=True), self.st(seq=1, kind="expired")]
-        plan = [{"at": 1200, "keys": ["ArrowUp", "Enter", "ArrowDown", "Enter", "ArrowUp", "Enter"], "tag": "open"},
+        plan = [{"at": 1200, "keys": ["ArrowUp", "Enter", "ArrowDown", "Enter", "ArrowDown", "Enter", "ArrowUp", "Enter"], "tag": "open"},
                 {"at": 6800, "keys": [], "tag": "after"}]
         res, s = self.run_plan(states, plan)
         self.assertFalse(s["after"]["panel"])
@@ -794,13 +801,13 @@ class TestAgentsTvInChromium(unittest.TestCase):
         # OK sur « Annuler » et Accueil annulent aussi
         for k in ("Enter", "Home"):
             states = [self.st(), self.st(active=True)]
-            plan = [{"at": 1200, "keys": ["ArrowUp", "Enter", "ArrowDown", "Enter", "ArrowUp", "Enter"], "tag": "o"},
+            plan = [{"at": 1200, "keys": ["ArrowUp", "Enter", "ArrowDown", "Enter", "ArrowDown", "Enter", "ArrowUp", "Enter"], "tag": "o"},
                     {"at": 2200, "keys": [k], "tag": "k"}]
             res, s = self.run_plan(states, plan, delay=3000)
             self.assertFalse(s["k"]["panel"], k)
             self.assertIn("POST /api/tv/agents/cancel", res["calls"], k)
 
-    OPEN = ["ArrowUp", "Enter", "ArrowDown", "Enter", "ArrowUp", "Enter"]
+    OPEN = ["ArrowUp", "Enter", "ArrowDown", "Enter", "ArrowDown", "Enter", "ArrowUp", "Enter"]
 
     # chaque annonce réellement affichée (chaque toast(), même texte répété) : window.__TOASTS__
     TOAST_SPY = ("<script>(function(){window.__TOASTS__=[];function go(){var t=document.getElementById('toast');"
@@ -985,7 +992,7 @@ class TestAgentsTvInChromium(unittest.TestCase):
         inject = ("<script>var _f=window.fetch;window.fetch=function(p,o){if(p==='/api/tv/agents'){__CALLS__.push("
                   "'POST '+p);return Promise.resolve({ok:false,status:409,json:function(){return Promise.resolve("
                   "{ok:false,error:'offline'});}});}return _f(p,o);};</script>")
-        plan = [{"at": 1200, "keys": ["ArrowUp", "Enter", "ArrowDown", "Enter", "ArrowUp", "Enter"], "tag": "o"},
+        plan = [{"at": 1200, "keys": ["ArrowUp", "Enter", "ArrowDown", "Enter", "ArrowDown", "Enter", "ArrowUp", "Enter"], "tag": "o"},
                 {"at": 1800, "keys": [], "tag": "refused"}]
         res = self.render(self.st(), [], delay=2500, inject=inject + "<script>window.__PLAN__=%s;</script>%s"
                           % (json.dumps(plan), AGENT_DRIVER))

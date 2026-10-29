@@ -1,6 +1,6 @@
 """opentv-pi : serve | preflight | health | net-helper | ap-guard | agent issue|list|revoke | setup reset | cec |
 cec-bootstrap | catalogue status|refresh|rollback|resume|ratings|ratings-retry|ratings-credential |
-muse status|pair|unpair|prepare-bluetooth|restore-bluetooth |
+muse status|pair|unpair|prepare-bluetooth|restore-bluetooth | muse-setup-helper |
 manifest verify."""
 import argparse
 import json
@@ -669,6 +669,12 @@ def cmd_muse(a):
     return museadmin.main(a)
 
 
+def cmd_muse_setup_helper(a):
+    """(root, opentv-muse-setup.service) Connexion de Muse depuis la TV : jobs du service, champs fixes seulement."""
+    from . import musehelper
+    return musehelper.main(config.Config.load(a.env))
+
+
 def cmd_manifest(a):
     rep = health.verify_manifest(a.root)
     return _out(rep, 0 if rep["ok"] else 1)
@@ -765,6 +771,8 @@ def build_parser():
     mu.add_argument("--installer", action="store_true", help=argparse.SUPPRESS)   # install.sh (transaction)
     mu.add_argument("--backup-dir", default=None, help=argparse.SUPPRESS)       # install.sh : sauvegardes $BK
     mu.add_argument("--env", default=argparse.SUPPRESS, help="fichier env (défaut : celui de opentv-pi --env)")
+    sub.add_parser("muse-setup-helper", help="(root, opentv-muse-setup.service) connexion de Muse depuis la TV : "
+                                             "consomme les jobs pair|cancel|unpair du service (champs fixes)")
     ma = sub.add_parser("manifest", help="vérifie le manifeste SHA-256")
     ma.add_argument("action", choices=("verify",))
     ma.add_argument("--root", default="/")
@@ -779,4 +787,4 @@ def main(argv):
             "playback": cmd_playback, "preflight": cmd_preflight, "health": cmd_health, "net-helper": cmd_net_helper,
             "ap-guard": cmd_ap_guard, "agent": cmd_agent, "setup": cmd_setup, "cec": cmd_cec,
             "cec-bootstrap": cmd_cec_bootstrap, "catalogue": cmd_catalogue, "manifest": cmd_manifest,
-            "muse": cmd_muse}[a.cmd](a)
+            "muse": cmd_muse, "muse-setup-helper": cmd_muse_setup_helper}[a.cmd](a)

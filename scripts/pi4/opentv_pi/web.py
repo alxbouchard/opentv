@@ -8,6 +8,9 @@
   actuelle (jamais 0.0.0.0) et **seulement** /assistants + /static/setup.css (aucun /setup, aucun balayage Wi-Fi) ;
   jeton distinct à usage unique, Host = adresse liée, pairs IPv4 privés, Origin exacte + jeton CSRF au POST,
   Referrer-Policy same-origin, aucun script.
+- Connexion de Muse (Réglages TV → Gérer les assistants → Muse, consentement confirmé sur la TV) : même port, adresse
+  LAN actuelle seulement, /muse + /muse/status + /muse/submit + /muse/cancel + setup.css + muse.js ; séance courte à
+  usage unique, jeton SDK chiffré par le téléphone (museseal), Referrer-Policy no-referrer, Cache-Control no-store.
 - Télécommande sur téléphone (<adresse LAN actuelle>:OPENTV_REMOTE_PORT, jamais 0.0.0.0, seulement configuré et en
   ligne ; écoute relancée si l'adresse change) : /r (appairage par QR seulement, puis pavé de navigation), POST
   /r/pair, /r/cmd, /r/forget ; /static/remote.css|js. Host = adresse liée ou nom mDNS exact de la boîte (avec le
@@ -28,7 +31,7 @@ import threading
 import time
 import urllib.parse
 
-from . import VERSION, bounded, phoneremote, validate, wifiscan
+from . import VERSION, bounded, museweb, phoneremote, validate, wifiscan
 from . import app as appmod   # constantes d'erreur du formulaire (app n'importe pas web : pas de cycle)
 
 TV_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; "
@@ -80,6 +83,14 @@ AGENTS_STATIC = {"setup.css": "text/css; charset=utf-8"}
 REMOTE_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
               "form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 REMOTE_STATIC = {"remote.css": "text/css; charset=utf-8", "remote.js": "application/javascript; charset=utf-8"}
+# Connexion de Muse (téléphone) : un script de même origine (chiffrement du jeton, avancement), connexions vers soi
+# seulement, aucun envoi de formulaire possible ailleurs ; Referrer-Policy no-referrer (le lien vers la page
+# officielle de Muse ne porte jamais l'adresse de la séance).
+MUSE_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
+            "form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+MUSE_STATIC = {"setup.css": "text/css; charset=utf-8", "muse.js": "application/javascript; charset=utf-8"}
+MUSE_JSON_MAX = 2048
+MUSE_HEADER = "X-OpenTV-Muse"
 REMOTE_COOKIE = "otv_remote"
 REMOTE_FORM_MAX = 512
 REMOTE_RETRY_S = 30.0   # écoute impossible (adresse pas encore prête) : nouvel essai au plus toutes les 30 s
@@ -94,7 +105,7 @@ LEVEL_LABELS = (("none", "Aucun accès"), ("read", "Voir seulement"), ("feedback
 
 # Journal HTTP : erreurs et non-2xx toujours ; navigations de page (/tv, /setup) toujours (rares, bornées) ; succès
 # des requêtes répétitives (poll /api/tv/*, /static/*, /healthz) non journalisés, un échantillon agrégé tous les N.
-QUIET_OK_PREFIXES = ("/api/tv/", "/static/", "/r/cmd")
+QUIET_OK_PREFIXES = ("/api/tv/", "/static/", "/r/cmd", "/muse/status")
 QUIET_OK_PATHS = ("/healthz",)
 HTTP_OK_SAMPLE = 600
 BUSY_LOG_INTERVAL_S = 60.0
@@ -365,6 +376,18 @@ class TVHandler(_Base):
             if ws is not None:
                 ws.sync_lan()
             return self.send_json(200, {"ok": True})
+        if path in ("/api/tv/muse/start", "/api/tv/muse/cancel", "/api/tv/muse/disconnect"):
+            # « Connecter Muse » : consentement explicite du propriétaire sur la TV (consent: true exactement)
+            if path == "/api/tv/muse/start":
+                ok, why = self.app.muse_start(body.get("consent"))
+            elif path == "/api/tv/muse/cancel":
+                ok, why = self.app.muse_cancel("tv"), None
+            else:
+                ok, why = self.app.muse_disconnect(body.get("confirm"))
+            ws = getattr(self.server, "webservers", None)
+            if ws is not None:
+                ws.sync_lan()
+            return self.send_json(200 if ok else 409, {"ok": bool(ok), "error": why, "muse": self.app.muse_view()})
         self.send_json(404, {"ok": False, "error": "not_found"})
 
 
@@ -1019,6 +1042,112 @@ class AgentsHandler(_Base):
             threading.Thread(target=ws.sync_lan, daemon=True, name="agents-close").start()
 
 
+# --------------------------------------------------------------------------- connexion de Muse (téléphone)
+def muse_post_origin_ok(headers, origin):
+    """POST JSON de muse.js : Origin exacte ; « null » (politique no-referrer de certains navigateurs) accepté
+    SEULEMENT avec Sec-Fetch-Site: same-origin (en-tête interdit aux scripts). L'en-tête X-OpenTV-Muse et le type
+    application/json imposent de toute façon un pré-vol CORS à toute page étrangère, jamais accordé ici."""
+    o = headers.get("Origin")
+    if o is not None and o.strip().lower() != "null":
+        return o.strip().lower() == origin
+    return headers.get("Sec-Fetch-Site") == "same-origin"
+
+
+class MuseHandler(_Base):
+    """Téléphone -> /muse (connexion de Muse seulement). Pair IPv4 privé, Host = adresse LAN liée avec le port réel.
+    GET /muse?s=…&step=1|2|3 (jamais de jeton dans l'URL), GET /muse/status?s=… (JSON), POST /muse/submit et
+    /muse/cancel (JSON, en-tête X-OpenTV-Muse, Origin, CSRF de la séance) ; /static/setup.css et /static/muse.js."""
+    csp = MUSE_CSP
+    referrer_policy = "no-referrer"
+
+    def _peer_host_ok(self):
+        srv = self.server
+        if not srv.peer_ok(self.client_address[0]):
+            self.send(403, "interdit", "text/plain; charset=utf-8")
+            return False
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host != "%s:%d" % (srv.lan_ip, srv.server_address[1]):
+            self.send(421, "hôte refusé", "text/plain; charset=utf-8")
+            return False
+        self.origin = "http://" + host
+        return True
+
+    def _query(self, u):
+        try:
+            q = urllib.parse.parse_qs(u.query, max_num_fields=2)
+        except ValueError:
+            return None
+        return {k: v[0] for k, v in q.items() if len(v) == 1}
+
+    def do_GET(self):
+        u = urllib.parse.urlsplit(self.path)
+        if not self._peer_host_ok():
+            return
+        if u.path.startswith("/static/"):
+            return self.send_static(u.path[len("/static/"):], MUSE_STATIC)
+        if u.path not in ("/muse", "/muse/status"):
+            return self.send(404, "introuvable", "text/plain; charset=utf-8")
+        q = self._query(u)
+        ip = self.client_address[0]
+        ms = self.app.muse
+        if q is None or ms.bad_limited(ip):
+            return self.send(429 if q is not None else 400, museweb.denied_page())
+        sid = q.get("s") or ""
+        if u.path == "/muse/status":
+            v = ms.status(sid)
+            if v is None:
+                ms.bad_limited(ip, record=True)
+                return self.send_json(403, {"ok": False, "error": "expired"})
+            return self.send_json(200, dict(v, ok=True))
+        view = ms.page(sid)
+        if view is None:
+            ms.bad_limited(ip, record=True)
+            return self.send(403, museweb.denied_page())
+        step = q.get("step")
+        self.send(200, museweb.render(sid, view, int(step) if step in ("1", "2", "3") else 1))
+
+    def do_POST(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if path not in ("/muse/submit", "/muse/cancel", "/muse/nojs"):
+            return self.send(404, "introuvable", "text/plain; charset=utf-8")
+        if not self._peer_host_ok():
+            return
+        if path == "/muse/nojs":   # formulaire sans JavaScript : son champ n'a pas de nom, rien n'est lu ni gardé
+            return self.send(400, museweb.nojs_page())
+        if self.headers.get(MUSE_HEADER) != "1" or not muse_post_origin_ok(self.headers, self.origin):
+            return self.send_json(403, {"ok": False, "error": "refused"})
+        if (self.headers.get("Content-Type") or "").split(";")[0].strip() != "application/json":
+            return self.send_json(415, {"ok": False, "error": "content_type"})
+        raw = self.read_body(MUSE_JSON_MAX)
+        if raw is None:
+            return self.send_json(413, {"ok": False, "error": "too_large"})
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            body = None
+        raw = None
+        if not isinstance(body, dict):
+            return self.send_json(400, {"ok": False, "error": "bad_json"})
+        ms, ip = self.app.muse, self.client_address[0]
+        if ms.bad_limited(ip):
+            return self.send_json(429, {"ok": False, "error": "limited"})
+        sid = body.get("s")
+        if path == "/muse/cancel":
+            if not ms.check_csrf(sid, body.get("c")):
+                ms.bad_limited(ip, record=True)
+                return self.send_json(403, {"ok": False, "error": "refused"})
+            self.app.muse_cancel("phone", sid=sid)
+            out = ms.status(sid) or {"state": "cancelled"}
+            return self.send_json(200, {"ok": True, "state": out.get("state")})
+        if set(body) != {"s", "c", "ct"}:
+            return self.send_json(400, {"ok": False, "error": "bad_json"})
+        code, out = ms.submit(sid, body.get("c"), body.get("ct"))
+        body = None
+        if code == 403:
+            ms.bad_limited(ip, record=True)
+        return self.send_json(code, out)
+
+
 # --------------------------------------------------------------------------- télécommande sur téléphone (LAN)
 PAD = ((None, ("up", "▲", "Haut"), None),
        (("left", "◀", "Gauche"), ("ok", "OK", "OK"), ("right", "▶", "Droite")),
@@ -1276,11 +1405,11 @@ class WebServers:
         seulement, pages /assistants seulement). Changement de rôle ou d'adresse ⇒ écoute fermée puis rouverte ;
         jamais les deux rôles sur un même serveur."""
         want = self.app.lan_purpose()
-        ip = self.app.lan_ip() if want == "agents" else None
-        agents_failed = False
+        ip = self.app.lan_ip() if want in ("agents", "muse") else None
+        agents_failed = muse_failed = False
         with self.lock:
             cur = self.lan
-            if cur is not None and (want != cur.purpose or (want == "agents" and cur.lan_ip != ip)):
+            if cur is not None and (want != cur.purpose or (want in ("agents", "muse") and cur.lan_ip != ip)):
                 self._stop(cur)
                 self.lan, self.app.lan_port_actual = None, None
                 self.app.log("setup_listener", state="closed", purpose=cur.purpose)
@@ -1289,6 +1418,10 @@ class WebServers:
                     if want == "setup":
                         self.lan = self._start((self.bind_lan, self.app.cfg.setup_port), LANHandler, self.app,
                                                purpose="setup")
+                    elif want == "muse":   # connexion de Muse : adresse LAN actuelle seulement, pages /muse seulement
+                        self.lan = self._start((self.remote_bind(ip), self.app.cfg.setup_port), MuseHandler,
+                                               self.app, _PerIPServer, purpose="muse", lan_ip=ip,
+                                               peer_ok=self.remote_peer_ok)
                     else:
                         self.lan = self._start((self.remote_bind(ip), self.app.cfg.setup_port), AgentsHandler,
                                                self.app, _PerIPServer, purpose="agents", lan_ip=ip,
@@ -1298,8 +1431,11 @@ class WebServers:
                 except OSError as e:
                     self.app.log("setup_listener_error", error=type(e).__name__, purpose=want)
                     agents_failed = want == "agents"
+                    muse_failed = want == "muse"
         if agents_failed:   # hors du verrou des écoutes : jamais de QR vide pendant 10 min, aucune boucle de bind
             self.app.agents_unavailable("bind")
+        if muse_failed:
+            self.app.muse_unavailable()
         self.sync_remote()
 
     def sync_remote(self):

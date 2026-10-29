@@ -199,6 +199,11 @@ class Config:
         self.jobs_dir = os.path.join(s, "netjobs")
         self.jobs_tmp = os.path.join(s, "netjobs-tmp")
         self.results_dir = os.path.join(s, "netresults")
+        # connexion de Muse depuis la TV : jobs 0600 du service (jeton SDK le temps de la prise en charge par le helper
+        # root opentv-muse-setup) et progression déposée par ce helper ; jamais lus par une autre unité
+        self.muse_jobs_dir = os.path.join(s, "musejobs")
+        self.muse_jobs_tmp = os.path.join(s, "musejobs-tmp")
+        self.muse_results_dir = os.path.join(s, "museresults")
         self.registry_file = os.path.join(s, "agents.json")
         self.audit_file = os.path.join(s, "audit.jsonl")
         self.foryou_state = os.path.join(s, "foryou")
@@ -212,7 +217,8 @@ class Config:
         return cls(env)
 
     def ensure_dirs(self):
-        for d in (self.state_dir, self.jobs_dir, self.jobs_tmp, self.results_dir, self.foryou_state):
+        for d in (self.state_dir, self.jobs_dir, self.jobs_tmp, self.results_dir, self.foryou_state,
+                  self.muse_jobs_dir, self.muse_jobs_tmp, self.muse_results_dir):
             os.makedirs(d, mode=0o700, exist_ok=True)
         os.makedirs(self.run_dir, mode=0o750, exist_ok=True)
 

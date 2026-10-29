@@ -1,0 +1,510 @@
+"""Helper root de la connexion Muse depuis la TV (opentv-muse-setup.service, lancé par opentv-muse-setup.path).
+
+Seul pont entre le service OpenTV (compte opentv) et l'administration Muse existante (museadmin.Admin, root). Il ne sait
+faire que trois choses, à champs fixes, sans chemin, commande, argument ni option venant du job :
+  - « pair »   (consent = "tv") : autorise le pilotage de Muse (même écriture que `muse authorize-control --yes`, notée
+                 pour retour arrière), puis `muse pair --token-stdin --replace-token` (JAMAIS --replace-identity ni
+                 --force : une identité muse-device étrangère reste intacte et la connexion échoue honnêtement) ;
+  - « cancel » (target = job « pair ») : ferme la fenêtre Bluetooth que CE helper a ouverte (interruption pendant
+                 l'attente de l'app Muse : identité tout juste émise révoquée par `muse pair` lui-même) ; un Muse déjà
+                 apparié n'est jamais révoqué par une annulation ;
+  - « unpair » (confirm = "tv") : `muse unpair --forget-token` puis `muse revoke-control`.
+Contrôles de chaque job (dossier du service ouvert sans suivre de lien, propriétaire opentv, 0700) : fichier régulier,
+un seul lien, propriétaire opentv, mode exactement 0600, ≤ 2 Kio, JSON strict à clés exactes, âge borné ; il est
+SUPPRIMÉ avant toute action (consommation unique) ; tout résidu (lien, FIFO, dossier, nom invalide) est retiré sans rien
+exécuter. Le jeton n'existe que dans ce processus, le temps de le passer à `muse pair` par un flux mémoire.
+Reprise après plantage : un journal root (/var/lib/opentv-muse-setup/inflight.json, 0600) est écrit AVANT l'autorisation ;
+au démarrage suivant, une séance interrompue est nettoyée : fenêtre Bluetooth arrêtée, identité émise sans appariement
+révoquée (la nôtre seulement), autorisation rendue si elle vient de cette séance et n'a pas changé depuis.
+"""
+import io
+import json
+import os
+import re
+import stat
+import sys
+import time
+
+from . import fsutil, museadmin, musesetup
+
+NAME_RE = re.compile(r"([a-z0-9]{16})\.json")
+JOURNAL_DIR = "/var/lib/opentv-muse-setup"
+JOURNAL = "inflight.json"
+PAIR_PICKUP_MAX_S = 120.0
+CANCEL_MAX_AGE_S = musesetup.PAIR_BUDGET_S + 60.0
+UNPAIR_MAX_AGE_S = 120.0
+MAX_JOBS = 16
+KEYS = {"pair": {"v", "id", "action", "consent", "created", "token"},
+        "cancel": {"v", "id", "action", "target", "created"},
+        "unpair": {"v", "id", "action", "confirm", "created"}}
+WINDOW_CODES = ("pair_timeout", "window_closed", "pair_window_not_opened")
+UNAVAILABLE = ("sdk_unverified", "dependency_missing", "stock_musegadget_present", "muse_user_missing",
+               "muse_user_is_root", "muse_user_group_not_private", "agent_group_missing", "muse_user_not_in_agent_group",
+               "bluetooth_group_missing", "state_dir_missing", "state_dir_unsafe", "sdk_token_file_unsafe",
+               "root_required", "muse_control_not_authorized", "clients_dir_unsafe", "token_input_required")
+BRIDGE = ("bridge_start_failed", "bridge_refused", "bridge_not_started", "bridge_stop_timeout", "bridge_not_running")
+
+
+def _stderr_log(event, **fields):
+    rec = {"ts": round(time.time(), 3), "event": event}
+    rec.update(fields)
+    sys.stderr.write(json.dumps(rec, sort_keys=True) + "\n")
+
+
+def outcome_code(res):
+    """Rapport de museadmin.Admin.pair -> code public stable (aucun détail technique, aucun secret)."""
+    if res.get("ok"):
+        return "connected"
+    err = res.get("error")
+    if not isinstance(err, str):
+        return "helper_error"
+    if err == "invalid_sdk_token" or err == "no_sdk_token":
+        return "invalid_sdk_token"
+    if err in WINDOW_CODES:
+        return err
+    if err in ("pair_unit_failed", "pair_unit_start_failed", "error"):
+        return "pair_window_not_opened"
+    if err == "interrupted":
+        return "interrupted"
+    if err == "muse_device_identity_unexpected":
+        return "foreign_identity"
+    if err.startswith("bluetooth"):
+        return "bluetooth_not_ready"
+    if err in ("registry_unreadable", "registry_busy", "registry_write_failed", "stale"):
+        return "registry_unavailable"
+    if err in UNAVAILABLE:
+        return "muse_unavailable"
+    if err in BRIDGE:
+        return "bridge_not_started"
+    return "helper_error"
+
+
+class Cancelled(KeyboardInterrupt):
+    """Annulation demandée par le propriétaire pendant l'attente de l'app Muse (gérée par Admin.pair : fenêtre
+    fermée, identité tout juste émise révoquée)."""
+
+
+class WizardAdmin(museadmin.Admin):
+    """museadmin.Admin + progression (préparation → en attente de Muse → connexion) et point d'annulation, sans rien
+    changer aux portes de `pair` (preflight, identité, pont)."""
+
+    def __init__(self, cfg, progress=None, **kw):
+        super().__init__(cfg, **kw)
+        self.progress = progress or (lambda phase, **x: None)
+        self.waiting = False
+        self.ble_name = None
+
+    def say(self, text):   # seul message de pair : la fenêtre Bluetooth est ouverte
+        self.progress("waiting_muse", ble_name=self.ble_name)
+
+    def read_state_status(self, dfd):
+        st = museadmin.Admin.read_state_status(dfd)
+        if st and st.get("state") == "open" and st.get("ble_name"):
+            self.ble_name = st["ble_name"]
+        return st
+
+    def wait_pair(self, dfd):
+        self.waiting = True
+        try:
+            return super().wait_pair(dfd)
+        finally:
+            self.waiting = False
+
+    def start_bridge(self):
+        self.progress("connecting")
+        return super().start_bridge()
+
+
+def _refuse_prompt(*_a, **_k):
+    raise ValueError("token_input_required")
+
+
+class MuseHelper:
+    def __init__(self, cfg, owner_uid, admin_factory=None, clock=time.time, sleep=time.sleep, log=_stderr_log,
+                 chown=True, journal_dir=JOURNAL_DIR, journal_uid=0):
+        self.cfg, self.owner_uid, self.clock, self.real_sleep, self.log = cfg, owner_uid, clock, sleep, log
+        self.chown, self.journal_dir, self.journal_uid = chown, journal_dir, journal_uid
+        self.admin_factory = admin_factory or (lambda **kw: WizardAdmin(cfg, **kw))
+        self.queue = []          # jobs lus pendant un appariement (traités ensuite)
+        self.cancel_for = set()  # jobs « pair » dont l'annulation est demandée
+        self.current = None      # job « pair » en cours
+        self.admin = None
+
+    # -- dossier des jobs : descripteur sans lien suivi, propriétaire = service, aucun accès groupe/autres
+    def _open_jobs(self):
+        try:
+            dfd = fsutil.open_dir(self.cfg.muse_jobs_dir)
+        except OSError as e:
+            self.log("muse_jobs_dir_unsafe", error=type(e).__name__)
+            return None
+        st = os.fstat(dfd)
+        if st.st_uid != self.owner_uid or st.st_mode & 0o077:
+            os.close(dfd)
+            self.log("muse_jobs_dir_unsafe", error="owner_or_mode")
+            return None
+        return dfd
+
+    def _discard(self, dfd, name, st):
+        try:
+            if stat.S_ISDIR(st.st_mode):
+                os.rmdir(name, dir_fd=dfd)   # vide seulement ; jamais de suppression récursive ici
+            else:
+                os.unlink(name, dir_fd=dfd)  # le lien lui-même, jamais sa cible
+            self.log("muse_job_junk", removed=True)
+        except OSError as e:
+            self.log("muse_job_junk", removed=False, error=type(e).__name__)
+
+    def _take(self, dfd, name):
+        """-> (dict | None, erreur | None) ; le fichier est TOUJOURS retiré avant toute action."""
+        try:
+            st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None, "gone"
+        if not stat.S_ISREG(st.st_mode):
+            self._discard(dfd, name, st)
+            return None, "bad_type"
+        raw, err = None, None
+        try:
+            fd = os.open(name, os.O_RDONLY | fsutil.O_NOFOLLOW | fsutil.O_NONBLOCK | fsutil.O_CLOEXEC, dir_fd=dfd)
+        except OSError:
+            err = "unreadable"
+        else:
+            try:
+                f = os.fstat(fd)
+                if not stat.S_ISREG(f.st_mode):
+                    err = "bad_type"
+                elif f.st_nlink != 1:
+                    err = "hardlinked"
+                elif f.st_uid != self.owner_uid:
+                    err = "bad_owner"
+                elif stat.S_IMODE(f.st_mode) != 0o600:
+                    err = "bad_mode"
+                elif f.st_size > musesetup.JOB_MAX_BYTES:
+                    err = "too_big"
+                else:
+                    raw = os.read(fd, musesetup.JOB_MAX_BYTES + 1)
+                    if len(raw) > musesetup.JOB_MAX_BYTES:
+                        raw, err = None, "too_big"
+            finally:
+                os.close(fd)
+        try:
+            os.unlink(name, dir_fd=dfd)
+        except OSError:
+            pass
+        if err:
+            return None, err
+        try:
+            job = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            return None, "bad_json"
+        finally:
+            raw = None
+        return job, None
+
+    def _check(self, job, jid):
+        """Schéma strict (clés exactes par action, âge borné). -> job validé ; ValueError(code) sinon."""
+        if not isinstance(job, dict) or job.get("v") != 1 or job.get("id") != jid:
+            raise ValueError("bad_job")
+        action = job.get("action")
+        if action not in KEYS or set(job) != KEYS[action]:
+            raise ValueError("bad_fields")
+        created = job.get("created")
+        if not isinstance(created, (int, float)) or isinstance(created, bool):
+            raise ValueError("bad_job")
+        age = self.clock() - created
+        limit = {"pair": PAIR_PICKUP_MAX_S, "cancel": CANCEL_MAX_AGE_S, "unpair": UNPAIR_MAX_AGE_S}[action]
+        if not -60 <= age <= limit:
+            raise ValueError("expired")
+        if action == "pair":
+            if job["consent"] != "tv":
+                raise ValueError("no_consent")
+            if not isinstance(job["token"], str) or not musesetup.SDK_TOKEN_RE.fullmatch(job["token"]):
+                raise ValueError("bad_token")
+        elif action == "cancel":
+            if not isinstance(job["target"], str) or not musesetup.JOB_ID_RE.fullmatch(job["target"]):
+                raise ValueError("bad_fields")
+        elif job["confirm"] != "tv":
+            raise ValueError("no_consent")
+        return job
+
+    def poll(self, cap=MAX_JOBS):
+        """Lit et consomme les jobs présents ; annulations ciblées notées tout de suite, autres jobs mis en file.
+        Tout job invalide est retiré, jamais exécuté (et un « pair » invalide reçoit une issue « refused »)."""
+        dfd = self._open_jobs()
+        if dfd is None:
+            return
+        try:
+            try:
+                names = sorted(os.listdir(dfd))[:4096]
+            except OSError:
+                return
+            n = 0
+            for name in names:
+                m = NAME_RE.fullmatch(name)
+                if m is None:
+                    try:
+                        st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+                    except OSError:
+                        continue
+                    self._discard(dfd, name, st)
+                    continue
+                if n >= cap:
+                    break
+                n += 1
+                jid = m.group(1)
+                job, err = self._take(dfd, name)
+                if err is None:
+                    try:
+                        job = self._check(job, jid)
+                    except ValueError as e:
+                        err = str(e)
+                if err is not None:
+                    job = None
+                    self.log("muse_job_refused", id=jid, error=err)
+                    if err not in ("gone",):
+                        self._result(jid, "done", ok=False, result="refused")
+                    continue
+                if job["action"] == "cancel":
+                    self.cancel_for.add(job["target"])
+                    self.log("muse_job", id=jid, action="cancel")
+                    self._result(jid, "done", ok=True, result="cancelled")
+                else:
+                    self.queue.append(job)
+        finally:
+            os.close(dfd)
+
+    # -- issues pour le service (son dossier, propriété opentv : descripteur, temporaire exclusif, rename)
+    def _result(self, jid, phase, ok=None, result=None, **extra):
+        body = {"v": 1, "id": jid, "phase": phase}
+        if phase == "done":
+            body.update(ok=bool(ok), result=result)
+        for k, v in extra.items():
+            if v is not None:
+                body[k] = v
+        try:
+            dfd = fsutil.open_dir(self.cfg.muse_results_dir)
+            try:
+                st = os.fstat(dfd)
+                if st.st_uid != self.owner_uid or st.st_mode & 0o077:
+                    raise fsutil.UnsafePath("results_dir_unsafe")
+                fsutil.atomic_write(dfd, jid + ".json", json.dumps(body, sort_keys=True), mode=0o600,
+                                    uid=self.owner_uid if self.chown else None)
+            finally:
+                os.close(dfd)
+        except OSError as e:
+            self.log("muse_result_error", id=jid, error=type(e).__name__)
+
+    # -- journal root de la séance en cours (reprise après plantage)
+    def _journal_dir(self):
+        dfd = fsutil.open_dir(self.journal_dir)
+        st = os.fstat(dfd)
+        if st.st_uid != self.journal_uid or st.st_mode & 0o077:
+            os.close(dfd)
+            raise fsutil.UnsafePath("journal_dir_unsafe")
+        return dfd
+
+    def _journal_write(self, data):
+        dfd = self._journal_dir()
+        try:
+            fsutil.atomic_write(dfd, JOURNAL, json.dumps(data, sort_keys=True), mode=0o600)
+        finally:
+            os.close(dfd)
+
+    def _journal_read(self):
+        try:
+            dfd = self._journal_dir()
+        except OSError:
+            return None, "journal_dir_unsafe"
+        try:
+            try:
+                fd = os.open(JOURNAL, os.O_RDONLY | fsutil.O_NOFOLLOW | fsutil.O_NONBLOCK | fsutil.O_CLOEXEC,
+                             dir_fd=dfd)
+            except FileNotFoundError:
+                return None, None
+            except OSError:
+                return {"v": 1, "id": None, "changed": False}, "journal_unsafe"
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != self.journal_uid:
+                    return {"v": 1, "id": None, "changed": False}, "journal_unsafe"
+                d = json.loads(os.read(fd, 4096).decode("utf-8"))
+            except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+                return {"v": 1, "id": None, "changed": False}, "journal_unsafe"
+            finally:
+                os.close(fd)
+            if not isinstance(d, dict) or d.get("v") != 1:
+                return {"v": 1, "id": None, "changed": False}, "journal_unsafe"
+            return d, None
+        finally:
+            os.close(dfd)
+
+    def _journal_clear(self):
+        try:
+            dfd = self._journal_dir()
+        except OSError:
+            return
+        try:
+            os.unlink(JOURNAL, dir_fd=dfd)
+        except FileNotFoundError:
+            pass
+        finally:
+            os.close(dfd)
+
+    # -- autorisation du pilotage et son retour arrière (compare-and-set)
+    def _rollback_grant(self, adm, before):
+        """Rend la ligne « muse » à `before` SEULEMENT si elle vaut encore exactement ce que la séance a écrit
+        (pilotage) : une décision du propriétaire prise entre-temps n'est jamais écrasée."""
+        from .app import AGENT_LEVELS, KNOWN_AGENTS
+        if not isinstance(before, list) or not all(isinstance(x, str) for x in before):
+            return "skipped"
+        try:
+            reg = adm.registry()
+            view, fp, corrupt = reg.snapshot(KNOWN_AGENTS)
+            if corrupt or sorted(view["muse"]["allowed"]) != sorted(AGENT_LEVELS["control"]):
+                return "kept"
+            reg.apply_policy_changes({"muse": sorted(before)}, KNOWN_AGENTS, fp, **adm.service_ids())
+            return "restored"
+        except (OSError, ValueError, KeyError) as e:
+            self.log("muse_grant_rollback_error", error=type(e).__name__)
+            return "error"
+
+    def recover(self):
+        """Séance interrompue (plantage, coupure) : nettoyage borné avant tout nouveau job."""
+        j, problem = self._journal_read()
+        if j is None and problem is None:
+            return None
+        if problem == "journal_dir_unsafe":
+            self.log("muse_recover", state="journal_dir_unsafe")
+            return "unsafe"
+        adm = self.admin_factory(sleep=self.real_sleep, prompt=_refuse_prompt, stdin=io.StringIO(""),
+                                 err=io.StringIO())
+        adm.systemctl("stop", museadmin.PAIR_UNIT)
+        report = {"identity": None, "grant": None}
+        pw, _why = adm.muse_account()
+        paired = None
+        if pw is not None:
+            try:
+                dfd = adm.open_state_dir(pw)
+            except OSError:
+                dfd = None
+            if dfd is not None:
+                try:
+                    paired = adm.entry(dfd, "pairing.json") == "present"
+                finally:
+                    os.close(dfd)
+            if paired is False:   # identité émise par une séance sans appariement : la nôtre seulement est révoquée
+                report["identity"] = adm.discard_identity(pw)
+        if j.get("changed") and paired is not True:
+            report["grant"] = self._rollback_grant(adm, j.get("before"))
+        jid = j.get("id")
+        if isinstance(jid, str) and musesetup.JOB_ID_RE.fullmatch(jid):
+            self._result(jid, "done", ok=False, result="interrupted")
+        self._journal_clear()
+        self.log("muse_recover", state="done", paired=paired, grant=report["grant"],
+                 identity_revoked=(report["identity"] or {}).get("agent_revoked"))
+        return report
+
+    # -- actions
+    def _sleep(self, s):
+        """Sommeil de museadmin : pendant l'attente de l'app Muse, une annulation du propriétaire l'interrompt."""
+        if self.admin is not None and self.admin.waiting:
+            self.poll()
+            if self.current in self.cancel_for:
+                raise Cancelled()
+        self.real_sleep(s)
+
+    def do_pair(self, job):
+        jid = job["id"]
+        self.current = jid
+        stdin = io.StringIO(job.pop("token") + "\n")   # seule copie restante : flux mémoire lu une fois par pair
+        try:
+            self._journal_write({"v": 1, "id": jid, "changed": False, "before": None, "at": round(self.clock(), 3)})
+        except OSError as e:
+            stdin.close()
+            self.log("muse_job", id=jid, action="pair", ok=False, error="journal_" + type(e).__name__)
+            self._result(jid, "done", ok=False, result="helper_error")
+            return "helper_error"
+        adm = self.admin_factory(sleep=self._sleep, prompt=_refuse_prompt, stdin=stdin, err=io.StringIO(),
+                                 progress=lambda phase, **x: self._result(jid, phase, **x))
+        self.admin = adm
+        changed, before, code, registered = False, None, "helper_error", None
+        try:
+            self._result(jid, "preparing")
+            grant, gcode = adm.authorize_control(yes=True)
+            if gcode != 0 or not grant.get("ok"):
+                code = "registry_unavailable" if str(grant.get("error", "")).startswith("registry") or \
+                    grant.get("error") == "stale" else "muse_unavailable"
+            else:
+                changed, before = bool(grant.get("changed")), grant.get("policy_before")
+                if changed:
+                    self._journal_write({"v": 1, "id": jid, "changed": True, "before": before,
+                                         "at": round(self.clock(), 3)})
+                self.poll()
+                if jid in self.cancel_for:
+                    code = "interrupted"
+                else:
+                    res, _rc = adm.pair(token_stdin=True, replace_token=True, force=False, replace_identity=False)
+                    code = outcome_code(res)
+                    registered = res.get("registered") if isinstance(res.get("registered"), bool) else None
+        except Cancelled:
+            code = "interrupted"
+        finally:
+            stdin.close()
+            self.admin = None
+        ok = code == "connected"
+        if not ok and changed:
+            self._rollback_grant(adm, before)
+        self._journal_clear()
+        self.current = None
+        self.log("muse_job", id=jid, action="pair", ok=ok, result=code)
+        self._result(jid, "done", ok=ok, result="cancelled" if code == "interrupted" else code, registered=registered)
+        return code
+
+    def do_unpair(self, job):
+        jid = job["id"]
+        adm = self.admin_factory(sleep=self.real_sleep, prompt=_refuse_prompt, stdin=io.StringIO(""), err=io.StringIO())
+        res, rc = adm.unpair(forget_token=True)
+        rv, rvc = adm.revoke_control()
+        ok = rc == 0 and rvc == 0
+        self.log("muse_job", id=jid, action="unpair", ok=ok, kept=res.get("agent_kept"))
+        self._result(jid, "done", ok=ok, result="disconnected" if ok else "disconnect_failed")
+        return ok
+
+    def run(self, max_rounds=8):
+        """Une activation : reprise éventuelle, puis jobs jusqu'à épuisement (borné)."""
+        self.recover()
+        done = []
+        for _ in range(max_rounds):
+            self.poll()
+            if not self.queue:
+                break
+            while self.queue:
+                job = self.queue.pop(0)
+                if job["action"] == "pair":
+                    if job["id"] in self.cancel_for:   # annulé avant toute action : aucune autorisation, aucun pair
+                        job.pop("token", None)
+                        self._result(job["id"], "done", ok=False, result="cancelled")
+                        done.append("cancelled")
+                        continue
+                    done.append(self.do_pair(job))
+                else:
+                    done.append("disconnected" if self.do_unpair(job) else "disconnect_failed")
+        self.queue = []
+        return done
+
+
+def main(cfg, owner_uid=None, chown=True):
+    if owner_uid is None:
+        if os.geteuid() != 0:
+            sys.stdout.write(json.dumps({"ok": False, "error": "root_required"}) + "\n")
+            return 2
+        import pwd
+        try:
+            owner_uid = pwd.getpwnam(cfg.service_user).pw_uid
+        except KeyError:
+            sys.stdout.write(json.dumps({"ok": False, "error": "service_user_missing"}) + "\n")
+            return 2
+    h = MuseHelper(cfg, owner_uid, chown=chown)
+    out = h.run()
+    sys.stdout.write(json.dumps({"ok": True, "processed": len(out)}) + "\n")
+    return 0

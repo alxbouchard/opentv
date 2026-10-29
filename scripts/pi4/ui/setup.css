@@ -74,3 +74,18 @@ code { font-size: 14px; }
 .recap li > span { display: block; }
 .recap small { display: block; color: #e3b341; font-size: 15px; margin-top: 6px; }
 .recap.final .status { margin-top: 6px; }
+/* Connexion de Muse (téléphone) : 3 étapes courtes, une action principale, avancement réel ; le champ du jeton n'est
+   révélé que par muse.js (sans JavaScript : jamais affiché, jamais envoyé). */
+.muse a.secondary { text-align: center; text-decoration: none; box-sizing: border-box; display: flex;
+  align-items: center; justify-content: center; }
+.muse .secondary[hidden], .muse form[hidden], .muse .err[hidden] { display: none; }
+.howto { margin: 14px 0 0; padding-left: 26px; font-size: 18px; line-height: 1.5; color: #c9d1d9; }
+.howto li { margin: 0 0 8px; }
+.mstatus { font-weight: 700; color: #f0f3f6; margin-top: 18px; }
+.mstatus.fail { color: #ffa198; }
+.mphases { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
+.mphases li { padding: 10px 14px; border-radius: 12px; border: 2px solid #30363d; color: #8b949e; font-size: 17px; }
+.mphases li.on { border-color: #2f81f7; color: #f0f3f6; font-weight: 700; }
+.mphases li.done { border-color: #238636; color: #7ee2a0; }
+/* Muse : avertissement « ne révoque pas » (lisible, jamais alarmant comme une erreur) */
+.muse .warn { border-left: 4px solid #d29922; padding: 8px 12px; font-size: 16px; color: #e6c66a; margin: 14px 0; }

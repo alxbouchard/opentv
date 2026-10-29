@@ -1,0 +1,11 @@
+[Unit]
+Description=OpenTV Pi - surveille les demandes de connexion Muse deposees par le service (TV)
+
+[Path]
+DirectoryNotEmpty=/var/lib/opentv/musejobs
+Unit=opentv-muse-setup.service
+TriggerLimitIntervalSec=10
+TriggerLimitBurst=20
+
+[Install]
+WantedBy=multi-user.target

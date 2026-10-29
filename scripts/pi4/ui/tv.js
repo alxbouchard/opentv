@@ -12,6 +12,16 @@
   // normalement au premier état), puis « QR indisponible, réessaie » ; à AGENTS_QR_GIVEUP_MS la feuille se ferme et
   // le mode est annulé — une seule fois, jamais de nouvel essai automatique (pas de boucle, jamais 10 min de vide)
   var AGENTS_QR_WAIT_MS = 2500, AGENTS_QR_GIVEUP_MS = 8000, MSG_AGENTS_QR = "QR indisponible, réessaie.";
+  // « Connecter Muse » (Gérer les assistants → Muse) : consentement explicite sur la TV (« Autoriser et connecter »,
+  // jamais au focus par défaut), puis QR de séance courte et avancement réel. Dernières issues déjà vues : jamais
+  // annoncées de nouveau (rechargement compris) ; la TV ne voit jamais de jeton, de clé ni de commande.
+  var museSeq = null, museDiscSeq = null, lastMuseQr = "", museSkipToast = false;
+  var MUSE_CAPS = ["Te proposer des films à l'écran", "Apprendre tes goûts et gérer tes listes", "Naviguer dans OpenTV",
+                   "Lancer ou fermer un film quand tu le lui demandes"];
+  var MUSE_PHASES = [["preparing", "Préparation"], ["waiting_muse", "En attente de Muse"], ["connecting", "Connexion"],
+                     ["connected", "Muse est connectée"]];
+  var MUSE_RANK = { submitted: 1, preparing: 1, waiting_muse: 2, connecting: 3, connected: 4 };
+  var MUSE_PATH = "Sur l'iPhone : Muse → Réglages → Appareils → Mode développeur → + → OpenTV";
   var focus = { zone: "rows", row: 0, cols: [], auto: false }, panel = null, toastTimer = null;
   // « Regarder » : contexte de la lecture en cours (carte d'origine), sondage rapide de l'état typé du service
   var play = null, playEndSeq = -1, PLAY_POLL_MS = 250, MSG_PLAY_KO = "Lecture indisponible";
@@ -384,10 +394,12 @@
     topEmpty: [["OK", "Ouvrir les Réglages"]],
     item: [["← →", "Choisir"], ["OK", "Valider"], ["Retour", "Fermer"]],
     agents: [["Téléphone", "Scanne le QR"], ["OK ou Retour", "Annuler"]],
+    musesetup: [["Téléphone", "Suis les étapes"], ["OK ou Retour", "Annuler"]],
     panel: [["↑ ↓", "Choisir"], ["OK", "Valider"], ["Retour", "Revenir"]]
   }, helpKey = "";
   function help() {
-    var k = panel ? (panel.kind === "item" ? "item" : panel.kind === "agents" ? "agents" : "panel") : (focus.zone === "top" ? (ROWS.length ? "top" : "topEmpty") :
+    var k = panel ? (panel.kind === "item" ? "item" : panel.kind === "agents" ? "agents" :
+                     panel.kind === "musesetup" ? "musesetup" : "panel") : (focus.zone === "top" ? (ROWS.length ? "top" : "topEmpty") :
                                                                        (focus.row > 0 ? "rows" : "rows0"));
     if (k === helpKey) { return; }
     helpKey = k;
@@ -430,7 +442,8 @@
   function renderRemote() {
     var r = state && state.remote, box = $("remotebox");
     // QR des assistants affiché : un seul QR à l'écran (jamais deux codes à confondre)
-    var show = !!(r && r.enabled && r.url && !state.setup.active) && !(panel && panel.kind === "agents");
+    var show = !!(r && r.enabled && r.url && !state.setup.active) &&
+      !(panel && (panel.kind === "agents" || panel.kind === "musesetup"));
     box.hidden = !show;
     if (!show) { return; }
     if (r.url !== lastRemoteQr) { lastRemoteQr = r.url; drawQR($("rqr"), r.url); }
@@ -469,7 +482,8 @@
     panel = extra || {};
     panel.kind = kind; panel.btn = btn;
     $("panel").className = "panel" + (kind === "item" ? "" : " sheet");   // Réglages : feuille latérale v23
-    $("pqrfig").hidden = kind !== "agents";
+    $("pqrfig").hidden = kind !== "agents" && kind !== "musesetup";
+    $("pcaps").hidden = true; $("pphases").hidden = true;
     $("panel").hidden = false;
     paintPanel(); paint(); renderRemote();
   }
@@ -644,12 +658,162 @@
   }
   function closePanel() {   // fiche/feuille fermée : sélection « Pour toi » en attente appliquée maintenant
     panel = null; $("panel").hidden = true; $("pqrfig").hidden = true;
+    $("pcaps").hidden = true; $("pphases").hidden = true;
     if (!flushForYou()) { paint(); }
     if (state) { renderRemote(); }
   }
   function panelBack() {
     if (panel.kind === "agents") { cancelAgents(); }
-    else if (panel.kind === "confirm") { openSettings(panel.what); } else { closePanel(); }
+    else if (panel.kind === "musesetup") { cancelMuse(); }
+    else if (panel.kind === "confirm") { if (panel.what === "agents") { openAssistants("rights"); } else { openSettings(panel.what); } }
+    else if (panel.kind === "assistants") { openSettings("agents"); }
+    else if (panel.kind === "muse") { openAssistants("muse"); }
+    else if (panel.kind === "museconfirm") { openMuse(); }
+    else { closePanel(); }
+  }
+  // ---- « Gérer les assistants » : Muse (connexion guidée) ou droits des assistants (QR existant)
+  function museTv() { return (state && state.muse) || {}; }
+  function museConnected() { return museTv().bridge === "ready"; }
+  function museSub() {
+    var m = museTv();
+    if (m.active) { return "Connexion en cours…"; }
+    if (m.disconnect && m.disconnect.state === "running") { return "Déconnexion en cours…"; }
+    if (m.bridge === "ready") { return "Connectée · Déconnecter"; }
+    if (m.bridge === "paused") { return "En pause · Reconnecter"; }
+    return "Connecter";
+  }
+  function openAssistants(sel) {
+    var list = [["muse", "M", "Muse", museSub()], ["rights", "◎", "Droits des assistants", agentsCounts()],
+                ["back", "←", "Retour", "Revenir aux Réglages"]];
+    var idx = 0;
+    showPanel("assistants", "Réglages", "Gérer les assistants",
+              "Choisis un assistant. Rien ne change sans ta confirmation.",
+              list.map(function (x, i) {
+                var b = button("", "lrow"), t = el("span", "lt");
+                b.setAttribute("data-label", x[2]);
+                t.appendChild(el("span", "tl", x[2])); t.appendChild(el("span", "ts", x[3]));
+                b.appendChild(el("span", "ic", x[1])); b.appendChild(t);
+                if (x[0] === sel) { idx = i; }
+                return b;
+              }), idx, { actions: list.map(function (x) { return x[0]; }) });
+  }
+  function openMuse() {   // « Autoriser et connecter » n'est JAMAIS au focus par défaut : choisir Muse n'accorde rien
+    var m = museTv();
+    if (m.active) { openMuseSetup(); return; }
+    if (museConnected()) {
+      showPanel("muse", "Gérer les assistants", "Muse est connectée",
+                "Muse peut proposer des films, apprendre tes goûts, naviguer et lancer un film quand tu le lui demandes.",
+                [button("Déconnecter Muse", "lrow danger"), button("Retour", "lrow")], 1,
+                { actions: ["disconnect", "back"] });
+      return;
+    }
+    showPanel("muse", "Gérer les assistants", "Connecter Muse",
+              "Avec ton accord, Muse pourra :", [button("Autoriser et connecter", "lrow"), button("Pas maintenant", "lrow")],
+              1, { actions: ["connect", "back"] });
+    var ul = $("pcaps");
+    ul.textContent = "";
+    MUSE_CAPS.forEach(function (x) { ul.appendChild(el("li", null, x)); });
+    ul.appendChild(el("li", "note", "Ton compte reste chez Muse. Retrait à tout moment ici."));
+    ul.hidden = false;
+  }
+  function openMuseConfirm() {
+    showPanel("museconfirm", "Muse", "Déconnecter Muse ?",
+              "Muse ne pourra plus rien faire sur la TV. Ton jeton et tes autres gadgets Muse ne changent pas.",
+              [button("Oui, déconnecter", "lrow danger"), button("Non", "lrow")], 1, { actions: ["yes", "no"] });
+  }
+  function startMuse() {   // consentement explicite du propriétaire : seul chemin qui envoie consent: true
+    api("POST", "/api/tv/muse/start", { consent: true }).then(function (j) {
+      if (!j || !j.ok) {
+        closePanel();
+        toast(j && j.error === "busy" ? "Muse est déjà en cours de connexion." :
+              "Impossible pour l'instant : la TV doit être connectée au réseau.");
+        return;
+      }
+      if (j.muse && j.muse.last && typeof j.muse.last.seq === "number") { museSeq = j.muse.last.seq; }
+      museSkipToast = false;
+      openMuseSetup();
+      api("GET", "/api/tv/state").then(render).catch(onApiError);   // QR sans attendre le poll
+    }).catch(function (e) {
+      if (!onApiError(e)) { closePanel(); toast("Impossible pour l'instant : la TV doit être connectée au réseau."); }
+    });
+  }
+  function openMuseSetup() {
+    lastMuseQr = "";
+    $("psteps").removeAttribute("data-muse");
+    showPanel("musesetup", "Gérer les assistants", "Connecter Muse", "", [button("Annuler", "lrow")], 0,
+              { actions: ["cancel"], openedAt: Date.now() });
+    renderMuse();
+  }
+  function renderMuse() {
+    if (!panel || panel.kind !== "musesetup") { return; }
+    var m = museTv(), c = $("aqr"), ol = $("psteps"), ph = $("pphases");
+    var r = MUSE_RANK[m.state] || 0;
+    if (m.cancelling) { $("pmeta").textContent = "Annulation en cours…"; }
+    if (!m.active) { return; }
+    if (m.state === "keygen" || m.state === "await_token") {
+      $("pqrfig").hidden = false; ph.hidden = true;
+      if (m.url) {
+        if (m.url !== lastMuseQr) { lastMuseQr = m.url; drawQR(c, m.url); }
+        c.style.visibility = ""; $("aqrmsg").hidden = true;
+      } else {   // clé de séance en préparation : jamais un ancien QR à l'écran
+        c.style.visibility = "hidden"; $("aqrmsg").textContent = "Préparation du QR…"; $("aqrmsg").hidden = false;
+      }
+      if (!m.cancelling) {
+        $("pmeta").textContent = m.phone ? "Téléphone connecté : suis les étapes affichées dessus." :
+          "Ton téléphone doit être sur le même Wi-Fi que la TV.";
+      }
+      if (ol.getAttribute("data-muse") !== "1") {
+        ol.textContent = "";
+        ["Scanne ce QR avec l'appareil photo du téléphone.", "Colle ton jeton Muse : le même pour tous tes appareils.",
+         "Termine dans l'app Muse sur l'iPhone."].forEach(function (x) { ol.appendChild(el("li", null, x)); });
+        ol.setAttribute("data-muse", "1");
+      }
+      return;
+    }
+    $("pqrfig").hidden = true; ph.hidden = false;   // jeton reçu : plus de QR, l'avancement réel seulement
+    ph.textContent = "";
+    MUSE_PHASES.forEach(function (x, i) {
+      ph.appendChild(el("li", m.state === "connected" || r > i + 1 ? "done" : r === i + 1 ? "on" : "", x[1]));
+    });
+    if (!m.cancelling) {
+      $("pmeta").textContent = m.state === "waiting_muse" ? MUSE_PATH + (m.ble_name ? " (" + m.ble_name + ")" : "") :
+        m.state === "connecting" ? "Muse est appairée : connexion…" : "La boîte prépare la connexion…";
+    }
+  }
+  function cancelMuse() {
+    var m = museTv();
+    if (m.active && (MUSE_RANK[m.state] || 0) >= 1) {   // appariement lancé : la boîte ferme la fenêtre, issue annoncée
+      api("POST", "/api/tv/muse/cancel", {}).then(function (j) { if (j && j.muse) { state.muse = j.muse; renderMuse(); } })
+        .catch(onApiError);
+      $("pmeta").textContent = "Annulation en cours…";
+      return;
+    }
+    closePanel();
+    museSkipToast = true;
+    toast("Annulé : rien n'a changé.");
+    api("POST", "/api/tv/muse/cancel", {}).catch(onApiError);
+  }
+  function onMuseResult(m) {
+    var st = m.last && m.last.state;
+    if (st === "cancelled" && museSkipToast) { museSkipToast = false; return; }
+    museSkipToast = false;
+    if (panel && (panel.kind === "musesetup" || panel.kind === "muse")) { closePanel(); }
+    if (st === "connected") {
+      goStart();
+      toast("Muse est connectée !\nDemande-lui par exemple : « Propose-moi un film ».", true);
+    } else if (st === "cancelled") { toast("Annulé : rien n'a changé."); }
+    else if (st === "expired") { toast("QR de Muse expiré : rien n'a changé."); }
+    else if (st === "failed") {
+      if (play || (panel && panel.kind === "item")) { toast(m.message || "Muse n'est pas connectée.", true); return; }
+      showPanel("museresult", "Gérer les assistants", "Muse n'est pas connectée", m.message || "La connexion n'a pas abouti.",
+                [button("Réessayer", "lrow"), button("Fermer", "lrow")], 0, { actions: ["retry", "close"] });
+    }
+  }
+  function disconnectMuse() {
+    api("POST", "/api/tv/muse/disconnect", { confirm: true }).then(function (j) {
+      closePanel();
+      toast(j && j.ok ? "Déconnexion de Muse…" : "Impossible pour l'instant : réessaie dans un moment.");
+    }).catch(function (e) { if (!onApiError(e)) { closePanel(); toast("Impossible pour l'instant : réessaie dans un moment."); } });
   }
   // ---- « Gérer les assistants » : QR dédié, téléphone seulement ; Retour/OK (« Annuler ») ferme sans rien changer
   function openAgents(seq) {
@@ -662,9 +826,9 @@
     showPanel("agents", "Réglages", "Gérer les assistants",
               "Sur ton téléphone, même Wi-Fi que la TV. Le Wi-Fi et le nom de la TV ne changent pas.",
               [button("Annuler", "lrow")], 0, { actions: ["cancel"], openedAt: now, noQrSince: now });
-    $("aqrmsg").hidden = true;
+    $("aqrmsg").hidden = true; $("aqrmsg").textContent = MSG_AGENTS_QR;
     var ol = $("psteps");
-    ol.textContent = "";
+    ol.textContent = ""; ol.removeAttribute("data-muse");
     ["Scanne ce QR avec l'appareil photo.", "Choisis pour Muse, Hermit et Hermes.", "Confirme sur le téléphone."]
       .forEach(function (x) { ol.appendChild(el("li", null, x)); });
     renderAgents();
@@ -726,10 +890,24 @@
   function act() {
     var a = panel.actions[panel.btn], it = panel.it;
     if (a === "watch") { startPlay(it); return; }
-    if (panel.kind === "settings") { if (a === "close") { closePanel(); } else { openConfirm(a); } return; }
+    if (panel.kind === "settings") {
+      if (a === "close") { closePanel(); } else if (a === "agents") { openAssistants(); } else { openConfirm(a); }
+      return;
+    }
     if (panel.kind === "agents") { cancelAgents(); return; }
+    if (panel.kind === "assistants") {
+      if (a === "muse") { openMuse(); } else if (a === "rights") { openConfirm("agents"); } else { openSettings("agents"); }
+      return;
+    }
+    if (panel.kind === "muse") {
+      if (a === "connect") { startMuse(); } else if (a === "disconnect") { openMuseConfirm(); } else { openAssistants("muse"); }
+      return;
+    }
+    if (panel.kind === "museconfirm") { if (a === "yes") { disconnectMuse(); } else { openMuse(); } return; }
+    if (panel.kind === "musesetup") { cancelMuse(); return; }
+    if (panel.kind === "museresult") { if (a === "retry") { openMuse(); } else { closePanel(); } return; }
     if (panel.kind === "confirm") {
-      if (a === "no") { openSettings(panel.what); return; }
+      if (a === "no") { if (panel.what === "agents") { openAssistants("rights"); } else { openSettings(panel.what); } return; }
       if (a === "agents") {
         api("POST", "/api/tv/agents", {}).then(function (j) {
           var base = j && typeof j.seq === "number" ? j.seq : null, last = j && j.last;
@@ -853,7 +1031,8 @@
     if (play) { return "player_active"; }   // Retour/Accueil pendant une lecture : fermés côté service
     if (humanRecent(queuedAt)) { return "human_active"; }
     if (panel && panel.kind !== "item") {
-      if (panel.kind === "agents") { return "tv_busy"; }
+      // QR d'assistants, connexion de Muse (consentement, QR, confirmation) : jamais une touche d'assistant
+      if ({ agents: 1, assistants: 1, muse: 1, museconfirm: 1, musesetup: 1, museresult: 1 }[panel.kind]) { return "tv_busy"; }
       if (a !== "back" && a !== "home") { return "settings_forbidden"; }
     } else if (!panel && focus.zone === "top" && a === "ok") { return "settings_forbidden"; }
     else if (panel && a === "ok" && panel.actions[panel.btn] === "watch") { return "use_play_title"; }
@@ -872,7 +1051,11 @@
       else if (a === "right" || (sheet && a === "down")) { panel.btn = Math.min(panel.actions.length - 1, panel.btn + 1); paintPanel(); }
       else if (a === "ok") { act(); }
       else if (a === "back") { panelBack(); }
-      else if (a === "home") { if (panel.kind === "agents") { cancelAgents(); } else { closePanel(); } goStart(); }
+      else if (a === "home") {
+        if (panel.kind === "agents") { cancelAgents(); } else if (panel.kind === "musesetup") { cancelMuse(); }
+        else { closePanel(); }
+        goStart();
+      }
       // ↑ ↓ sur une fiche : sans effet, mais consommés — jamais de saut vers Réglages depuis un film ouvert
       return true;
     }
@@ -953,6 +1136,29 @@
     // l'ouverture) est toléré quelques secondes, au-delà la feuille se ferme d'elle-même
     if (panel && panel.kind === "agents") {
       if ((am && am.active) || Date.now() - panel.openedAt < 6000) { renderAgents(); } else { closePanel(); }
+    }
+    var mu = s.muse;
+    if (mu && mu.last && typeof mu.last.seq === "number") {   // issue de la connexion de Muse : une annonce, jamais rejouée
+      if (museSeq === null) { museSeq = mu.last.seq; }
+      else if (mu.last.seq > museSeq) { museSeq = mu.last.seq; if (!s.setup.active) { onMuseResult(mu); } }
+    }
+    if (mu && mu.disconnect_last && typeof mu.disconnect_last.seq === "number") {
+      if (museDiscSeq === null) { museDiscSeq = mu.disconnect_last.seq; }
+      else if (mu.disconnect_last.seq > museDiscSeq) {
+        museDiscSeq = mu.disconnect_last.seq;
+        toast(mu.disconnect_last.state === "done" ? "Muse est déconnectée." :
+              "Muse n'a pas pu être déconnectée. Redémarre la boîte, puis réessaie.", true);
+      }
+    }
+    if (mu && mu.active && !s.setup.active && !play && (!panel || panel.kind !== "musesetup") &&
+        (!panel || panel.kind !== "item")) {
+      openMuseSetup();   // page rechargée pendant la connexion : la feuille revient (séance déjà confirmée sur la TV)
+    } else if (panel && panel.kind === "musesetup") {
+      if (mu && mu.active) { renderMuse(); } else if (Date.now() - panel.openedAt > 6000) { closePanel(); }
+    }
+    if (panel && panel.kind === "assistants") {   // sous-titres à jour (Muse connectée, compteurs)
+      var subs = document.querySelectorAll("#pbtns .ts");
+      if (subs.length === 3) { subs[0].textContent = museSub(); subs[1].textContent = agentsCounts(); }
     }
     if (s.setup.active) { closePanel(); renderSetup(s.setup); }
     else {

@@ -1528,9 +1528,13 @@ class TestUnitsAndInstall(unittest.TestCase):
         logical = re.sub(r"\\\n", " ", "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#")))
         lines = [l for l in logical.splitlines() if re.search(r"systemctl (enable|start|restart|mask)\b", l)]
         self.assertTrue(any("opentv.service" in l for l in lines))
+        # le pont et sa fenêtre Bluetooth : jamais activés/démarrés par l'installation (noms exacts). Seule unité
+        # « muse » activée : opentv-muse-setup.path (surveillance des jobs du parcours TV, qui n'apparie rien seul)
         for line in lines:
-            self.assertNotIn("opentv-muse", line, line)
+            units = set(re.findall(r"opentv-muse[\w.@-]*", line))
+            self.assertLessEqual(units, {"opentv-muse-setup.path"}, line)
             self.assertNotIn("musegadget", line, line)
+        self.assertTrue(any("opentv-muse-setup.path" in l and "enable" in l for l in lines))
         self.assertIn("post systemctl try-restart opentv-muse.service", text)
         su = read(os.path.join(PI4, "system", "sysusers-opentv.conf"))
         self.assertIn("m opentv-muse opentv-agent", su)

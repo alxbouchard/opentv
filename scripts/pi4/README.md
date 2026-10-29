@@ -360,8 +360,8 @@ contrôleur et aide des touches joignables (§6 bis) ; sinon aucun bouton factic
 Action dédiée, distincte de « Reconfigurer » : **ni Wi-Fi, ni nom, ni hotspot, ni job réseau, ni étape de première
 mise en route**. La ligne affiche deux nombres distincts : « Autorisés : N · Connectés : M ».
 
-1. TV : Réglages → « Gérer les assistants » → confirmation (« Non » au focus par défaut ; Retour = un niveau) →
-   « Oui, afficher le QR ». La feuille Réglages montre un QR dédié (la colonne « Télécommande » est masquée : un seul
+1. TV : Réglages → « Gérer les assistants » → « Droits des assistants » (l'autre ligne, « Muse », ouvre la connexion
+   guidée du §5 ter) → confirmation (« Non » au focus par défaut ; Retour = un niveau) → « Oui, afficher le QR ». La feuille Réglages montre un QR dédié (la colonne « Télécommande » est masquée : un seul
    QR à l'écran) ; OK sur « Annuler », Retour ou Accueil annulent sans rien changer.
 2. Téléphone (même Wi-Fi), 3 étapes courtes rendues par le serveur, **sans aucun script** :
    1. « Assistants de la TV » : pour Muse, Hermit et Hermes, deux lignes séparées — **Autorisé** (plafond choisi) et
@@ -406,6 +406,65 @@ mise en route**. La ligne affiche deux nombres distincts : « Autorisés : N · 
    web tourne sans privilège et n'obtient aucun droit sur ce dossier root ; aucune suppression n'est faite depuis ce
    parcours (et `agent revoke` ne la fait pas non plus aujourd'hui). Nettoyage par l'administrateur :
    `sudo rm /etc/opentv/agents/agent-<id>-<uid>.json`.
+
+### 5 ter. Connecter Muse depuis la TV (sans terminal)
+
+Parcours propriétaire, sans Mac ni SSH. Choisir Muse **n'accorde rien** : seul « Autoriser et connecter » le fait.
+
+1. TV : Réglages → « Gérer les assistants » → **Muse** (« Connecter » ; « Connectée · Déconnecter » une fois prête).
+   Feuille de consentement : ce que Muse pourra faire (te proposer des films à l'écran ; apprendre tes goûts et gérer
+   tes listes ; naviguer dans OpenTV ; lancer ou fermer un film quand tu le lui demandes), « Pas maintenant » **au
+   focus par défaut**, « Autoriser et connecter » est le seul envoi de `{"consent": true}` (exact ; tout autre corps ⇒
+   409, rien créé).
+2. La TV affiche un QR (séance courte, à usage unique) et trois lignes simples ; jamais d'adresse, de commande, de
+   jeton ni de terme technique. OK/Retour = Annuler.
+3. Téléphone (même Wi-Fi), 3 étapes, une action principale chacune :
+   1. « Ton jeton Muse » : un compte Muse a **un seul jeton actif, valable pour plusieurs appareils (jusqu'à 50)** —
+      action principale « **Utiliser mon jeton existant** » ; « Ne révoque pas ce jeton : tes autres gadgets Muse
+      seraient déconnectés » ; si la page Muse n'en montre que le début masqué, il ne peut pas être recopié de là
+      (le reprendre où il a été gardé ; sinon demander de l'aide plutôt que de le changer). Lien secondaire vers la
+      page officielle `https://gadgets.muse.ai/settings/sdk-tokens` (« Pas encore de jeton ? »). Le compte et la
+      connexion restent chez Muse ; OpenTV n'affiche jamais le jeton.
+   2. « Colle ton jeton » : champ masqué sans `name`, visible seulement si `muse.js` a passé son auto-test ;
+      « Envoyer à OpenTV ». Un début masqué collé (•, *, …) est expliqué, jamais envoyé.
+   3. « Termine dans l'app Muse » : Muse → Réglages → Appareils → Mode développeur → + → OpenTV, et l'avancement réel.
+4. TV et téléphone suivent : Préparation → En attente de Muse → Connexion → « Muse est connectée ! ». L'appariement
+   reste une action humaine dans l'app Muse ; la fenêtre Bluetooth (10 min) est ouverte automatiquement par la boîte.
+5. Annuler (TV ou téléphone) : avant prise en charge, le job (et donc le jeton) est retiré ; pendant l'appariement, le
+   helper ferme la fenêtre qu'il a ouverte, révoque l'identité tout juste émise et rend l'autorisation précédente —
+   **jamais** une Muse déjà connectée. « Déconnecter Muse » : confirmation (« Non » au focus), puis `muse unpair
+   --forget-token` + `muse revoke-control` par le helper. Local seulement : la copie du jeton sur la boîte est
+   effacée, mais le jeton n'est **jamais** révoqué chez Muse (tes autres gadgets restent connectés).
+
+Sécurité :
+- **Transport** : la page du téléphone est en HTTP sur le LAN (aucun certificat possible pour une adresse locale ;
+  `crypto.subtle` y est absent). Le jeton n'y circule donc **jamais en clair** : chaque séance crée une clé RSA-2048
+  (mémoire du service seulement, effacée à la remise ou à la fin) ; `ui/muse.js` (ES5, SHA-256 et RSA-OAEP-SHA-256
+  en JavaScript, aléa `crypto.getRandomValues`, auto-test au chargement) chiffre `{v, s, f, t}` — `s` identifiant de
+  séance, `f` secret de 128 bits porté **uniquement** par le fragment `#` du QR (jamais envoyé au serveur en clair,
+  ni dans une URL de requête, ni dans le Referer), `t` le jeton. Sans JavaScript, sans `BigInt`, sans aléa sûr, sans
+  fragment ou si l'auto-test échoue : le champ reste caché, rien ne part (échec fermé). Déchiffrement stdlib
+  (`museseal.py`), interopérable avec `cryptography` (tests). Limite : protège contre l'écoute passive du Wi-Fi ; un
+  attaquant **actif** sur le LAN (usurpation ARP) pourrait remplacer la page servie en HTTP — connecter Muse sur un
+  réseau de confiance (même limite que la fenêtre Bluetooth).
+- **Séance** : identifiant aléatoire 128 bits, ≤ 10 min, une seule remise, CSRF lié à la séance, 5 essais, 30 erreurs
+  d'identifiant par minute et par adresse, états strictement croissants (finaux immuables), nouvelle séance ⇒
+  l'ancienne annulée. POST : `Origin` exacte (ou `null` seulement avec `Sec-Fetch-Site: same-origin`), en-tête
+  `X-OpenTV-Muse` + JSON (prévol CORS jamais accordé), ≤ 2 Kio. Pages : `Cache-Control: no-store`,
+  `Referrer-Policy: no-referrer`, CSP même origine sans `unsafe-inline`. Le jeton n'apparaît dans aucune réponse,
+  page, URL, journal, audit, état TV, fichier résultat ni stockage du navigateur.
+- **Remise privilégiée** : le service (compte `opentv`) écrit **un** job `pair` 0600 (rename atomique) dans
+  `/var/lib/opentv/musejobs` (0700) ; `opentv-muse-setup.path` lance `opentv-muse-setup.service` (root, oneshot,
+  sans réseau, `ProtectSystem=strict`, capacités `CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER` seulement), qui exécute
+  `opentv-pi muse-setup-helper` (`musehelper.py`). Le helper n'accepte que trois schémas fixes (`pair` avec
+  `consent: "tv"`, `cancel`, `unpair` avec `confirm: "tv"`), ouverts sans suivre de lien (`O_NOFOLLOW`), fichier
+  régulier, propriétaire `opentv`, mode 0600, un seul lien, ≤ 2 Kio, âge borné ; tout le reste est retiré sans
+  action. Aucun chemin, argument ni commande ne vient du job ; il appelle `museadmin` en interne
+  (`authorize-control --yes` puis `pair --token-stdin --replace-token`), **jamais** `--force` ni
+  `--replace-identity` : une identité `muse-device` étrangère reste intacte (« Une autre installation de Muse existe
+  déjà »). Journal de reprise root (`/var/lib/opentv-muse-setup`, sans jeton) : après un plantage, fenêtre fermée,
+  identité inachevée retirée et autorisation précédente rendue, sauf si l'appariement avait abouti. Les unités de
+  catalogue n'accèdent pas à ces dossiers (`InaccessiblePaths`) ; `net-helper` et l'Agent Port sont inchangés.
 
 ## 6. Agent MCP (Muse, Hermit, Hermes sur la boîte)
 
@@ -662,7 +721,8 @@ quatre portes de plus, chacune distincte : action acceptée (`queued`), appliqu�
 lecture `playing` puis `closed` (`opentv-pi muse status` ne lit pas l'Agent Port : utiliser `status` via Muse), et
 photo HDMI de la fiche « Proposé par Muse » puis du retour sur la même fiche — porte terrain.
 
-Aide Mac (jamais versionnée avec un jeton, rien n'est stocké) : `scripts/pi4/tools/muse-pair-from-mac.sh
+**Récupération administrateur seulement** (le parcours normal est sur la TV, §5 ter ; jamais proposé dans
+l'interface). Aide Mac (jamais versionnée avec un jeton, rien n'est stocké) : `scripts/pi4/tools/muse-pair-from-mac.sh
 <admin>@<hôte-opentv>` lit `muse status`, propose l'autorisation du pilotage (Alex tape « oui » ; sinon rien écrit),
 ouvre la page des jetons SDK, lit le jeton `mgst_…` **sans écho**, vérifie seulement sa forme et le passe une fois par
 SSH à `muse pair --token-stdin` (jamais en argument, fichier, historique ni sortie ; variable effacée à chaque sortie).

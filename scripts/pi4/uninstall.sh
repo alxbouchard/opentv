@@ -505,6 +505,13 @@ if [ -d "$(dirname "$UNINSTALLING")" ]; then act touch -- "$UNINSTALLING"; fi
 host systemctl stop opentv-catalogue-refresh.timer opentv-catalogue-ratings-retry.timer
 host systemctl stop opentv-catalogue-refresh.service
 host systemctl stop opentv-catalogue-ratings.service opentv-catalogue-ratings-retry.service
+# connexion de Muse depuis la TV : plus aucun job pris (surveillance puis helper arrêtés, fenêtre Bluetooth avec eux) ;
+# un job encore en file peut porter un jeton SDK : retiré (fichiers réguliers seulement, jamais un lien suivi)
+host systemctl stop opentv-muse-setup.path opentv-muse-setup.service
+for d in /var/lib/opentv/musejobs /var/lib/opentv/musejobs-tmp; do
+  dd="$(dest "$d")"
+  if [ -d "$dd" ] && [ ! -L "$dd" ]; then act find "$dd" -mindepth 1 -maxdepth 1 -type f -delete; fi
+done
 # plus rien ne peut (re)lancer le point d'accès : service, helper et garde arrêtés
 host systemctl disable --now opentv-player.service opentv-player-keys.service opentv-kiosk.service opentv.service \
   opentv-net-helper.path opentv-net-helper.service opentv-ap-guard.timer opentv-ap-guard.service opentv-cec.timer \
@@ -512,7 +519,7 @@ host systemctl disable --now opentv-player.service opentv-player-keys.service op
   opentv-catalogue-refresh.service opentv-catalogue-ratings.service opentv-catalogue-ratings-retry.timer \
   opentv-catalogue-ratings-retry.service opentv-plymouth-failsafe.timer \
   opentv-plymouth-failsafe.service opentv-plymouth-deactivate.service opentv-plymouth-quit.service \
-  opentv-muse.service opentv-muse-pair.service
+  opentv-muse.service opentv-muse-pair.service opentv-muse-setup.path opentv-muse-setup.service
 # « Regarder » : la promotion terrain ne survit jamais à une désinstallation (même sans --purge) — une réinstallation
 # exige une nouvelle validation HDMI ; la source approuvée (source.env, configuration locale) reste jusqu'à --purge
 PROMO="$(dest /etc/opentv/playback-promoted)"
@@ -646,7 +653,7 @@ fi
 host systemctl start getty@tty1.service
 
 if [ "$PURGE" = 1 ]; then
-  for d in /var/lib/opentv /var/lib/opentv-kiosk /var/lib/opentv-muse /var/cache/opentv /etc/opentv /var/lib/opentv-install; do
+  for d in /var/lib/opentv /var/lib/opentv-kiosk /var/lib/opentv-muse /var/lib/opentv-muse-setup /var/cache/opentv /etc/opentv /var/lib/opentv-install; do
     # (un échec initramfs s'arrête à l'étape 0f, avant ce point : le marqueur et la sauvegarde y restent)
     if [ -e "$(dest "$d")" ]; then act rm -rf -- "$(dest "$d")"; fi
   done
