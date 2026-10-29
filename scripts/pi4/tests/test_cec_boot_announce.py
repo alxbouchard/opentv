@@ -1,11 +1,12 @@
-"""Régression terrain (Pi réel + Samsung, après redémarrage) : la télécommande Samsung ne pilotait plus OpenTV.
+"""Régressions terrain (Pi réel + Samsung, après redémarrage) : la télécommande Samsung ne pilotait plus OpenTV.
 
-Cause : l'amorçage de la minuterie (opentv-cec.service) ne faisait jamais d'<Active Source> ; seule l'unité manuelle
-opentv-cec-announce.service rétablissait le routage des touches, d'où `announced_this_boot=false` après chaque
-démarrage. Contrat corrigé :
+La première correction a ajouté l'<Active Source> automatique. Une seconde observation a montré qu'une annonce envoyée
+dans la même transaction que la nouvelle réclamation d'adresse logique était acquittée et marquée réussie, sans que la
+Samsung ne route les touches ; la même annonce manuelle, adresse stabilisée, rétablissait immédiatement le contrôle.
+Contrat corrigé :
 
 1. une seule activation CEC par démarrage de la boîte, faite par la minuterie dans une fenêtre bornée après le boot,
-   dès que HDMI est branché et l'adaptateur prêt — quelle que soit la source active que la TV annonce (autre/inconnue) ;
+   au passage suivant une nouvelle réclamation d'adresse logique — quelle que soit la source active annoncée ;
 2. le témoin de démarrage n'est écrit qu'après une annonce réussie (TV pas allumée ou émission ratée ⇒ aucun témoin,
    nouvel essai au prochain passage tant que la fenêtre est ouverte) ;
 3. les passages suivants du même démarrage (minuterie, redémarrage de service) n'émettent plus rien ;
@@ -96,10 +97,16 @@ class TestFirstBootAnnounce(BootBase):
                 r = make_root(self)
                 bus = OtherSourceBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "empty"},
                                                   "/dev/cec1": {"pa": "f.f.f.f", "state": "empty"}}, active=active)
+                first = self.tick(r, bus)
+                self.assertEqual((first["result"], first["registration"], first["announce"]["result"]),
+                                 ("ready", "registered", "registration_settling"))
+                self.assertEqual(bus.opts(), ["--playback"])
+                self.assertIsNone(self.marker())
+                set_uptime(self.proc, 55.0)       # tick suivant : adresse logique déjà stable, unique annonce
                 res = self.tick(r, bus)
                 self.assertTrue(res["ok"], res)
                 self.assertEqual((res["result"], res["selected"], res["registration"]),
-                                 ("ready", "/dev/cec0", "registered"))
+                                 ("ready", "/dev/cec0", "existing"))
                 self.assertEqual(res["announce"]["result"], "boot_done")
                 self.assertEqual(bus.opts(), ["--playback"] + ANNOUNCE_SEQ)
                 self.assertIn(["cec-ctl", "-d", "/dev/cec0", "-s", "--active-source", "phys-addr=1.0.0.0"],
@@ -135,6 +142,10 @@ class TestFirstBootAnnounce(BootBase):
         self.assertEqual(self.tick(r, bus)["result"], "disconnected")
         set_uptime(self.proc, 85.0)
         bus.ad["/dev/cec0"]["pa"] = "1.0.0.0"
+        first_connected = self.tick(r, bus)
+        self.assertEqual(first_connected["announce"]["result"], "registration_settling")
+        self.assertIsNone(self.marker())
+        set_uptime(self.proc, 115.0)
         res = self.tick(r, bus)
         self.assertEqual(res["announce"]["result"], "boot_done")
         self.assertEqual(self.emitted(bus), ANNOUNCE_SEQ)
@@ -200,9 +211,11 @@ class TestOncePerBoot(BootBase):
     def test_subsequent_ticks_and_service_restarts_never_announce_again(self):
         r = make_root(self)
         bus = FakeBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "empty"}})
+        self.assertEqual(self.tick(r, bus)["announce"]["result"], "registration_settling")
+        set_uptime(self.proc, 55.0)
         self.assertEqual(self.tick(r, bus)["announce"]["result"], "boot_done")
         n = len(bus.opts())
-        for up in (85.0, 145.0, 205.0, 3600.0, 86400.0):          # minuterie 60 s, puis bien plus tard
+        for up in (85.0, 145.0, 205.0, 3600.0, 86400.0):          # minuterie 30 s, puis bien plus tard
             set_uptime(self.proc, up)
             res = self.tick(r, bus)
             self.assertEqual((res["ok"], res["result"]), (True, "ready"))
@@ -260,15 +273,17 @@ class TestOncePerBoot(BootBase):
 class TestNoFocusStealAfterSamsungHome(BootBase):
     def test_home_overlay_then_service_restarts_and_ticks_emit_nothing(self):
         """Boot → annonce unique ; Samsung Home ouvert (aucun message CEC vers le Pi) ; opentv-cec relancé par la
-        minuterie toutes les 60 s et redémarré à la main pendant la fenêtre : jamais d'Active Source qui fermerait le
+        minuterie toutes les 30 s et redémarré à la main pendant la fenêtre : jamais d'Active Source qui fermerait le
         menu Samsung ou volerait une application native."""
         r = make_root(self)
         bus = FakeBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "empty"},
                                    "/dev/cec1": {"pa": "f.f.f.f", "state": "empty"}})
-        self.tick(r, bus)
+        self.assertEqual(self.tick(r, bus)["announce"]["result"], "registration_settling")
+        set_uptime(self.proc, 55.0)
+        self.assertEqual(self.tick(r, bus)["announce"]["result"], "boot_done")
         self.assertEqual(bus.opts().count("--active-source"), 1)
         n = len(bus.opts())
-        up = 25.0
+        up = 55.0
         for _ in range(12):                    # Home ouvert / fermé, 12 passages dont plusieurs dans la fenêtre
             up += 15.0
             set_uptime(self.proc, up)

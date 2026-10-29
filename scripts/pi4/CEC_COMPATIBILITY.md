@@ -11,11 +11,13 @@ Priorité de contrôle :
 2. télécommande Web locale sur téléphone ;
 3. télécommande OpenTV USB/2,4 GHz.
 
-OpenTV se déclare comme **Playback Device** sous le nom `OpenTV` et remappe OK. Il fait **une seule annonce de source
-active par démarrage de la boîte** (minuterie, fenêtre de 240 s après le boot, TV allumée seulement, témoin lié au
-`boot_id` écrit après succès seulement). Il ne doit jamais réveiller la TV ni réannoncer périodiquement la source : après
-cette annonce, ni la minuterie ni un redémarrage de service n'émet plus rien (Samsung Home et les applis natives ne
-sont pas interrompus).
+OpenTV se déclare comme **Playback Device** sous le nom `OpenTV` et remappe OK. Après une nouvelle réclamation d'adresse
+logique, il laisse d'abord cette adresse se stabiliser : le passage suivant de la minuterie, 30 s plus tard, fait
+**une seule annonce de source active par démarrage de la boîte** (fenêtre de 240 s après le boot, TV allumée seulement,
+témoin lié au `boot_id` écrit après succès seulement). Ce découpage est requis sur la Samsung terrain : une annonce
+envoyée dans la même transaction que la réclamation était acquittée mais ne rétablissait pas le routage des touches.
+OpenTV ne doit jamais réveiller la TV ni réannoncer périodiquement la source : après cette annonce, ni la minuterie ni
+un redémarrage de service n'émet plus rien (Samsung Home et les applis natives ne sont pas interrompus).
 
 Séquence émise, identique pour l'annonce de démarrage et la réactivation explicite :
 

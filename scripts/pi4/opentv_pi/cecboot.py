@@ -67,8 +67,10 @@ MIN_STEP_S = 1.0            # en dessous, une commande n'est plus lancée : l'ex
 # secondes), sinon « busy » non réussi — `opentv-pi cec --activate` propose alors de relancer
 LOCK_WAIT_S = 15.0
 LOCK_POLL_S = 0.5
-# annonce de démarrage : fenêtre après le boot (minuterie : 20 s puis toutes les 60 s ⇒ ~4 passages, assez pour
-# déclarer l'adresse logique puis annoncer ; au-delà, une TV allumée plus tard n'est jamais basculée sur OpenTV)
+# annonce de démarrage : fenêtre après le boot (minuterie : 20 s puis toutes les 30 s). Le premier passage qui doit
+# réclamer l'adresse logique NE l'annonce pas dans la même transaction : le Samsung terrain acquitte ce premier
+# <Active Source> mais ne route pas encore les touches. Le passage suivant voit l'adresse déjà stable et fait l'unique
+# annonce. Au-delà de la fenêtre, une TV allumée plus tard n'est jamais basculée sur OpenTV.
 BOOT_ANNOUNCE_WINDOW_S = 240.0
 
 ADAPTER_RE = re.compile(r"Adapter Name\s*:\s*([A-Za-z0-9_.-]{1,32})")
@@ -441,6 +443,14 @@ def bootstrap(root="/", runner=default_runner, mono=time.monotonic, keymap_io=No
             return res
         pa = info["physical_address"]
         res["physical_address"] = pa
+        if res["registration"] == "registered" and boot_announce and not force_announce:
+            # Régression terrain Samsung après reboot : une annonce envoyée immédiatement après `--playback` était
+            # acquittée et le témoin écrit, mais la télécommande restait capturée par la TV. Aucun moyen CEC fiable ne
+            # permet de lire ce focus. On sépare donc les phases : ce passage ne fait QUE la réclamation ; le prochain
+            # tick (30 s) annoncera une seule fois l'adresse déjà stable. Aucun témoin ici, donc retry borné naturel.
+            res["result"] = "ready"
+            res["announce"] = {"result": "registration_settling"}
+            return res
         if force_announce:       # geste explicite (opentv-pi cec --activate) : ignore le témoin de démarrage
             ann, ok = announce(run, sel, pa)
             res["announce"] = ann
