@@ -628,7 +628,8 @@ présent mais non approuvé : passage `skipped`, aucune requête.
   succès par l'unité), sans requête ni écriture.
 - **Candidat ensemencé** par le catalogue actuel : par `site_id` stable (sinon même chemin du même film), description,
   affiche, IMDb, TMDb et tout autre champ d'enrichissement sont conservés ; seuls chemin/identifiant de l'époque, hôte
-  et titre/année/genre publiés viennent du site. Un nouveau film arrive sans note jusqu'au prochain enrichissement.
+  et titre/année/genre publiés viennent du site. Un nouveau film arrive sans note : le passage des notes TMDb (§6
+  quater), déclenché juste après chaque rafraîchissement réussi, l'ajoute.
 - **Validation avant remplacement** (candidat `.catalogue.json.<hasard>.candidate` dans le même dossier, relu depuis le
   disque) : JSON ≤ 8 Mio, `count == len(items)`, chaque élément accepté par le moteur avec titre non vide et
   `site_id`, `site_id`/chemins/identifiants de lien uniques, au moins `OPENTV_CATALOGUE_MIN_ITEMS` (20) et au plus
@@ -672,6 +673,98 @@ Un changement légitime de plus de 25 % est refusé chaque jour (unité en éche
 source, puis installer un catalogue accepté par la procédure manuelle (§8) ou ajuster
 `OPENTV_CATALOGUE_MAX_DROP_PCT` dans `/etc/opentv/opentv.env`. Désactiver : `sudo systemctl disable --now
 opentv-catalogue-refresh.timer`.
+
+## 6 quater. Notes TMDb après chaque rafraîchissement
+
+`opentv-catalogue-refresh.service` déclenche par `OnSuccess=` (passage `updated`, `unchanged` ou `held`) le oneshot
+**séparé** `opentv-catalogue-ratings.service` (sans section `[Install]` : jamais activé ni lancé à l'installation).
+Il réutilise tel quel le moteur vérifié du NanoPi `opentv_tmdb.py` (livré inchangé dans
+`/opt/opentv/lib/foryou/`, empreinte dans le manifeste) : `/find` par identifiant IMDb connu, sinon titre exact ou
+normalisé + année compatible, sinon `ambiguous`/`unmatched` — jamais de choix parmi plusieurs candidats. Une note n'est
+écrite que si TMDb a au moins un vote : **0 vote ⇒ `tmdb_rating: null` (« indisponible »), jamais 0** ; aucune note
+inventée, IMDb et TMDb restent deux fournisseurs distincts (`imdb_*` jamais touchés).
+
+- **Panne TMDb ≠ panne du catalogue.** Le rafraîchissement a déjà remplacé et validé le catalogue ; une panne TMDb,
+  un jeton refusé ou un délai dépassé laisse ce catalogue **intact octet pour octet** (aucune annulation du
+  rafraîchissement), l'unité des notes sort en échec et l'échec est rapporté : `provider_unavailable` (disjoncteur après
+  5 erreurs consécutives ou échéance globale de 240 s), `auth_failed`, `partial` (éléments notés écrits, les autres
+  repris au passage suivant). `catalogue status` → `ratings` (`credential`, `coverage` : `items`, `rated`, `matched`,
+  `ambiguous`, `unmatched`, `pending` = jamais traités, `last` : dernier passage) ; `opentv-pi health` → `ratings` +
+  avertissement `ratings_enrichment_failed` (l'état « ok » de l'appareil n'en dépend pas : les notes sont un
+  enrichissement).
+- **Écriture** : verrou commun `catalogue.json.lock` (exclut rafraîchissement/rollback/resume ; `busy`, code 75),
+  catalogue suspendu (`.hold`) ⇒ `held` sans lire le jeton ni rien demander. Copie en mémoire où seuls `tmdb_*` et
+  `attribution.tmdb` peuvent changer, puis contrôles : catalogue sans champs TMDb identique, mêmes nombre et
+  identifiants (`site_id`, `source_id`, chemin) dans le même ordre, aucun champ TMDb invalide **introduit** (un
+  élément déjà invalide resté identique après une erreur du fournisseur est conservé et compté `invalid_kept`),
+  **perte de notes bornée**
+  (au plus max(2, 10 %) des notes existantes par passage, sinon `rating_drop`, rien écrit), relecture du candidat par
+  `load_catalogue_meta` (même nombre d'éléments servis). Candidat même dossier relu, catalogue revérifié inchangé
+  (sinon `catalogue_changed`, la copie la plus récente gagne), `os.replace` atomique + fsync du dossier. Rien n'a
+  changé ⇒ `unchanged`, aucun octet réécrit. `catalogue.json.prev` (retour arrière du rafraîchissement) n'est jamais
+  touché ; horodatages des vérifications hors catalogue (`catalogue.json.tmdb-state.json`), statut
+  `catalogue-ratings.json` (0600 `opentv`). L'accueil voit les notes comme tout remplacement : ≤ ~62 s.
+- **Rythme** : seuls les nouveaux éléments (ou dont titre/année/IMDb a changé) sont cherchés ; une note trouvée est
+  relue par son identifiant TMDb après `OPENTV_TMDB_RATING_MAX_AGE_DAYS` (7) jours, un titre non trouvé/ambigu est
+  recherché de nouveau après `OPENTV_TMDB_RECHECK_DAYS` (30) ; au plus `OPENTV_TMDB_MAX_REQUESTS` (300) requêtes.
+- **Reprise bornée** (`opentv-catalogue-ratings-retry.timer`, toutes les heures, activée à l'installation) : un
+  passage n'est refait que si le **dernier** a échoué pour une cause transitoire (`provider_unavailable`, `partial`,
+  `provider_error`, `internal_error`, `catalogue_changed`, `write_failed`, `busy`), au plus 5 fois par épisode, après
+  30 min, 1 h, 2 h, 4 h puis 8 h depuis la fin du passage précédent ; ensuite `retry_exhausted` (avertissement
+  `ratings_retry_exhausted`) jusqu'au passage quotidien, qui remet le compteur à zéro. Succès, jeton absent
+  (`skipped`), suspension (`held`) ou refus non transitoire (`auth_failed`, `credential_*`, `rating_drop`,
+  `invalid_candidate`…) : aucune reprise, aucune requête, statut intact. Une seule passe à la fois (verrou commun) ;
+  le rafraîchissement et le passage quotidien sont ordonnés **après** une reprise en cours (ils l'attendent au lieu
+  de trouver le verrou pris) ; une reprise lancée pendant eux sort `busy` sans rien noter. Toute exception de
+  transport (lecture tronquée, connexion coupée, TLS) devient une erreur d'élément : élément gardé tel quel,
+  disjoncteur, jamais de trace. `catalogue status` → `ratings.retry` (`attempts`, `max`, `state`, `not_before`).
+- **Bac à sable** : celui du rafraîchissement (compte `opentv`, écriture `/var/lib/opentv` seulement, même état
+  masqué), plus `source.env` et le cache du résolveur inaccessibles ; HTTPS sortant vers `api.themoviedb.org`
+  seulement (nom exact et adresse publique vérifiés avant connexion, aucune redirection suivie).
+
+**Jeton (secret).** `/etc/opentv/tmdb/token`, **root:opentv 0640**, dans le dossier `/etc/opentv/tmdb`
+**root:opentv 0750** ; une ligne `TMDB_READ_TOKEN=<jeton v4>` (préféré : en-tête `Authorization`) ou
+`TMDB_API_KEY=<clé v3>` ; modèle sans secret : `/opt/opentv/tmdb-token.example`. Chemin fixe (non configurable).
+Jamais dans Git, le manifeste, un `EnvironmentFile=`, argv, un journal ni une sortie.
+
+- **Masque par dossier.** Le dossier est créé par tmpfiles (`/etc/tmpfiles.d/opentv.conf`) à l'installation, avant
+  le (re)démarrage des unités, puis à chaque démarrage avant toute unité ; toutes les unités autres que les deux des
+  notes portent `InaccessiblePaths=-/etc/opentv/tmdb` (le kiosque, sans espace de montage, n'est pas du groupe
+  `opentv` : le mode 0750 le lui ferme). Masquer le dossier et non le fichier : un remplacement atomique du jeton ne
+  peut pas défaire le masque. Le dossier n'est jamais recréé ni renommé pendant que les services tournent.
+- **Contrôles fail-closed** (lecture par le service, `catalogue status`, dépôt) : groupe `opentv` privé (aucun autre
+  membre, aucun autre compte de ce groupe principal), dossier vrai dossier root:opentv sans écriture groupe ni accès
+  « autres », fichier régulier à un seul lien, root:opentv, 0640 au plus avec lecture groupe ; parent root non
+  inscriptible. Sinon `credential_unsafe` (raison dans `credential_why`) et aucune requête. Absent ⇒ `skipped`.
+- **Dépôt** (root, sans écho, format validé) : refusé si le groupe n'est pas privé, ou si une unité du compte
+  `opentv` en cours d'exécution (`opentv`, `opentv-cec`, `opentv-cec-announce`, `opentv-catalogue-refresh`) n'a pas
+  le masque dans son espace de montage (`/proc/<pid>/mountinfo`) : `credential_exposed` + unités à redémarrer, rien
+  écrit. Écriture atomique dans le dossier vérifié. `opentv-pi health` (root) avertit `ratings_credential_exposed`
+  dans le même cas. `install.sh` ne crée, ne lit ni ne retire jamais le jeton ; `uninstall.sh` le garde (dossier
+  compris), sauf `--purge`.
+
+```sh
+sudo /opt/opentv/bin/opentv-pi catalogue ratings-credential            # saisie masquée sur un terminal
+# depuis le Mac (trousseau), sans afficher le jeton :
+security find-generic-password -s com.paz.opentv.tmdb.read-access-token-v4 -a paz_alex -w |
+  ssh <pi> sudo /opt/opentv/bin/opentv-pi catalogue ratings-credential
+sudo /opt/opentv/bin/opentv-pi catalogue ratings    # un passage MAINTENANT, via l'unité (jamais exécuté en root)
+sudo /opt/opentv/bin/opentv-pi catalogue status     # … "ratings": {"credential", "coverage", "last", "retry"}
+journalctl -u opentv-catalogue-ratings -u opentv-catalogue-ratings-retry -n 20 --no-pager
+```
+
+`catalogue ratings` sous root : `busy` (code 75) si un autre passage tenait le verrou (la reprise horaire s'en
+charge), `timeout` si `systemctl start` dépasse son délai (l'unité peut encore tourner : `systemctl status`), sinon
+le résultat du passage relu dans son statut.
+
+**Désactiver** sans désinstaller : `sudo rm /etc/opentv/tmdb/token` (passages suivants `skipped`, reprise sans
+objet ; garder le dossier). **Revenir sur des notes** : il n'existe pas de retour arrière propre aux notes — ce
+passage n'écrit jamais `catalogue.json.prev`. `catalogue rollback` rétablit le catalogue validé d'**avant le dernier
+rafraîchissement** (il retire donc aussi ce rafraîchissement et les notes ajoutées depuis) et pose la suspension,
+qui bloque rafraîchissement, notes et reprise ; `catalogue resume` lève la suspension, et le passage suivant
+recherche de nouveau les notes manquantes.
+
+This product uses the TMDB API but is not endorsed or certified by TMDB.
 
 ## 7. Retour arrière
 
@@ -769,6 +862,11 @@ sauvegardes OpenTV, jamais un paquet.
   (limite Chromium) ; F12/Ctrl+Maj+I sur un clavier branché ⇒ retour OpenTV sans DevTools visible ; `Target.getTargets`
   liste bien la cible DevTools et `Target.closeTarget` la ferme sur le Chromium de Raspberry Pi OS ; décodage et
   thermique pendant la lecture ; `uninstall.sh` puis réinstallation ⇒ bouton absent jusqu'à nouvelle promotion.
+- Notes TMDb (`opentv-catalogue-ratings.service`, reprise `opentv-catalogue-ratings-retry.timer`) : `OnSuccess=`
+  (systemd ≥ 249, Bookworm 252), ordre `After=` entre reprise et rafraîchissement, masque du dossier
+  `/etc/opentv/tmdb` dans les espaces de montage réels, condition `!/run/opentv-uninstalling`, résolution DNS et
+  HTTPS vers `api.themoviedb.org` sous ce bac à sable, couverture réelle après un passage, et absence de jeton dans
+  le journal : **non vérifiés sur la Pi**, à prouver par la ligne « Notes TMDb quotidiennes » de la grille terrain.
 - Catalogue : à copier une première fois dans `/var/lib/opentv/catalogue.json` (propriétaire `opentv`, 0600) depuis la
   chaîne acceptée ; sans lui « Pour toi » affiche une sélection vide. Rafraîchissement quotidien (§6 ter) **vérifié hors
   matériel seulement** : à prouver sur la Pi (`systemd-analyze verify`/`security opentv-catalogue-refresh`, résolution
@@ -794,6 +892,7 @@ sauvegardes OpenTV, jamais un paquet.
 | **Assistants (Réglages)** | TV : Réglages → « Gérer les assistants » → « Non » au focus → « Oui » → QR dans la feuille, colonne Télécommande masquée ; iPhone (appareil photo) : 3 étapes, « Autorisé » et « Connecté » distincts, « Oui, enregistrer » ; TV : accueil + « C'est enregistré ! Assistants autorisés : N · connectés : M » ; `ss -ltn` : `:8081` lié à l'adresse LAN pendant le mode seulement, puis fermé ; Wi-Fi/nom inchangés (`nmcli -t device status`, `device.json`) ; aucun nouveau fichier dans `/etc/opentv/agents` ; second envoi du même QR refusé ; photo d'Alex |
 | **Regarder** | `opentv-pi playback status` → `promotion: missing` après installation (bouton absent même avec `source.env`) ; après les essais HDMI ci-dessus et `playback promote --field-validated` : bouton présent ; `playback demote` pendant une lecture ⇒ lecteur fermé, retour même carte, bouton absent en ≤ 10 s ; télécommande USB débranchée et CEC absent ⇒ bouton absent (`devices: 0`) ; unité du lecteur : décodage H.264 matériel toujours actif (`/dev/video10` tenu) avec `DevicePolicy=closed` + `SystemCallFilter=~@debug`, `systemd-analyze security opentv-player` relu, `/dev/cec0`/`/dev/input` inaccessibles depuis le lecteur, `curl http://127.0.0.1:<port TV>` refusé depuis l'unité ; groupes effectifs (`/proc/<pid>/status`) : Cage avec `input`, `playerd`/Chromium du lecteur sans `input`, `opentv-player-keys` avec `input` seulement ; photo/vidéo d'Alex |
 | **Catalogue quotidien** | `systemctl list-timers opentv-catalogue-refresh.timer` : prochain passage planifié ; `sudo /opt/opentv/bin/opentv-pi catalogue refresh` → `updated` (ou `unchanged`), puis `catalogue status` : nombre attendu, `snapshot` présent, SHA-256 lu ; second passage → `unchanged` sans réécriture ; `catalogue rollback` → `rolled_back`, `hold.held: true`, puis `catalogue refresh` → `held` et SHA-256 inchangé ; `catalogue resume` → `resumed`, passage suivant `updated`/`unchanged` ; fiche ouverte ou lecture pendant un remplacement ⇒ Retour sur la même carte (photo) ; `ls -l /var/lib/opentv/catalogue.json*` : tout `opentv` ; Wi-Fi coupé → `discovery_failed` et SHA-256 inchangé ; accueil peuplé avec le nouveau catalogue en ≤ 120 s (attendu ≤ ~62 s) sans redémarrage de service ; `journalctl -u opentv-catalogue-refresh` sans hôte, préfixe, jeton ni URL ; `systemd-analyze security opentv-catalogue-refresh` relu |
+| **Notes TMDb quotidiennes** | `ls -ld /etc/opentv/tmdb` = `root opentv` `drwxr-x---` dès l'installation ; `getent group opentv` sans membre supplémentaire ; `sudo /opt/opentv/bin/opentv-pi catalogue ratings-credential` (jeton depuis le trousseau, jamais affiché) puis `ls -l /etc/opentv/tmdb/token` = `root opentv` `-rw-r-----` ; pour `opentv`, `opentv-cec` (pendant un passage) et le rafraîchissement : `grep ' /etc/opentv/tmdb ' /proc/<MainPID>/mountinfo` présent et `sudo nsenter -t <MainPID> -m ls /etc/opentv/tmdb` refusé ; jeton remplacé une 2e fois ⇒ masque toujours présent dans `opentv` sans redémarrage ; `catalogue refresh` puis `systemctl show -p ActiveEnterTimestamp,Result opentv-catalogue-ratings` (déclenchée après le rafraîchissement) ; `catalogue status` : `ratings.last.result` `updated`/`unchanged`, `coverage.pending` = 0, `rated` cohérent (aujourd'hui 110/116 : un spécial TV sans vote TMDb reste « indisponible », jamais 0) ; second `catalogue ratings` → `unchanged`, SHA-256 inchangé ; `IPAddressDeny` et DNS : passage réel réussi sous le bac à sable ; panne simulée (réseau coupé pendant le seul passage des notes) → `provider_unavailable`, unité `failed`, `health.warnings` = `ratings_enrichment_failed`, catalogue du rafraîchissement inchangé (SHA-256), puis réseau rétabli ⇒ `systemctl list-timers opentv-catalogue-ratings-retry.timer` et reprise réussie dans ≤ ~1 h 30 (`ratings.retry.attempts` 1, résultat `updated`), et heure suivante : reprise sans requête ; `journalctl -u opentv-catalogue-ratings*` et `-u opentv-catalogue-refresh` sans jeton, titre, hôte ni URL ; `systemd-analyze verify` et `security` des deux unités des notes relus ; `uninstall.sh` pendant un rafraîchissement ⇒ aucun passage des notes démarré (journal), `/run/opentv-uninstalling` retiré à la fin ; nouvelle note visible à l'accueil en ≤ 120 s sans redémarrage |
 | **Agent** | `opentv-mcp` depuis le compte de l'agent : `tools/list` filtré par scopes, `recommend` sans URL, scope refusé, audit présent sans secret |
 
 ## 10. Développement

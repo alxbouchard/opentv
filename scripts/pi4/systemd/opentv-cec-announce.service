@@ -20,6 +20,9 @@ NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 ProtectSystem=strict
+# dossier du jeton TMDb (root:opentv 0750, cree par tmpfiles avant toute unite) : lu seulement par les unites des
+# notes. Le DOSSIER est masque (un remplacement atomique du fichier ne peut pas le demasquer).
+InaccessiblePaths=-/etc/opentv/tmdb
 ProtectHome=yes
 PrivateTmp=yes
 PrivateNetwork=yes

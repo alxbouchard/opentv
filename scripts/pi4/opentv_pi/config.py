@@ -61,7 +61,19 @@ DEFAULTS = {
     # catalogue valide actuel (nombre ou site_id conservés) — l'ancien catalogue reste alors en place
     "OPENTV_CATALOGUE_MIN_ITEMS": "20",
     "OPENTV_CATALOGUE_MAX_DROP_PCT": "25",
+    # notes TMDb après chaque rafraîchissement réussi (opentv-catalogue-ratings.service, ratings.py) : jeton HORS de
+    # ce fichier, dans TMDB_DIR/token (chemin FIXE, non configurable : c'est ce dossier que masquent les unités)
+    "OPENTV_TMDB_LANGUAGES": "fr-FR,fr-CA",
+    "OPENTV_TMDB_MAX_REQUESTS": "300",
+    "OPENTV_TMDB_RATING_MAX_AGE_DAYS": "7",
+    "OPENTV_TMDB_RECHECK_DAYS": "30",
 }
+TMDB_LANG_RE = re.compile(r"[a-z]{2}-[A-Z]{2}")
+# dossier du jeton TMDb : root:opentv 0750, créé par tmpfiles (installation et chaque démarrage) avant toute unité,
+# masqué par InaccessiblePaths=-/etc/opentv/tmdb dans toutes les unités sauf celles des notes. Fixe (jamais lu de
+# opentv.env) : un chemin configurable échapperait au masque.
+TMDB_DIR = "/etc/opentv/tmdb"
+TMDB_TOKEN_NAME = "token"
 
 
 def read_env_file(path, cap=65536):
@@ -164,6 +176,20 @@ class Config:
                 not 0 <= int(e["OPENTV_CATALOGUE_MAX_DROP_PCT"]) <= 90:
             raise ValueError("config: OPENTV_CATALOGUE_MAX_DROP_PCT invalide (0 à 90)")
         self.catalogue_max_drop_pct = int(e["OPENTV_CATALOGUE_MAX_DROP_PCT"])
+        self.tmdb_dir = TMDB_DIR
+        self.tmdb_token_name = TMDB_TOKEN_NAME
+        self.tmdb_file = os.path.join(TMDB_DIR, TMDB_TOKEN_NAME)
+        langs = tuple(x for x in e["OPENTV_TMDB_LANGUAGES"].split(","))
+        if not 1 <= len(langs) <= 3 or not all(TMDB_LANG_RE.fullmatch(x) for x in langs):
+            raise ValueError("config: OPENTV_TMDB_LANGUAGES invalide (1 à 3 codes xx-XX séparés par des virgules)")
+        self.tmdb_languages = langs
+        if not re.fullmatch(r"[0-9]{1,4}", e["OPENTV_TMDB_MAX_REQUESTS"]) or \
+                not 1 <= int(e["OPENTV_TMDB_MAX_REQUESTS"]) <= 2000:
+            raise ValueError("config: OPENTV_TMDB_MAX_REQUESTS invalide (1 à 2000)")
+        self.tmdb_max_requests = int(e["OPENTV_TMDB_MAX_REQUESTS"])
+        self.tmdb_rating_max_age_s = _num(e["OPENTV_TMDB_RATING_MAX_AGE_DAYS"], 1, 90,
+                                          "OPENTV_TMDB_RATING_MAX_AGE_DAYS") * 86400
+        self.tmdb_recheck_s = _num(e["OPENTV_TMDB_RECHECK_DAYS"], 1, 365, "OPENTV_TMDB_RECHECK_DAYS") * 86400
         s = self.state_dir
         self.device_file = os.path.join(s, "device.json")
         self.setup_flag = os.path.join(s, "setup-requested")

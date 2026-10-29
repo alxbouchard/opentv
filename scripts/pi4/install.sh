@@ -159,10 +159,12 @@ for u in tv.html tv.js keys.js tv.css setup.css setup.js remote.css remote.js fa
 add "$REPO/native/app/qrcode.js" /opt/opentv/share/ui/qrcode.js 644                  # réutilisé tel quel
 add "$REPO/scripts/nanopi/opentv_foryou.py" /opt/opentv/lib/foryou/opentv_foryou.py 644  # moteur « Pour toi »
 add "$REPO/scripts/nanopi/opentv_bridge.py" /opt/opentv/lib/foryou/opentv_bridge.py 644  # load_catalogue_meta
+add "$REPO/scripts/nanopi/opentv_tmdb.py" /opt/opentv/lib/foryou/opentv_tmdb.py 644      # notes TMDb (tel quel)
 for u in opentv.service opentv-kiosk.service opentv-net-helper.service opentv-net-helper.path \
          opentv-ap-guard.service opentv-ap-guard.timer opentv-cec.service opentv-cec.timer \
          opentv-cec-announce.service opentv-splash.service opentv-player.service opentv-player-keys.service \
-         opentv-catalogue-refresh.service opentv-catalogue-refresh.timer \
+         opentv-catalogue-refresh.service opentv-catalogue-refresh.timer opentv-catalogue-ratings.service \
+         opentv-catalogue-ratings-retry.service opentv-catalogue-ratings-retry.timer \
          opentv-plymouth-deactivate.service opentv-plymouth-quit.service opentv-plymouth-failsafe.service \
          opentv-plymouth-failsafe.timer; do
   add "$HERE/systemd/$u" "/etc/systemd/system/$u" 644
@@ -184,6 +186,10 @@ add "$HERE/uninstall.sh" /opt/opentv/uninstall.sh 755
 add "$HERE/README.md" /opt/opentv/README.md 644
 add "$HERE/CEC_COMPATIBILITY.md" /opt/opentv/CEC_COMPATIBILITY.md 644
 add "$HERE/opentv-pi.env.example" /opt/opentv/opentv-pi.env.example 644
+# modèle SANS secret du jeton TMDb ; le vrai /etc/opentv/tmdb/token (root:opentv 0640) n'est jamais livré, écrit,
+# manifesté ni retiré par l'installation (sudo /opt/opentv/bin/opentv-pi catalogue ratings-credential). Son dossier
+# /etc/opentv/tmdb (root:opentv 0750) est créé par tmpfiles AVANT le (re)démarrage des unités qui le masquent.
+add "$HERE/tmdb-token.example" /opt/opentv/tmdb-token.example 644
 NEW_DSTS=""
 for e in "${FILES[@]}"; do
   src="${e%%|*}"; rest="${e#*|}"
@@ -900,6 +906,10 @@ post systemd-sysusers /etc/sysusers.d/opentv.conf
 post drop_kiosk_input
 post systemd-tmpfiles --create /etc/tmpfiles.d/opentv.conf
 post chown root:opentv "$ENVF"
+# témoin d'une désinstallation interrompue (/run/opentv-uninstalling : bloque rafraîchissement et notes) : retiré
+if [ -e "$(dest /run/opentv-uninstalling)" ] || [ -L "$(dest /run/opentv-uninstalling)" ]; then
+  act rm -f -- "$(dest /run/opentv-uninstalling)"
+fi
 post systemctl daemon-reload
 if [ "$ENABLE" = 1 ]; then
   # opentv-ap-guard.timer : garde root du Wi-Fi temporaire, indépendante du service Python
@@ -913,14 +923,19 @@ if [ "$ENABLE" = 1 ]; then
   # écrasé par l'installation (opentv-pi playback promote --field-validated, après la validation HDMI réelle).
   # opentv-catalogue-refresh.timer : rafraîchissement quotidien du catalogue (sauté sans /etc/opentv/source.env) ;
   # seule la minuterie est (re)démarrée ici, jamais le passage lui-même (aucune requête pendant l'installation).
+  # opentv-catalogue-ratings.service (notes TMDb) n'a pas de section [Install] : tirée par OnSuccess= du
+  # rafraîchissement seulement, jamais activée ni lancée ici. opentv-catalogue-ratings-retry.timer : reprise horaire
+  # BORNÉE après un échec transitoire seulement (sinon aucun passage ni requête) ; minuterie (re)démarrée, jamais le
+  # passage. Le dossier du jeton existe déjà (tmpfiles ci-dessus) : chaque unité redémarrée ici le masque.
   # opentv-plymouth-failsafe.timer : filet absolu (120 s après le noyau) contre un Plymouth laissé indéfiniment ;
   # activé pour le prochain démarrage seulement (jamais démarré ici). Les unités de passage deactivate/quit n'ont pas
   # de section [Install] : tirées par opentv-kiosk.service (Wants=), elles ne s'activent ni ne s'exécutent seules.
   post systemctl enable opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
     opentv-cec.timer opentv-splash.service opentv-player-keys.service opentv-player.service \
-    opentv-catalogue-refresh.timer opentv-plymouth-failsafe.timer
+    opentv-catalogue-refresh.timer opentv-catalogue-ratings-retry.timer opentv-plymouth-failsafe.timer
   post systemctl restart opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
-    opentv-cec.timer opentv-player-keys.service opentv-player.service opentv-catalogue-refresh.timer
+    opentv-cec.timer opentv-player-keys.service opentv-player.service opentv-catalogue-refresh.timer \
+    opentv-catalogue-ratings-retry.timer
 fi
 if ! host python3 -I /opt/opentv/bin/opentv-pi health; then
   say "santé : à vérifier (sudo /opt/opentv/bin/opentv-pi health ; journalctl -u opentv -u opentv-kiosk)"

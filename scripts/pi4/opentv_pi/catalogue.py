@@ -55,6 +55,11 @@ STATUS_NAME = "catalogue-refresh.json"
 STATUS_CAP = 16384
 HOLD_SUFFIX = ".hold"              # catalogue.json.hold : rafraîchissement suspendu après un rollback
 HOLD_CAP = 4096
+# notes TMDb (ratings.py, opentv-catalogue-ratings.service) : statut du dernier passage et horodatages des vérifications
+# (hors catalogue, pour qu'un passage sans changement ne réécrive aucun octet). Déclarés ici pour que le nettoyage des
+# orphelins sous le verrou commun couvre aussi les temporaires de ce passage.
+RATINGS_STATUS_NAME = "catalogue-ratings.json"
+RATINGS_STATE_SUFFIX = ".tmdb-state.json"
 ENGINE_ATTRS = ("parse_listing", "clean_item", "load_catalogue_meta", "valid_public_host", "FetchError",
                 "http_fetch", "DiscoveryFailed", "NUM_ID_RE")
 CODE_RE = re.compile(r"^[a-z_:0-9]{1,48}$")
@@ -388,9 +393,11 @@ def run(cfg, action, fetch=None, clock=time.time, mono=time.monotonic, log=_noop
 
 def _cleanup(dfd, name):
     """Orphelins d'un passage interrompu (coupure, SIGKILL) retirés sous le verrou : candidats et temporaires `.tmp`
-    des écritures atomiques de CE module seulement (instantané, statut, témoin de suspension). Liste du dossier
+    des écritures atomiques de CE module et du passage des notes seulement (instantané, statuts, témoin de suspension,
+    état TMDb). Liste du dossier
     impossible : Refused(cleanup_failed), jamais une trace."""
-    own = "|".join(re.escape(n) for n in (name + ".prev", STATUS_NAME, name + HOLD_SUFFIX))
+    own = "|".join(re.escape(n) for n in (name + ".prev", STATUS_NAME, name + HOLD_SUFFIX, RATINGS_STATUS_NAME,
+                                          name + RATINGS_STATE_SUFFIX))
     pat = re.compile(r"^(?:\.%s\.[0-9a-f]{12}\.candidate|\.(?:%s)\.[0-9a-f]{12}\.tmp)$" % (re.escape(name), own))
     try:
         entries = os.listdir(dfd)

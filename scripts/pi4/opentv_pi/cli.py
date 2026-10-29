@@ -1,5 +1,5 @@
 """opentv-pi : serve | preflight | health | net-helper | ap-guard | agent issue|list|revoke | setup reset | cec |
-cec-bootstrap | catalogue status|refresh|rollback|resume | manifest verify."""
+cec-bootstrap | catalogue status|refresh|rollback|resume|ratings|ratings-retry|ratings-credential | manifest verify."""
 import argparse
 import json
 import os
@@ -466,6 +466,8 @@ def cmd_playback(a):
 
 
 CATALOGUE_UNIT_TIMEOUT_S = 330   # > TimeoutStartSec=300 de opentv-catalogue-refresh.service (oneshot attendu)
+RATINGS_UNIT_TIMEOUT_S = 390     # > TimeoutStartSec=360 de opentv-catalogue-ratings.service (oneshot attendu)
+RATINGS_CRED_CAP = 4096
 # rollback/resume sous root : action FIXE déléguée au compte du service (jamais exécutée en root : les fichiers du
 # compte opentv ne doivent jamais devenir root:root), argv sans shell, environnement minimal, durée bornée
 RUNUSER = "/usr/sbin/runuser"
@@ -527,11 +529,16 @@ def cmd_catalogue(a):
     Sous root, rien n'est jamais écrit en root : refresh démarre l'unité bac à sable opentv-catalogue-refresh.service
     puis relit le statut qu'elle a écrit ; rollback/resume délèguent l'action fixe au compte du service (runuser).
     Sous le compte du service (l'unité, ou la délégation) : passage direct, une ligne JSON, code 0 / 1 / 75."""
-    from . import catalogue
+    from . import catalogue, ratings
     cfg = config.Config.load(a.env)
     if a.action == "status":
         rep = catalogue.status(cfg)
+        rep["ratings"] = ratings.status(cfg)
         return _out(rep, 0 if rep["ok"] else 1)
+    if a.action == "ratings-credential":
+        return _ratings_credential(cfg)
+    if a.action in ("ratings", "ratings-retry"):
+        return _catalogue_ratings(cfg, retry=a.action == "ratings-retry")
     if os.geteuid() == 0:
         if a.action in CATALOGUE_DELEGATED:
             return _catalogue_delegate(cfg, a.env, a.action)
@@ -555,6 +562,91 @@ def cmd_catalogue(a):
     res = catalogue.run(cfg, a.action, log=log)
     code = 0 if res["ok"] else (catalogue.BUSY_EXIT if res["result"] == "busy" else 1)
     return _line(dict(res, event="catalogue_" + a.action), code)
+
+
+def _catalogue_ratings(cfg, retry=False):
+    """Notes TMDb : sous root, démarre l'unité bac à sable (jamais exécuté en root) puis relit son statut ; sous le
+    compte du service (l'unité) : passage direct, une ligne JSON, code 0 / 1 / 75. retry : passage de reprise
+    (seulement après un échec transitoire, délai croissant, nombre borné)."""
+    from . import ratings
+    unit = ratings.RETRY_UNIT if retry else ratings.UNIT
+    if os.geteuid() == 0:
+        before = ratings.last_finished(cfg)
+        rc, _ = nethelper.default_runner(["systemctl", "start", unit], RATINGS_UNIT_TIMEOUT_S)
+        st = ratings.status(cfg)
+        last = st.get("last") or {}
+        base = {"unit": unit, "coverage": st.get("coverage"), "credential": st.get("credential"),
+                "retry": st.get("retry")}
+        if last.get("finished_at") is not None and last.get("finished_at") != before:
+            if last.get("result") == "busy":
+                return _out(dict(base, ok=False, result="busy", ratings=last,
+                                 note="Un passage du catalogue tenait le verrou : reprise automatique dans l'heure "
+                                      "(opentv-catalogue-ratings-retry.timer), ou réessayer plus tard."),
+                            ratings.BUSY_EXIT)
+            return _out(dict(base, ok=bool(last.get("ok")), ratings=last), 0 if last.get("ok") else 1)
+        if rc == 124:
+            # systemctl start dépasse RATINGS_UNIT_TIMEOUT_S (> TimeoutStartSec) : l'unité est peut-être encore en
+            # cours (file d'attente, arrêt en cours) — jamais présenté comme un échec du passage ni comme un succès
+            return _out(dict(base, ok=False, result="timeout",
+                             note="systemctl status %s ; journalctl -u %s -n 20 --no-pager" % (unit, unit)), 1)
+        status = _unit_exit_status(unit)
+        if status == ratings.BUSY_EXIT:
+            return _out(dict(base, ok=False, result="busy",
+                             note="Un passage du catalogue était en cours : réessayer dans quelques minutes."),
+                        ratings.BUSY_EXIT)
+        if retry and rc == 0 and status == 0:
+            # reprise sans passage (aucun échec transitoire, délai non écoulé ou plafond atteint) : statut intact
+            return _out(dict(base, ok=True, result=(st.get("retry") or {}).get("state", "retry_not_needed")), 0)
+        return _out(dict(base, ok=False, result="not_run", service_ok=rc == 0,
+                         note="journalctl -u %s -n 20 --no-pager" % unit), 1)
+    res = ratings.run(cfg, log=log, retry=retry)
+    code = 0 if res["ok"] else (ratings.BUSY_EXIT if res["result"] == "busy" else 1)
+    return _line(dict(res, event="catalogue_ratings_retry" if retry else "catalogue_ratings"), code)
+
+
+def _ratings_credential(cfg):
+    """(root) Dépose le jeton TMDb lu sur l'entrée standard (sans écho sur un terminal) dans
+    /etc/opentv/tmdb/token, root:<groupe PRIVÉ du service> 0640. Refusé si le groupe a d'autres membres ou si une
+    unité du compte tourne sans le masque du dossier. Rien n'est jamais affiché ni journalisé : type (v4/v3) et état."""
+    from . import ratings
+    if os.geteuid() != 0:
+        return _out({"ok": False, "error": "root_required"}, 2)
+    try:
+        gid = ratings.service_gid(cfg)
+    except ratings.Refused as e:
+        return _out({"ok": False, "error": e.code,
+                     "note": "Le groupe %s doit être privé (aucun autre membre)." % cfg.service_user}, 2)
+    if sys.stdin is None:
+        return _out({"ok": False, "error": "stdin_required"}, 2)
+    if sys.stdin.isatty():
+        import getpass
+        value = getpass.getpass("Jeton TMDb (lecture v4, ou clé v3) : ")
+    else:
+        value = sys.stdin.readline(RATINGS_CRED_CAP + 1)
+    try:
+        if len(value) > RATINGS_CRED_CAP:
+            return _out({"ok": False, "error": "credential_bad_format"}, 2)
+        kind = ratings.write_credential(cfg, value, gid, nethelper.default_runner)
+    except ValueError:
+        return _out({"ok": False, "error": "credential_bad_format"}, 2)
+    except ratings.Exposed as e:
+        return _out({"ok": False, "error": "credential_exposed", "units": e.units,
+                     "note": "Unités démarrées sans le masque de %s : sudo systemctl restart %s, puis recommencer."
+                             % (cfg.tmdb_dir, " ".join(e.units))}, 1)
+    except ratings.Refused as e:
+        rep = {"ok": False, "error": e.code}
+        if e.why:
+            rep["why"] = e.why
+        return _out(rep, 1)
+    except OSError:
+        return _out({"ok": False, "error": "credential_write_failed",
+                     "note": "%s doit être root:root 0755 et %s root:%s 0750" % (
+                         os.path.dirname(cfg.tmdb_dir), cfg.tmdb_dir, cfg.service_user)}, 1)
+    finally:
+        value = None
+    return _out({"ok": True, "kind": kind, "credential": ratings.credential_state(cfg),
+                 "note": "Notes appliquées au prochain rafraîchissement, ou maintenant : "
+                         "sudo /opt/opentv/bin/opentv-pi catalogue ratings"})
 
 
 def cmd_manifest(a):
@@ -622,8 +714,12 @@ def build_parser():
     pb.add_argument("--env", default=config.ENV_FILE)
     ca = sub.add_parser("catalogue", help="catalogue accepté : status | refresh (rafraîchissement quotidien, source "
                                           "approuvée) | rollback (catalogue.json.prev validé + suspension) | resume "
-                                          "(reprise du rafraîchissement)")
-    ca.add_argument("action", choices=("status", "refresh", "rollback", "resume"))
+                                          "(reprise du rafraîchissement) | ratings (notes TMDb, aussi après chaque "
+                                          "rafraîchissement réussi) | ratings-retry (reprise bornée après un échec "
+                                          "transitoire) | ratings-credential (root : jeton TMDb lu sur l'entrée "
+                                          "standard, jamais affiché)")
+    ca.add_argument("action", choices=("status", "refresh", "rollback", "resume", "ratings", "ratings-retry",
+                                       "ratings-credential"))
     ca.add_argument("--env", default=argparse.SUPPRESS, help="fichier env (défaut : celui de opentv-pi --env)")
     ma = sub.add_parser("manifest", help="vérifie le manifeste SHA-256")
     ma.add_argument("action", choices=("verify",))

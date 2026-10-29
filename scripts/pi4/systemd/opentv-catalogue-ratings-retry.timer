@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenTV Pi - reprise horaire bornee des notes TMDb (seulement apres un echec transitoire)
+Documentation=file:///opt/opentv/README.md
+
+[Timer]
+# toutes les heures (delai aleatoire borne) : au plus une tentative par heure ; le code decide s'il y a lieu
+# (echec transitoire, delai croissant ecoule, plafond non atteint) — sinon aucune requete
+OnCalendar=*-*-* *:10:00
+RandomizedDelaySec=15min
+AccuracySec=1min
+Persistent=false
+Unit=opentv-catalogue-ratings-retry.service
+
+[Install]
+WantedBy=timers.target

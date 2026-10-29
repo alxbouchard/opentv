@@ -5,13 +5,15 @@ import json
 import os
 import re
 
-from . import netstate
+from . import netstate, ratings
 from .nethelper import default_runner
 
 MANIFEST = "/opt/opentv/MANIFEST.sha256"
 LINE_RE = re.compile(r"([0-9a-f]{64})  (/[^\n]+)")
 UNITS_REQUIRED = ("opentv.service", "opentv-net-helper.path", "opentv-ap-guard.timer")
-UNITS_OPTIONAL = ("opentv-kiosk.service", "opentv-cec.timer", "opentv-catalogue-refresh.timer")
+UNITS_OPTIONAL = ("opentv-kiosk.service", "opentv-cec.timer", "opentv-catalogue-refresh.timer",
+                  "opentv-catalogue-ratings.service", "opentv-catalogue-ratings-retry.timer",
+                  "opentv-catalogue-ratings-retry.service")
 
 
 def sha256_file(path):
@@ -117,6 +119,16 @@ def run(cfg, root="/", runner=default_runner, check_http=True):
     service = http_ok(cfg.tv_port) if check_http else None
     net = netstate.snapshot(runner)
     ok = man["ok"] and all(units[u] == "active" for u in UNITS_REQUIRED) and service is not False
+    # notes TMDb : enrichissement facultatif (n'influe pas sur « ok » de l'appareil) mais un échec reste visible
+    rat = ratings.health_view(cfg, runner=runner)
+    warnings = []
+    if rat.get("ok") is False or units.get(ratings.UNIT) == "failed" or units.get(ratings.RETRY_UNIT) == "failed":
+        warnings.append("ratings_enrichment_failed")
+    if (rat.get("retry") or {}).get("state") == "retry_exhausted":
+        warnings.append("ratings_retry_exhausted")
+    if rat.get("exposed") or ("exposed" in rat and rat["exposed"] is None):
+        # jeton présent mais une unité du compte tourne sans le masque de son dossier (ou invérifiable)
+        warnings.append("ratings_credential_exposed")
     return {"ok": ok, "manifest": man, "units": units, "service_http": service,
             "network": {"mode": net["mode"]}, "kiosk": units.get("opentv-kiosk.service"),
-            "boot_splash": boot_splash(root)}
+            "boot_splash": boot_splash(root), "ratings": rat, "warnings": warnings}

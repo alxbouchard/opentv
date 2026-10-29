@@ -28,6 +28,8 @@ AmbientCapabilities=
 UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict
+# dossier du jeton TMDb : jamais visible ici (lu seulement par les unites des notes)
+InaccessiblePaths=-/etc/opentv/tmdb
 ProtectHome=yes
 PrivateNetwork=yes
 DevicePolicy=closed

@@ -1,0 +1,71 @@
+[Unit]
+Description=OpenTV Pi - notes TMDb du catalogue accepte (apres chaque rafraichissement reussi ; champs tmdb_* seulement, remplacement atomique ; TMDb absent ou en panne => catalogue du rafraichissement intact, echec rapporte)
+Documentation=file:///opt/opentv/README.md
+# Declenchee par OnSuccess= de opentv-catalogue-refresh.service (ou `opentv-pi catalogue ratings`) ; aucune section
+# [Install] : jamais activee ni lancee seule a l'installation. Sans /etc/opentv/tmdb/token : passage `skipped` (aucune
+# requete), statut ecrit pour que `catalogue status`/`health` disent « non configure » plutot que rien. Un echec
+# transitoire est repris par opentv-catalogue-ratings-retry.timer (borne), jamais par Restart=.
+# desinstallation en cours (uninstall.sh) : aucun passage ne demarre, meme tire par OnSuccess= d'un rafraichissement
+ConditionPathExists=!/run/opentv-uninstalling
+Wants=network-online.target
+# apres une reprise en cours (opentv-catalogue-ratings-retry.service) : attend sa fin plutot que « occupe »
+After=network-online.target time-sync.target opentv-catalogue-refresh.service opentv-catalogue-ratings-retry.service
+
+[Service]
+Type=oneshot
+User=opentv
+Group=opentv
+# configuration NON secrete seulement ; le jeton TMDb (/etc/opentv/tmdb/token, root:opentv 0640 dans un dossier
+# root:opentv 0750) est lu par le code, jamais charge dans l'environnement (EnvironmentFile=), argv ni journal
+EnvironmentFile=-/etc/opentv/opentv.env
+ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-pi catalogue ratings
+# 75 = un autre passage du catalogue tenait le verrou (rien touche) : pas un echec de l'unite
+SuccessExitStatus=75
+# passage reseau borne a 240 s par le code (echeance globale + disjoncteur apres 5 erreurs consecutives)
+TimeoutStartSec=360
+Nice=10
+IOSchedulingClass=idle
+CPUQuota=50%
+MemoryMax=256M
+TasksMax=16
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+# catalogue.json, son verrou, son candidat, l'etat des verifications TMDb et le statut du passage
+ReadWritePaths=-/var/lib/opentv
+# rien d'autre de l'etat OpenTV n'est utile a ce passage (meme liste que le rafraichissement), ni la source approuvee
+# ni le cache de son resolveur : ce passage ne parle qu'a l'API TMDb. « - » : chemin absent au demarrage ignore.
+InaccessiblePaths=-/var/lib/opentv/device.json -/var/lib/opentv/setup-requested -/var/lib/opentv/hotspot.json
+InaccessiblePaths=-/var/lib/opentv/hotspot-rearm -/var/lib/opentv/wifi-apply.json
+InaccessiblePaths=-/var/lib/opentv/netjobs -/var/lib/opentv/netjobs-tmp -/var/lib/opentv/netresults
+InaccessiblePaths=-/var/lib/opentv/foryou -/var/lib/opentv/agents.json -/var/lib/opentv/agents.json.lock
+InaccessiblePaths=-/var/lib/opentv/audit.jsonl -/var/lib/opentv/remote.json -/var/lib/opentv/source
+InaccessiblePaths=-/var/lib/opentv-kiosk -/var/lib/opentv-install
+InaccessiblePaths=-/etc/opentv/agents -/etc/opentv/source.env -/etc/NetworkManager/system-connections
+InaccessiblePaths=-/run/opentv -/run/opentv-player -/run/opentv-player-keys -/run/opentv-cec
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# reseau : HTTPS sortant vers api.themoviedb.org seulement (nom exact et adresse publique verifies par le code) ;
+# jamais la boite elle-meme, le lien local ni le multicast. 127.0.0.53/54 : resolveur local eventuel.
+IPAddressDeny=localhost link-local multicast
+IPAddressAllow=127.0.0.53/32 127.0.0.54/32
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native

@@ -1,0 +1,17 @@
+# /etc/opentv/tmdb/token — jeton TMDb des notes du catalogue (opentv-catalogue-ratings*.service). SECRET :
+# jamais dans Git, un chat, une capture, argv ni un journal ; jamais livré, manifesté ni retiré par install.sh
+# (uninstall.sh --purge seulement). Exigé : fichier régulier root:opentv 0640, sans lien (symbolique ni dur), dans le
+# dossier /etc/opentv/tmdb root:opentv 0750 (créé par tmpfiles, masqué pour toutes les autres unités) ; le groupe
+# opentv ne doit avoir aucun autre membre.
+#
+# Dépôt recommandé (aucun écho, format validé, écriture atomique root:opentv 0640, refus si une unité tourne sans le
+# masque du dossier) :
+#   sudo /opt/opentv/bin/opentv-pi catalogue ratings-credential          # saisie masquée sur un terminal
+#   <commande qui imprime le jeton> | ssh <pi> sudo /opt/opentv/bin/opentv-pi catalogue ratings-credential
+# Absent : aucune requête TMDb, `catalogue status` indique credential « missing » (notes non configurées).
+#
+# Une seule des deux clés (le jeton de lecture v4 est préféré ; la clé v3 passe dans l'URL des requêtes) :
+#TMDB_READ_TOKEN=<jeton de lecture v4 de votre compte TMDb>
+#TMDB_API_KEY=<clé v3, seulement sans jeton v4>
+#
+# This product uses the TMDB API but is not endorsed or certified by TMDB.

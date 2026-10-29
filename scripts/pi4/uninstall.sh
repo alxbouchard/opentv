@@ -13,7 +13,8 @@
 #                                            échoue — arrêt alors AVANT tout retrait, pour relancer), retire l'écran OpenTV et
 #                                            la condition getty de tty1, rend tty1, retire la promotion
 #                                            terrain de « Regarder » (/etc/opentv/playback-promoted)
-#   ... --purge                              efface aussi l'état (/var/lib/opentv*, /etc/opentv)
+#                                            Le jeton TMDb (/etc/opentv/tmdb/token) et la source approuvée restent.
+#   ... --purge                              efface aussi l'état (/var/lib/opentv*, /etc/opentv, jeton TMDb compris)
 #   ... --purge --forget-wifi                oublie aussi le Wi-Fi configuré par OpenTV (opentv-wifi)
 #   ... --dry-run | --root <dossier>         plan seul / rootfs de test
 set -Eeuo pipefail
@@ -31,7 +32,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1; shift ;;
     --purge) PURGE=1; shift ;;
     --forget-wifi) FORGET_WIFI=1; shift ;;
-    -h|--help) sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "option inconnue : $1" ;;
   esac
 done
@@ -482,12 +483,24 @@ if [ "$PLY_RESTORED" = 1 ] || [ "$INITRD_REC_SEEN" = 1 ]; then
   fi
 fi
 
-# 1) plus rien ne peut (re)lancer le point d'accès : service, helper et garde arrêtés
+# 1) catalogue : témoin /run/opentv-uninstalling AVANT tout arrêt — rafraîchissement, notes et reprise portent
+#    ConditionPathExists=!/run/opentv-uninstalling : un OnSuccess= d'un rafraîchissement qui se termine pendant
+#    l'arrêt, une minuterie ou une reprise ne peut plus démarrer de passage pendant le retrait des fichiers. Retiré à
+#    la fin (ou par install.sh ; /run est vidé au redémarrage). Puis arrêt des minuteries d'abord, du
+#    rafraîchissement ensuite, des passages des notes enfin (toute tâche de démarrage en attente remplacée par
+#    l'arrêt) ; tout est ensuite désactivé avec le reste.
+UNINSTALLING="$(dest /run/opentv-uninstalling)"
+if [ -d "$(dirname "$UNINSTALLING")" ]; then act touch -- "$UNINSTALLING"; fi
+host systemctl stop opentv-catalogue-refresh.timer opentv-catalogue-ratings-retry.timer
+host systemctl stop opentv-catalogue-refresh.service
+host systemctl stop opentv-catalogue-ratings.service opentv-catalogue-ratings-retry.service
+# plus rien ne peut (re)lancer le point d'accès : service, helper et garde arrêtés
 host systemctl disable --now opentv-player.service opentv-player-keys.service opentv-kiosk.service opentv.service \
   opentv-net-helper.path opentv-net-helper.service opentv-ap-guard.timer opentv-ap-guard.service opentv-cec.timer \
   opentv-cec.service opentv-cec-announce.service opentv-splash.service opentv-catalogue-refresh.timer \
-  opentv-catalogue-refresh.service opentv-plymouth-failsafe.timer opentv-plymouth-failsafe.service \
-  opentv-plymouth-deactivate.service opentv-plymouth-quit.service
+  opentv-catalogue-refresh.service opentv-catalogue-ratings.service opentv-catalogue-ratings-retry.timer \
+  opentv-catalogue-ratings-retry.service opentv-plymouth-failsafe.timer \
+  opentv-plymouth-failsafe.service opentv-plymouth-deactivate.service opentv-plymouth-quit.service
 # « Regarder » : la promotion terrain ne survit jamais à une désinstallation (même sans --purge) — une réinstallation
 # exige une nouvelle validation HDMI ; la source approuvée (source.env, configuration locale) reste jusqu'à --purge
 PROMO="$(dest /etc/opentv/playback-promoted)"
@@ -589,5 +602,9 @@ if [ "$PURGE" = 1 ]; then
   fi
   host nmcli connection reload
   say "comptes système conservés (sans effet) : sudo userdel opentv; sudo userdel opentv-kiosk; sudo userdel opentv-keys; sudo groupdel opentv-agent"
+else
+  say "jeton TMDb conservé (/etc/opentv/tmdb/token, dossier root:opentv 0750) : effacé seulement par --purge"
 fi
+# unités retirées et rechargées : le témoin n'a plus rien à bloquer
+if [ -e "$UNINSTALLING" ] || [ -L "$UNINSTALLING" ]; then act rm -f -- "$UNINSTALLING"; fi
 say "désinstallation terminée"

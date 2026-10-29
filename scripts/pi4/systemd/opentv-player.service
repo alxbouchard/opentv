@@ -34,6 +34,8 @@ UMask=0077
 BindReadOnlyPaths=/opt/opentv/share/chromium-player-policy:/etc/chromium/policies/managed
 BindReadOnlyPaths=-/opt/opentv/share/chromium-player-policy:/etc/chromium-browser/policies/managed
 ProtectSystem=strict
+# dossier du jeton TMDb : jamais visible ici (lu seulement par les unites des notes)
+InaccessiblePaths=-/etc/opentv/tmdb
 # lecture seule (pas « yes ») : la session Wayland de Cage vit dans /run/user/<uid du kiosque>
 ProtectHome=read-only
 PrivateTmp=yes

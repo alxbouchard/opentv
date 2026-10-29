@@ -2,9 +2,16 @@
 Description=OpenTV Pi - rafraichissement du catalogue accepte (source approuvee ; candidat valide puis remplacement atomique, ancien catalogue conserve sur tout echec)
 Documentation=file:///opt/opentv/README.md
 # sans source approuvee configuree : unite sautee, aucune requete
+# desinstallation en cours (uninstall.sh, /run efface au redemarrage) : aucun passage ne demarre
+ConditionPathExists=!/run/opentv-uninstalling
 ConditionPathExists=/etc/opentv/source.env
 Wants=network-online.target
-After=network-online.target time-sync.target
+# une reprise des notes en cours (oneshot : son travail reste en file jusqu'a sa fin) est attendue, jamais un
+# rafraichissement perdu sur « occupe » ; la reprise n'est ordonnee apres rien (aucun cycle)
+After=network-online.target time-sync.target opentv-catalogue-ratings-retry.service
+# notes TMDb des elements (nouveaux compris) apres chaque passage reussi (updated, unchanged, held) : unite SEPAREE, un
+# TMDb en panne ne fait jamais echouer ni annuler ce rafraichissement (catalogue remplace garde, echec rapporte a part)
+OnSuccess=opentv-catalogue-ratings.service
 
 [Service]
 Type=oneshot
@@ -42,6 +49,8 @@ InaccessiblePaths=-/var/lib/opentv/foryou -/var/lib/opentv/agents.json -/var/lib
 InaccessiblePaths=-/var/lib/opentv/audit.jsonl -/var/lib/opentv/remote.json
 InaccessiblePaths=-/var/lib/opentv-kiosk -/var/lib/opentv-install
 InaccessiblePaths=-/etc/opentv/agents -/etc/NetworkManager/system-connections
+# dossier du jeton TMDb : lu seulement par les unites des notes (dossier masque, jamais le seul fichier)
+InaccessiblePaths=-/etc/opentv/tmdb
 # sockets locaux OpenTV (Agent Port, lecteur, aide des touches, CEC) : jamais joignables depuis ce passage. AF_UNIX
 # reste permis pour la resolution DNS (nss-resolve) seulement.
 InaccessiblePaths=-/run/opentv -/run/opentv-player -/run/opentv-player-keys -/run/opentv-cec

@@ -12,6 +12,8 @@ UMask=0077
 NoNewPrivileges=yes
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
 ProtectSystem=strict
+# dossier du jeton TMDb : jamais visible ici (lu seulement par les unites des notes)
+InaccessiblePaths=-/etc/opentv/tmdb
 ReadWritePaths=/var/lib/opentv /etc/NetworkManager/system-connections
 ProtectHome=yes
 PrivateTmp=yes
