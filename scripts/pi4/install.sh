@@ -144,7 +144,35 @@ in_scope() {   # chemins qu'OpenTV a le droit de retirer (même périmètre que 
 FILES=()
 add() { FILES+=("$1|$2|$3"); }
 for f in "$HERE"/opentv_pi/*.py; do add "$f" "/opt/opentv/lib/opentv_pi/$(basename "$f")" 644; done
-for b in opentv-pi opentv-mcp opentv-net-helper opentv-kiosk-browser opentv-player opentv-player-keys; do add "$HERE/bin/$b" "/opt/opentv/bin/$b" 755; done
+for b in opentv-pi opentv-mcp opentv-net-helper opentv-kiosk-browser opentv-player opentv-player-keys opentv-muse-bridge; do add "$HERE/bin/$b" "/opt/opentv/bin/$b" 755; done
+# pont Muse : sous-ensemble MINIMAL du SDK Linux officiel (transport + appariement), octets identiques au commit épinglé
+# (vendor/muse/PIN.json : commit, archive officielle SHA-256, empreinte de chaque fichier ; jamais @main). Ni
+# executor.py, ni fileops.py, ni service.py, ni cli.py, ni l'unité musegadget.service d'origine ne sont livrés.
+while IFS= read -r f; do
+  rel="${f#"$HERE/vendor/muse/"}"
+  add "$f" "/opt/opentv/lib/muse/$rel" 644
+done < <(find "$HERE/vendor/muse" -type f ! -path '*/__pycache__/*' ! -name '*.pyc' | LC_ALL=C sort)
+# dépendance websockets du SDK : roue pure Python épinglée par SHA-256 (= requirements.lock du même commit), déposée
+# par prepare-pi.sh (seule étape réseau) dans /var/cache/opentv/muse ; jamais téléchargée ici. Absente : OpenTV est
+# installé, le pont Muse reste indisponible (opentv-pi muse status) ; empreinte fausse : installation refusée.
+MUSE_WHEEL="websockets-17.1-py3-none-any.whl"
+MUSE_WHEEL_SHA256="f221081107b8c48184d99f7019604486376e7ef826037e70aad6b02540732c23"
+if [ "$LIVE" = 0 ] && [ -n "${OPENTV_INSTALL_TEST_MUSE_WHEEL_SHA256:-}" ]; then   # racines de test seulement
+  MUSE_WHEEL_SHA256="$OPENTV_INSTALL_TEST_MUSE_WHEEL_SHA256"
+fi
+MUSE_CACHE="/var/cache/opentv/muse/$MUSE_WHEEL"
+MUSE_DEP=""
+for cand in "$(dest "$MUSE_CACHE")" "$(dest "/opt/opentv/lib/muse/$MUSE_WHEEL")"; do
+  if [ -e "$cand" ] || [ -L "$cand" ]; then
+    { [ -f "$cand" ] && [ ! -L "$cand" ]; } || die "$cand : fichier inattendu (lien ou non régulier), installation refusée, rien modifié"
+    [ "$(sha256 "$cand")" = "$MUSE_WHEEL_SHA256" ] || die "$cand : SHA-256 différent de l'épinglage ($MUSE_WHEEL_SHA256), installation refusée, rien modifié"
+    MUSE_DEP="$cand"
+    break
+  fi
+done
+if [ -n "$MUSE_DEP" ]; then
+  add "$MUSE_DEP" "/opt/opentv/lib/muse/$MUSE_WHEEL" 644
+fi
 # démarrage produit : écran OpenTV sur tty1 + contrôle en lecture seule après redémarrage
 add "$HERE/system/opentv-splash" /opt/opentv/bin/opentv-splash 755
 add "$HERE/system/opentv-boot-check" /opt/opentv/bin/opentv-boot-check 755
@@ -166,7 +194,7 @@ for u in opentv.service opentv-kiosk.service opentv-net-helper.service opentv-ne
          opentv-catalogue-refresh.service opentv-catalogue-refresh.timer opentv-catalogue-ratings.service \
          opentv-catalogue-ratings-retry.service opentv-catalogue-ratings-retry.timer \
          opentv-plymouth-deactivate.service opentv-plymouth-quit.service opentv-plymouth-failsafe.service \
-         opentv-plymouth-failsafe.timer; do
+         opentv-plymouth-failsafe.timer opentv-muse.service opentv-muse-pair.service; do
   add "$HERE/systemd/$u" "/etc/systemd/system/$u" 644
 done
 # aucune invite de connexion sur tty1 tant que opentv-kiosk.service est activé (condition seule, rien de masqué)
@@ -936,6 +964,34 @@ if [ "$ENABLE" = 1 ]; then
   post systemctl restart opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
     opentv-cec.timer opentv-player-keys.service opentv-player.service opentv-catalogue-refresh.timer \
     opentv-catalogue-ratings-retry.timer
+fi
+# ---------------------------------------------------------------- pont Muse : jamais activé par l'installation
+# opentv-muse.service n'est activé que par un appariement humain réussi (sudo opentv-pi muse pair) ; une mise à jour
+# ne fait que le redémarrer s'il tournait déjà (try-restart). opentv-muse-pair.service n'a pas de section [Install].
+post systemctl try-restart opentv-muse.service
+# Service musegadget d'origine (system.run, file.read, file.write, device.health) : masqué tant qu'aucune unité
+# étrangère n'existe (lien /dev/null noté, retiré par uninstall.sh) ; s'il est déjà installé, le pont refuse de
+# s'apparier (opentv-pi muse status/pair le signalent) et rien d'étranger n'est modifié.
+MUSE_MASK="/etc/systemd/system/musegadget.service"
+MUSE_MASK_REC="/var/lib/opentv-install/musegadget-masked"
+MM="$(dest "$MUSE_MASK")"
+if [ -L "$MM" ] && [ "$(readlink "$MM")" = /dev/null ]; then
+  say "Muse : service musegadget d'origine déjà masqué"
+elif [ -e "$MM" ] || [ -L "$MM" ] || [ -e "$(dest /lib/systemd/system/musegadget.service)" ] ||
+     [ -e "$(dest /usr/lib/systemd/system/musegadget.service)" ]; then
+  say "ATTENTION Muse : service musegadget d'origine présent (il donne system.run/file.* à Muse) — non modifié ; le pont OpenTV refusera de s'apparier tant qu'il existe"
+elif [ "$DRY" = 1 ]; then
+  say "[dry-run] masquer musegadget.service d'origine ($MUSE_MASK -> /dev/null, noté dans $MUSE_MASK_REC)"
+else
+  { mkdir -p -- "$(dirname "$(dest "$MUSE_MASK_REC")")" && put_durably "$(dest "$MUSE_MASK_REC")" "masked=$MUSE_MASK" &&
+    mkdir -p -- "$(dirname "$MM")" && ln -s /dev/null "$MM"; } || post_fail "masquage de musegadget.service"
+  post systemctl daemon-reload
+  say "Muse : service musegadget d'origine masqué (jamais activable à côté d'OpenTV)"
+fi
+if [ -n "$MUSE_DEP" ]; then
+  say "Muse : SDK épinglé et dépendance websockets installés, NON apparié (porte humaine : sudo /opt/opentv/bin/opentv-pi muse pair, après avoir autorisé Muse en lecture sur la TV)"
+else
+  say "Muse : dépendance websockets absente (sudo ./prepare-pi.sh --yes) — pont Muse indisponible, rien d'apparié"
 fi
 if ! host python3 -I /opt/opentv/bin/opentv-pi health; then
   say "santé : à vérifier (sudo /opt/opentv/bin/opentv-pi health ; journalctl -u opentv -u opentv-kiosk)"

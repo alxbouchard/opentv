@@ -12,9 +12,11 @@
 #                                            sauvegarde SHA-256 avant, octets d'avant rétablis si la régénération
 #                                            échoue — arrêt alors AVANT tout retrait, pour relancer), retire l'écran OpenTV et
 #                                            la condition getty de tty1, rend tty1, retire la promotion
-#                                            terrain de « Regarder » (/etc/opentv/playback-promoted)
+#                                            terrain de « Regarder » (/etc/opentv/playback-promoted), arrête le pont
+#                                            Muse et rend le service musegadget d'origine (démasqué s'il l'avait été).
 #                                            Le jeton TMDb (/etc/opentv/tmdb/token) et la source approuvée restent.
-#   ... --purge                              efface aussi l'état (/var/lib/opentv*, /etc/opentv, jeton TMDb compris)
+#   ... --purge                              efface aussi l'état (/var/lib/opentv*, /etc/opentv, appariement Muse,
+#                                            jeton TMDb compris, /var/cache/opentv)
 #   ... --purge --forget-wifi                oublie aussi le Wi-Fi configuré par OpenTV (opentv-wifi)
 #   ... --dry-run | --root <dossier>         plan seul / rootfs de test
 set -Eeuo pipefail
@@ -32,7 +34,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1; shift ;;
     --purge) PURGE=1; shift ;;
     --forget-wifi) FORGET_WIFI=1; shift ;;
-    -h|--help) sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "option inconnue : $1" ;;
   esac
 done
@@ -500,7 +502,8 @@ host systemctl disable --now opentv-player.service opentv-player-keys.service op
   opentv-cec.service opentv-cec-announce.service opentv-splash.service opentv-catalogue-refresh.timer \
   opentv-catalogue-refresh.service opentv-catalogue-ratings.service opentv-catalogue-ratings-retry.timer \
   opentv-catalogue-ratings-retry.service opentv-plymouth-failsafe.timer \
-  opentv-plymouth-failsafe.service opentv-plymouth-deactivate.service opentv-plymouth-quit.service
+  opentv-plymouth-failsafe.service opentv-plymouth-deactivate.service opentv-plymouth-quit.service \
+  opentv-muse.service opentv-muse-pair.service
 # « Regarder » : la promotion terrain ne survit jamais à une désinstallation (même sans --purge) — une réinstallation
 # exige une nouvelle validation HDMI ; la source approuvée (source.env, configuration locale) reste jusqu'à --purge
 PROMO="$(dest /etc/opentv/playback-promoted)"
@@ -540,8 +543,10 @@ if [ -f "$MANIFEST" ]; then
   done < "$MANIFEST"
   restore_backups ""   # restauration des fichiers d'origine (dans l'ordre des installations)
   act rm -f -- "$MANIFEST"
-  act rm -rf -- "$(dest /opt/opentv/lib/opentv_pi/__pycache__)" "$(dest /opt/opentv/lib/foryou/__pycache__)"
-  for d in /opt/opentv/lib/opentv_pi /opt/opentv/lib/foryou /opt/opentv/lib /opt/opentv/share/ui /opt/opentv/share/chromium-player-policy /opt/opentv/share \
+  act rm -rf -- "$(dest /opt/opentv/lib/opentv_pi/__pycache__)" "$(dest /opt/opentv/lib/foryou/__pycache__)" \
+    "$(dest /opt/opentv/lib/muse/musegadget/__pycache__)" "$(dest /opt/opentv/lib/muse/musegadget/noise/__pycache__)"
+  for d in /opt/opentv/lib/opentv_pi /opt/opentv/lib/foryou /opt/opentv/lib/muse/musegadget/noise \
+           /opt/opentv/lib/muse/musegadget /opt/opentv/lib/muse /opt/opentv/lib /opt/opentv/share/ui /opt/opentv/share/chromium-player-policy /opt/opentv/share \
            /opt/opentv/bin /opt/opentv; do
     if [ -d "$(dest "$d")" ]; then
       if [ "$DRY" = 1 ]; then say "[dry-run] rmdir $(dest "$d")"; else rmdir -- "$(dest "$d")" 2>/dev/null || say "conservé (non vide) : $d"; fi
@@ -574,6 +579,16 @@ if [ -f "$DIRS_REC" ]; then
   act rm -f -- "$DIRS_REC"
 fi
 
+# service musegadget d'origine : démasqué seulement si OpenTV l'avait masqué (marqueur) et que c'est encore son lien
+MUSE_MASK="$(dest /etc/systemd/system/musegadget.service)"
+MUSE_MASK_REC="$(dest /var/lib/opentv-install/musegadget-masked)"
+if [ -f "$MUSE_MASK_REC" ] && [ ! -L "$MUSE_MASK_REC" ]; then
+  if [ -L "$MUSE_MASK" ] && [ "$(readlink "$MUSE_MASK")" = /dev/null ]; then
+    act rm -f -- "$MUSE_MASK"
+    say "Muse : masque OpenTV de musegadget.service retiré"
+  fi
+  act rm -f -- "$MUSE_MASK_REC"
+fi
 host systemctl daemon-reload
 # tty1 lisible tout de suite pour la console rendue (palette par défaut, curseur visible, police console de la
 # distribution) ; best effort, chaque accès borné (une console bloquée ne fige jamais la désinstallation) ; le reste
@@ -593,7 +608,7 @@ fi
 host systemctl start getty@tty1.service
 
 if [ "$PURGE" = 1 ]; then
-  for d in /var/lib/opentv /var/lib/opentv-kiosk /etc/opentv /var/lib/opentv-install; do
+  for d in /var/lib/opentv /var/lib/opentv-kiosk /var/lib/opentv-muse /var/cache/opentv /etc/opentv /var/lib/opentv-install; do
     # (un échec initramfs s'arrête à l'étape 0f, avant ce point : le marqueur et la sauvegarde y restent)
     if [ -e "$(dest "$d")" ]; then act rm -rf -- "$(dest "$d")"; fi
   done
@@ -601,7 +616,7 @@ if [ "$PURGE" = 1 ]; then
     act rm -f -- "$(dest "$NM/opentv-wifi.nmconnection")"
   fi
   host nmcli connection reload
-  say "comptes système conservés (sans effet) : sudo userdel opentv; sudo userdel opentv-kiosk; sudo userdel opentv-keys; sudo groupdel opentv-agent"
+  say "comptes système conservés (sans effet) : sudo userdel opentv; sudo userdel opentv-kiosk; sudo userdel opentv-keys; sudo userdel opentv-muse; sudo groupdel opentv-agent"
 else
   say "jeton TMDb conservé (/etc/opentv/tmdb/token, dossier root:opentv 0750) : effacé seulement par --purge"
 fi

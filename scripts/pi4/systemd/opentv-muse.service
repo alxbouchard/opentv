@@ -1,0 +1,70 @@
+[Unit]
+Description=OpenTV Pi - pont Muse (SDK Linux officiel en transport seulement ; commandes OpenTV en lecture via l'Agent Port)
+Documentation=file:///opt/opentv/README.md
+# Jamais demarre sans appariement humain (sudo opentv-pi muse pair) : condition + refus du code. install.sh ne
+# l'active jamais ; seul un appariement reussi l'active. Jamais en meme temps que le service musegadget d'origine.
+ConditionPathExists=/var/lib/opentv-muse/pairing.json
+Conflicts=musegadget.service opentv-muse-pair.service
+Wants=network-online.target
+After=network-online.target time-sync.target opentv.service
+
+[Service]
+Type=simple
+User=opentv-muse
+Group=opentv-muse
+EnvironmentFile=-/etc/opentv/opentv.env
+Environment=MUSEGADGET_STATE_DIR=/var/lib/opentv-muse
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-muse-bridge run
+Restart=on-failure
+RestartSec=15
+# 78 = identite OpenTV absente/revoquee/plus large que la lecture, SDK non verifie : jamais de boucle de redemarrage
+RestartPreventExitStatus=78
+StateDirectory=opentv-muse
+StateDirectoryMode=0700
+RuntimeDirectory=opentv-muse
+RuntimeDirectoryMode=0700
+UMask=0077
+Nice=5
+MemoryMax=192M
+TasksMax=32
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ReadWritePaths=/var/lib/opentv-muse /run/opentv-muse
+# Aucun acces a l'etat OpenTV (catalogue brut, registre, profil « Pour toi »), aux secrets TMDb/source, au Wi-Fi ni
+# aux autres sockets locaux. Seuls restent : le socket de l'Agent Port (/run/opentv/agent.sock, groupe opentv-agent)
+# et le fichier client root:opentv-muse 0640 de /etc/opentv/agents. Pas de D-Bus (BlueZ, systemd) hors appariement.
+InaccessiblePaths=-/var/lib/opentv -/var/lib/opentv-kiosk -/var/lib/opentv-install
+InaccessiblePaths=-/etc/opentv/tmdb.env -/etc/opentv/source.env -/etc/opentv/playback-promoted
+InaccessiblePaths=-/etc/NetworkManager/system-connections -/run/opentv-player -/run/opentv-player-keys -/run/opentv-cec
+InaccessiblePaths=-/run/dbus
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# HTTPS/WSS sortant vers Muse seulement : jamais la boite elle-meme (API /tv locale), le lien local ni le multicast.
+# 127.0.0.53/54 : resolveur local eventuel. L'Agent Port est un socket Unix.
+IPAddressDeny=localhost link-local multicast
+IPAddressAllow=127.0.0.53/32 127.0.0.54/32
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

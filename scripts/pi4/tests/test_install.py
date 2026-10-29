@@ -29,7 +29,7 @@ UNITS = ("opentv.service", "opentv-kiosk.service", "opentv-net-helper.service", 
          "opentv-catalogue-refresh.service", "opentv-catalogue-refresh.timer", "opentv-catalogue-ratings.service",
          "opentv-catalogue-ratings-retry.service", "opentv-catalogue-ratings-retry.timer",
          "opentv-plymouth-deactivate.service", "opentv-plymouth-quit.service", "opentv-plymouth-failsafe.service",
-         "opentv-plymouth-failsafe.timer")
+         "opentv-plymouth-failsafe.timer", "opentv-muse.service", "opentv-muse-pair.service")
 
 
 def sha(p):

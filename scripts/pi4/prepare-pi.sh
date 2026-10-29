@@ -7,6 +7,8 @@
 #   options : --no-install (paquets seulement)   --root <dossier> (racine de test : apt jamais exécuté)
 #
 # Aucun apt n'est lancé avant le préflight matériel (Pi 4 Model B, Raspberry Pi OS Bookworm, arm64, KMS vc4, DRM HDMI).
+# Seul autre téléchargement : la roue websockets du pont Muse, URL exacte + SHA-256 épinglés (vendor/muse/PIN.json,
+# = requirements.lock du SDK officiel au commit épinglé), refusée si l'empreinte diffère ; jamais @main.
 set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -65,10 +67,43 @@ if [ "$LIVE" = 1 ] && command -v apt-cache >/dev/null 2>&1 && ! has_candidate ch
 fi
 # plymouth + plymouth-themes : image OpenTV de démarrage (thème livré et activé par install.sh, initramfs régénéré et
 # vérifié). Le second paquet fournit label.so, utilisé par les invites de secours du thème script.
-PKGS="cage wlr-randr $CHROMIUM v4l-utils dnsmasq-base network-manager python3 fonts-noto-core fonts-dejavu-core plymouth plymouth-themes"
+# bluez python3-cryptography python3-dbus python3-gi : pont Muse (SDK officiel : appariement BLE + transport Noise)
+PKGS="cage wlr-randr $CHROMIUM v4l-utils dnsmasq-base network-manager python3 fonts-noto-core fonts-dejavu-core plymouth plymouth-themes bluez python3-cryptography python3-dbus python3-gi curl ca-certificates"
 sys apt-get update
 # shellcheck disable=SC2086
 sys apt-get install -y --no-install-recommends $PKGS
+
+# ---------------------------------------------------------------- pont Muse : dépendance épinglée (aucune exécution)
+MUSE_WHEEL="websockets-17.1-py3-none-any.whl"
+MUSE_WHEEL_URL="https://files.pythonhosted.org/packages/41/63/23572870e01836a98346075b9e17a8bc24a6ddd9800a3204ceee58677f3c/websockets-17.1-py3-none-any.whl"
+MUSE_WHEEL_SHA256="f221081107b8c48184d99f7019604486376e7ef826037e70aad6b02540732c23"
+MUSE_CACHE_DIR="/var/cache/opentv/muse"
+fetch_muse_wheel() {   # téléchargement borné, HTTPS seulement, empreinte vérifiée AVANT le renommage final
+  local d="$MUSE_CACHE_DIR" t
+  if [ -f "$d/$MUSE_WHEEL" ] && [ ! -L "$d/$MUSE_WHEEL" ] &&
+     [ "$(sha256sum "$d/$MUSE_WHEEL" | cut -d' ' -f1)" = "$MUSE_WHEEL_SHA256" ]; then
+    say "Muse : $MUSE_WHEEL déjà présent (SHA-256 vérifié)"
+    return 0
+  fi
+  install -d -m 0755 -o root -g root /var/cache/opentv "$d"
+  t="$(mktemp "$d/.wheel.XXXXXX")"
+  if ! curl --proto '=https' --tlsv1.2 -fsSL --max-time 120 --max-filesize 2097152 -o "$t" "$MUSE_WHEEL_URL"; then
+    rm -f -- "$t"; die "Muse : téléchargement de $MUSE_WHEEL impossible (rien installé pour Muse)"
+  fi
+  if [ "$(sha256sum "$t" | cut -d' ' -f1)" != "$MUSE_WHEEL_SHA256" ]; then
+    rm -f -- "$t"; die "Muse : SHA-256 de $MUSE_WHEEL différent de l'épinglage : refusé"
+  fi
+  chmod 0644 "$t"
+  mv -f -- "$t" "$d/$MUSE_WHEEL"
+  say "Muse : $MUSE_WHEEL vérifié (SHA-256 $MUSE_WHEEL_SHA256) dans $d"
+}
+if [ "$YES" = 0 ]; then
+  say "[plan] télécharger $MUSE_WHEEL (SHA-256 $MUSE_WHEEL_SHA256 vérifié) dans $MUSE_CACHE_DIR"
+elif [ "$LIVE" = 1 ]; then
+  fetch_muse_wheel
+else
+  say "[ignoré (racine de test)] télécharger $MUSE_WHEEL (SHA-256 $MUSE_WHEEL_SHA256) dans $MUSE_CACHE_DIR"
+fi
 
 # ---------------------------------------------------------------- OpenTV (préflight complet, 1080p, manifeste, services)
 if [ "$INSTALL" = 1 ]; then

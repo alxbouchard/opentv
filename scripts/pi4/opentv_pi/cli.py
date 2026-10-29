@@ -1,5 +1,6 @@
 """opentv-pi : serve | preflight | health | net-helper | ap-guard | agent issue|list|revoke | setup reset | cec |
-cec-bootstrap | catalogue status|refresh|rollback|resume|ratings|ratings-retry|ratings-credential | manifest verify."""
+cec-bootstrap | catalogue status|refresh|rollback|resume|ratings|ratings-retry|ratings-credential |
+muse status|pair|unpair | manifest verify."""
 import argparse
 import json
 import os
@@ -152,10 +153,47 @@ def _private_group(pw):
     return all(p.pw_gid != pw.pw_gid or p.pw_uid == pw.pw_uid for p in pwd.getpwall())
 
 
-def _issue_root(a, cfg, reg, ids, scopes):
+def issue_root_client(cfg, reg, ids, agent_id, scopes, pw, force=False, trusted_uids=None):
     """Émission par root : le fichier client va dans cfg.agent_clients_dir (root:root 0755, vérifié composant par
     composant), jamais dans le home du compte. Fichier root:<groupe privé> 0640 (root:root 0600 pour root) : lisible
-    par l'agent, non modifiable. Toute validation précède l'émission ; un échec d'écriture rétablit le registre."""
+    par l'agent, non modifiable. Toute validation précède l'émission ; un échec d'écriture rétablit le registre.
+    Partagé par `agent issue` et `muse pair`. -> (code, rapport) ; aucun jeton dans le rapport."""
+    if pw.pw_uid == 0:
+        gid, mode = 0, 0o600
+    elif _private_group(pw):
+        gid, mode = pw.pw_gid, 0o640
+    else:
+        return 2, {"ok": False, "error": "owner_group_not_private"}
+    name = agents.client_file_name(agent_id, pw.pw_uid)
+    try:
+        dfd = fsutil.open_trusted_dir(cfg.agent_clients_dir,
+                                      CLIENT_DIR_TRUSTED_UIDS if trusted_uids is None else trusted_uids)
+    except OSError:
+        return 2, {"ok": False, "error": "clients_dir_unsafe",
+                   "note": "%s doit exister, root:root 0755 (systemd-tmpfiles --create)." % cfg.agent_clients_dir}
+    try:
+        prev = []
+        try:
+            tok = reg.issue(agent_id, scopes, force=force, previous=prev, **ids)
+        except ValueError as e:
+            return 2, {"ok": False, "error": str(e)}
+        except OSError as e:
+            return 2, {"ok": False, "error": _registry_os_error(e)}
+        try:
+            fsutil.atomic_write(dfd, name, agents.client_config_bytes(agent_id, tok, cfg.agent_socket), mode=mode,
+                                uid=0, gid=gid)
+        except OSError:
+            return 2, dict({"ok": False, "error": "client_write_failed"}, **_rollback(reg, agent_id, tok, prev, ids))
+        finally:
+            tok = None
+    finally:
+        os.close(dfd)
+    path = os.path.join(cfg.agent_clients_dir, name)
+    return 0, {"ok": True, "agent": agent_id, "scopes": sorted(set(scopes)), "config": path, "owner": pw.pw_name,
+               "replaced_previous": bool(prev and prev[0])}
+
+
+def _issue_root(a, cfg, reg, ids, scopes):
     import pwd
     if a.out:
         return _out({"ok": False, "error": "out_forbidden_as_root",
@@ -164,42 +202,14 @@ def _issue_root(a, cfg, reg, ids, scopes):
         pw = pwd.getpwnam(a.owner or "root")
     except KeyError:
         return _out({"ok": False, "error": "owner_missing"}, 2)
-    if pw.pw_uid == 0:
-        gid, mode = 0, 0o600
-    elif _private_group(pw):
-        gid, mode = pw.pw_gid, 0o640
-    else:
-        return _out({"ok": False, "error": "owner_group_not_private"}, 2)
-    name = agents.client_file_name(a.id, pw.pw_uid)
-    try:
-        dfd = fsutil.open_trusted_dir(cfg.agent_clients_dir, CLIENT_DIR_TRUSTED_UIDS)
-    except OSError:
-        return _out({"ok": False, "error": "clients_dir_unsafe",
-                     "note": "%s doit exister, root:root 0755 (systemd-tmpfiles --create)." % cfg.agent_clients_dir},
-                    2)
-    try:
-        prev = []
-        try:
-            tok = reg.issue(a.id, scopes, force=a.force, previous=prev, **ids)
-        except ValueError as e:
-            return _out({"ok": False, "error": str(e)}, 2)
-        except OSError as e:
-            return _out({"ok": False, "error": _registry_os_error(e)}, 2)
-        try:
-            fsutil.atomic_write(dfd, name, agents.client_config_bytes(a.id, tok, cfg.agent_socket), mode=mode,
-                                uid=0, gid=gid)
-        except OSError:
-            return _out(dict({"ok": False, "error": "client_write_failed"},
-                             **_rollback(reg, a.id, tok, prev, ids)), 2)
-        finally:
-            tok = None
-    finally:
-        os.close(dfd)
-    path = os.path.join(cfg.agent_clients_dir, name)
-    return _out({"ok": True, "agent": a.id, "scopes": sorted(set(scopes)), "config": path, "owner": pw.pw_name,
-                 "mcp": {"command": "/opt/opentv/bin/opentv-mcp", "args": ["--config", path]},
-                 "note": "Le compte %s doit être membre du groupe %s (sudo gpasswd -a %s %s) pour joindre le socket."
-                         % (pw.pw_name, cfg.agent_group, pw.pw_name, cfg.agent_group)})
+    code, rep = issue_root_client(cfg, reg, ids, a.id, scopes, pw, force=a.force)
+    if code != 0:
+        return _out(rep, code)
+    rep.pop("replaced_previous", None)
+    rep["mcp"] = {"command": "/opt/opentv/bin/opentv-mcp", "args": ["--config", rep["config"]]}
+    rep["note"] = ("Le compte %s doit être membre du groupe %s (sudo gpasswd -a %s %s) pour joindre le socket."
+                   % (pw.pw_name, cfg.agent_group, pw.pw_name, cfg.agent_group))
+    return _out(rep)
 
 
 def _registry_os_error(e):
@@ -649,6 +659,11 @@ def _ratings_credential(cfg):
                          "sudo /opt/opentv/bin/opentv-pi catalogue ratings"})
 
 
+def cmd_muse(a):
+    from . import museadmin
+    return museadmin.main(a)
+
+
 def cmd_manifest(a):
     rep = health.verify_manifest(a.root)
     return _out(rep, 0 if rep["ok"] else 1)
@@ -721,6 +736,15 @@ def build_parser():
     ca.add_argument("action", choices=("status", "refresh", "rollback", "resume", "ratings", "ratings-retry",
                                        "ratings-credential"))
     ca.add_argument("--env", default=argparse.SUPPRESS, help="fichier env (défaut : celui de opentv-pi --env)")
+    mu = sub.add_parser("muse", help="pont Muse (SDK officiel = transport ; commandes OpenTV en lecture seule) : "
+                                     "status | pair (root, humain : jeton SDK masqué + app Muse) | unpair (root)")
+    mu.add_argument("action", choices=("status", "pair", "unpair"))
+    mu.add_argument("--token-stdin", action="store_true",
+                    help="(pair) lire le jeton SDK sur stdin (une ligne) au lieu d'une saisie masquée ; jamais en argument")
+    mu.add_argument("--replace-token", action="store_true", help="(pair) remplacer le jeton SDK enregistré")
+    mu.add_argument("--force", action="store_true", help="(pair) nouvel appariement même si déjà apparié")
+    mu.add_argument("--forget-token", action="store_true", help="(unpair) effacer aussi le jeton SDK")
+    mu.add_argument("--env", default=argparse.SUPPRESS, help="fichier env (défaut : celui de opentv-pi --env)")
     ma = sub.add_parser("manifest", help="vérifie le manifeste SHA-256")
     ma.add_argument("action", choices=("verify",))
     ma.add_argument("--root", default="/")
@@ -734,4 +758,5 @@ def main(argv):
     return {"serve": cmd_serve, "player-daemon": cmd_player_daemon, "player-keys": cmd_player_keys,
             "playback": cmd_playback, "preflight": cmd_preflight, "health": cmd_health, "net-helper": cmd_net_helper,
             "ap-guard": cmd_ap_guard, "agent": cmd_agent, "setup": cmd_setup, "cec": cmd_cec,
-            "cec-bootstrap": cmd_cec_bootstrap, "catalogue": cmd_catalogue, "manifest": cmd_manifest}[a.cmd](a)
+            "cec-bootstrap": cmd_cec_bootstrap, "catalogue": cmd_catalogue, "manifest": cmd_manifest,
+            "muse": cmd_muse}[a.cmd](a)

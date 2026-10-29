@@ -1,0 +1,67 @@
+{
+ "archive": {
+  "sha256": "bc02e8dfb54b7fb52cd500c584f6cda732195a9c0b0cb8958bc3a668d72fb2ee",
+  "size": 6433027,
+  "url": "https://github.com/facebookincubator/muse-gadget-sdk/archive/1db6a26f4ca56939c4465d8a12e241c1b1b5c8dc.tar.gz",
+  "verified": "2026-10-28"
+ },
+ "commit": "1db6a26f4ca56939c4465d8a12e241c1b1b5c8dc",
+ "dependencies": {
+  "apt": [
+   "bluez",
+   "python3-cryptography",
+   "python3-dbus",
+   "python3-gi"
+  ],
+  "websockets": {
+   "file": "websockets-17.1-py3-none-any.whl",
+   "license": "BSD-3-Clause",
+   "pinned_by": "musegadget/data/requirements.lock du même commit (python_full_version >= '3.11')",
+   "sha256": "f221081107b8c48184d99f7019604486376e7ef826037e70aad6b02540732c23",
+   "size": 211134,
+   "url": "https://files.pythonhosted.org/packages/41/63/23572870e01836a98346075b9e17a8bc24a6ddd9800a3204ceee58677f3c/websockets-17.1-py3-none-any.whl",
+   "version": "17.1"
+  }
+ },
+ "excluded": [
+  "musegadget/__main__.py",
+  "musegadget/cli.py",
+  "musegadget/data/musegadget.service",
+  "musegadget/data/requirements.lock",
+  "musegadget/doctor.py",
+  "musegadget/executor.py",
+  "musegadget/fileops.py",
+  "musegadget/muse_turn.py",
+  "musegadget/service.py",
+  "musegadget/voice_audio.py",
+  "musegadget/voice_call.py",
+  "musegadget/voice_gate.py"
+ ],
+ "files": {
+  "LICENSE": "0353a8ae950232a70f0379a4b8a10b661b2f3e3a598e9411332fc0d4f98947fa",
+  "musegadget/__init__.py": "ca05f6c0625ebfb00053734dcaef8cbf00a4c499e962e6e8346c0aa9a2a3d6a9",
+  "musegadget/ble_framing.py": "b788a4f1f5362a9dae2d2718f976f27d52508924015cb0c46e09be5efc780222",
+  "musegadget/ble_server.py": "61a7bd01291896212911f4b285c39cb783d41447520dfe872fd2f48af4c57b0d",
+  "musegadget/ble_setup.py": "ac67a5650fe750d6cae44af8439e667be5bf5a7543287d0179cf53dc4f14a68a",
+  "musegadget/config.py": "6b77617e7b42b791d56dfb3fe1abd8a9338229ee572b2953e6793d02ce31ccea",
+  "musegadget/identity.py": "04ffb844aba378247b257c1927799aba3d0f60a5a50b50c1ea5595933a13f490",
+  "musegadget/link_client.py": "4cbfaf77912b557d73d7132cc2a841596ef2866495c9e7b86b9eefec0f2c1241",
+  "musegadget/muse_api.py": "63eb98e1902167cc00b3cf9e9a1126e38e47fb0bb7f2e7d0903b700206f88031",
+  "musegadget/network.py": "f80d4552992824973f05dd276e8fde987689c88af523afbc5f6d465099893d22",
+  "musegadget/noise/__init__.py": "b7d46a042a6cff22cd4a75b114caf3e973073720c1ced9b263123951937246e2",
+  "musegadget/noise/_proto.py": "dc523508f7363b276d4fde0513a8b5e7ac0bc2f56e736a3bacb2000af91cd8a3",
+  "musegadget/noise/envelope.py": "fbc8ff41059e2dc2c53fdc4aa42087b12d0e6202d2cb3f27a08603b5c76228ba",
+  "musegadget/noise/framing.py": "cf4d7e3f8478f917612aaecec80b207a56ba16bc98b4ed39549d56cdc1d3e986",
+  "musegadget/noise/noise_xx.py": "e90e79cf87f8e44b3b6da095e70dbb1c66bd441eeef753cd1c426acecc7d5157",
+  "musegadget/noise/transport.py": "1e105c6d81e855d4a53b95a9d697a204bfc5a90748d32520e0e6f2733973821b",
+  "musegadget/pair.py": "8e682f2c6a440783d1735a49d9f011750b98a483fda1ed7260d1e8d75377cafb",
+  "musegadget/pairing.py": "529309cb3c72c3f1c7ba6791243019511129d620c7020f19b6b5fb254c6b14f5",
+  "musegadget/streaming.py": "a313651b9438de53ad6c9b49852320d7d11a9e152d80df8eb6c00c2ac025af14"
+ },
+ "license": "Apache-2.0",
+ "name": "musegadget",
+ "note": "Sous-ensemble minimal relu, octets identiques à l'archive officielle de ce commit. Transport et appariement seulement : executor.py, fileops.py, service.py, cli.py, __main__.py, doctor.py, muse_turn.py, voice_*.py et data/ (unité musegadget.service d'origine) ne sont PAS livrés.",
+ "repository": "https://github.com/facebookincubator/muse-gadget-sdk",
+ "subdir": "linux/src/musegadget",
+ "v": 1
+}
