@@ -768,6 +768,9 @@ class Bridge:
         if not first:
             return
         log_event("muse_bridge_paused", error=self.fatal)
+        # statut « refused » écrit AUSSITÔT (avant la fin de session) : `muse pair` ne prend jamais pour sain un
+        # processus condamné qui afficherait encore « registered » pendant la grâce de réponse
+        self._status("refused", reason=self.fatal)
         loop = self._loop
         if loop is None:
             return
@@ -777,9 +780,14 @@ class Bridge:
             pass
 
     def _status(self, state, **extra):
+        """Statut d'exécution (aucun secret). `pid` : `muse pair` le compare au MainPID systemd (jamais un statut
+        laissé par un autre processus). Après un refus d'identité définitif, seul « refused » est écrit (jamais
+        « registered »/« disconnected » d'une session condamnée)."""
+        if self.fatal is not None:
+            state, extra = "refused", {"reason": self.fatal}
         if self.status_path:
             write_json_status(self.status_path, dict({"v": 1, "state": state, "since": round(time.time(), 3),
-                                                      "commands": sorted(COMMANDS)}, **extra))
+                                                      "pid": os.getpid(), "commands": sorted(COMMANDS)}, **extra))
 
     async def _sleep(self, seconds):
         try:

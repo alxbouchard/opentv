@@ -16,6 +16,13 @@ Portes humaines et barrières :
   avec d'autres scopes (ancien pont en lecture seule) : réémise avec les scopes exacts. La fenêtre Bluetooth
   bornée tourne dans l'unité bac à sable opentv-muse-pair.service ; opentv-muse.service n'est activé qu'APRÈS un
   appariement réussi ; tout échec de l'appariement révoque l'identité tout juste émise et retire son fichier client.
+  Séquence du pont (déterministe, idempotente) : pont sain et connecté (statut « registered » écrit par le MainPID
+  courant, relu deux fois), identité exacte, rien à changer -> jamais interrompu. Sinon : arrêt puis ATTENTE de la fin
+  réelle de l'ancien processus (borne STOP_WAIT_S ; sinon bridge_stop_timeout, rien changé) AVANT toute réémission,
+  révocation ou --force ; ensuite seulement reset-failed, enable, start --no-block et relecture systemd + statut du
+  NOUVEAU processus : ok seulement s'il tourne ; refus/échec -> ok false, code 1, appariement et identité conservés
+  (relancer `muse pair`, sans Bluetooth). Jamais un succès suivi d'un pont laissé arrêté par la sortie tardive (78)
+  d'un ancien processus en pause.
 - `unpair` arrête et désactive le pont, efface l'appariement (et le jeton SDK avec --forget-token), révoque
   l'identité « muse-device » SEULEMENT si c'est la nôtre (comparaison du jeton) et retire son fichier client.
 - migration (pair/unpair) d'une installation de développement antérieure qui émettait « muse » au compte
@@ -62,6 +69,11 @@ SYSTEMCTL_S = 15
 PAIR_WAIT_S = musebridge.PAIR_TIMEOUT_S + 90
 OPEN_WAIT_S = 45
 REGISTER_WAIT_S = 30
+# arrêt d'un ancien pont : TimeoutStopSec par défaut (90 s, puis SIGKILL) + marge ; jamais d'identité changée avant
+STOP_WAIT_S = 100
+HEALTHY_SETTLE_S = 2.0
+UNIT_PROPS = ("LoadState", "ActiveState", "SubState", "MainPID", "Result", "ExecMainStatus", "UnitFileState")
+PROP_RE = re.compile(r"[A-Za-z0-9_-]{0,32}")
 FINAL_PAIR = ("paired", "already_paired", "invalid_sdk_token", "no_sdk_token", "window_closed", "error")
 TOKEN_PROMPT = "Jeton SDK Muse (gadgets.muse.ai > Account > SDK tokens, saisie masquée) : "
 
@@ -186,7 +198,95 @@ class Admin:
             out["since"] = d["since"]
         if isinstance(d.get("reason"), str) and musebridge.ERROR_RE.fullmatch(d["reason"]):
             out["reason"] = d["reason"]
+        if isinstance(d.get("pid"), int) and not isinstance(d["pid"], bool) and 0 < d["pid"] < 2 ** 31:
+            out["pid"] = d["pid"]
         return out
+
+    # -- relecture systemd du pont (aucun secret : état, sous-état, PID principal, résultat, code de sortie)
+    def unit_state(self, unit=UNIT):
+        rc, out = self.runner(["systemctl", "show", "--property=" + ",".join(UNIT_PROPS), unit], SYSTEMCTL_S)
+        d = {}
+        for line in (out or "").splitlines()[:len(UNIT_PROPS) * 2]:
+            k, sep, v = line.partition("=")
+            if sep and k in UNIT_PROPS and k not in d and PROP_RE.fullmatch(v):
+                d[k] = v
+        pid, code = d.get("MainPID", ""), d.get("ExecMainStatus", "")
+        return {"load": d.get("LoadState") or "unknown", "active": d.get("ActiveState") or "unknown",
+                "sub": d.get("SubState") or "unknown", "result": d.get("Result") or "unknown",
+                "enabled": d.get("UnitFileState") or "unknown",
+                "pid": int(pid) if pid.isdigit() and 0 < int(pid) < 2 ** 31 else None,
+                "exit_status": int(code) if code.isdigit() and int(code) < 256 else None}
+
+    @staticmethod
+    def _stopped(st):
+        return st["active"] in ("inactive", "failed") and st["pid"] is None
+
+    @staticmethod
+    def _service_view(st):
+        return {"unit": UNIT, "active": st["active"], "sub": st["sub"], "enabled": st["enabled"],
+                "result": st["result"], "exit_status": st["exit_status"]}
+
+    def healthy_bridge(self):
+        """Pont en marche, sain et connecté : actif, statut ÉCRIT PAR CE PROCESSUS (pid = MainPID) et « registered »,
+        relu une seconde fois après HEALTHY_SETTLE_S (un refus en vol publie « refused » aussitôt). -> état ou None."""
+        st = None
+        for i in range(2):
+            if i:
+                self.sleep(HEALTHY_SETTLE_S)
+            cur, link = self.unit_state(), self.link_status()
+            if cur["active"] != "active" or cur["pid"] is None or not link or link.get("pid") != cur["pid"] or \
+                    link["state"] != "registered" or (st is not None and st["pid"] != cur["pid"]):
+                return None
+            st = cur
+        return st
+
+    def stop_bridge(self):
+        """Arrête le pont et ATTEND la fin réelle de son processus (inactive/failed, MainPID 0), borné à STOP_WAIT_S :
+        aucune identité ni aucun appariement n'est changé tant qu'un ancien processus peut encore sortir.
+        -> (True, état) ou (False, état)."""
+        st = self.unit_state()
+        if self._stopped(st):
+            return True, st
+        self.systemctl("stop", "--no-block", UNIT)
+        deadline = self.clock() + STOP_WAIT_S
+        while True:
+            st = self.unit_state()
+            if self._stopped(st):
+                return True, st
+            if self.clock() >= deadline:
+                return False, st
+            self.sleep(0.5)
+
+    def start_bridge(self):
+        """(identité et appariement déjà écrits) Efface un échec précédent (exit 78), active puis démarre le pont et
+        relit systemd + le statut écrit par le NOUVEAU processus. -> (True, relecture) seulement si le pont tourne
+        (enregistré ou en cours de connexion) ; (False, relecture) s'il refuse, échoue ou ne démarre pas."""
+        self.systemctl("reset-failed", UNIT)
+        enabled = self.systemctl("enable", UNIT)
+        if not self.systemctl("start", "--no-block", UNIT):
+            st = self.unit_state()
+            return False, {"error": "bridge_start_failed", "service": self._service_view(st), "enable_ok": enabled}
+        t0 = self.clock()
+        deadline = t0 + REGISTER_WAIT_S
+        while True:
+            st, link = self.unit_state(), self.link_status()
+            fresh = link if link and st["pid"] is not None and link.get("pid") == st["pid"] else None
+            rb = {"service": self._service_view(st), "link": fresh, "enable_ok": enabled}
+            if st["active"] == "active" and fresh:
+                if fresh["state"] == "registered":
+                    return True, dict(rb, registered=True)
+                if fresh["state"] in ("refused", "not_paired", "unpaired", "stopped"):
+                    return False, dict(rb, error="bridge_refused" if fresh["state"] == "refused"
+                                       else "bridge_not_running", reason=fresh.get("reason"))
+            # juste après « start --no-block », la tâche peut encore être en file : inactive/failed lus après 5 s
+            if st["active"] in ("inactive", "failed") and self.clock() - t0 >= 5:
+                return False, dict(rb, error="bridge_refused" if st["exit_status"] == musebridge.EX_CONFIG
+                                   else "bridge_start_failed")
+            if self.clock() >= deadline:
+                if st["active"] == "active" and st["pid"] is not None:   # démarré, Muse pas encore joint : dit tel quel
+                    return True, dict(rb, registered=False)
+                return False, dict(rb, error="bridge_not_started")
+            self.sleep(1.0)
 
     def identity_public(self, dfd):
         try:
@@ -502,15 +602,6 @@ class Admin:
             out["timeout_s"] = d["timeout_s"]
         return out
 
-    def wait_registered(self):
-        deadline = self.clock() + REGISTER_WAIT_S
-        while self.clock() < deadline:
-            st = self.link_status()
-            if st and st["state"] in ("registered", "refused", "not_paired"):
-                return st
-            self.sleep(1.0)
-        return self.link_status()
-
     @staticmethod
     def _unlink(dfd, name):
         try:
@@ -556,32 +647,57 @@ class Admin:
             else:
                 token_written = False
             migration = self.migrate_legacy(pw)
+            base = {"sdk_token_written": token_written, "migration": migration}
+            paired = self.entry(dfd, "pairing.json") == "present"
+            # 1. idempotence : pont déjà connecté par CE processus, identité exacte à nous, rien à changer (ni jeton ni
+            #    --force) -> jamais interrompu ; seulement activé au démarrage s'il ne l'était pas (sans --now)
+            if paired and not force and not token_written and ident_state["state"] == "owned":
+                healthy = self.healthy_bridge()
+                if healthy is not None:
+                    if healthy["enabled"] != "enabled":
+                        self.systemctl("enable", UNIT)
+                        healthy = self.unit_state()
+                    return dict(base, ok=True, result="already_paired", paired=True, restarted=False,
+                                identity_reissued=False, registered=True, service=self._service_view(healthy),
+                                link=self.link_status(),
+                                note="Déjà apparié et connecté : rien interrompu. Nouvel appariement : sudo "
+                                     "opentv-pi muse pair --force"), 0
+            # 2. tout autre cas : l'ancien pont est arrêté et la FIN de son processus attendue avant tout changement
+            #    d'identité ou d'appariement (un ancien processus en pause ne peut plus sortir après le démarrage du
+            #    nouveau et le laisser arrêté) ; arrêt non confirmé : rien changé, honnête et relançable
+            stopped, st = self.stop_bridge()
+            if not stopped:
+                return dict(base, ok=False, error="bridge_stop_timeout", service=self._service_view(st),
+                            note="L'ancien pont ne s'est pas arrêté à temps : identité et appariement inchangés. "
+                                 "journalctl -u %s -n 30 --no-pager, puis relancer sudo opentv-pi muse pair" % UNIT), 1
             replaced = None
             if ident_state["state"] == "unexpected":   # --replace-identity : seule « muse-device » est révoquée
                 replaced = self.discard_identity(pw, only_owned=False)
-            elif ident_state["state"] == "stale_client":
+            elif ident_state["state"] in ("stale_client", "outdated"):   # outdated : à nous, autres scopes -> réémise
                 self.discard_identity(pw)
-            if force:
-                self.systemctl("disable", "--now", UNIT)
-                self._unlink(dfd, "pairing.json")
-            base = {"sdk_token_written": token_written, "migration": migration}
             if replaced is not None:
                 base["replaced_identity"] = replaced
-            if ident_state["state"] == "outdated":   # prouvée à nous, autres scopes : révoquée puis réémise exacte
-                self.discard_identity(pw)
-            if self.entry(dfd, "pairing.json") == "present":
+            if force:
+                self.systemctl("disable", UNIT)   # déjà arrêté (fin attendue ci-dessus)
+                self._unlink(dfd, "pairing.json")
+                paired = False
+            if paired:
                 reissued = False
                 if self.identity_state(pw)["state"] != "owned":   # identité aux scopes exacts réémise si absente
                     code, ident = self.issue_identity(pw)
                     if code != 0:
-                        return dict(ident, ok=False), code
+                        return dict({**base, **ident}, ok=False, service=self._service_view(self.unit_state())), code
                     reissued = True
-                if reissued:   # pont encore en marche avec l'ancienne identité (en pause) : relancé avec la nouvelle ;
-                    self.systemctl("try-restart", UNIT)   # arrêté (exit 78) : rien ici, démarré juste après
-                self.systemctl("enable", "--now", UNIT)
-                return dict(base, ok=True, result="already_paired", service=self.systemctl_word("is-active", UNIT),
-                            link=self.wait_registered(),
-                            note="Déjà apparié. Nouvel appariement : sudo opentv-pi muse pair --force"), 0
+                # 3. identité et appariement écrits : seulement maintenant reset-failed, enable, start, relecture
+                started, rb = self.start_bridge()
+                out = dict({**base, **rb}, ok=started, paired=True, restarted=True, identity_reissued=reissued)
+                if started:
+                    out["result"] = "already_paired"
+                    out["note"] = "Déjà apparié : pont relancé. Nouvel appariement : sudo opentv-pi muse pair --force"
+                else:
+                    out["note"] = ("Appariement et identité conservés, pont non démarré : journalctl -u %s -n 30 "
+                                   "--no-pager, puis relancer sudo opentv-pi muse pair (aucun Bluetooth)" % UNIT)
+                return out, 0 if started else 1
             code, ident = self.issue_identity(pw)
             if code != 0:
                 return dict(ident, ok=False), code
@@ -601,16 +717,22 @@ class Admin:
             if st["state"] not in ("paired", "already_paired"):
                 return failed(st["state"], 1, note="journalctl -u %s -n 30 --no-pager" % PAIR_UNIT)
             # porte suivante, séparée : le service ne démarre qu'apparié (ConditionPathExists=pairing.json)
-            started = self.systemctl("enable", "--now", UNIT)
-            link = self.wait_registered() if started else None
-            return dict(base, ok=True, result="paired",
-                        agent={"id": AGENT_ID, "scopes": list(musebridge.MUSE_SCOPES), "config": ident.get("config"),
-                               "ceiling_from": agents.LINKED_POLICY[AGENT_ID]},
-                        commands=sorted(musebridge.COMMANDS), service_started=started, link=link,
-                        gates=["Muse : demander « liste le catalogue OpenTV » et vérifier la réponse dans l'app",
-                               "Muse : « propose-moi un film » -> fiche sur la TV (opentv-pi muse status : action "
-                               "applied), puis photo HDMI",
-                               "journalctl -u opentv-muse -n 30 : muse_registered puis muse_invoke ok"]), 0
+            started, rb = self.start_bridge()
+            out = dict({**base, **rb}, ok=started, paired=True, service_started=started,
+                       agent={"id": AGENT_ID, "scopes": list(musebridge.MUSE_SCOPES), "config": ident.get("config"),
+                              "ceiling_from": agents.LINKED_POLICY[AGENT_ID]},
+                       commands=sorted(musebridge.COMMANDS),
+                       gates=["Muse : demander « liste le catalogue OpenTV » et vérifier la réponse dans l'app",
+                              "Muse : « propose-moi un film » -> fiche sur la TV (opentv-pi muse status : action "
+                              "applied), puis photo HDMI",
+                              "journalctl -u opentv-muse -n 30 : muse_registered puis muse_invoke ok"])
+            if started:
+                out["result"] = "paired"
+                return out, 0
+            # appariement réussi et conservé (identité comprise) : relancer `muse pair` démarre le pont sans Bluetooth
+            out["note"] = ("Appariement réussi et conservé, pont non démarré : journalctl -u %s -n 30 --no-pager, puis "
+                           "relancer sudo opentv-pi muse pair (aucun nouveau Bluetooth)" % UNIT)
+            return out, 1
         finally:
             os.close(dfd)
 

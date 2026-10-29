@@ -130,7 +130,7 @@ class TestDedicatedIdentity(tmb.AdminBase):
             self.assertTrue(r["identity"]["client_file_removed"], how)
             self.assertIsNone(self.reg().list().get(MUSE_DEV), how)
             self.assertFalse(os.path.exists(self.client()), how)
-            self.assertNotIn("enable --now " + museadmin.UNIT, self.cmds(), how)
+            self.assertNotIn("start --no-block " + museadmin.UNIT, self.cmds(), how)
 
     def test_existing_dedicated_identity_not_ours_fails_closed_unless_explicitly_replaced(self):
         foreign = self.reg().issue(MUSE_DEV, ["read"])               # émise hors de muse pair, sans notre fichier

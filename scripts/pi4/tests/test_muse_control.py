@@ -463,7 +463,7 @@ class TestAuthorizeControl(tmb.AdminBase):
 
     def test_reauthorizing_control_never_reactivates_a_paused_bridge_until_pair(self):
         """Pilotage retiré puis réautorisé : l'identité du pont reste réduite (Agent Port : bridge_paused), rien ne
-        redémarre ; seul `muse pair` la réémet et relance explicitement le pont (try-restart puis enable --now)."""
+        redémarre ; seul `muse pair` la réémet et relance explicitement le pont (arrêt attendu, puis démarrage)."""
         self.admin().authorize_control(yes=True)
         self.assertEqual(self.pair()[1], 0)
         client = os.path.join(self.cfg.agent_clients_dir, agents.client_file_name("muse-device", os.getuid()))
@@ -480,7 +480,9 @@ class TestAuthorizeControl(tmb.AdminBase):
         r, code = self.pair()
         self.assertEqual((code, r["result"]), (0, "already_paired"), r)
         cmds = [" ".join(c[1:]) for c in self.calls[n:] if c[1] not in ("is-active", "is-enabled", "show")]
-        self.assertLess(cmds.index("try-restart " + museadmin.UNIT), cmds.index("enable --now " + museadmin.UNIT))
+        self.assertLess(cmds.index("stop --no-block " + museadmin.UNIT),
+                        cmds.index("start --no-block " + museadmin.UNIT))
+        self.assertEqual((r["restarted"], r["identity_reissued"], r["registered"]), (True, True, True))
         new = json.loads(tmb.read(client))["token"]
         reg = agents.Registry(self.cfg.registry_file)
         self.assertIsNone(reg.authenticate("muse-device", old))
@@ -488,7 +490,9 @@ class TestAuthorizeControl(tmb.AdminBase):
         self.assertFalse(agents.linked_paused("muse-device", reg.authenticate("muse-device", new)))
         n = len(self.calls)                                  # identité déjà exacte : session saine jamais coupée
         self.assertEqual(self.pair()[1], 0)
-        self.assertNotIn("try-restart " + museadmin.UNIT, [" ".join(c[1:]) for c in self.calls[n:]])
+        later = [" ".join(c[1:]) for c in self.calls[n:]]
+        for verb in ("stop --no-block ", "start --no-block ", "reset-failed ", "enable "):
+            self.assertNotIn(verb + museadmin.UNIT, later)
 
     def test_cli_wiring(self):
         p = cli.build_parser()
@@ -523,6 +527,209 @@ class TestAuthorizeControl(tmb.AdminBase):
 
 
 # ------------------------------------------------------------------------------------------- revue : identité liée
+# ------------------------------------------------------------------- course d'arrêt du pont pendant `muse pair`
+class TestPairRestartRace(tmb.AdminBase):
+    """Course signalée : un ancien pont en pause qui sort (exit 78, sans redémarrage) APRÈS que `muse pair` l'a
+    « démarré » laissait le service arrêté derrière un faux succès. Contrat : un seul `muse pair` attend la fin réelle
+    de l'ancien processus avant de changer l'identité, ne démarre qu'ensuite, et relit systemd + le statut écrit par
+    le NOUVEAU processus -> pont relancé et enregistré, ou échec explicite ; jamais succès avec un pont arrêté."""
+
+    U = museadmin.UNIT
+
+    def setUp(self):
+        super().setUp()
+        self.admin().authorize_control(yes=True)
+        r, code = self.pair()
+        self.assertEqual((code, r["result"], self.unit.active), (0, "paired", "active"), r)
+        self.first_pid = self.unit.pid
+        self.client = os.path.join(self.cfg.agent_clients_dir, agents.client_file_name("muse-device", os.getuid()))
+
+    def token(self):
+        return json.loads(tmb.read(self.client))["token"]
+
+    def reg(self):
+        return agents.Registry(self.cfg.registry_file)
+
+    def cmds_since(self, n):
+        return [" ".join(c[1:]) for c in self.calls[n:] if c[1] not in ("is-active", "is-enabled", "show")]
+
+    def watch_identity_changes(self):
+        """Toute émission/révocation de « muse-device » est notée avec l'état du pont à cet instant."""
+        seen = []
+        orig_issue, orig_discard = museadmin.Admin.issue_identity, museadmin.Admin.discard_identity
+
+        def issue(adm, pw):
+            seen.append(("issue", self.unit.active, self.unit.pid))
+            return orig_issue(adm, pw)
+
+        def discard(adm, pw, only_owned=True):
+            seen.append(("discard", self.unit.active, self.unit.pid))
+            return orig_discard(adm, pw, only_owned)
+        for p in (mock.patch.object(museadmin.Admin, "issue_identity", issue),
+                  mock.patch.object(museadmin.Admin, "discard_identity", discard)):
+            p.start()
+            self.addCleanup(p.stop)
+        return seen
+
+    def assert_new_bridge_survives(self, r, code):
+        new_pid = self.unit.pid
+        self.fake_sleep(120)                                           # bien après la sortie prévue de l'ancien
+        # d'abord le contrat lui-même : jamais « ok » avec un pont qui finit arrêté
+        self.assertFalse(r.get("ok") and self.unit.active != "active",
+                         "faux succès : pont arrêté après la sortie de l'ancien processus (%s)" % self.unit.active)
+        self.assertEqual((self.unit.active, self.unit.pid), ("active", new_pid))
+        self.assertEqual((code, r["ok"], r["result"], r["restarted"], r["registered"]),
+                         (0, True, "already_paired", True, True), r)
+        self.assertEqual(r["service"]["active"], "active")
+        self.assertNotEqual(new_pid, self.first_pid)
+        self.assertEqual(r["link"]["pid"], new_pid)                    # statut du NOUVEAU processus, jamais l'ancien
+        self.assertFalse(self.unit.overlap)                            # jamais démarré pendant que l'ancien vivait
+        self.assertEqual(json.loads(tmb.read(self.j(museadmin.musebridge.RUN_STATUS)))["state"], "registered")
+        self.assertEqual(self.reg().authenticate("muse-device", self.token()), tmb.CONTROL)
+        blob = json.dumps(r) + self.err.getvalue()
+        for s in (tmb.SDK_TOKEN, tmb.ACCESS, tmb.REFRESH, self.token()):
+            self.assertNotIn(s, blob)
+
+    def test_delayed_old_exit_after_identity_change_ends_with_the_new_bridge_started(self):
+        """revoke-control (identité réduite) puis réautorisation : l'ancien pont a vu la pause mais ferme lentement
+        sa session (arrêt en 4 s) et sortirait de lui-même avec 78 à t+8 s. L'identité n'est réémise qu'une fois
+        l'ancien processus disparu ; un seul `muse pair` finit avec le nouveau pont actif et enregistré."""
+        old = self.token()
+        self.admin().revoke_control()
+        self.unit.doom(after=8.0, refused=False)       # refus en vol : son statut dit encore « registered »
+        self.unit.stop_delay = 4.0
+        self.admin().authorize_control(yes=True)
+        seen = self.watch_identity_changes()
+        n = len(self.calls)
+        r, code = self.pair(stdin="")
+        self.assert_new_bridge_survives(r, code)
+        self.assertTrue(r["identity_reissued"])
+        self.assertIsNone(self.reg().authenticate("muse-device", old))
+        self.assertTrue(seen)
+        for what, active, pid in seen:                 # identité changée seulement pont arrêté (fin attendue)
+            self.assertIn(active, ("inactive", "failed"), what)
+            self.assertIsNone(pid, what)
+        c = self.cmds_since(n)
+        order = [c.index(x + self.U) for x in ("stop --no-block ", "reset-failed ", "enable ", "start --no-block ")]
+        self.assertEqual(order, sorted(order), c)
+        self.assertNotIn("try-restart " + self.U, c)
+        self.assertNotIn("enable --now " + self.U, c)
+
+    def test_paused_process_with_an_already_exact_identity_is_replaced_not_trusted(self):
+        """Course d'origine : plafond seul abaissé puis rétabli (identité restée exacte, « owned ») alors que l'ancien
+        processus a déjà vu `bridge_paused` et sortira avec 78 dans 3 s. L'ancien code ne faisait qu'`enable --now`
+        (sans effet sur une unité active) et rendait un succès ; le pont restait ensuite arrêté."""
+        self.reg().set_policy({"muse": ["display", "feedback", "read"], "hermit": [], "hermes": []})
+        self.unit.doom(after=3.0, refused=True)
+        self.reg().set_policy({"muse": list(tmb.CONTROL), "hermit": [], "hermes": []})
+        old = self.token()
+        self.assertEqual(self.admin().identity_state(self.pwmap["opentv-muse"])["state"], "owned")
+        r, code = self.pair(stdin="")
+        self.assert_new_bridge_survives(r, code)
+        self.assertFalse(r["identity_reissued"])
+        self.assertEqual(self.token(), old)
+
+    def test_old_exit_during_the_stop_wait_and_already_failed_units_are_restarted(self):
+        """L'ancien sort de lui-même (78 -> failed) PENDANT l'attente d'arrêt, ou était déjà « failed » : reset-failed
+        puis démarrage ; le résultat relu est le nouveau pont, jamais l'état « failed » de l'ancien."""
+        self.admin().revoke_control()
+        self.unit.doom(after=1.0)
+        self.unit.stop_delay = 30.0
+        self.admin().authorize_control(yes=True)
+        r, code = self.pair(stdin="")
+        self.assert_new_bridge_survives(r, code)
+        self.first_pid = self.unit.pid
+        self.unit.doom(after=0.0)                       # pont arrêté de lui-même (exit 78) avant `muse pair`
+        self.unit.tick()
+        self.assertEqual(self.unit.active, "failed")
+        n = len(self.calls)
+        r, code = self.pair(stdin="")
+        self.assert_new_bridge_survives(r, code)
+        self.assertNotIn("stop --no-block " + self.U, self.cmds_since(n))   # déjà arrêté : rien à arrêter
+
+    def test_repeated_pair_is_idempotent_and_never_interrupts_a_healthy_bridge(self):
+        pid, tok = self.unit.pid, self.token()
+        for _ in range(3):
+            n = len(self.calls)
+            r, code = self.pair(stdin="")
+            self.assertEqual((code, r["result"], r["restarted"], r["identity_reissued"], r["registered"]),
+                             (0, "already_paired", False, False, True), r)
+            self.assertEqual(self.cmds_since(n), [])
+            self.assertEqual((self.unit.pid, self.unit.active, self.token()), (pid, "active", tok))
+        self.unit.enabled = False                       # en marche mais plus activé au démarrage : enable sans --now
+        n = len(self.calls)
+        r, code = self.pair(stdin="")
+        self.assertEqual((code, r["restarted"], r["service"]["enabled"]), (0, False, "enabled"), r)
+        self.assertEqual(self.cmds_since(n), ["enable " + self.U])
+        self.assertEqual(self.unit.pid, pid)
+        self.assertEqual(self.unit.spawned, [self.first_pid])          # un seul processus depuis l'appariement
+
+    def test_bridge_that_never_stops_changes_nothing_and_says_so(self):
+        self.admin().revoke_control()
+        self.unit.hang_stop = True
+        self.admin().authorize_control(yes=True)
+        old = self.token()
+        t0, n = self._t, len(self.calls)
+        r, code = self.pair(stdin="")
+        self.assertEqual((code, r["ok"], r["error"]), (1, False, "bridge_stop_timeout"), r)
+        self.assertNotIn("result", r)
+        self.assertLessEqual(self._t - t0, museadmin.STOP_WAIT_S + museadmin.HEALTHY_SETTLE_S + 2)   # borné
+        self.assertEqual(self.token(), old)             # identité réduite intacte : rien changé, relançable
+        self.assertEqual(self.reg().authenticate("muse-device", old), ["display", "feedback", "read"])
+        c = self.cmds_since(n)
+        self.assertNotIn("start --no-block " + self.U, c)
+        self.assertNotIn("enable " + self.U, c)
+        self.unit.hang_stop = False                     # l'ancien finit par s'arrêter : relancer suffit
+        self.unit.gone(0)
+        r, code = self.pair(stdin="")
+        self.assertEqual((code, r["ok"], r["identity_reissued"], r["registered"]), (0, True, True, True), r)
+
+    def test_start_failure_is_reported_and_state_kept_for_a_plain_retry(self):
+        self.unit.gone(78)
+        for crash, err in ((1, "bridge_start_failed"), (78, "bridge_refused")):
+            self.unit.crash_next = crash
+            r, code = self.pair(stdin="")
+            self.assertEqual((code, r["ok"], r["error"], r["paired"]), (1, False, err, True), r)
+            self.assertNotIn("result", r)
+            self.assertEqual(r["service"]["active"], "failed")
+            self.assertIn("relancer sudo opentv-pi muse pair", r["note"])
+            self.assertTrue(os.path.exists(self.j("/var/lib/opentv-muse/pairing.json")))
+            self.assertEqual(self.admin().identity_state(self.pwmap["opentv-muse"])["state"], "owned")
+        n = len(self.calls)
+        r, code = self.pair(stdin="")
+        self.assertEqual((code, r["ok"], r["registered"], r["service"]["active"]), (0, True, True, "active"), r)
+        self.assertNotIn("start --no-block " + museadmin.PAIR_UNIT, self.cmds_since(n))   # aucun Bluetooth
+
+    def test_first_pairing_with_a_bridge_that_cannot_start_is_not_a_success(self):
+        self.admin().unpair()
+        self.unit.crash_next = 1
+        r, code = self.pair(stdin="")
+        self.assertEqual((code, r["ok"], r["error"], r["paired"], r["service_started"]),
+                         (1, False, "bridge_start_failed", True, False), r)
+        self.assertNotIn("result", r)
+        self.assertTrue(os.path.exists(self.j("/var/lib/opentv-muse/pairing.json")))   # appariement conservé
+        self.assertEqual(self.reg().authenticate("muse-device", self.token()), tmb.CONTROL)
+        n = len(self.calls)
+        r, code = self.pair(stdin="")
+        self.assertEqual((code, r["result"], r["registered"]), (0, "already_paired", True), r)
+        self.assertNotIn("start --no-block " + museadmin.PAIR_UNIT, self.cmds_since(n))
+
+    def test_bridge_refused_after_start_is_never_reported_as_registered(self):
+        """Le nouveau processus refuse (plafond abaissé entre-temps) : statut « refused » du NOUVEAU pid ou sortie 78
+        -> échec explicite, jamais le « registered » d'un autre processus."""
+        self.unit.gone(78)
+        orig = self.unit.spawn
+
+        def spawn():
+            orig()
+            self.unit.write_status("refused", reason="bridge_paused")
+            self.unit.exit_at = self._t + 0.5
+        self.unit.spawn = spawn
+        r, code = self.pair(stdin="")
+        self.assertEqual((code, r["ok"], r["error"]), (1, False, "bridge_refused"), r)
+        self.assertNotEqual((r.get("link") or {}).get("state"), "registered")
+
+
 class TestLinkedIdentityIsMuseOnScreen(unittest.TestCase):
     """« muse-device » (pont Muse) est l'identité authentifiée ; tout ce que voit Alex dit « Muse »."""
 

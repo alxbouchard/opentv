@@ -583,8 +583,9 @@ pas comme des échecs d'authentification et l'audit garde `muse-device`. Le pont
 s'arrête avec le code 78 (`RestartPreventExitStatus=78` : pas de redémarrage) ; sans commande, un `whoami` de contrôle
 toutes les 15 s détecte la même pause. Au démarrage, le même refus (ou des scopes différents :
 `identity_scope_mismatch`) l'empêche de s'enregistrer. Réautoriser le pilotage ne relance rien tout seul : l'identité
-reste réduite (toujours `bridge_paused`) jusqu'à `sudo /opt/opentv/bin/opentv-pi muse pair`, qui la réémet et
-redémarre le pont. Les résultats repassent par un nettoyage : jetons-adresses retirés (détecteur explicite, au
+reste réduite (toujours `bridge_paused`) jusqu'à `sudo /opt/opentv/bin/opentv-pi muse pair`, qui attend l'arrêt
+effectif de l'ancien pont, la réémet, puis démarre le nouveau et relit son état. Les résultats repassent par un
+nettoyage : jetons-adresses retirés (détecteur explicite, au
 moins aussi strict que le moteur « Pour toi » : schémas, `www.`, hôte/chemin, hôte:port, IPv4, hôtes nus des TLD
 courants, `user:mot@hôte`, courriels, chemins absolus/`~/`/`../`/Windows) sans effacer les titres légitimes
 (« Big Data: le film », « M.Butterfly », « Mr.Robot », « File: … », « Paris.Fin ») ; clés retirées par segment exact
@@ -639,7 +640,17 @@ fichier client) — sinon `muse_device_identity_unexpected`, rien modifié, sauf
 avec les scopes exacts, sans nouvel appariement Bluetooth. Il écrit le jeton (0600 opentv-muse, par descripteur),
 émet `muse-device` (`control, display, feedback, read`, jamais au-delà du plafond, jamais `--force`), ouvre la fenêtre
 (10 min) et n'active `opentv-muse.service` qu'**après** un appariement réussi ; puis il attend l'enregistrement du
-lien. Tout échec (fenêtre fermée, unité en échec, Ctrl-C) révoque l'identité tout juste émise et retire son fichier
+lien. **Séquence déterministe et idempotente** : un pont déjà actif, connecté (`registered` écrit par CE processus :
+`pid` du statut = `MainPID` systemd, relu deux fois) avec l'identité exacte et rien à changer n'est **jamais**
+interrompu (au plus `enable` sans `--now`). Sinon, `pair` arrête l'ancien pont et **attend la fin réelle de son
+processus** (`inactive`/`failed`, `MainPID` 0, borné à 100 s ; sinon `bridge_stop_timeout`, identité et appariement
+inchangés) avant toute réémission, révocation ou `--force` ; puis seulement `reset-failed`, `enable`, `start` et
+relecture systemd + statut du **nouveau** processus. Succès seulement si le nouveau pont tourne (`registered`, ou
+`registered: false` s'il joint encore Muse) ; refus (`bridge_refused`, code 78) ou échec de démarrage
+(`bridge_start_failed`) : `ok: false`, code 1, appariement et identité conservés — relancer `muse pair` suffit (aucun
+Bluetooth). Un ancien processus en pause ne peut donc plus sortir après le démarrage et laisser le service arrêté
+derrière un faux succès ; dès qu'il voit la pause, le pont publie `refused` (jamais pris pour sain). Tout échec
+(fenêtre fermée, unité en échec, Ctrl-C) révoque l'identité tout juste émise et retire son fichier
 client. `unpair` ne révoque `muse-device` que si elle est la nôtre (sinon : conservée, signalée). Migration d'une
 installation de développement antérieure (identité `muse` émise au compte `opentv-muse`) : `pair`/`unpair` retirent
 `agent-muse-<uid opentv-muse>.json` et ne révoquent l'entrée `muse` que si elle porte encore CE jeton ; après la

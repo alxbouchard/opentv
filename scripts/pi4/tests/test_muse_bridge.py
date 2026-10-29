@@ -864,6 +864,9 @@ class TestLivePauseFakeMuse(unittest.TestCase):
                 m = await asyncio.wait_for(vm.next_message(), 10)
                 got[m["id"]] = m
             res["got"] = got
+            # dès la première réponse refusée, AVANT la fin de session (grâce) : statut « refused » de ce processus
+            # (`muse pair` ne prend jamais pour sain un pont condamné encore affiché « registered »)
+            res["status_on_reply"] = json.loads(read(self.status))
             res["end"] = await asyncio.wait_for(task, 10)
             try:                                       # le pont a fermé la connexion Noise de son côté
                 await asyncio.wait_for(vm.next_message(), 5)
@@ -888,6 +891,8 @@ class TestLivePauseFakeMuse(unittest.TestCase):
             self.assertEqual((res["got"][iid]["ok"], res["got"][iid]["error"]), (False, code), iid)
         self.assertEqual((res["end"], res["fatal"], res["closed"]), (code, code, True))
         self.assertEqual(self.counts["connect"], 1)                       # jamais réenregistré
+        early = res["status_on_reply"]
+        self.assertEqual((early["state"], early["reason"], early["pid"]), ("refused", code, os.getpid()))
         st = json.loads(read(self.status))
         self.assertEqual((st["state"], st["reason"]), ("refused", code))
         # aucun effet : ni bannière, ni goût, ni action TV, ni « actif » après l'abaissement
@@ -1072,6 +1077,127 @@ class FakeGroups:
         return types.SimpleNamespace(gr_name=name, gr_mem=self.members[name])
 
 
+class FakeBridgeUnit:
+    """opentv-muse.service simulé (systemd + processus du pont), horloge factice du test :
+    - démarrage : ConditionPathExists=pairing.json ; le processus relit SON fichier client et l'Agent Port (registre
+      réel : identité ∩ plafond de Muse) -> statut « registered » avec son pid, sinon « refused » puis exit 78 ;
+    - `stop --no-block` : fin du processus après `stop_delay` (deactivating entre-temps ; `hang_stop` : jamais) ;
+    - `doom(after)` : ancien processus en pause qui sortira tout seul (exit 78) plus tard, quoi qu'il arrive ;
+    - `enable --now` / `try-restart` : sémantique systemd (rien si déjà actif / rien si arrêté).
+    `overlap` : un démarrage demandé alors qu'un ancien processus vivait encore (ce que `muse pair` doit exclure)."""
+
+    def __init__(self, test):
+        self.t, self.active, self.pid, self.enabled = test, "inactive", None, False
+        self.result, self.exit_status, self.next_pid = "success", None, 2000
+        self.exit_at = self.stop_at = None
+        self.stop_delay, self.hang_stop, self.crash_next = 0.0, False, None
+        self.overlap, self.spawned = False, []
+
+    def status_path(self):
+        return self.t.j(musebridge.RUN_STATUS)
+
+    def write_status(self, state, **extra):
+        fsutil.atomic_write_path(self.status_path(), json.dumps(dict({"v": 1, "state": state, "pid": self.pid,
+                                                                       "since": self.t._t}, **extra)))
+
+    def gone(self, code):
+        """Fin du processus : RuntimeDirectory retiré (statut effacé), failed si code non nul."""
+        self.pid, self.exit_at, self.stop_at = None, None, None
+        self.active, self.exit_status = ("failed", code) if code else ("inactive", 0)
+        self.result = "exit-code" if code else "success"
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(self.status_path())
+
+    def tick(self):
+        now = self.t._t
+        if self.pid is not None and self.exit_at is not None and now >= self.exit_at:
+            self.gone(78)
+        if self.pid is not None and self.stop_at is not None and now >= self.stop_at:
+            self.gone(0)
+
+    def spawn(self):
+        if self.pid is not None:
+            self.overlap = True
+            return
+        if not os.path.exists(self.t.j("/var/lib/opentv-muse/pairing.json")):
+            self.active = "inactive"   # condition non remplie : jamais lancé
+            return
+        self.next_pid += 1
+        self.pid, self.active, self.result, self.exit_status = self.next_pid, "active", "success", None
+        self.spawned.append(self.pid)
+        if self.crash_next is not None:
+            code, self.crash_next = self.crash_next, None
+            self.gone(code)
+            return
+        reg = agents.Registry(self.t.cfg.registry_file)
+        client = os.path.join(self.t.cfg.agent_clients_dir, agents.client_file_name(musebridge.MUSE_AGENT_ID,
+                                                                                    os.getuid()))
+        try:
+            tok = json.loads(read(client))["token"]
+        except (OSError, ValueError, KeyError):
+            tok = None
+        scopes = reg.authenticate(musebridge.MUSE_AGENT_ID, tok) if tok else None
+        cap = agents.ceiling(reg.policy(), musebridge.MUSE_AGENT_ID) or []
+        eff = sorted(set(scopes or ()) & set(cap))
+        if scopes is None or agents.linked_paused(musebridge.MUSE_AGENT_ID, eff):
+            self.write_status("refused", reason="unauthorized" if scopes is None else "bridge_paused")
+            self.exit_at = self.t._t + 0.5
+            return
+        self.write_status("registered")
+
+    def doom(self, after, refused=True):
+        """Ancien processus ayant vu la pause : sortira (exit 78) dans `after` s ; statut « refused » publié aussitôt
+        (pont corrigé) ou encore « registered » (refus en vol, pas encore publié)."""
+        assert self.pid is not None
+        self.exit_at = self.t._t + after
+        if refused:
+            self.write_status("refused", reason="bridge_paused")
+
+    def show(self):
+        sub = {"active": "running", "deactivating": "stop-sigterm", "failed": "failed"}.get(self.active, "dead")
+        return "\n".join(["LoadState=loaded", "ActiveState=%s" % self.active, "SubState=%s" % sub,
+                          "MainPID=%d" % (self.pid or 0), "Result=%s" % self.result,
+                          "ExecMainStatus=%d" % (self.exit_status or 0),
+                          "UnitFileState=%s" % ("enabled" if self.enabled else "disabled")]) + "\n"
+
+    def run(self, verb, opts):
+        self.tick()
+        if verb == "show":
+            return 0, self.show()
+        if verb == "is-active":
+            return (0 if self.active == "active" else 3), self.active + "\n"
+        if verb == "is-enabled":
+            return (0 if self.enabled else 1), ("enabled" if self.enabled else "disabled") + "\n"
+        if verb in ("enable", "disable"):
+            self.enabled = verb == "enable"
+            if verb == "enable" and "--now" in opts and self.active != "active":
+                self.spawn()
+            if verb == "disable" and "--now" in opts:
+                return self.run("stop", [])
+            return 0, ""
+        if verb == "reset-failed":
+            if self.active == "failed":
+                self.active, self.result, self.exit_status = "inactive", "success", None
+            return 0, ""
+        if verb == "stop":
+            if self.pid is not None and self.stop_at is None:
+                self.active = "deactivating"
+                self.stop_at = float("inf") if self.hang_stop else self.t._t + self.stop_delay
+                self.tick()
+            return 0, ""
+        if verb == "start":
+            if self.active == "active":
+                return 0, ""
+            self.spawn()
+            return 0, ""
+        if verb == "try-restart":
+            if self.active == "active":
+                self.gone(0)
+                self.spawn()
+            return 0, ""
+        return 0, ""
+
+
 class AdminBase(unittest.TestCase):
     """Racine de test + faux comptes/systemctl pour opentv-pi muse (aucun test ici : réutilisée ailleurs)."""
 
@@ -1110,6 +1236,7 @@ class AdminBase(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         self.chowns = []
+        self.unit = FakeBridgeUnit(self)
         reg = agents.Registry(self.cfg.registry_file)
         reg.set_policy({"muse": list(CONTROL), "hermit": [], "hermes": []})   # pilotage déjà accordé par Alex
         self.bt_pid = 4242
@@ -1161,6 +1288,7 @@ class AdminBase(unittest.TestCase):
 
     def fake_sleep(self, s):
         self._t += s
+        self.unit.tick()
         st = os.path.join(self.j("/var/lib/opentv-muse"), musebridge.PAIR_STATUS_NAME)
         if self.window and os.path.exists(st) and json.loads(read(st))["state"] == "open":
             fsutil.atomic_write_path(st, json.dumps({"state": self.window}))
@@ -1173,8 +1301,8 @@ class AdminBase(unittest.TestCase):
         if argv[:3] == ["systemctl", "start", "--no-block"] and argv[3] == museadmin.PAIR_UNIT:
             fsutil.atomic_write_path(os.path.join(self.j("/var/lib/opentv-muse"), musebridge.PAIR_STATUS_NAME),
                                      json.dumps({"state": "open", "ble_name": "MuseGadget0A0B0C", "timeout_s": 600}))
-        if argv[:3] == ["systemctl", "enable", "--now"] and argv[3] == museadmin.UNIT:
-            fsutil.atomic_write_path(self.j(musebridge.RUN_STATUS), json.dumps({"state": "registered", "since": 1.0}))
+        if argv[0] == "systemctl" and argv[-1] == museadmin.UNIT:
+            return self.unit.run(argv[1], argv[2:-1])
         if argv[1:5] == ["show", "-p", "MainPID", "--value"]:
             return 0, "%d\n" % self.bt_pid
         if argv[1] == "is-active":
@@ -1248,8 +1376,11 @@ class TestAdmin(AdminBase):
         self.assertEqual(agents.Registry(self.cfg.registry_file).list()[musebridge.MUSE_AGENT_ID]["scopes"], CONTROL)
         c = self.cmds()
         start = c.index("start --no-block " + museadmin.PAIR_UNIT)
-        enable = c.index("enable --now " + museadmin.UNIT)
+        enable = c.index("enable " + museadmin.UNIT)
         self.assertLess(start, enable)                                   # jamais activé avant l'appariement
+        self.assertLess(enable, c.index("start --no-block " + museadmin.UNIT))
+        self.assertEqual((r["service"]["active"], r["registered"], r["service_started"]), ("active", True, True))
+        self.assertEqual(r["link"]["pid"], self.unit.pid)                # statut écrit par le processus démarré
         self.assertIn("MuseGadget0A0B0C", self.err.getvalue())
         blob = json.dumps(r) + self.err.getvalue()
         for s in (SDK_TOKEN, ACCESS, REFRESH, read(client)):
@@ -1272,13 +1403,13 @@ class TestAdmin(AdminBase):
         r, code = self.pair()
         self.assertEqual((r["error"], code), ("pair_unit_failed", 1))
         self.assertGreaterEqual(min(seen), 5.0)    # jamais lu juste après le démarrage (tâche en file d'attente)
-        self.assertNotIn("enable --now " + museadmin.UNIT, self.cmds())
+        self.assertNotIn("start --no-block " + museadmin.UNIT, self.cmds())
 
     def test_closed_window_never_enables_the_bridge(self):
         self.window = "window_closed"
         r, code = self.pair()
         self.assertEqual((r["ok"], r["error"], code), (False, "window_closed", 1))
-        self.assertNotIn("enable --now " + museadmin.UNIT, self.cmds())
+        self.assertNotIn("start --no-block " + museadmin.UNIT, self.cmds())
         self.assertIn("stop " + museadmin.PAIR_UNIT, self.cmds())
 
     def test_already_paired_keeps_pairing_and_force_restarts_the_window(self):
@@ -1287,11 +1418,16 @@ class TestAdmin(AdminBase):
         r, code = self.pair(stdin="")
         self.assertEqual((r["result"], code), ("already_paired", 0))
         self.assertNotIn("start --no-block " + museadmin.PAIR_UNIT, self.cmds())
+        self.assertEqual(self.cmds(), [])                                # pont sain : rien interrompu
         self.calls.clear()
         r, code = self.pair(stdin="", force=True)
         self.assertEqual((r["result"], code), ("paired", 0))
         c = self.cmds()
-        self.assertLess(c.index("disable --now " + museadmin.UNIT), c.index("start --no-block " + museadmin.PAIR_UNIT))
+        self.assertLess(c.index("stop --no-block " + museadmin.UNIT), c.index("disable " + museadmin.UNIT))
+        self.assertLess(c.index("disable " + museadmin.UNIT), c.index("start --no-block " + museadmin.PAIR_UNIT))
+        self.assertLess(c.index("start --no-block " + museadmin.PAIR_UNIT),
+                        c.index("start --no-block " + museadmin.UNIT))
+        self.assertEqual(self.unit.active, "active")
 
     def test_status_never_reads_or_prints_secrets(self):
         self.assertEqual(self.pair()[1], 0)
