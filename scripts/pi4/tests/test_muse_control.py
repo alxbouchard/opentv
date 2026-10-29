@@ -688,6 +688,31 @@ class TestPairRestartRace(tmb.AdminBase):
         self.assertTrue(r["identity_reissued"])
         self.assertIsNone(self.reg().authenticate("muse-device", old))
 
+    def test_foreign_identity_appearing_during_healthy_check_is_never_replaced_implicitly(self):
+        """La deuxième lecture peut découvrir une identité qu'un autre administrateur vient d'émettre. La barrière
+        `--replace-identity` s'applique aussi à cet instantané tardif : rien n'est révoqué, arrêté ou réémis."""
+        old = self.token()
+        original = museadmin.Admin.healthy_bridge
+        foreign = []
+
+        def healthy_then_foreign(adm):
+            answer = original(adm)
+            if not foreign:
+                self.reg().revoke("muse-device")
+                foreign.append(self.reg().issue("muse-device", ["read"]))
+            return answer
+
+        n = len(self.calls)
+        with mock.patch.object(museadmin.Admin, "healthy_bridge", healthy_then_foreign):
+            r, code = self.pair(stdin="")
+        self.assertEqual((code, r["ok"], r["error"], r["reason"]),
+                         (2, False, "muse_device_identity_unexpected", "not_issued_by_muse_pair"), r)
+        self.assertIn("--replace-identity", r["note"])
+        self.assertEqual(self.reg().authenticate("muse-device", foreign[0]), ["read"])
+        self.assertIsNone(self.reg().authenticate("muse-device", old))
+        self.assertEqual(self.cmds_since(n), [])
+        self.assertEqual((self.unit.active, self.unit.pid), ("active", self.first_pid))
+
     def test_bridge_that_never_stops_changes_nothing_and_says_so(self):
         self.admin().revoke_control()
         self.unit.hang_stop = True

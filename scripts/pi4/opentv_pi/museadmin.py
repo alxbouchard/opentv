@@ -663,6 +663,16 @@ class Admin:
                         allowed = agents.ceiling(self.registry().policy(), AGENT_ID)
                     except (OSError, ValueError):
                         allowed = None
+                    # Le second instantané a la même barrière de propriété que celui du début. Une identité étrangère
+                    # peut apparaître pendant les deux lectures de santé ; sans --replace-identity elle est sacrée :
+                    # ne pas arrêter le pont et surtout ne jamais tomber jusqu'au discard only_owned=False ci-dessous.
+                    if ident_state["state"] == "unexpected" and not replace_identity:
+                        return {"ok": False, "error": "muse_device_identity_unexpected",
+                                "reason": ident_state["reason"],
+                                "foreign_clients": ident_state["foreign_clients"],
+                                "note": "L'identité %s a changé pendant la vérification sans venir de cet "
+                                        "appariement : rien modifié. Remplacement explicite : sudo "
+                                        "/opt/opentv/bin/opentv-pi muse pair --replace-identity" % AGENT_ID}, 2
                     if ident_state["state"] != "owned" or sorted(allowed or []) != list(musebridge.MUSE_SCOPES):
                         healthy = None
                 if healthy is not None:
