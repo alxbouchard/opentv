@@ -21,7 +21,11 @@ SUPPRIMÉ avant toute action (consommation unique) ; tout résidu (lien, FIFO, d
 exécuter. Le jeton n'existe que dans ce processus, le temps de le passer à `muse pair` par un flux mémoire.
 Reprise après plantage : un journal root (/var/lib/opentv-muse-setup/inflight.json, 0600) est écrit AVANT l'autorisation ;
 au démarrage suivant, une séance interrompue est nettoyée : fenêtre Bluetooth arrêtée, identité émise sans appariement
-révoquée (la nôtre seulement), autorisation rendue si elle vient de cette séance et n'a pas changé depuis.
+révoquée (la nôtre seulement), jeton local écrit par cette séance retiré (même inode, aucun appariement), autorisation
+rendue si elle vient de cette séance et n'a pas changé depuis. Issue publiée VRAIE (jamais « rien n'a changé » sans
+preuve) : appariement présent ⇒ « paired_incomplete » (appariement, identité, jeton et pilotage gardés ; pont pas prouvé
+connecté : à reprendre par « Reconnecter », ou « Déconnecter Muse ») ; état d'avant entièrement rendu ⇒ « interrupted » ;
+sinon ⇒ « recovery_incomplete ». Une annulation en direct suit la même règle.
 """
 import io
 import json
@@ -102,9 +106,13 @@ class WizardAdmin(museadmin.Admin):
     """museadmin.Admin + progression (préparation → en attente de Muse → connexion) et point d'annulation, sans rien
     changer aux portes de `pair` (preflight, identité, pont)."""
 
-    def __init__(self, cfg, progress=None, **kw):
+    def __init__(self, cfg, progress=None, token_created=None, **kw):
         super().__init__(cfg, **kw)
         self.progress = progress or (lambda phase, **x: None)
+        # jeton local écrit par CET appariement (aucun avant) : (périphérique, inode) noté au journal de reprise, pour
+        # le retirer après un plantage exactement comme pair() le fait après un échec (jamais un autre fichier)
+        self.token_created = token_created or (lambda dev, ino: None)
+        self.pair_ctx = None
         self.waiting = False
         self.ble_name = None
 
@@ -117,7 +125,14 @@ class WizardAdmin(museadmin.Admin):
             self.ble_name = st["ble_name"]
         return st
 
+    def _pair(self, token_stdin, replace_token, force, replace_identity, keep_token, ctx):
+        self.pair_ctx = ctx
+        return super()._pair(token_stdin, replace_token, force, replace_identity, keep_token, ctx)
+
     def wait_pair(self, dfd):
+        created = (self.pair_ctx or {}).get("created")
+        if created is not None:
+            self.token_created(created[1], created[2])
         self.waiting = True
         try:
             return super().wait_pair(dfd)
@@ -387,8 +402,44 @@ class MuseHelper:
             self.log("muse_grant_rollback_error", error=type(e).__name__)
             return "error"
 
+    @staticmethod
+    def _state_entries(adm, pw):
+        """-> {"pairing": absent|present|unsafe|None, "sdk_token": …} (présences seulement, jamais lues ; None =
+        dossier d'état illisible)."""
+        out = {"pairing": None, "sdk_token": None}
+        if pw is None:
+            return out
+        try:
+            dfd = adm.open_state_dir(pw)
+        except OSError:
+            return out
+        try:
+            out["pairing"] = adm.entry(dfd, "pairing.json")
+            out["sdk_token"] = adm.entry(dfd, "sdk_token")
+        finally:
+            os.close(dfd)
+        return out
+
+    @staticmethod
+    def _identity_undone(rep):
+        """Rapport de discard_identity : révocation et retrait du fichier client effectivement terminés."""
+        return isinstance(rep, dict) and rep.get("agent_revoked") is not None and \
+            rep.get("client_file_removed") != "clients_dir_unsafe"
+
+    def _journal_token(self, jid, dev, ino):
+        """Jeton local écrit par CET appariement : (périphérique, inode) noté au journal (aucun secret)."""
+        try:
+            j, problem = self._journal_read()
+            if problem is None and isinstance(j, dict) and j.get("id") == jid:
+                self._journal_write(dict(j, token_created=[int(dev), int(ino)]))
+        except (OSError, ValueError, TypeError) as e:
+            self.log("muse_journal_error", error=type(e).__name__)
+
     def recover(self):
-        """Séance interrompue (plantage, coupure) : nettoyage borné avant tout nouveau job."""
+        """Séance interrompue (plantage, coupure) : nettoyage borné avant tout nouveau job, puis issue VRAIE.
+        Appariement présent ⇒ « paired_incomplete » : appariement, identité, jeton local et pilotage gardés, pont non
+        prouvé connecté (jamais « annulé » ni « rien n'a changé ») ; état d'avant entièrement rendu (identité révoquée,
+        jeton écrit par la séance retiré, autorisation rendue) ⇒ « interrupted » ; sinon ⇒ « recovery_incomplete »."""
         j, problem = self._journal_read()
         if j is None and problem is None:
             return None
@@ -398,29 +449,36 @@ class MuseHelper:
         adm = self.admin_factory(sleep=self.real_sleep, prompt=_refuse_prompt, stdin=io.StringIO(""),
                                  err=io.StringIO())
         adm.systemctl("stop", museadmin.PAIR_UNIT)
-        report = {"identity": None, "grant": None}
+        report = {"identity": None, "grant": None, "token": None}
         pw, _why = adm.muse_account()
-        paired = None
-        if pw is not None:
-            try:
-                dfd = adm.open_state_dir(pw)
-            except OSError:
-                dfd = None
-            if dfd is not None:
-                try:
-                    paired = adm.entry(dfd, "pairing.json") == "present"
-                finally:
-                    os.close(dfd)
-            if paired is False:   # identité émise par une séance sans appariement : la nôtre seulement est révoquée
-                report["identity"] = adm.discard_identity(pw)
+        ent = self._state_entries(adm, pw)
+        paired = None if ent["pairing"] is None else ent["pairing"] == "present"
+        if paired is False:   # identité émise par une séance sans appariement : la nôtre seulement est révoquée
+            report["identity"] = adm.discard_identity(pw)
+            created = j.get("token_created")
+            if j.get("token_before") == "absent" and isinstance(created, list) and len(created) == 2 and \
+                    all(isinstance(x, int) and not isinstance(x, bool) for x in created):
+                # jeton écrit par cette séance (aucun avant) : retiré s'il s'agit encore du même fichier
+                report["token"] = adm._rollback_created_token((pw, created[0], created[1]))
         if j.get("changed") and paired is not True:
             report["grant"] = self._rollback_grant(adm, j.get("before"))
+        if paired is True:
+            code = "paired_incomplete"
+        else:
+            after = self._state_entries(adm, pw)
+            token_ok = j.get("token_before") == "same" or (j.get("token_before") == "absent" and
+                                                           after["sdk_token"] == "absent")
+            undone = paired is False and ent["pairing"] == "absent" and after["pairing"] == "absent" and \
+                self._identity_undone(report["identity"]) and token_ok and \
+                (not j.get("changed") or report["grant"] == "restored")
+            code = "interrupted" if undone else "recovery_incomplete"
         jid = j.get("id")
         if isinstance(jid, str) and musesetup.JOB_ID_RE.fullmatch(jid):
-            self._result(jid, "done", ok=False, result="interrupted")
+            self._result(jid, "done", ok=False, result=code)
         self._journal_clear()
-        self.log("muse_recover", state="done", paired=paired, grant=report["grant"],
-                 identity_revoked=(report["identity"] or {}).get("agent_revoked"))
+        self.log("muse_recover", state="done", paired=paired, grant=report["grant"], result=code,
+                 identity_revoked=(report["identity"] or {}).get("agent_revoked"), token_removed=report["token"])
+        report["result"] = code
         return report
 
     # -- actions
@@ -451,17 +509,23 @@ class MuseHelper:
             return code
         stdin = io.StringIO(tok + "\n")   # seule copie restante : flux mémoire lu une fois par pair
         tok = None
+        paired_before = self._paired_now(pre)
+        # présence d'un jeton local AVANT la séance (absent | same ; aucun secret) : la reprise ne dira « rien n'a
+        # changé » qu'après avoir retiré le jeton que la séance a écrit
+        jbase = {"v": 1, "id": jid, "changed": False, "before": None,
+                 "token_before": match if match in ("absent", "same") else None}
         try:
-            self._journal_write({"v": 1, "id": jid, "changed": False, "before": None, "at": round(self.clock(), 3)})
+            self._journal_write(dict(jbase, at=round(self.clock(), 3)))
         except OSError as e:
             stdin.close()
             self.log("muse_job", id=jid, action="pair", ok=False, error="journal_" + type(e).__name__)
             self._result(jid, "done", ok=False, result="helper_error")
             return "helper_error"
         adm = self.admin_factory(sleep=self._sleep, prompt=_refuse_prompt, stdin=stdin, err=io.StringIO(),
-                                 progress=lambda phase, **x: self._result(jid, phase, **x))
+                                 progress=lambda phase, **x: self._result(jid, phase, **x),
+                                 token_created=lambda dev, ino: self._journal_token(jid, dev, ino))
         self.admin = adm
-        changed, before, code, registered = False, None, "helper_error", None
+        changed, before, code, registered, res, called = False, None, "helper_error", None, None, False
         try:
             self._result(jid, "preparing")
             grant, gcode = adm.authorize_control(yes=True)
@@ -471,13 +535,13 @@ class MuseHelper:
             else:
                 changed, before = bool(grant.get("changed")), grant.get("policy_before")
                 if changed:
-                    self._journal_write({"v": 1, "id": jid, "changed": True, "before": before,
-                                         "at": round(self.clock(), 3)})
+                    self._journal_write(dict(jbase, changed=True, before=before, at=round(self.clock(), 3)))
                 self.poll()
                 if jid in self.cancel_for:
                     code = "interrupted"
                 else:
                     # JAMAIS --replace-token, --force ni --replace-identity : un jeton local existant est gardé
+                    called = True
                     res, _rc = adm.pair(token_stdin=True, replace_token=False, force=False, replace_identity=False,
                                         keep_token=True)
                     code = outcome_code(res)
@@ -488,13 +552,43 @@ class MuseHelper:
             stdin.close()
             self.admin = None
         ok = code == "connected"
-        if not ok and changed:
-            self._rollback_grant(adm, before)
+        if code == "interrupted" and paired_before is not True:
+            now = self._paired_now(adm)
+            if now is not False:
+                # annulation lue alors que l'iPhone venait d'apparier (ou état illisible) : jamais « annulé »
+                code = "paired_incomplete" if now else "recovery_incomplete"
+        rolled = None
+        if not ok and changed and code != "paired_incomplete":   # apparié : pilotage gardé (comme la reprise)
+            rolled = self._rollback_grant(adm, before)
+        if code == "interrupted" and not self._undone_live(res, changed, rolled, called):
+            code = "recovery_incomplete"
         self._journal_clear()
         self.current = None
         self.log("muse_job", id=jid, action="pair", ok=ok, result=code)
         self._result(jid, "done", ok=ok, result="cancelled" if code == "interrupted" else code, registered=registered)
         return code
+
+    def _paired_now(self, adm):
+        """Appariement présent maintenant ? True | False | None (dossier d'état illisible, entrée anormale)."""
+        try:
+            pw, _why = adm.muse_account()
+        except (AttributeError, OSError):
+            return None
+        p = self._state_entries(adm, pw)["pairing"]
+        return None if p not in ("absent", "present") else p == "present"
+
+    def _undone_live(self, res, changed, rolled, called):
+        """Annulation en direct : état d'avant rendu ? (identité tout juste émise révoquée, jeton écrit retiré,
+        autorisation rendue). Annulée avant `muse pair` : seule l'autorisation compte."""
+        if changed and rolled != "restored":
+            return False
+        if not called:
+            return True
+        if not isinstance(res, dict):   # `muse pair` interrompu sans rapport : rien de prouvé
+            return False
+        if "identity" in res and not self._identity_undone(res["identity"]):
+            return False
+        return res.get("sdk_token_rolled_back") is not False
 
     def do_unpair(self, job):
         jid = job["id"]

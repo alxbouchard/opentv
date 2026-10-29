@@ -849,9 +849,21 @@
     else if (st === "expired") { toast("QR de Muse expiré : rien n'a changé."); }
     else if (st === "failed") {
       if (play || (panel && panel.kind === "item")) { toast(msg || "Muse n'est pas connectée.", true); return; }
+      if (m.last && m.last.error === "paired_incomplete") { openMusePaired(msg); return; }
       showPanel("museresult", "Gérer les assistants", "Muse n'est pas connectée", msg || "La connexion n'a pas abouti.",
                 [button("Réessayer", "lrow"), button("Fermer", "lrow")], 0, { actions: ["retry", "close"] });
     }
+  }
+  // appariement réussi, puis interruption (plantage du helper pendant le démarrage du pont…) : Muse EST appairée,
+  // jamais « annulé » ni « connectée » ; reprise sûre (« Reconnecter » = nouveau consentement, même jeton) ou
+  // « Déconnecter Muse » (confirmation, seulement si la boîte possède Muse) ; « Fermer » au focus
+  function openMusePaired(msg) {
+    var acts = ["reconnect"], btns = [button("Reconnecter", "lrow")];
+    if (museOwned() && !museTv().foreign) { acts.push("disconnect"); btns.push(button("Déconnecter Muse", "lrow danger")); }
+    acts.push("close"); btns.push(button("Fermer", "lrow"));
+    showPanel("museresult", "Gérer les assistants", "Muse est appairée",
+              msg || "Muse est appairée, mais la connexion doit être reprise.", btns, btns.length - 1,
+              { actions: acts, paired: msg || "", sig: museSig() });
   }
   function disconnectMuse() {
     api("POST", "/api/tv/muse/disconnect", { confirm: true }).then(function (j) {
@@ -950,7 +962,11 @@
     }
     if (panel.kind === "museconfirm") { if (a === "yes") { disconnectMuse(); } else { openMuse(); } return; }
     if (panel.kind === "musesetup") { cancelMuse(); return; }
-    if (panel.kind === "museresult") { if (a === "retry") { openMuse(); } else { closePanel(); } return; }
+    if (panel.kind === "museresult") {
+      if (a === "retry") { openMuse(); } else if (a === "reconnect") { openMuseConsent(); }
+      else if (a === "disconnect") { openMuseConfirm(); } else { closePanel(); }
+      return;
+    }
     if (panel.kind === "confirm") {
       if (a === "no") { if (panel.what === "agents") { openAssistants("rights"); } else { openSettings(panel.what); } return; }
       if (a === "agents") {
@@ -1204,6 +1220,10 @@
     }
     if (panel && panel.kind === "muse" && panel.sig !== undefined && panel.sig !== museSig() && !(mu && mu.active)) {
       openMuse(true);   // propriété / pont établis entre-temps : choix à jour, focus de nouveau sur l'option sûre
+    }
+    if (panel && panel.kind === "museresult" && panel.paired !== undefined && panel.sig !== museSig() &&
+        !(mu && mu.active)) {
+      openMusePaired(panel.paired);   // propriété publiée après l'issue : « Déconnecter Muse » à jour, focus sûr
     }
     if (panel && panel.kind === "assistants") {   // sous-titres à jour (Muse connectée, compteurs)
       var subs = document.querySelectorAll("#pbtns .ts");

@@ -21,7 +21,11 @@ Annuler : avant prise en charge, le job (et donc le jeton) est retiré ; après,
 de fermer la fenêtre Bluetooth qu'IL a ouverte (jamais de révocation d'un Muse déjà apparié). Seule l'issue du helper
 dit « annulé » ; sans issue après CANCEL_WAIT_S, la TV dit « Annulation demandée » (jamais « rien n'a changé ») et le
 suivi continue jusqu'à l'issue réelle ; au-delà de l'échéance globale : « cancel_unconfirmed », puis une issue
-tardive du helper est encore annoncée telle quelle (réconciliation). « Déconnecter Muse » : job « unpair » seulement
+tardive du helper est encore annoncée telle quelle (réconciliation). Issues vraies et monotones, en direct comme en
+réconciliation : « annulé, rien n'a changé » seulement si le helper prouve l'état d'avant rendu (cancelled /
+interrupted) ; appariement réussi avant un plantage ⇒ « paired_incomplete » (« Muse est appairée, mais la connexion
+doit être reprise » : jamais annulé, jamais connectée sans pont prouvé ; Reconnecter / Déconnecter proposés) ; reprise
+partielle ⇒ « recovery_incomplete ». « Déconnecter Muse » : job « unpair » seulement
 après confirmation explicite sur la TV, proposé quand la boîte possède un appariement, un jeton ou SA propre identité
 (état public publié par le helper dans box.json, sans secret), jamais pour une identité étrangère.
 Le compte opentv peut déjà écrire la politique des assistants (« Gérer les assistants ») : le job « pair » ne lui
@@ -64,7 +68,7 @@ RESULT_CODES = ("connected", "already_paired", "cancelled", "invalid_sdk_token",
                 "pair_window_not_opened", "foreign_identity", "bluetooth_not_ready", "muse_unavailable",
                 "registry_unavailable", "bridge_not_started", "helper_error", "helper_unavailable", "timeout",
                 "too_many_attempts", "disconnected", "disconnect_failed", "interrupted", "busy", "refused",
-                "different_token")
+                "different_token", "paired_incomplete", "recovery_incomplete")
 MESSAGES = {
     "connected": "Muse est connectée.",
     "cancelled": "Annulé : rien n'a changé.",
@@ -87,6 +91,13 @@ MESSAGES = {
     "muse_unavailable": "Muse n'est pas disponible sur cette boîte : son installation est incomplète.",
     "registry_unavailable": "Les assistants de la boîte sont illisibles : rien n'a été changé.",
     "bridge_not_started": "Muse est appairée mais ne démarre pas. Redémarre la boîte, puis réessaie.",
+    # plantage du helper APRÈS l'appariement (pont pas prouvé connecté) : appariement et pilotage gardés
+    "paired_incomplete": ("Muse est appairée, mais la connexion doit être reprise : choisis « Reconnecter » dans "
+                          "Réglages → Gérer les assistants → Muse."),
+    # reprise après plantage : état d'avant entièrement rendu (prouvé par le helper)
+    "interrupted": "La connexion a été interrompue : rien n'a changé. Recommence depuis la TV.",
+    "recovery_incomplete": ("La connexion a été interrompue et la boîte n'a pas pu tout remettre comme avant. Ouvre "
+                            "Réglages → Gérer les assistants → Muse pour vérifier."),
     "helper_unavailable": "La boîte n'a pas répondu. Redémarre-la, puis recommence.",
     "timeout": "La connexion a pris trop de temps. Recommence depuis la TV.",
     "too_many_attempts": "Trop d'essais : recommence depuis la TV.",
@@ -237,6 +248,7 @@ class MuseSetup:
         self.disc_last = {"seq": 0, "state": None}
         self.bad = {}                      # ip -> horodatages (identifiants de séance faux)
         self.reconcile = None              # job « pair » terminé sans issue confirmée : issue tardive encore annoncée
+        self.reconcile_cancel = False      # … après une annulation demandée (sinon : délai dépassé)
         self.box = None                    # état public de la boîte (helper root), relu à chaque tick
         self.probe_at = -1e18
 
@@ -316,6 +328,7 @@ class MuseSetup:
             s.pair_deadline, s.cancel_pending, s.nohost_since = None, False, None
             self.cur = s
             self.reconcile = None
+            self.reconcile_cancel = False
             self._bump()
             self.log("muse_setup", state="open")
         if self.async_keygen:
@@ -561,9 +574,11 @@ class MuseSetup:
                 self.log("muse_setup_cancel", state="pending")
             elif s.cancel_requested:
                 self.reconcile = s.job            # issue tardive du helper : encore annoncée telle quelle
+                self.reconcile_cancel = True
                 self._set(s, "failed", "cancel_unconfirmed")
             else:
                 self.reconcile = s.job
+                self.reconcile_cancel = False
                 self._set(s, "failed", "timeout")
 
     def tick(self):
@@ -593,9 +608,11 @@ class MuseSetup:
             return
         if self.reconcile is not None and r["id"] == self.reconcile and r["phase"] == "done":
             # issue réelle arrivée après une fin sans confirmation (annulation non confirmée, délai) : annoncée
+            # telle quelle ; « annulé » seulement si l'annulation avait été demandée ET l'état d'avant rendu
             self.reconcile = None
             code = "connected" if r["ok"] else (r["result"] or "helper_error")
-            state = "connected" if r["ok"] else "cancelled" if code in ("cancelled", "interrupted") else "failed"
+            state = "connected" if r["ok"] else \
+                "cancelled" if code in ("cancelled", "interrupted") and self.reconcile_cancel else "failed"
             self._bump()
             self.last = {"seq": self.seq, "state": state, "error": None if r["ok"] else code, "late": True,
                          "message": message_for(state if state != "failed" else code)}
@@ -617,8 +634,12 @@ class MuseSetup:
             self._set(s, "connected")
         else:
             code = r["result"] or "helper_error"
-            self._set(s, "cancelled" if code in ("cancelled", "interrupted") and s.cancel_requested else "failed",
-                      "cancelled" if code == "interrupted" else code)
+            # « annulé » seulement pour une annulation demandée et confirmée par le helper (état d'avant rendu) ;
+            # paired_incomplete / recovery_incomplete ne sont JAMAIS une annulation, même demandée
+            if code in ("cancelled", "interrupted") and s.cancel_requested:
+                self._set(s, "cancelled", "cancelled")
+            else:
+                self._set(s, "failed", code)
 
     # -- vues
     def busy(self):

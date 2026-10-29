@@ -726,6 +726,77 @@ class TestLateCancelIsReportedTruthfully(unittest.TestCase):
         a.tick()
         self.assertEqual(a.muse_view()["last"]["state"], "connected")
 
+    def test_unconfirmed_cancel_then_late_paired_incomplete_is_never_cancelled(self):
+        a, s, sid, ph, jid = self.picked()
+        a.mono_clock.t += musesetup.PAIR_BUDGET_S
+        a.tick()
+        seq = a.muse_view()["last"]["seq"]
+        self.assertEqual(a.muse_view()["last"]["error"], "cancel_unconfirmed")
+        result(a, jid, "done", ok=False, res="paired_incomplete")         # reprise du helper : appairée
+        a.tick()
+        v = a.muse_view()
+        self.assertGreater(v["last"]["seq"], seq)
+        self.assertEqual((v["last"]["state"], v["last"]["error"], v["last"]["late"]),
+                         ("failed", "paired_incomplete", True))
+        self.assertEqual(v["last"]["message"], musesetup.message_for("paired_incomplete"))
+        self.assertNotIn("rien n'a changé", v["last"]["message"])
+        result(a, jid, "done", ok=False, res="cancelled")                 # une seule fois : jamais rétrogradé
+        a.tick()
+        self.assertEqual(a.muse_view()["last"]["error"], "paired_incomplete")
+
+    def test_unconfirmed_cancel_then_late_clean_interruption_is_cancelled(self):
+        a, s, sid, ph, jid = self.picked()
+        a.mono_clock.t += musesetup.PAIR_BUDGET_S
+        a.tick()
+        result(a, jid, "done", ok=False, res="interrupted")
+        a.tick()
+        v = a.muse_view()
+        self.assertEqual((v["last"]["state"], v["last"]["message"]), ("cancelled", "Annulé : rien n'a changé."))
+
+    def test_live_paired_incomplete_with_or_without_cancel_says_paired(self):
+        for cancel, pending in ((False, False), (True, False), (True, True)):
+            a, s = wizard(self)
+            sid, f, ph = start(self, a, s)
+            ph.submit(sid, f)
+            jid = jobs(a)[0][:-5]
+            os.remove(os.path.join(a.cfg.muse_jobs_dir, jid + ".json"))
+            result(a, jid, "connecting")
+            a.tick()
+            if cancel:
+                tv(s, "/api/tv/muse/cancel", {})
+            if pending:
+                a.mono_clock.t += musesetup.CANCEL_WAIT_S + 1
+                a.tick()
+                self.assertTrue(a.muse_view()["cancel_pending"])
+            result(a, jid, "done", ok=False, res="paired_incomplete")
+            a.tick()
+            v = a.muse_view()
+            self.assertEqual((v["active"], v["last"]["state"], v["last"]["error"]),
+                             (False, "failed", "paired_incomplete"), (cancel, pending))
+            self.assertIn("Muse est appairée", v["last"]["message"])
+            self.assertNotIn("rien n'a changé", json.dumps(v, ensure_ascii=False))
+            st = json.loads(ph.req("GET", "/muse/status?s=" + sid)[2])     # téléphone : même vérité
+            self.assertEqual((st["state"], st["message"]), ("failed", musesetup.message_for("paired_incomplete")))
+            code, _, page = ph.page(sid, 3)
+            self.assertEqual(code, 200)
+            self.assertIn("Muse est appairée", page)
+            self.assertNotIn("rien n", page)
+            self.assertNotIn(TOKEN, everything_text(a, s, page))
+
+    def test_live_interruption_without_cancel_is_not_called_cancelled(self):
+        a, s = wizard(self)
+        sid, f, ph = start(self, a, s)
+        ph.submit(sid, f)
+        jid = jobs(a)[0][:-5]
+        os.remove(os.path.join(a.cfg.muse_jobs_dir, jid + ".json"))
+        result(a, jid, "waiting_muse")
+        a.tick()
+        result(a, jid, "done", ok=False, res="interrupted")                # reprise propre après plantage
+        a.tick()
+        v = a.muse_view()
+        self.assertEqual((v["last"]["state"], v["last"]["error"]), ("failed", "interrupted"))
+        self.assertEqual(v["last"]["message"], musesetup.message_for("interrupted"))
+
     def test_race_result_arriving_with_the_timeout_tick_wins_over_pending(self):
         a, s = wizard(self)
         sid, f, ph = start(self, a, s)
@@ -1158,13 +1229,72 @@ class TestHelperWithRealAdmin(RealAdminHelperBase):
         self.assertIn(musebridge.MUSE_AGENT_ID, agents.Registry(self.cfg.registry_file).list())
         with open(os.path.join(self.journal, "inflight.json")) as f:
             self.assertNotIn(tmb.SDK_TOKEN, f.read())
+        self.assertTrue(os.path.exists(self.j("/var/lib/opentv-muse/sdk_token")))   # écrit par cette séance
         self.calls.clear()
         self.helper().run()                                                   # redémarrage : reprise
         self.assertIn("stop %s" % museadmin.PAIR_UNIT, self.cmds())
         self.assertNotIn(musebridge.MUSE_AGENT_ID, agents.Registry(self.cfg.registry_file).list())
         self.assertEqual(sorted(self.policy()), ["feedback", "read"])
         self.assertEqual(os.listdir(self.journal), [])
-        self.assertEqual(self.result("a" * 16)["result"], "interrupted")
+        # état d'avant VRAIMENT rendu (aucun jeton avant la séance) : alors seulement « interrompu, rien n'a changé »
+        self.assertFalse(os.path.exists(self.j("/var/lib/opentv-muse/sdk_token")))
+        r = self.result("a" * 16)
+        self.assertEqual((r["ok"], r["result"]), (False, "interrupted"))
+        self.assertIn("rien n'a changé", musesetup.message_for("interrupted"))
+        self.assertEqual(musesetup.read_box(self.cfg.muse_results_dir)["owned"], False)
+
+    def test_crash_recovery_that_cannot_undo_everything_never_says_nothing_changed(self):
+        self.window = None
+
+        class Crash(Exception):
+            pass
+        n = {"i": 0}
+
+        def crashing(s):
+            n["i"] += 1
+            if n["i"] > 3:
+                raise Crash()
+            self.fake_sleep(s)
+        self.pair_job()
+        with self.assertRaises(Crash):
+            self.helper(sleep=crashing).run()
+        stuck = {"agent_revoked": None, "agent_error": "registry_busy", "client_file_removed": False}
+        with mock.patch.object(museadmin.Admin, "discard_identity", return_value=stuck):
+            self.helper().run()
+        r = self.result("a" * 16)
+        self.assertEqual((r["ok"], r["result"]), (False, "recovery_incomplete"))
+        msg = musesetup.message_for("recovery_incomplete")
+        self.assertNotIn("rien n'a changé", msg)
+        self.assertIn("Gérer les assistants", msg)
+        self.assertEqual(os.listdir(self.journal), [])
+
+    def tracked(self, jid="a" * 16, cancel=False):
+        """Séance du service (même dossier museresults que le helper) arrivée à « Connexion »."""
+        ms = musesetup.MuseSetup(self.cfg, keygen=fast_key, async_keygen=False)
+        self.assertEqual(ms.start(True), (True, None))
+        s = ms.cur
+        s.job, s.deadline = jid, time.monotonic() + musesetup.PAIR_BUDGET_S
+        s.pair_deadline, s.expires = s.deadline, s.deadline
+        ms._set(s, "submitted")
+        ms._set(s, "connecting")
+        if cancel:
+            s.cancel_requested = True
+        return ms
+
+    def assert_paired_incomplete(self, ms, late=False):
+        v = ms.tv_view(MDNS, 8081, musebridge.MUSE_AGENT_ID in agents.Registry(self.cfg.registry_file).list())
+        last = v["last"]
+        self.assertEqual((v["active"], last["state"], last["error"]), (False, "failed", "paired_incomplete"))
+        self.assertEqual(bool(last.get("late")), late)
+        self.assertEqual(last["message"], musesetup.message_for("paired_incomplete"))
+        self.assertIn("Muse est appairée", last["message"])
+        self.assertIn("connexion doit être reprise", last["message"])
+        for bad in ("rien n'a changé", "Annulé", "est connectée"):
+            self.assertNotIn(bad, last["message"])
+        self.assertNotIn(tmb.SDK_TOKEN, json.dumps(v))
+        # actions sûres : reconnexion (nouveau consentement TV) et déconnexion confirmée (la boîte possède Muse)
+        self.assertEqual(v["owned"], True)
+        return v
 
     def test_crash_after_successful_pairing_never_revokes_the_paired_muse(self):
         fsutil = tmb.fsutil
@@ -1172,9 +1302,70 @@ class TestHelperWithRealAdmin(RealAdminHelperBase):
         with open(os.path.join(self.journal, "inflight.json"), "w") as f:
             json.dump({"v": 1, "id": "a" * 16, "changed": True, "before": ["feedback", "read"]}, f)
         agents.Registry(self.cfg.registry_file).set_policy({"muse": CONTROL, "hermit": [], "hermes": []})
+        ms = self.tracked()                                                   # TV : suivi en cours, sans annulation
         self.helper().run()
         self.assertEqual(sorted(self.policy()), CONTROL)
         self.assertEqual(os.listdir(self.journal), [])
+        self.assertTrue(os.path.exists(self.j("/var/lib/opentv-muse/pairing.json")))
+        r = self.result("a" * 16)
+        self.assertEqual((r["ok"], r["result"]), (False, "paired_incomplete"))   # jamais « interrupted »
+        self.assertEqual(musesetup.read_box(self.cfg.muse_results_dir)["owned"], True)
+        ms.tick()
+        v = self.assert_paired_incomplete(ms)
+        self.assertEqual(ms.disconnect(True, owned=v["owned"]), (True, None))
+        jobs_now = sorted(os.listdir(self.cfg.muse_jobs_dir))
+        with open(os.path.join(self.cfg.muse_jobs_dir, jobs_now[0])) as f:
+            self.assertEqual(json.load(f)["action"], "unpair")
+
+    def test_crash_during_bridge_start_after_pairing_reports_paired_and_keeps_everything(self):
+        class Crash(Exception):
+            pass
+        self.pair_job()
+        ms = self.tracked(cancel=True)                                        # annulation demandée en plus
+        with mock.patch.object(museadmin.Admin, "start_bridge", side_effect=Crash()):
+            with self.assertRaises(Crash):                                    # plantage après pairing.json
+                self.helper().run()
+        reg = agents.Registry(self.cfg.registry_file)
+        ident = reg.list()[musebridge.MUSE_AGENT_ID]
+        with open(self.j("/var/lib/opentv-muse/sdk_token"), "rb") as f:
+            tok = f.read()
+        self.calls.clear()
+        self.helper().run()                                                   # redémarrage : reprise
+        self.assertTrue(os.path.exists(self.j("/var/lib/opentv-muse/pairing.json")))
+        self.assertEqual(reg.list()[musebridge.MUSE_AGENT_ID].get("token_sha256"), ident.get("token_sha256"))
+        with open(self.j("/var/lib/opentv-muse/sdk_token"), "rb") as f:
+            self.assertEqual(f.read(), tok)                                   # jeton local gardé
+        self.assertEqual(sorted(self.policy()), CONTROL)                      # pilotage gardé
+        self.assertFalse([c for c in self.cmds() if "disable" in c])
+        r = self.result("a" * 16)
+        self.assertEqual((r["ok"], r["result"]), (False, "paired_incomplete"))
+        ms.tick()
+        self.assert_paired_incomplete(ms)                                     # annulation demandée : jamais « Annulé »
+        self.assertEqual(ms.start(True), (True, None))                        # « Reconnecter » : nouveau consentement
+        blob = json.dumps(self.hlogs) + json.dumps(r) + self.err.getvalue()
+        self.assertNotIn(tmb.SDK_TOKEN, blob)
+        # reprise réelle : même jeton, aucun Bluetooth, pont démarré ⇒ seulement alors « connectée »
+        self.calls.clear()
+        self.put({"id": "b" * 16, "action": "pair", "consent": "tv", "token": tmb.SDK_TOKEN})
+        self.assertEqual(self.helper().run(), ["connected"])
+        self.assertFalse([c for c in self.cmds() if museadmin.PAIR_UNIT in c])
+
+    def test_cancel_racing_a_completed_pairing_reports_paired_never_cancelled(self):
+        self.window = None
+
+        def on_window():   # l'iPhone termine l'appariement au moment même où Alex annule
+            tmb.fsutil.atomic_write_path(self.j("/var/lib/opentv-muse/pairing.json"), "{}")
+            self.put({"id": "c" * 16, "action": "cancel", "target": "a" * 16})
+        self.on_window = on_window
+        self.pair_job()
+        ms = self.tracked(cancel=True)
+        self.assertEqual(self.helper().run(), ["paired_incomplete"])
+        self.assertEqual(self.result("a" * 16)["result"], "paired_incomplete")
+        self.assertTrue(os.path.exists(self.j("/var/lib/opentv-muse/pairing.json")))
+        self.assertTrue(os.path.exists(self.j("/var/lib/opentv-muse/sdk_token")))
+        self.assertEqual(sorted(self.policy()), CONTROL)
+        ms.tick()
+        self.assert_paired_incomplete(ms)
 
     def test_unpair_job_unpairs_forgets_token_and_revokes_control(self):
         self.pair_job()
@@ -1478,9 +1669,10 @@ class TestMuseTvInChromium(unittest.TestCase):
     FY, STATE, REMOTE1, render = T.FY, T.STATE, T.REMOTE1, T.render
 
     def st(self, active=False, state=None, url=None, lseq=0, last=None, bridge=None, phone=False, ble=None,
-           message=None, disc=None, cancelling=False, owned=None, foreign=False, pending=False, lmsg=None):
+           message=None, disc=None, cancelling=False, owned=None, foreign=False, pending=False, lmsg=None,
+           lerr=None):
         base = self.T.st(self.T)
-        base["muse"] = {"seq": lseq, "last": {"seq": lseq, "state": last, "error": None, "message": lmsg},
+        base["muse"] = {"seq": lseq, "last": {"seq": lseq, "state": last, "error": lerr, "message": lmsg},
                         "active": active, "state": state, "url": url if active else None, "phone": phone,
                         "ble_name": ble, "message": message, "bridge": bridge, "cancelling": cancelling,
                         "cancel_pending": pending, "expires_in": 600, "owned": owned, "foreign": foreign,
@@ -1712,6 +1904,40 @@ class TestMuseTvInChromium(unittest.TestCase):
         allt = s["done"]["toasts"]
         self.assertNotIn("Annulé : rien n'a changé.", allt)
         self.assertTrue(s["done"]["toast"].startswith("Muse est connectée !"), s["done"])   # issue réelle annoncée
+
+    def paired_incomplete(self, owned, keys, delay=5300):
+        msg = musesetup.message_for("paired_incomplete")
+        conn = self.st(active=True, state="connecting", lseq=2, owned=owned)
+        script = [(0, self.st(lseq=2, owned=owned)), (1500, conn),
+                  (2500, self.st(lseq=5, last="failed", lerr="paired_incomplete", lmsg=msg, state="failed",
+                                 owned=owned))]
+        plan = [{"at": 1200, "keys": self.TO_MUSE + ["ArrowUp", "Enter"], "tag": "go"},
+                {"at": 4700, "keys": [], "tag": "result"}, {"at": 4800, "keys": keys, "tag": "next"},
+                {"at": 4900, "keys": ["Enter"], "tag": "after"}]
+        res, s = self.live(script, plan, delay=delay)
+        r = s["result"]
+        self.assertEqual((r["ptitle"], r["pmeta"]), ("Muse est appairée", msg))   # jamais « Annulé », ni « connectée »
+        for t in [r["toast"] or ""] + r["toasts"] + [r["text"]]:
+            self.assertNotIn("rien n'a changé", t)
+            self.assertNotIn("Muse est connectée", t)
+        self.assertEqual(r["clip"], [], r)
+        self.assertEqual([b for b in s["after"]["bodies"] if "disconnect" in b or "cancel" in b], [])
+        return s
+
+    def test_paired_but_bridge_incomplete_offers_reconnect_and_confirmed_disconnect(self):
+        s = self.paired_incomplete(True, ["ArrowUp", "Enter"])
+        r = s["result"]
+        self.assertEqual((r["btns"], r["focused"]), (["Reconnecter", "Déconnecter Muse", "Fermer"], "Fermer"))
+        self.assertEqual((s["next"]["ptitle"], s["next"]["focused"]), ("Déconnecter Muse ?", "Non"))
+        self.assertNotEqual(s["after"]["ptitle"], "Déconnecter Muse ?")         # « Non » : rien envoyé
+        s = self.paired_incomplete(True, ["ArrowUp", "ArrowUp", "Enter"])
+        n = s["next"]
+        self.assertEqual((n["ptitle"], n["focused"]), ("Connecter Muse", "Pas maintenant"))   # consentement de nouveau
+        self.assertEqual([b for b in n["bodies"] if "start" in b], [])
+        s = self.paired_incomplete(None, ["ArrowUp", "Enter"])                   # propriété pas établie : rien
+        r = s["result"]
+        self.assertEqual((r["btns"], r["focused"]), (["Reconnecter", "Fermer"], "Fermer"))
+        self.assertNotIn("Déconnecter Muse", r["btns"])
 
     def test_reload_during_connection_reopens_the_sheet_and_announces_nothing_old(self):
         st = self.st(active=True, state="waiting_muse", lseq=7)
