@@ -1029,7 +1029,8 @@ class TestAgentsEndToEnd(unittest.TestCase):
                             json.dumps(cfg)], capture_output=True, timeout=240)
         self.assertEqual(p.returncode, 0, p.stderr.decode()[-3000:])
         res = json.loads(p.stdout.decode().strip().splitlines()[-1])
-        self.assertEqual(res["settings_buttons"], ["Reconfigurer", "Gérer les assistants", "Fermer"])
+        self.assertEqual(res["settings_buttons"], ["Reconfigurer", "Gérer les assistants", "Ambiance OpenTV",
+                                                   "Fermer"])   # service Canvas réel : ligne du propriétaire
         self.assertIn("Autorisés : 1 · Connectés : 2", res["settings_text"])
         self.assertEqual(res["confirm_focus"], "Non")
         q = res["qr_layout"]

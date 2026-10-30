@@ -41,7 +41,7 @@ TV_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'sel
 SETUP_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; "
              "base-uri 'none'; frame-ancestors 'none'")
 TV_STATIC = {"tv.js": "application/javascript; charset=utf-8", "keys.js": "application/javascript; charset=utf-8",
-             "tv.css": "text/css; charset=utf-8",
+             "canvas.js": "application/javascript; charset=utf-8", "tv.css": "text/css; charset=utf-8",
              "qrcode.js": "application/javascript; charset=utf-8", "setup.css": "text/css; charset=utf-8"}
 SETUP_STATIC = {"setup.css": "text/css; charset=utf-8", "setup.js": "application/javascript; charset=utf-8"}
 # Assistants (téléphone) : aucune ligne de script, formulaires vers soi seulement.

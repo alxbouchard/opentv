@@ -137,7 +137,12 @@ const connectAll = (j) => {
                panel_cls: panel.hidden ? null : panel.className };
     });
     const shot = async (name) => { if (cfg.shots) { await page.screenshot({ path: path.join(cfg.shots, name) }); } };
-    const key = async (k, label) => { await page.keyboard.press(k); await sleep(350); const s = await snap(label); s.layout = await measure(); return s; };
+    // mesure de l'état STABLE : 350 ms, puis (borné) fin des transitions de la coque en cours (défilement des rangées,
+    // focus…) ; les fondus du halo Canvas (.cv-g) ne déplacent rien et sont ignorés
+    const settled = () => page.waitForFunction(() => document.getAnimations().filter((a) => a.transitionProperty &&
+      a.playState === "running" && !(a.effect && a.effect.target && a.effect.target.classList.contains("cv-g"))).length === 0,
+      null, { timeout: 1500 }).catch(() => {});
+    const key = async (k, label) => { await page.keyboard.press(k); await sleep(350); await settled(); const s = await snap(label); s.layout = await measure(); return s; };
     out.settings = [];
     await key("Home", "set:home");
     await shot("tv-1920x1080-home.png");

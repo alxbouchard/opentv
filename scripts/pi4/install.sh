@@ -183,7 +183,7 @@ add "$HERE/system/opentv-initramfs.sh" /opt/opentv/lib/opentv-initramfs.sh 644
 for t in opentv.plymouth opentv.script opentv.png opentv-mask.png; do
   add "$HERE/system/plymouth/$t" "/usr/share/plymouth/themes/opentv/$t" 644
 done
-for u in tv.html tv.js keys.js tv.css setup.css setup.js remote.css remote.js muse.js fallback.html; do add "$HERE/ui/$u" "/opt/opentv/share/ui/$u" 644; done
+for u in tv.html tv.js keys.js canvas.js tv.css setup.css setup.js remote.css remote.js muse.js fallback.html; do add "$HERE/ui/$u" "/opt/opentv/share/ui/$u" 644; done
 add "$REPO/native/app/qrcode.js" /opt/opentv/share/ui/qrcode.js 644                  # réutilisé tel quel
 add "$REPO/scripts/nanopi/opentv_foryou.py" /opt/opentv/lib/foryou/opentv_foryou.py 644  # moteur « Pour toi »
 add "$REPO/scripts/nanopi/opentv_bridge.py" /opt/opentv/lib/foryou/opentv_bridge.py 644  # load_catalogue_meta

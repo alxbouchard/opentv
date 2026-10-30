@@ -10,13 +10,20 @@
 </head>
 <body>
 <div id="app">
-  <!-- Fond OpenTV v23 : une photo plein écran (embarquée dans tv.css) et son voile, peints une seule fois -->
-  <div id="bg" aria-hidden="true"><div id="bgShade"></div></div>
+  <!-- Fond OpenTV v23 : une photo plein écran (embarquée dans tv.css) et son voile, peints une seule fois.
+       OpenTV Canvas (canvas.js) : couches d'ambiance FIXES sous le voile — base, trois voiles lents et le halo du
+       héros (deux calques en fondu) ; seules des classes fermées « cv-* » changent leur peinture -->
+  <div id="bg" aria-hidden="true">
+    <div id="cvwall"><div class="cv-base"></div><div class="cv-l cv-l1"></div><div class="cv-l cv-l2"></div>
+      <div class="cv-l cv-l3"></div><div id="cvglow"><div id="cvga" class="cv-g"></div><div id="cvgb" class="cv-g"></div></div></div>
+    <div id="bgShade"></div>
+  </div>
 
   <header>
     <div id="clockBox" class="clockbox">
       <div id="clock" class="clock"></div>
-      <div id="date" class="date"></div>
+      <!-- date v23, puis pastille de scène (texte fermé de canvas.js, jamais un texte d'agent) -->
+      <div class="dateline"><div id="date" class="date"></div><span id="cvpill" class="cvpill" hidden></span></div>
     </div>
     <div class="spacer"></div>
     <div id="quick" class="quick">
@@ -88,6 +95,17 @@
     <div id="pbtns" class="pbtns"></div>
   </div>
 
+  <!-- OpenTV Canvas : feuille de confirmation du PROPRIÉTAIRE pour l'ambiance proposée par un assistant. Style de la
+       coque (jamais de la scène) ; « Non » au focus ; ses touches ne sont jamais des gestes ordinaires. -->
+  <div id="cvsheet" class="panel sheet cvsheet" role="dialog" hidden>
+    <p id="cvkicker" class="kicker"></p>
+    <h2 id="cvtitle">Changer l'ambiance ?</h2>
+    <p id="cvmeta" class="pmeta">L'écran montre l'ambiance proposée. Rien n'est gardé sans ton « Oui ».</p>
+    <ul id="cvchanges" class="cvchanges"></ul>
+    <div id="cvbtns" class="pbtns"></div>
+    <p id="cvcount" class="cvcount"></p>
+  </div>
+
   <div id="toast" class="toast" hidden></div>
   <div id="offline" class="offline" hidden>Reconnexion à OpenTV…</div>
   <!-- « Regarder » : écran OpenTV pendant la préparation cachée du lecteur (identique à l'onglet de chargement du
@@ -103,6 +121,7 @@
 </div>
 <script src="/static/qrcode.js"></script>
 <script src="/static/keys.js"></script>
+<script src="/static/canvas.js"></script>
 <script src="/static/tv.js"></script>
 </body>
 </html>

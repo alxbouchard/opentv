@@ -80,7 +80,7 @@
     if (!Array.isArray(list)) { list = []; }
     return list.filter(function (t) { return typeof t === "number" && t <= now && now - t < RELOAD_WINDOW_MS; });
   }
-  function showOffline(text) { $("offline").textContent = text; $("offline").hidden = false; }
+  function showOffline(text) { $("offline").textContent = text; $("offline").hidden = false; cvPaint(); }
   function scheduleReload() {
     if (reloadTimer) { return; }
     var st = reloadStore();
@@ -203,7 +203,7 @@
     api("GET", "/api/tv/foryou").then(offerForYou).catch(function (e) { fyAt = 0; onApiError(e); });
   }
   function sigOf(d) { try { return JSON.stringify(d); } catch (e) { return null; } }
-  function fyBusy() { return !!(play || panel); }
+  function fyBusy() { return !!(play || panel || cvSheet); }   // fiche, feuille Canvas ou lecture : rangées gelées
   function offerForYou(d) {
     var sig = sigOf(d);
     if (fy && sig !== null && sig === fySig) { fyPending = null; return; }   // inchangé : aucun nouveau rendu
@@ -216,6 +216,14 @@
     var p = fyPending;
     applyForYou(p.d, p.sig);
     return true;
+  }
+  // fiche, feuille ou lecture terminée : ordre des rangées de la scène publiée PUIS sélection en attente ; un seul
+  // nouveau rendu, focus réancré par rangée + film (identifiants stables). -> true si les rangées ont été redessinées
+  function flushPending() {
+    var ro = takeRowOrder();
+    if (flushForYou()) { return true; }
+    if (ro && fy) { renderRows(); return true; }
+    return false;
   }
   function badges(m) {
     var out = [];
@@ -266,7 +274,7 @@
   function rowsData() {
     var out = [];
     ((fy && fy.rows) || []).forEach(function (r) { if (r && r.items && r.items.length) { out.push(r); } });
-    return out;
+    return orderRows(out);
   }
   function renderEmpty(box) {
     var d = el("div", "empty"), ul = el("ul");
@@ -367,7 +375,7 @@
     var top = focus.zone === "top";
     $("gear").className = "qbtn" + (top ? (panel ? " active" : " focused") : "");
     // panneau ouvert : le message d'assistant s'efface (couche dédiée, jamais sur Réglages/confirmation/fiche)
-    $("app").className = (top ? "zone-top" : "") + (panel ? " has-panel" : "");
+    $("app").className = (top ? "zone-top" : "") + (panel || cvSheet ? " has-panel" : "");
     $("main").className = "main" + (panel ? " dim" : "");
     grid.forEach(function (g, ri) {
       var cur = ri === focus.row, c = focus.cols[ri] || 0, fc = g.cards[c] || g.cards[0];
@@ -386,6 +394,7 @@
     $("rowsin").style.transform = g0 && g0.row.offsetTop ? "translateY(" + (-g0.row.offsetTop) + "px)" : "";
     hero();
     help();
+    cvPaint();
   }
   // aide du bas : toujours celle du contexte courant (rangées, Réglages en haut, panneau)
   var HELP = {
@@ -416,6 +425,7 @@
     var r = ROWS[focus.row] || null, it = r ? r.items[col()] : null, key = it ? "i:" + it.id : (fy ? "empty" : "wait");
     if (key === heroId) { return; }
     heroId = key;
+    if (CV) { CV.focus(it ? hue(it.id || it.title) : -1); }   // halo du héros : teinte du visuel dessiné au focus
     var chips = $("hchips");
     chips.textContent = "";
     if (!it) {
@@ -431,7 +441,7 @@
       $("hmeta").textContent = meta(it, false);
       scores(it).forEach(function (c) { chips.appendChild(el("span", "chip score", c)); });
       var why = (it.reasons || []).filter(function (x) { return x && x.code !== "quality" && x.text; })[0];
-      if (why) { chips.appendChild(el("span", "chip", why.text)); }
+      if (why) { chips.appendChild(el("span", "chip why", why.text)); }
       else if (!scores(it).length && it.reasons && it.reasons[0]) { chips.appendChild(el("span", "chip", it.reasons[0].text)); }
       badges(((fy && fy.marks) || {})[it.id]).forEach(function (b) { chips.appendChild(el("span", "chip mark", b)); });
       $("hdesc").textContent = it.description || "";
@@ -458,7 +468,7 @@
       remoteFails = 0;
       if (d && typeof d.seq === "number") {
         if (remoteSeq >= 0 && d.events) {
-          d.events.forEach(function (ev) { if (ev && REMOTE_ACTIONS[ev.a] === 1) { lastHumanAt = Date.now(); handle(ev.a); } });
+          d.events.forEach(function (ev) { if (ev && REMOTE_ACTIONS[ev.a] === 1) { remoteKey(ev.a); } });
         }
         remoteSeq = d.seq;
       }
@@ -577,7 +587,7 @@
     $("playov").hidden = true;
     if (p && p.it && !p.restored) { restoreCard(p); }
     if (v.state === "unavailable") { toast(MSG_PLAY_KO, true); }   // grand message centré : jamais sur la fiche
-    flushForYou();   // sans fiche rouverte (page rechargée en cours de lecture) : sélection en attente appliquée
+    flushPending();   // sans fiche rouverte (page rechargée en cours de lecture) : ordre et sélection en attente
     if (!local && typeof v.seq === "number" && v.seq >= 0) {   // repeint d'abord, puis acquittement au service
       requestAnimationFrame(function () { requestAnimationFrame(function () {
         api("POST", "/api/tv/play/ack", { seq: v.seq }).catch(onApiError);
@@ -620,6 +630,7 @@
   function openSettings(sel) {
     var list = [["setup", "⟳", "Reconfigurer", "Nouveau QR : Wi-Fi, nom, assistants"],
                 ["agents", "◎", "Gérer les assistants", agentsCounts()]];
+    if (cvOn() && CV) { list.push(["ambiance", "✦", "Ambiance OpenTV", ambianceSub()]); }
     if (state && state.remote && state.remote.enabled && state.remote.phones > 0) {
       list.push(["remote-forget", "▣", "Oublier les téléphones", "Ils devront rescanner le QR"]);
     }
@@ -637,6 +648,14 @@
               }), idx, { actions: list.map(function (x) { return x[0]; }) });
   }
   function openConfirm(what) {   // choix sûr (« Non ») au focus par défaut
+    if (what === "amb-undo" || what === "amb-reset") {
+      var undo = what === "amb-undo";
+      showPanel("confirm", "Ambiance OpenTV", undo ? "Revenir à l'ambiance précédente ?" : "Revenir à l'ambiance d'origine ?",
+                undo ? "La dernière ambiance enregistrée est annulée." : "Canvas, mouvement calme. Les versions précédentes sont oubliées.",
+                [button(undo ? "Oui, revenir" : "Oui, ambiance d'origine", "lrow"), button("Non", "lrow")], 1,
+                { what: what, actions: [what, "no"] });
+      return;
+    }
     if (what === "agents") {
       showPanel("confirm", "Réglages", "Gérer les assistants ?",
                 "Un QR s'affiche : choisis sur ton téléphone ce que Muse, Hermit et Hermes peuvent faire. Le Wi-Fi et le nom de la TV ne changent pas.",
@@ -661,13 +680,17 @@
   function closePanel() {   // fiche/feuille fermée : sélection « Pour toi » en attente appliquée maintenant
     panel = null; $("panel").hidden = true; $("pqrfig").hidden = true;
     $("pcaps").hidden = true; $("pphases").hidden = true;
-    if (!flushForYou()) { paint(); }
+    if (!flushPending()) { paint(); }
     if (state) { renderRemote(); }
   }
   function panelBack() {
     if (panel.kind === "agents") { cancelAgents(); }
     else if (panel.kind === "musesetup") { cancelMuse(); }
+    else if (panel.kind === "confirm" && (panel.what === "amb-undo" || panel.what === "amb-reset")) { openAmbiance(panel.what.slice(4)); }
     else if (panel.kind === "confirm") { if (panel.what === "agents") { openAssistants("rights"); } else { openSettings(panel.what); } }
+    else if (panel.kind === "ambiance") { openSettings("ambiance"); }
+    else if (panel.kind === "ambstyle") { openAmbiance("style"); }
+    else if (panel.kind === "ambmotion") { openAmbiance("motion"); }
     else if (panel.kind === "assistants") { openSettings("agents"); }
     else if (panel.kind === "muse") { openAssistants("muse"); }
     else if (panel.kind === "museconfirm") { openMuse(); }
@@ -945,11 +968,14 @@
   }
   function act() {
     var a = panel.actions[panel.btn], it = panel.it;
+    if (panel.pending) { return; }   // écriture de l'ambiance en cours : jamais deux fois
     if (a === "watch") { startPlay(it); return; }
     if (panel.kind === "settings") {
-      if (a === "close") { closePanel(); } else if (a === "agents") { openAssistants(); } else { openConfirm(a); }
+      if (a === "close") { closePanel(); } else if (a === "agents") { openAssistants(); }
+      else if (a === "ambiance") { openAmbiance(); } else { openConfirm(a); }
       return;
     }
+    if (ambianceAct(a)) { return; }
     if (panel.kind === "agents") { cancelAgents(); return; }
     if (panel.kind === "assistants") {
       if (a === "muse") { openMuse(); } else if (a === "rights") { openConfirm("agents"); } else { openSettings("agents"); }
@@ -1013,7 +1039,8 @@
   }
   // ---- pilotage par assistant : une action à la fois, réclamée puis appliquée une seule fois, résultat rendu
   function runActions(s) {
-    if (actBusy || !s || s.setup.active) { return; }
+    // feuille Canvas affichée : seul le propriétaire décide, aucune action d'assistant n'est même réclamée
+    if (actBusy || !s || s.setup.active || cvSheet) { return; }
     var l = (s.actions && s.actions.pending) || [], next = null, i;
     for (i = 0; i < l.length; i++) { if (l[i] && typeof l[i].seq === "number" && l[i].seq > actSeq) { next = l[i]; break; } }
     if (!next) { return; }
@@ -1026,7 +1053,10 @@
       if (!r || !r.ok || !r.action || r.action.seq !== seq) { return null; }   // déjà prise, expirée, remplacée
       var why = null;
       try { why = applyAction(r.action, sentAt); } catch (e) { why = "error"; }
-      return api("POST", "/api/tv/action", { seq: seq, phase: "done", ok: !why, reason: why || null });
+      // fiche ouverte par l'action : le service connaît l'occupation « panel » AVANT d'apprendre qu'elle est faite
+      return syncBusy().then(function () {
+        return api("POST", "/api/tv/action", { seq: seq, phase: "done", ok: !why, reason: why || null });
+      });
     }).catch(function (e) { onApiError(e); actSeq = Math.max(actSeq, seq); })
       .then(function () { actBusy = false; if (state) { runActions(state); } });
   }
@@ -1038,6 +1068,7 @@
   function humanRecent(queuedAt) { return !!(lastHumanAt && lastHumanAt > queuedAt - HUMAN_PRIORITY_MS); }
   function applyAction(x, sentAt) {   // -> null (appliquée) | code de refus
     if (!state || state.setup.active) { return "tv_setup_active"; }
+    if (cvSheet) { return "tv_busy"; }   // réclamée juste avant la feuille Canvas : jamais appliquée par-dessus
     // heure de mise en file estimée sur l'horloge de la page (au plus tôt : la latence favorise l'humain)
     var queuedAt = (sentAt || Date.now()) - (typeof x.age_ms === "number" ? Math.max(0, x.age_ms) : 0);
     if (x.kind === "key") { return agentKey(x.key, queuedAt); }
@@ -1100,6 +1131,386 @@
     handle(a);
     return null;
   }
+  // ---- OpenTV Canvas : scène d'ambiance publiée, aperçu d'un assistant à confirmer, Réglages « Ambiance OpenTV ».
+  // Le rendu appartient à canvas.js (classes fermées, aucune requête) ; ici, le cycle de vie avec le service :
+  // - chaque touche ordinaire (télécommande, clavier, téléphone, souris) envoie POST /api/tv/canvas/event AVANT d'agir
+  //   (« remote » pour le téléphone : le service ne la voit pas autrement). Aperçu vivant connu (sans feuille) : la
+  //   touche n'agit qu'après la confirmation de son annulation (CV_GATE_MS au plus), sinon elle est seulement consommée ;
+  // - l'ensemble occupé de la page (panneau, page cachée, hors ligne) est déclaré COMPLET par POST
+  //   /api/tv/canvas/ui, une requête à la fois (jamais une ancienne liste vide après une plus récente) ;
+  // - la feuille de confirmation (« Non » au focus) n'est ni un panneau ni un geste ordinaire : ses touches ←/→/↑/↓,
+  //   OK et Retour n'envoient ni événement ni occupation. L'aperçu n'est peint QUE pendant qu'elle est affichée, ses
+  //   rangées jamais (mémoire spatiale) ; l'ordre de la scène publiée attend la fin de toute fiche/feuille/lecture.
+  // - aucune action d'assistant n'est réclamée ni appliquée pendant la feuille ; « restore_failed » (see_state) montre
+  //   l'état réel relu par le service, jamais « rien n'a changé ».
+  var CV = window.OpenTVCanvas || null;
+  var CV_GATE_MS = 800, CV_SHEET_MARGIN_S = 3;
+  var cvPub = null, cvSheet = null, cvSheetTimer = null, cvDone = {}, cvGate = null;
+  var humanGen = 0, evPending = 0, rowOrder = null, rowOrderSig = "";
+  var busyAcked = null, busyFlight = false, busyWait = [], busyRetry = null;
+  var MSG_CV_SEE = "L'ambiance n'a peut-être pas été enregistrée comme prévu.\nL'écran montre l'ambiance réellement active.";
+  var MSG_CV_LOST = "Réponse perdue : vérifie l'ambiance affichée (Réglages → Ambiance OpenTV).";
+  var CV_ERR = { no_change: "Déjà active : rien n'a changé.", nothing_to_rollback: "Aucune version précédente : rien n'a changé.",
+                 store_corrupt: "Ambiance illisible : choisis « Ambiance d'origine ». Rien n'a changé.",
+                 store_busy: "OpenTV est occupé : réessaie. Rien n'a changé." };
+  var STYLES = [["canvas", "Canvas", "Aurore et halo du titre · d'origine"], ["mist", "Brume", "La côte brumeuse d'OpenTV, en mouvement"],
+                ["cinema", "Cinéma", "Salle sombre et halo de l'affiche"]];
+  var STYLE_WP = { canvas: "aurore", mist: "brume", cinema: "affiche" };
+  var MOTIONS = [["off", "Coupé", "Fond fixe, aucune animation"], ["calm", "Calme", "Mouvement lent · d'origine"],
+                 ["alive", "Vivant", "Plus d'ambiance"]];
+  // horloge monotone (échéance de la feuille) : performance.now(), sinon Date.now rendu monotone (recul ignoré)
+  var perf = window.performance && typeof window.performance.now === "function" ? window.performance : null;
+  var monoWall = null, monoAcc = 0;
+  function mono() {
+    if (perf) { return perf.now(); }
+    var w = Date.now(), d = monoWall === null ? 0 : w - monoWall;
+    monoWall = w;
+    monoAcc += d > 0 ? Math.min(d, 1000) : 0;
+    return monoAcc;
+  }
+  function cvOn() { return !!(state && state.canvas); }   // service Canvas (sinon : OpenTV v23 inchangé)
+  function capi(path, body) {   // POST Canvas : la réponse JSON fait foi même en 409/503 (outcome, canvas relu)
+    return fetch(path, { method: "POST", headers: { "X-OpenTV-TV": KEY, "Content-Type": "application/json" },
+                         body: JSON.stringify(body), cache: "no-store" }).then(function (r) {
+      return r.json().catch(function () { return null; }).then(function (j) {
+        if (r.status === 403 && j && j.error === "tv_key") { var e = new Error("tv_key"); e.tvKey = true; throw e; }
+        if (!j || typeof j !== "object") { throw new Error(r.status); }
+        return j;
+      });
+    });
+  }
+  // ---- occupation de la page : ensemble complet, une seule requête en vol, toujours le plus récent en dernier
+  function pageBusy() {
+    var b = [];
+    if (panel) { b.push("panel"); }
+    if (document.hidden) { b.push("hidden"); }
+    if (!$("offline").hidden) { b.push("offline"); }
+    return b;
+  }
+  function busySettle(ok) { var w = busyWait; busyWait = []; w.forEach(function (f) { f(ok); }); }
+  function pumpBusy() {
+    if (busyFlight || !cvOn()) { return; }
+    var want = pageBusy(), sig = want.join(",");
+    if (sig === busyAcked) { busySettle(true); return; }
+    if (busyRetry) { clearTimeout(busyRetry); busyRetry = null; }
+    busyFlight = true;
+    capi("/api/tv/canvas/ui", { busy: want }).then(function (j) { return !!j.ok; },
+                                                  function (e) { onApiError(e); return false; })
+      .then(function (ok) {
+        busyFlight = false;
+        if (ok) { busyAcked = sig; }
+        if (!ok) {   // service injoignable : nouvel essai borné ; personne n'attend indéfiniment
+          busySettle(false);
+          busyRetry = setTimeout(function () { busyRetry = null; pumpBusy(); }, 2000);
+          return;
+        }
+        pumpBusy();   // l'ensemble a changé pendant l'envoi : le plus récent part maintenant (sinon : réglé)
+      });
+  }
+  function syncBusy() {   // -> promesse : true quand le service connaît l'ensemble courant (false : échec)
+    if (!cvOn()) { return Promise.resolve(true); }
+    return new Promise(function (res) { busyWait.push(res); pumpBusy(); });
+  }
+  function noteBusy() { if (cvOn() && !busyFlight && pageBusy().join(",") !== busyAcked) { pumpBusy(); } }
+  // ---- gestes humains ordinaires
+  function humanEvent(kind) {
+    humanGen += 1;   // tout état demandé avant ce geste ne peut plus ouvrir de feuille
+    if (!cvOn()) { return Promise.resolve(true); }
+    evPending += 1;
+    return capi("/api/tv/canvas/event", { kind: kind }).then(function (j) { return !!j.ok; },
+                                                          function (e) { onApiError(e); return false; })
+      .then(function (ok) { evPending -= 1; return ok; });
+  }
+  function previewKnown() {
+    var p = cvOn() && state.canvas.preview;
+    return p && typeof p.id === "string" && !cvDone[p.id] ? p.id : null;
+  }
+  function humanKey(kind, a, repeat) {   // -> true si la touche est consommée
+    lastHumanAt = Date.now();
+    if (cvGate) { return true; }   // annulation d'un aperçu en cours d'établissement : touche consommée
+    var pid = previewKnown();
+    if (!pid) {
+      // une répétition tenue suit l'événement déjà en vol (borné : une requête à la fois pour une touche tenue)
+      if (!(repeat && evPending)) { humanEvent(kind); } else { humanGen += 1; }
+      return handle(a);
+    }
+    // aperçu vivant connu : jamais d'action avant que le service confirme son annulation
+    var gate = cvGate = { a: a };
+    cvDone[pid] = true;
+    renderCanvas();
+    var t = setTimeout(function () { if (cvGate === gate) { cvGate = null; } }, CV_GATE_MS);
+    humanEvent(kind).then(function (ok) {
+      if (cvGate !== gate) { return; }   // délai dépassé : la touche reste consommée, l'interface jamais figée
+      cvGate = null;
+      clearTimeout(t);
+      if (ok) { handle(a); }
+    });
+    return true;
+  }
+  function remoteKey(a) {   // téléphone appairé : même règle, événement « remote » (le service ne le voit pas)
+    if (cvSheet) { lastHumanAt = Date.now(); sheetKey(a); return; }
+    humanKey("remote", a, false);
+  }
+  // ---- scène publiée et rendu
+  function cvValid(sc) { return !!(CV && CV.valid(sc)); }
+  function cvAdopt(c) {   // vue Canvas du service (état, réponse d'une route) : scène publiée et ordre des rangées
+    if (!c || typeof c !== "object") { return; }
+    if (state) { state.canvas = c; }
+    cvPub = cvValid(c.scene) ? c.scene : null;
+    if (takeRowOrder() && fy) { renderRows(); }
+    renderCanvas();
+  }
+  function wantRowOrder() {
+    var o = cvPub && cvPub.row_order;
+    return o instanceof Array && o.length ? o.join(",") : "";
+  }
+  function takeRowOrder() {   // nouvel ordre publié adopté seulement hors fiche/feuille/lecture -> true si changé
+    var sig = wantRowOrder();
+    if (sig === rowOrderSig || fyBusy()) { return false; }
+    rowOrderSig = sig;
+    rowOrder = sig ? sig.split(",") : null;
+    return true;
+  }
+  // rangées connues de la scène réordonnées ENTRE ELLES dans leurs emplacements ; une rangée hors schéma (« because »…)
+  // garde exactement sa place : l'ordre par défaut rend donc l'ordre du service à l'identique
+  function orderRows(rows) {
+    if (!rowOrder) { return rows; }
+    var rank = {}, known = [], k = 0, i;
+    for (i = 0; i < rowOrder.length; i++) { rank[rowOrder[i]] = i; }
+    function isKnown(r) { return typeof r.id === "string" && rank.hasOwnProperty(r.id); }
+    rows.forEach(function (r, n) { if (isKnown(r)) { known.push({ r: r, n: n }); } });
+    known.sort(function (x, y) { return rank[x.r.id] - rank[y.r.id] || x.n - y.n; });
+    return rows.map(function (r) { return isKnown(r) ? known[k++].r : r; });
+  }
+  function pbState() { return (state && state.playback && state.playback.state) || "idle"; }
+  function cvPauses() {
+    var r = [];
+    if (state && state.setup && state.setup.active) { r.push("setup"); }
+    if (panel) { r.push("panel"); }
+    if (play || { loading: 1, playing: 1, closing: 1, closed: 1, unavailable: 1 }[pbState()] === 1) { r.push("playback"); }
+    if (!$("offline").hidden) { r.push("offline"); }
+    if (document.hidden) { r.push("hidden"); }
+    return r;
+  }
+  function renderCanvas() {
+    if (!CV) { return; }
+    CV.apply(cvSheet ? cvSheet.scene : cvPub, { on: cvOn(), preview: !!cvSheet,
+                                               setup: !!(state && state.setup && state.setup.active) });
+    CV.pause(cvPauses());
+  }
+  function cvPaint() {   // après chaque changement d'état visible : occupation déclarée, animation figée ou non
+    noteBusy();
+    if (CV && cvOn()) { CV.pause(cvPauses()); }
+  }
+  // ---- feuille de confirmation du propriétaire (aperçu proposé par un assistant)
+  function sheetBlocked() {
+    return !!(panel || play || cvGate || (state && state.setup && state.setup.active) || !$("offline").hidden ||
+              document.hidden || { loading: 1, playing: 1, closing: 1, closed: 1, unavailable: 1 }[pbState()] === 1);
+  }
+  function cvState(c, gen) {
+    if (!c) { if (cvSheet) { closeSheet(); } return; }
+    var pv = c.preview, sh = c.sheet;
+    if (cvSheet) {
+      if (cvSheet.busy) { return; }   // « Oui » en vol : sa réponse décide
+      if (!pv || pv.id !== cvSheet.id) {   // retiré ailleurs (agent, échéance, état occupé) : rien n'a été publié
+        cvDone[cvSheet.id] = true;
+        closeSheet();
+        toast("Proposition d'ambiance retirée : rien n'a changé.");
+      } else if (!sh || sheetBlocked()) {
+        sheetChoose("no", "timeout");
+      }
+      return;
+    }
+    if (!sh || !pv || sh.preview_id !== pv.id || cvDone[pv.id] || gen !== humanGen || evPending || sheetBlocked() ||
+        !cvValid(pv.scene) || typeof sh.expires_in_s !== "number" || sh.expires_in_s - CV_SHEET_MARGIN_S < 1) {
+      return;
+    }
+    openSheet(sh, pv);
+  }
+  function openSheet(sh, pv) {
+    cvSheet = { id: pv.id, scene: pv.scene, btn: 0, busy: false,
+                deadline: mono() + (sh.expires_in_s - CV_SHEET_MARGIN_S) * 1000 };
+    $("cvkicker").textContent = "Proposé par " + (AGENTS.hasOwnProperty(sh.proposed_by) ? AGENTS[sh.proposed_by] : "un assistant");
+    var ul = $("cvchanges"), rows = CV.describe(sh.changes);
+    ul.textContent = "";
+    rows.forEach(function (x) {
+      var li = el("li");
+      li.appendChild(el("b", null, x.label + " : "));
+      li.appendChild(document.createTextNode(x.from ? x.from + " → " + x.to : x.to));
+      ul.appendChild(li);
+    });
+    var box = $("cvbtns");
+    box.textContent = "";
+    [["no", "Non, garder l'ambiance actuelle"], ["yes", "Oui, appliquer"]].forEach(function (b) {
+      var x = button(b[1], "lrow");
+      x.setAttribute("data-choice", b[0]);
+      box.appendChild(x);
+    });
+    $("cvsheet").hidden = false;
+    paintSheet();
+    tickSheet();
+    renderCanvas();
+    paint();
+  }
+  function paintSheet() {
+    var b = $("cvbtns").children;
+    for (var i = 0; i < b.length; i++) { b[i].className = "lrow" + (cvSheet && i === cvSheet.btn ? " focused" : ""); }
+  }
+  function tickSheet() {
+    clearTimeout(cvSheetTimer);
+    cvSheetTimer = null;
+    if (!cvSheet) { return; }
+    var left = cvSheet.deadline - mono();
+    if (left <= 0) { if (!cvSheet.busy) { sheetChoose("no", "timeout"); } return; }
+    $("cvcount").textContent = "Sans réponse dans " + Math.ceil(left / 1000) + " s : « Non ».";
+    cvSheetTimer = setTimeout(tickSheet, Math.max(50, Math.min(1000, left)));
+  }
+  function closeSheet() {
+    if (!cvSheet) { return; }
+    cvSheet = null;
+    clearTimeout(cvSheetTimer);
+    cvSheetTimer = null;
+    $("cvsheet").hidden = true;
+    renderCanvas();
+    if (!flushPending()) { paint(); }
+    if (state) { runActions(state); }
+  }
+  function sheetKey(a) {   // touches de consentement : jamais d'événement ordinaire, jamais d'occupation
+    if (!cvSheet || cvSheet.busy) { return true; }
+    if (a === "left" || a === "up") { cvSheet.btn = 0; paintSheet(); }
+    else if (a === "right" || a === "down") { cvSheet.btn = 1; paintSheet(); }
+    else if (a === "ok") { sheetChoose(cvSheet.btn === 1 ? "yes" : "no", "owner"); }
+    else if (a === "back" || a === "home") { sheetChoose("no", "owner"); }
+    return true;
+  }
+  function sheetChoose(choice, why) {
+    var sh = cvSheet;
+    if (!sh || sh.busy) { return; }
+    cvDone[sh.id] = true;
+    if (choice !== "yes") {   // « Non », Retour ou échéance : l'aperçu est retiré, la scène publiée n'a pas bougé
+      closeSheet();
+      capi("/api/tv/canvas/cancel", { preview_id: sh.id }).then(function (j) { cvAdopt(j.canvas); }, onApiError);
+      toast(why === "timeout" ? "Sans réponse : l'ambiance ne change pas." : "Ambiance refusée : rien n'a changé.");
+      return;
+    }
+    sh.busy = true;
+    capi("/api/tv/canvas/confirm", { preview_id: sh.id, confirm: true }).then(function (j) {
+      closeSheet();
+      cvAdopt(j.canvas);
+      if (j.ok) { toast("Nouvelle ambiance appliquée.\nRéglages → Ambiance OpenTV → Version précédente pour revenir.", true); }
+      else if (j.outcome === "see_state") { toast(MSG_CV_SEE, true); }
+      else if (j.error === "unknown_preview" || j.error === "preview_expired") { toast("Proposition expirée : rien n'a changé."); }
+      else { toast("Ambiance non appliquée : rien n'a changé."); }
+    }).catch(function (e) {
+      if (onApiError(e)) { return; }
+      closeSheet();
+      toast(MSG_CV_LOST, true);
+      refreshState();
+    });
+  }
+  function refreshState() { api("GET", "/api/tv/state").then(function (s) { render(s); }).catch(onApiError); }
+  // ---- Réglages « Ambiance OpenTV » (propriétaire seulement : jamais une touche d'assistant, écritures confirmées)
+  function cvView() { return (state && state.canvas) || {}; }
+  function styleOf(sc) { var w = sc && sc.wallpaper; return w === "brume" ? "mist" : w === "affiche" ? "cinema" : "canvas"; }
+  function styleName() { var s = styleOf(cvPub); return STYLES.filter(function (x) { return x[0] === s; })[0][1]; }
+  function motionName() {
+    var m = (cvPub && cvPub.motion) || "calm";
+    return (MOTIONS.filter(function (x) { return x[0] === m; })[0] || MOTIONS[1])[1];
+  }
+  function ambianceSub() {
+    var c = cvView();
+    if (c.status === "corrupt") { return "Illisible : revenir à l'ambiance d'origine"; }
+    if (c.status === "unavailable") { return "Indisponible : ambiance d'origine"; }
+    return styleName() + " · mouvement " + motionName().toLowerCase();
+  }
+  function listButtons(list, sel) {
+    var idx = 0, btns = list.map(function (x, i) {
+      var b = button("", "lrow"), t = el("span", "lt");
+      b.setAttribute("data-label", x[2]);
+      t.appendChild(el("span", "tl", x[2])); t.appendChild(el("span", "ts", x[3]));
+      b.appendChild(el("span", "ic", x[1])); b.appendChild(t);
+      if (x[0] === sel) { idx = i; }
+      return b;
+    });
+    return { btns: btns, idx: idx, actions: list.map(function (x) { return x[0]; }) };
+  }
+  function openAmbiance(sel) {
+    var c = cvView(), list = [["style", "◐", "Style", "Actuel : " + styleName()],
+                              ["motion", "≈", "Mouvement du fond", "Actuel : " + motionName()]];
+    if (c.can_rollback) { list.push(["undo", "↶", "Version précédente", "Revenir à l'ambiance d'avant"]); }
+    list.push(["reset", "⟲", "Ambiance d'origine", "Canvas, mouvement calme"]);
+    list.push(["back", "←", "Retour", "Revenir aux Réglages"]);
+    var text = c.status === "corrupt" ? "Ambiance enregistrée illisible : l'écran montre l'ambiance d'origine. « Ambiance d'origine » la répare." :
+      c.status === "unavailable" ? "Ambiance indisponible sur cette boîte : l'ambiance d'origine reste affichée." :
+      "Fond et couleurs de l'accueil. Rien ne change sans ton choix ici ou ton « Oui » sur la TV.";
+    var l = listButtons(list, sel);
+    showPanel("ambiance", "Réglages", "Ambiance OpenTV", text, l.btns, l.idx, { actions: l.actions });
+  }
+  function openAmbStyle() {
+    var cur = styleOf(cvPub), list = STYLES.map(function (x) {
+      return [x[0], x[0] === cur ? "✓" : "◐", x[1], x[2]];
+    });
+    list.push(["back", "←", "Retour", "Revenir à l'ambiance"]);
+    var l = listButtons(list, cur);
+    showPanel("ambstyle", "Ambiance OpenTV", "Style", "OK applique le style choisi ; le mouvement du fond est gardé.",
+              l.btns, l.idx, { actions: l.actions });
+  }
+  function openAmbMotion() {
+    var cur = (cvPub && cvPub.motion) || "calm", list = MOTIONS.map(function (x) {
+      return [x[0], x[0] === cur ? "✓" : "≈", x[1], x[2]];
+    });
+    list.push(["back", "←", "Retour", "Revenir à l'ambiance"]);
+    var l = listButtons(list, cur);
+    showPanel("ambmotion", "Ambiance OpenTV", "Mouvement du fond",
+              "« Réduire les animations » du système et une lecture fluide passent toujours avant.", l.btns, l.idx,
+              { actions: l.actions });
+  }
+  // écriture du propriétaire (confirmation littérale de l'API) ; la réponse porte l'état relu du service
+  function ownerCanvas(action, body, okMsg, sel) {
+    if (!panel || panel.pending) { return; }
+    panel.pending = true;
+    body.confirm = true;
+    var p = panel;
+    capi("/api/tv/canvas/" + action, body).then(function (j) {
+      cvAdopt(j.canvas);
+      if (panel === p) { openAmbiance(sel); }   // feuille Ambiance à jour (l'ordre des rangées attend sa fermeture)
+      if (j.ok) { toast(okMsg); }
+      else if (j.outcome === "see_state") { toast(MSG_CV_SEE, true); }
+      else { toast(CV_ERR[j.error] || "Impossible pour l'instant : rien n'a changé."); }
+    }).catch(function (e) {
+      if (onApiError(e)) { return; }
+      if (panel === p) { p.pending = false; }
+      toast(MSG_CV_LOST, true);
+      refreshState();
+    });
+  }
+  function ambianceAct(a) {   // -> true si l'action relève de l'ambiance
+    if (panel.kind === "ambiance") {
+      if (a === "style") { openAmbStyle(); } else if (a === "motion") { openAmbMotion(); }
+      else if (a === "undo" || a === "reset") { openConfirm("amb-" + a); } else { openSettings("ambiance"); }
+      return true;
+    }
+    if (panel.kind === "ambstyle") {
+      if (a === "back") { openAmbiance("style"); return true; }
+      if (styleOf(cvPub) === a) { toast(CV_ERR.no_change); return true; }
+      ownerCanvas("apply", { changes: { preset: a, motion: (cvPub && cvPub.motion) || "calm" } },
+                  "Style « " + STYLES.filter(function (x) { return x[0] === a; })[0][1] + " » appliqué.", "style");
+      return true;
+    }
+    if (panel.kind === "ambmotion") {
+      if (a === "back") { openAmbiance("motion"); return true; }
+      ownerCanvas("apply", { changes: { motion: a } }, "Mouvement du fond : " +
+                  MOTIONS.filter(function (x) { return x[0] === a; })[0][1].toLowerCase() + ".", "motion");
+      return true;
+    }
+    if (panel.kind === "confirm" && (panel.what === "amb-undo" || panel.what === "amb-reset")) {
+      if (a === "no") { openAmbiance(panel.what.slice(4)); return true; }
+      if (a === "amb-undo") { ownerCanvas("rollback", {}, "Ambiance précédente rétablie.", "style"); }
+      else { ownerCanvas("reset", {}, "Ambiance d'origine rétablie.", "style"); }
+      return true;
+    }
+    return false;
+  }
   // ---- télécommande : actions normalisées par keys.js (clavier, télécommande USB 2,4 GHz, HDMI-CEC)
   var KEYS = window.OpenTVKeys || { normalize: function () { return null; }, isBrowserNav: function () { return false; } };
   function handle(a) {   // -> true si l'action a été consommée
@@ -1147,20 +1558,26 @@
     if (KEYS.isBrowserNav(e) || a === "back" || a === "home") { e.preventDefault(); }
     if (!a) { return; }
     lastHumanAt = Date.now();   // télécommande d'Alex : prioritaire sur toute touche d'assistant
-    if (!play && guarded(a)) { e.preventDefault(); return; }   // Retour/Accueil tenus depuis la fermeture du lecteur
+    if (cvSheet) {   // feuille Canvas : touches de consentement seulement (aucun geste ordinaire, aucune rafale)
+      if (!(e.repeat && (a === "ok" || a === "back" || a === "home"))) { sheetKey(a); }
+      e.preventDefault();
+      return;
+    }
+    if (!play && guarded(a)) { humanEvent("key"); e.preventDefault(); return; }   // Retour/Accueil tenus après le lecteur
     if (e.repeat && (a === "ok" || a === "back" || a === "home")) { e.preventDefault(); return; }   // pas de rafale
-    if (handle(a)) { e.preventDefault(); }
+    if (humanKey("key", a, !!e.repeat)) { e.preventDefault(); }
   });
   // boutons « précédent/suivant » d'une télécommande souris (air mouse) : jamais d'historique ; précédent = Retour
   document.addEventListener("mouseup", function (e) {
     if (e.button === 3 || e.button === 4) {
       e.preventDefault();
-      if (e.button === 3 && (play || !guarded("back"))) { handle("back"); }
+      if (e.button === 3 && cvSheet) { sheetKey("back"); }
+      else if (e.button === 3 && (play || !guarded("back"))) { humanKey("pointer", "back", false); }
     }
   });
 
   // ---- état global
-  function render(s) {
+  function render(s, gen) {
     var wasSetup = !!(state && state.setup.active);
     state = s;
     if (wasSetup && !s.setup.active) {   // succès confirmé sur la TV, sans terminal ni jargon
@@ -1235,11 +1652,14 @@
       loadForYou(false);
     }
     renderRemote();
+    if (s.canvas) { cvAdopt(s.canvas); cvState(s.canvas, gen); } else { cvPub = null; cvState(null); renderCanvas(); }
+    cvPaint();
     runActions(s);
     resumePlay(s.playback);
   }
   function poll() {
-    api("GET", "/api/tv/state").then(function (s) { fails = 0; $("offline").hidden = true; render(s); })
+    var gen = humanGen;   // feuille Canvas : seulement d'un état demandé APRÈS le dernier geste humain
+    api("GET", "/api/tv/state").then(function (s) { fails = 0; $("offline").hidden = true; render(s, gen); })
       .catch(function (e) {
         if (onApiError(e)) { return; }
         fails += 1;
@@ -1251,6 +1671,10 @@
     var st = reloadStore();
     document.documentElement.setAttribute("data-reloads", st ? String(recentReloads(st).length) : "na");
   })();
+  document.addEventListener("visibilitychange", function () {   // page cachée : occupation déclarée, feuille retirée
+    if (document.hidden && cvSheet && !cvSheet.busy) { sheetChoose("no", "timeout"); }
+    cvPaint();
+  });
   clock(); setInterval(clock, 10000);
   poll();
   remoteLoop();

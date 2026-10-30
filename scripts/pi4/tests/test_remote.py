@@ -2324,8 +2324,9 @@ class TestPhoneRemoteHttp(unittest.TestCase):
         self.assertNotIn("Réglages", ft["layout"]["hint"])
         self.assertEqual(st["set:end"]["focus"], st["set:row1"]["focus"])         # Retour : même carte
         self.assertEqual((st["set:open"]["panel"], st["set:open"]["ptitle"]), (True, "Réglages"))
-        self.assertEqual(res["settings_buttons"], ["Reconfigurer", "Gérer les assistants", "Oublier les téléphones",
-                                                   "Fermer"])
+        # service Canvas réel : « Ambiance OpenTV » (propriétaire) entre les assistants et les téléphones
+        self.assertEqual(res["settings_buttons"], ["Reconfigurer", "Gérer les assistants", "Ambiance OpenTV",
+                                                   "Oublier les téléphones", "Fermer"])
         self.assertEqual(st["set:confirm"]["ptitle"], "Afficher un nouveau QR de configuration ?")
         self.assertEqual(res["confirm_btn"], "Non")                              # confirmation : « Non » par défaut
         self.assertEqual(st["set:back"]["ptitle"], "Réglages")                   # Retour : un niveau

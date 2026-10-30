@@ -56,7 +56,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await key("Enter");                     // Gérer les assistants
     out.assistants = await panel();
     await shot("tv-muse-assistants.png");
+    const probed = tv.waitForResponse((r) => r.url().indexOf("/api/tv/muse/probe") >= 0, { timeout: 10000 });
     await key("Enter");                     // Muse
+    // propriété relue par la sonde puis publiée : la feuille se met à jour d'elle-même (focus remis sur l'option sûre).
+    // Attendre ce premier état APRÈS la sonde, sinon ↑ peut tomber juste avant ce rafraîchissement (course de minutage)
+    await probed;
+    await tv.waitForResponse((r) => r.url().indexOf("/api/tv/state") >= 0, { timeout: 10000 });
+    await sleep(150);
     out.consent = await panel();
     await shot("tv-muse-consent.png");
     // seule requête permise avant le consentement : relire l'état public de la boîte (aucune écriture d'autorisation)

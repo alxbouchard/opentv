@@ -798,9 +798,20 @@ class TestNonImpact(unittest.TestCase):
         self.assertGreater(len(copies), 50)
         self.assertGreaterEqual(len(copies), int(m.group(1)))          # tout fichier manifesté est copié
         proto = os.path.join(PI4, "prototypes")
+        proto_bytes = set()
+        for d, _, names in os.walk(proto):
+            for n in names:
+                with open(os.path.join(d, n), "rb") as f:
+                    proto_bytes.add(f.read())
+        prod_canvas = os.path.realpath(os.path.join(PI4, "ui", "canvas.js"))
         for src, dst in copies:
             self.assertFalse(os.path.realpath(src).startswith(proto + os.sep), src)
-            self.assertNotRegex(dst, r"(?i)prototype|canvas_model|lab\.(?:html|css)|canvas\.js", dst)
+            self.assertNotRegex(dst, r"(?i)prototype|canvas_model|lab\.(?:html|css)", dst)
+            if re.search(r"(?i)canvas\.js", dst):   # seul le moteur de production (ui/canvas.js), jamais celui du prototype
+                self.assertEqual(os.path.realpath(src), prod_canvas, (src, dst))
+                self.assertRegex(dst, r"^/opt/opentv/share/ui/canvas\.js(?:\.opentv-tmp)?$", dst)
+            with open(src, "rb") as f:
+                self.assertNotIn(f.read(), proto_bytes, src)   # aucun fichier livré n'est une copie du prototype
         self.assertNotRegex(out, r"(?i)prototypes|canvas_model")
 
     def test_production_code_never_imports_or_names_the_prototype(self):

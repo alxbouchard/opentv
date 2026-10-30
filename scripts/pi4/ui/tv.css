@@ -26,7 +26,8 @@ header { flex: 0 0 200px; height: 200px; display: flex; align-items: flex-start;
   white-space: nowrap; }
 .clockbox { flex: 0 0 auto; }
 .clock { font-size: 88px; font-weight: 300; line-height: 1; letter-spacing: -2px; font-variant-numeric: tabular-nums; }
-.date { font-size: 27px; line-height: 34px; color: var(--text-2); margin-top: 10px; text-transform: capitalize; }
+.dateline { display: flex; align-items: center; margin-top: 10px; height: 34px; }
+.date { flex: 0 0 auto; font-size: 27px; line-height: 34px; color: var(--text-2); text-transform: capitalize; }
 .spacer { flex: 1 1 0; min-width: 40px; }
 .quick { flex: 0 1 auto; min-width: 0; display: flex; flex-direction: column; align-items: flex-end; }
 .qrow { display: flex; align-items: center; height: 76px; }
@@ -264,3 +265,140 @@ footer { flex: 0 0 auto; display: flex; align-items: center; gap: 36px; padding-
 @keyframes pspin { to { transform: rotate(360deg); } }
 .pmsg { margin-top: 22px; font-size: 30px; opacity: .7; }
 .pbtns button.play { background: #fff; color: #0b0f18; font-weight: 700; }
+
+/* ==== OpenTV Canvas (canvas.js) : ambiance de l'accueil, classes fermées « cv-* » posées sur <body>.
+   Peint le FOND (#cvwall dans #bg, sous le voile) et le contenu de l'accueil (cartes, titres de rangée, pastille,
+   raison de la recommandation) — jamais la coque : configuration, Réglages, confirmations, boutons, QR, lecteur,
+   hors-ligne et toasts gardent leurs styles. Aucune ressource, aucun filtre, flou ni backdrop-filter ; animations
+   continues transform/opacity seulement sur QUATRE couches au plus (.cv-l1, .cv-l2, .cv-l3, #cvglow) ; « cv-paused »
+   les fige, « cv-static » les supprime (fond fixe complet). Configuration (« cv-setup ») : fond v23 intact. */
+#cvwall { display: none; position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; overflow: hidden; }
+.cv #cvwall { display: block; }
+#cvwall > div { position: absolute; }
+.cv-base { left: 0; top: 0; width: 1920px; height: 1080px; }
+.cv-l { display: none; }
+#cvglow { left: 560px; top: 0; width: 1200px; height: 820px; opacity: .78; }
+.cv-g { position: absolute; left: 0; top: 0; width: 100%; height: 100%; opacity: 0; transition: opacity .6s ease; }
+.cv-g.on { opacity: 1; }
+/* teintes fermées du halo = visuel dessiné de la carte au focus (hsl de tv.js), cv-hn = accent neutre */
+.cv-hn { background: radial-gradient(ellipse 50% 50% at 50% 50%, rgba(var(--cv-acc), .42) 0%, rgba(var(--cv-acc), .14) 40%, rgba(var(--cv-acc), 0) 70%); }
+.cv-h0 { background: radial-gradient(ellipse 50% 50% at 50% 50%, hsla(15, 64%, 58%, .62) 0%, hsla(63, 58%, 34%, .28) 40%, hsla(63, 58%, 34%, 0) 70%); }
+.cv-h1 { background: radial-gradient(ellipse 50% 50% at 50% 50%, hsla(45, 64%, 58%, .62) 0%, hsla(93, 58%, 34%, .28) 40%, hsla(93, 58%, 34%, 0) 70%); }
+.cv-h2 { background: radial-gradient(ellipse 50% 50% at 50% 50%, hsla(75, 64%, 58%, .62) 0%, hsla(123, 58%, 34%, .28) 40%, hsla(123, 58%, 34%, 0) 70%); }
+.cv-h3 { background: radial-gradient(ellipse 50% 50% at 50% 50%, hsla(105, 64%, 58%, .62) 0%, hsla(153, 58%, 34%, .28) 40%, hsla(153, 58%, 34%, 0) 70%); }
+.cv-h4 { background: radial-gradient(ellipse 50% 50% at 50% 50%, hsla(135, 64%, 58%, .62) 0%, hsla(183, 58%, 34%, .28) 40%, hsla(183, 58%, 34%, 0) 70%); }
+.cv-h5 { background: radial-gradient(ellipse 50% 50% at 50% 50%, hsla(165, 64%, 58%, .62) 0%, hsla(213, 58%, 34%, .28) 40%, hsla(213, 58%, 34%, 0) 70%); }
+.cv-h6 { background: radial-gradient(ellipse 50% 50% at 50% 50%, hsla(195, 64%, 58%, .62) 0%, hsla(243, 58%, 34%, .28) 40%, hsla(243, 58%, 34%, 0) 70%); }
+.cv-h7 { background: radial-gradient(ellipse 50% 50% at 50% 50%, hsla(225, 64%, 58%, .62) 0%, hsla(273, 58%, 34%, .28) 40%, hsla(273, 58%, 34%, 0) 70%); }
+.cv-h8 { background: radial-gradient(ellipse 50% 50% at 50% 50%, hsla(255, 64%, 58%, .62) 0%, hsla(303, 58%, 34%, .28) 40%, hsla(303, 58%, 34%, 0) 70%); }
+.cv-h9 { background: radial-gradient(ellipse 50% 50% at 50% 50%, hsla(285, 64%, 58%, .62) 0%, hsla(333, 58%, 34%, .28) 40%, hsla(333, 58%, 34%, 0) 70%); }
+.cv-h10 { background: radial-gradient(ellipse 50% 50% at 50% 50%, hsla(315, 64%, 58%, .62) 0%, hsla(3, 58%, 34%, .28) 40%, hsla(3, 58%, 34%, 0) 70%); }
+.cv-h11 { background: radial-gradient(ellipse 50% 50% at 50% 50%, hsla(345, 64%, 58%, .62) 0%, hsla(33, 58%, 34%, .28) 40%, hsla(33, 58%, 34%, 0) 70%); }
+
+/* couleur d'accent : quatre valeurs fermées */
+.cv { --cv-acc: 168, 220, 255; }
+.cv-acc-ice { --cv-acc: 168, 220, 255; }
+.cv-acc-ember { --cv-acc: 255, 190, 122; }
+.cv-acc-jade { --cv-acc: 126, 226, 184; }
+.cv-acc-violet { --cv-acc: 201, 176, 255; }
+
+/* aurore (Canvas, défaut) : nuit bleutée, deux rubans d'aurore (accent, violet), brume basse, halo du héros */
+.cv-wp-aurore .cv-base {
+  background: radial-gradient(ellipse 60% 40% at 18% 108%, rgba(28, 96, 98, .55) 0%, rgba(28, 96, 98, 0) 70%),
+    radial-gradient(ellipse 40% 30% at 92% 4%, rgba(70, 60, 150, .4) 0%, rgba(70, 60, 150, 0) 70%),
+    linear-gradient(160deg, #0b1026 0%, #121b3c 38%, #0d2832 72%, #071417 100%); }
+.cv-wp-aurore .cv-l1, .cv-wp-aurore .cv-l2, .cv-wp-aurore .cv-l3 { display: block; }
+.cv-wp-aurore .cv-l1 { left: -24%; top: -14%; width: 140%; height: 90%;
+  background: radial-gradient(ellipse 50% 50% at 50% 50%, rgba(var(--cv-acc), .58) 0%, rgba(var(--cv-acc), .2) 38%,
+    rgba(var(--cv-acc), 0) 70%);
+  transform: rotate(-11deg) scale(1, .42) translate3d(-5%, 0, 0); }
+.cv-wp-aurore .cv-l2 { left: 6%; top: -6%; width: 130%; height: 80%; opacity: .8;
+  background: radial-gradient(ellipse 50% 50% at 50% 50%, rgba(150, 110, 255, .52) 0%, rgba(150, 110, 255, .16) 40%,
+    rgba(140, 110, 255, 0) 70%);
+  transform: rotate(9deg) scale(1, .36) translate3d(6%, 4%, 0); }
+.cv-wp-aurore .cv-l3, .cv-wp-brume .cv-l2 { left: -40%; top: 58%; width: 170%; height: 44%;
+  background: radial-gradient(ellipse 50% 50% at 50% 50%, rgba(214, 228, 236, .14) 0%, rgba(214, 228, 236, .05) 45%,
+    rgba(214, 228, 236, 0) 72%);
+  transform: translate3d(7%, 0, 0); }
+
+/* brume : la photo d'OpenTV v23 reste le fond ; bancs de brume et rai de lumière lents par-dessus */
+.cv-wp-brume .cv-base { display: none; }
+.cv-wp-brume .cv-l1, .cv-wp-brume .cv-l2, .cv-wp-brume .cv-l3 { display: block; }
+.cv-wp-brume .cv-l1 { left: -30%; top: 8%; width: 160%; height: 52%;
+  background: radial-gradient(ellipse 50% 50% at 50% 50%, rgba(232, 240, 242, .3) 0%, rgba(232, 240, 242, .11) 42%,
+    rgba(232, 240, 242, 0) 70%);
+  transform: translate3d(-6%, 0, 0); }
+.cv-wp-brume .cv-l3 { left: 52%; top: -18%; width: 60%; height: 90%; opacity: .45;
+  background: radial-gradient(ellipse 40% 50% at 50% 30%, rgba(255, 246, 226, .2) 0%, rgba(255, 246, 226, 0) 70%); }
+.cv-wp-brume #cvglow { opacity: .42; }
+
+/* affiche (Cinéma) : salle sombre, grand halo de l'affiche au focus, balayage de lumière */
+.cv-wp-affiche .cv-base { background: linear-gradient(90deg, #07080c 0%, #0a0b12 40%, #0c0d14 100%); }
+.cv-wp-affiche .cv-l1 { display: block; left: -20%; top: -10%; width: 50%; height: 130%; opacity: 0;
+  background: linear-gradient(100deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, .07) 50%, rgba(255, 255, 255, 0) 100%); }
+.cv-wp-affiche #cvglow { left: 520px; width: 1400px; height: 1080px; opacity: .95; }
+
+/* héros : titre (défaut), affiche (halo plus présent, texte plus étroit), calme (halo discret, sans description) */
+.cv-hero-artwork #cvglow { opacity: .95; }
+.cv-hero-artwork .htext { width: 940px; }
+.cv-hero-calm #cvglow { opacity: .3; }
+.cv-hero-calm .hdesc { display: none; }
+
+/* voile de lisibilité : trois intensités fermées */
+.cv-shade-soft #bgShade { opacity: .72; }
+.cv-shade-deep #bgShade { background: linear-gradient(90deg, rgba(3, 4, 8, .9) 0%, rgba(3, 4, 8, .62) 34%,
+    rgba(3, 4, 8, .1) 66%, rgba(3, 4, 8, .3) 100%),
+  linear-gradient(180deg, rgba(0, 0, 0, .5) 0%, rgba(0, 0, 0, .1) 28%, rgba(0, 0, 0, .55) 60%, rgba(0, 0, 0, .9) 100%); }
+
+/* mouvement : « alive » = quatre couches, « calm » = trois couches plus lentes (le halo ne dérive pas) */
+@keyframes cvRibA { from { transform: rotate(-11deg) scale(1, .42) translate3d(-5%, 0, 0); }
+  to { transform: rotate(-5deg) scale(1.08, .5) translate3d(6%, 8%, 0); } }
+@keyframes cvRibB { from { transform: rotate(9deg) scale(1, .36) translate3d(6%, 4%, 0); opacity: .6; }
+  to { transform: rotate(3deg) scale(1.1, .46) translate3d(-7%, 12%, 0); opacity: 1; } }
+@keyframes cvFogA { from { transform: translate3d(-6%, 0, 0); } to { transform: translate3d(9%, -3%, 0); } }
+@keyframes cvFogB { from { transform: translate3d(7%, 0, 0); opacity: .7; } to { transform: translate3d(-8%, 2%, 0); opacity: 1; } }
+@keyframes cvShaft { from { opacity: .45; } to { opacity: 1; } }
+@keyframes cvSweep { from { transform: translate3d(0, 0, 0); opacity: 0; } to { transform: translate3d(320%, 0, 0); opacity: 1; } }
+@keyframes cvBloom { from { transform: translate3d(0, 0, 0) scale(1); } to { transform: translate3d(-3%, 2%, 0) scale(1.06); } }
+.cv-anim.cv-wp-aurore .cv-l1 { animation: cvRibA 64s ease-in-out infinite alternate; }
+.cv-anim.cv-wp-aurore .cv-l2 { animation: cvRibB 88s ease-in-out infinite alternate; }
+.cv-anim.cv-wp-aurore .cv-l3, .cv-anim.cv-wp-brume .cv-l2 { animation: cvFogB 112s ease-in-out infinite alternate; }
+.cv-anim.cv-wp-brume .cv-l1 { animation: cvFogA 84s ease-in-out infinite alternate; }
+.cv-anim.cv-wp-brume .cv-l3 { animation: cvShaft 26s ease-in-out infinite alternate; }
+.cv-anim.cv-wp-affiche .cv-l1 { animation: cvSweep 22s ease-in-out infinite alternate; }
+.cv-anim.cv-m-alive #cvglow { animation: cvBloom 52s ease-in-out infinite alternate; }
+.cv-anim.cv-m-calm .cv-l1 { animation-duration: 104s; }
+.cv-anim.cv-m-calm .cv-l2 { animation-duration: 140s; }
+.cv-anim.cv-m-calm .cv-l3 { animation-duration: 160s; }
+.cv-anim.cv-m-calm.cv-wp-affiche .cv-l1, .cv-anim.cv-m-calm.cv-wp-brume .cv-l3 { animation-duration: 44s; }
+.cv-paused #cvwall > div { animation-play-state: paused; }
+.cv-static #cvwall > div { animation: none; }
+@media (prefers-reduced-motion: reduce) { #cvwall > div { animation: none !important; } }
+
+/* ---- contenu de l'accueil (jamais la coque) : pastille de scène, raison de la proposition, rangées, cartes */
+.cvpill { display: none; flex: 0 0 auto; margin-left: 18px; font-size: 19px; line-height: 24px; padding: 5px 14px 5px 32px;
+  border-radius: 999px; position: relative; color: var(--text-1); background: rgba(255, 255, 255, .1);
+  border: 1px solid rgba(255, 255, 255, .16); white-space: nowrap; }
+.cvpill::before { content: ""; position: absolute; left: 13px; top: 12px; width: 10px; height: 10px; border-radius: 50%;
+  background: rgb(var(--cv-acc)); }
+.cv .cvpill { display: inline-block; }
+.cv .cvpill[hidden] { display: none; }
+.cv .chip.why { background: rgba(var(--cv-acc), .16); color: rgb(var(--cv-acc)); }
+.cv-wp-affiche #hkicker { text-transform: uppercase; letter-spacing: 2px; font-size: 20px; line-height: 30px;
+  color: rgb(var(--cv-acc)); }
+.cv .row h2 { display: flex; align-items: center; }
+.cv .row h2::before { content: ""; flex: 0 0 6px; height: 26px; margin-right: 14px; border-radius: 3px;
+  background: rgb(var(--cv-acc)); opacity: .9; }
+/* verre plus profond : reflet supérieur, ombre portée ; focus = anneau blanc + halo d'accent (aucun flou) */
+.cv .card { border-radius: 22px; border-color: rgba(255, 255, 255, .14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .26), 0 8px 16px rgba(0, 0, 0, .28); }
+.cv .card.focused { border-color: #fff;
+  box-shadow: 0 0 0 3px #fff, 0 0 0 9px rgba(var(--cv-acc), .38), 0 6px 16px rgba(0, 0, 0, .45); }
+.cv .card .info { background: linear-gradient(180deg, rgba(4, 8, 20, 0) 0%, rgba(4, 8, 20, .86) 64%); }
+.cv-wp-affiche .card { background: rgba(6, 7, 10, .7); border-color: rgba(255, 255, 255, .1); }
+
+/* ---- feuille de confirmation Canvas : style de la COQUE (comme Réglages), jamais de la scène */
+.cvchanges { list-style: none; margin: -8px 0 26px; padding: 0; font-size: 23px; line-height: 1.35; color: #fff; }
+.cvchanges li { margin: 0 0 10px; padding: 10px 16px; border-radius: 12px; background: rgba(255, 255, 255, .08); }
+.cvchanges b { font-weight: 600; color: rgba(255, 255, 255, .84); }
+.cvcount { margin: 14px 0 0; font-size: 20px; color: rgba(255, 255, 255, .6); }
