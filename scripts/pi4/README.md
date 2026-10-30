@@ -1132,6 +1132,13 @@ chargement, la lecture ou son retour (la proposition est refusée `tv_busy`). Le
 reste « prêt » sans cette permission ; Muse ne voit les outils d'ambiance que si son identité générique `muse` l'a
 reçue.
 
+**Cinéma (fond « Affiche »).** Une lumière de projection diffuse, ivoire chaud, entre par le haut à droite depuis
+l'extérieur du cadre : aucun projecteur, appareil, objectif ni silhouette, seulement un faisceau large et un halo
+plumés par des dégradés locaux (aucun filtre, flou, masque ni ressource), toujours sous le voile, le héros, les cartes
+et la coque. « Coupé » : lumière fixe ; « Calme » : dérive et respiration très lentes (2 couches) ; « Vivant » :
+balayage doux du faisceau et cadence de film évoquée par de rares creux d'opacité minimes (≤ 4 %, jamais un
+stroboscope), 4 couches au plus.
+
 **Mouvement sûr.** Au plus quatre couches continues, transform/opacity seulement (aucun flou, filtre, vidéo ni
 worker), aucune ressource distante. Ambiance **figée** pendant un panneau, la feuille de confirmation, le
 chargement/la lecture/le retour, le hors-ligne et une page cachée ; **fond fixe** en configuration, en mouvement

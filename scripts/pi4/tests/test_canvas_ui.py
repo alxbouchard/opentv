@@ -201,6 +201,120 @@ class TestCanvasCssStatic(unittest.TestCase):
                 self.assertNotRegex(sel, r"\.cv-|\.cv\b", sel)
 
 
+class TestCinemaProjectionStatic(unittest.TestCase):
+    """Cinéma (wallpaper « affiche ») : lumière de projection diffuse seulement — aucun projecteur, appareil,
+    silhouette, texte ni ressource ; dégradés locaux plumés (aucun filtre/flou/masque) ; couches fixes existantes ;
+    « calm » très lent, « alive » balayage doux + cadence de film évoquée par de rares creux d'opacité minimes."""
+    WALL = {"cv-base", "cv-l", "cv-l1", "cv-l2", "cv-l3", "cvglow"}
+    PROPS = {"left", "top", "width", "height", "opacity", "background", "transform", "transform-origin", "display",
+             "animation", "animation-duration"}
+
+    def affiche_rules(self):
+        out = []
+        for sel, decl in css_rules(canvas_css()):
+            for part in sel.split(","):
+                part = part.strip()
+                if "cv-wp-affiche" not in part:
+                    continue
+                last = re.split(r"\s+", part)[-1]
+                out.append((part, last, decl))
+        return out
+
+    def keyframes(self, name):
+        css = re.sub(r"/\*.*?\*/", "", read(TV_CSS), flags=re.S)
+        body = re.search(r"@keyframes\s+%s\s*\{((?:[^{}]*\{[^{}]*\})*)\s*\}" % name, css).group(1)
+        frames = []
+        for sel, decl in re.findall(r"([^{}]+)\{([^{}]*)\}", body):
+            for o in sel.split(","):
+                o = o.strip()
+                off = 0.0 if o == "from" else 100.0 if o == "to" else float(o.rstrip("%"))
+                frames.append((off, decl))
+        return sorted(frames)
+
+    def anim_names(self, motion):
+        names = {}
+        for sel, decl in css_rules(canvas_css()):
+            m = re.search(r"(?:^|;)\s*animation\s*:\s*([\w-]+)\s+([\d.]+)s", decl)
+            if not m:
+                continue
+            for part in sel.split(","):
+                part = part.strip()
+                if ".cv-anim" in part and "cv-wp-affiche" in part and ("cv-m-" + motion in part or "cv-m-" not in part):
+                    names[re.findall(r"[.#]([\w-]+)", re.split(r"\s+", part)[-1])[-1]] = (m.group(1), float(m.group(2)))
+        return names
+
+    def test_only_feathered_warm_gradients_on_existing_layers(self):
+        rules = self.affiche_rules()
+        self.assertTrue(rules)
+        lit = set()
+        for part, last, decl in rules:
+            self.assertNotRegex(part, r"::?(before|after)|::", part)                 # aucun pseudo-élément (forme, texte)
+            toks = set(re.findall(r"[.#]([\w-]+)", last))
+            if not toks & self.WALL:
+                continue                                                               # contenu de l'accueil (hors fond)
+            props = set(re.findall(r"([\w-]+)\s*:", decl))
+            self.assertLessEqual(props, self.PROPS, (part, props))                    # ni bordure, ombre, rayon, clip…
+            low = decl.lower()
+            for bad in ("url(", "conic-gradient", "repeating-", "image-set", "element(", "content", "filter", "blur",
+                        "mask", "clip", "border", "shadow", "#fff", "white", "hsl"):
+                self.assertNotIn(bad, low, (part, bad))
+            for g in re.findall(r"(\w[\w-]*)\(", decl):
+                self.assertIn(g, ("radial-gradient", "linear-gradient", "rgba", "rotate", "translate3d", "scale",
+                                  "ellipse"), (part, g))
+            if toks & {"cv-l1", "cv-l2", "cv-l3"} and "background" in props:
+                lit.update(toks & {"cv-l1", "cv-l2", "cv-l3"})
+                cols = re.findall(r"rgba\((\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\)", decl)
+                self.assertTrue(cols, part)
+                for r, g, b, a in cols:                                                # ivoire chaud, toujours diffus
+                    r, g, b, a = int(r), int(g), int(b), float(a)
+                    self.assertTrue(r >= 240 and r >= g >= b and r - b >= 30, (part, r, g, b))
+                    self.assertLessEqual(a, 0.2, part)
+                for grad in re.findall(r"radial-gradient\(([^()]*(?:\([^()]*\)[^()]*)*)\)", decl):
+                    alphas = [float(x) for x in re.findall(r"rgba\([^)]*,\s*([\d.]+)\)", grad)]
+                    self.assertEqual(alphas[-1], 0, (part, grad))                       # plumé jusqu'à zéro
+                    self.assertEqual(alphas, sorted(alphas, reverse=True), (part, grad))
+                    self.assertGreaterEqual(len(alphas), 3, (part, grad))               # dégradé en plusieurs paliers
+        self.assertEqual(lit, {"cv-l1", "cv-l2", "cv-l3"})
+        self.assertRegex(canvas_css(), r"\.cv-wp-affiche \.cv-l1, \.cv-wp-affiche \.cv-l2, \.cv-wp-affiche \.cv-l3 "
+                                       r"\{ display: block; \}")
+
+    def test_no_projector_markup_text_or_resource(self):
+        html = read(TV_HTML)
+        wall = re.search(r'<div id="cvwall">(.*?)</div></div>\n', html, re.S).group(1)
+        self.assertEqual(re.findall(r'<div (?:id|class)="([^"]+)"', wall),
+                         ["cv-base", "cv-l cv-l1", "cv-l cv-l2", "cv-l cv-l3", "cvglow", "cvga", "cvgb"])
+        for f in (TV_HTML, CANVAS_JS, TV_CSS):   # code seulement (les commentaires peuvent nommer l'interdit)
+            low = re.sub(r"/\*.*?\*/|<!--.*?-->", "", read(f), flags=re.S).lower()
+            for bad in ("projecteur", "projector", "projectionniste", "<img", "<video", "<svg id=\"cv"):
+                self.assertFalse(bad in low, (f, bad))
+
+    def test_motion_modes_and_film_cadence_never_strobe(self):
+        calm, alive = self.anim_names("calm"), self.anim_names("alive")
+        self.assertEqual(set(calm) - {"cvglow"}, {"cv-l2", "cv-l3"}, calm)              # calme : dérive + respiration
+        self.assertEqual(set(alive), {"cv-l1", "cv-l2", "cv-l3"}, alive)               # + balayage (+ halo global)
+        for layer, (name, dur) in list(calm.items()) + list(alive.items()):
+            self.assertGreaterEqual(dur, 20, (layer, name))
+        for layer in ("cv-l2", "cv-l3"):
+            self.assertGreaterEqual(calm[layer][1], 120, layer)                        # très lent
+        rot = lambda d: [float(x) for x in re.findall(r"rotate\((-?[\d.]+)deg\)", d)]
+        for name, cap in ((calm["cv-l2"][0], 2), (alive["cv-l2"][0], 6)):              # balayage doux
+            r = [x for _, d in self.keyframes(name) for x in rot(d)]
+            self.assertTrue(r and max(r) - min(r) <= cap, (name, r))
+        film = self.keyframes(alive["cv-l3"][0])
+        ops = [(o, float(re.search(r"opacity\s*:\s*([\d.]+)", d).group(1))) for o, d in film]
+        self.assertEqual(len(ops), len(film), "cadence : opacité seulement")
+        for _, d in film:
+            self.assertEqual(set(re.findall(r"([\w-]+)\s*:", d)), {"opacity"})
+        vals = [v for _, v in ops]
+        self.assertLessEqual(max(vals) - min(vals), 0.15, vals)
+        self.assertGreaterEqual(min(vals), 0.8, vals)
+        brief = [(a, b) for a, b in zip(ops, ops[1:]) if b[0] - a[0] < 1.0]
+        self.assertTrue(2 <= len(brief) <= 8, brief)                                    # quelques creux rares
+        for a, b in brief:
+            self.assertLessEqual(abs(a[1] - b[1]), 0.05, (a, b))                        # jamais un flash
+        self.assertLessEqual(sum(b[0] - a[0] for a, b in brief), 3.0, brief)          # ≤ 3 % du cycle
+
+
 class TestTvHtmlStatic(unittest.TestCase):
     def test_layers_sheet_and_scripts(self):
         html = read(TV_HTML)
@@ -840,8 +954,8 @@ class TestCanvasUiBrowser(unittest.TestCase):
         for k in ("off", "reduced"):
             self.assertEqual((x[k]["mode"], x[k]["total"]), ("static", 0), k)
         self.assertEqual(x["reduced_back"]["mode"], "run")                  # préférence relue en direct
-        expect = {"aurore-calm": 3, "aurore-alive": 4, "brume-calm": 3, "brume-alive": 4, "affiche-calm": 1,
-                  "affiche-alive": 2}
+        expect = {"aurore-calm": 3, "aurore-alive": 4, "brume-calm": 3, "brume-alive": 4, "affiche-calm": 2,
+                  "affiche-alive": 4}
         for k, n in expect.items():
             self.assertEqual(x["combos"][k]["running"], n, (k, x["combos"][k]))
             self.assertLessEqual(x["combos"][k]["running"], 4)
@@ -868,6 +982,43 @@ class TestCanvasUiBrowser(unittest.TestCase):
         self.assertTrue(60 <= x["slowSteps"] <= 60 + 70, x["slowSteps"])
         self.assertEqual(x["after"]["probe"], {"probing": False, "sleeping": False, "probes": 2})
         self.assertEqual((x["after"]["mode"], x["after"]["degraded"]), ("static", "1"))
+
+    def test_cinema_projection_light_is_diffuse_warm_and_behind(self):
+        """Captures réelles 1920×1080 (projection-off|calm|alive[-light].png) : lumière ivoire chaude, large et
+        plumée, point chaud hors champ (aucun appareil), jamais au-dessus du héros/des cartes/de la coque."""
+        x = self.r("projection")
+        for mo, mode, n in (("off", "static", 0), ("calm", "run", 2), ("alive", "run", 4)):
+            r = x[mo]
+            self.assertEqual((r["mode"], r["running"]), (mode, n), mo)
+            self.assertEqual(r["behind"], [], mo)                                       # toujours derrière
+            for layer in r["layers"]:                                                   # aucune forme ni texte ajoutés
+                self.assertIn(layer["before"], ("none", "normal"), (mo, layer))
+                self.assertIn(layer["after"], ("none", "normal"), (mo, layer))
+                self.assertEqual(layer["text"].strip(), "", (mo, layer))
+                self.assertEqual(layer["kids"], 2 if layer["cls"] == "cvglow" else 0, (mo, layer))
+            px = r["px"]
+            self.assertLessEqual(px["rawMax"], 90, (mo, px))                            # jamais une source éclatante
+            self.assertLessEqual(px["maxStep"], 5, (mo, px))                            # aucun bord ni silhouette
+            self.assertGreaterEqual(px["maxDelta"], 25, (mo, px))                       # lumière visible
+            self.assertGreaterEqual(px["meanDelta"], 5, (mo, px))
+            self.assertGreaterEqual(px["litFrac"], 0.35, (mo, px))                      # large et diffuse
+            self.assertGreaterEqual(px["warmth"], 2, (mo, px))                          # ivoire chaud
+            ax, ay = px["maxAt"]
+            self.assertTrue(ax >= 1920 - 48 or ay <= 48, (mo, px["maxAt"]))             # point chaud au bord : hors champ
+        self.assertEqual(x["off"]["moved"], 0)                                          # « Coupé » : fixe
+        self.assertGreater(x["calm"]["moved"], 0.2)
+        self.assertGreater(x["alive"]["moved"], x["calm"]["moved"])                     # « Vivant » plus présent
+        c = x["calm"]["cadence"]
+        self.assertEqual(c["dips"], 0, c)                                               # calme : respiration sans creux
+        self.assertLessEqual(c["maxStep"], 0.005, c)
+        a = x["alive"]["cadence"]
+        self.assertEqual(a["samples"], round(a["duration"] * 24 / 1000) + 1, a)          # échantillonné à 24 i/s
+        self.assertLessEqual(a["maxStep"], 0.05, a)                                     # jamais un stroboscope
+        self.assertTrue(1 <= a["dips"] <= 3, a)                                         # rares creux de cadence
+        self.assertLessEqual(a["dipFrac"], 0.03, a)
+        self.assertLessEqual(a["max"] - a["min"], 0.15, a)
+        self.assertEqual((x["reduced"]["mode"], x["reduced"]["total"]), ("static", 0))
+        self.assertEqual(x["reducedVsOff"], 0)                                          # repli fixe = « Coupé »
 
     def test_shell_and_qr_are_never_styled_or_animated_by_the_scene(self):
         x = self.r("shell")

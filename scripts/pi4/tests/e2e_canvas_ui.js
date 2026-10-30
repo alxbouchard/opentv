@@ -924,6 +924,158 @@ S.watchdog = async (browser) => {
   return { healthy: healthy, asleep: asleep, slow: slow, slowSteps: steps + 1, after: after };
 };
 
+// Cinéma (affiche) : lumière de projection diffuse. Captures déterministes 1920×1080 (animations figées à une même
+// fraction de leur cycle), analyse de pixels dans une page vierge (canvas), cadence échantillonnée à 1/24 s.
+const LIGHT_ONLY = (on) => {   // fond seul : coque, contenu, voile et halo de la carte masqués (CSSOM, permis par la CSP)
+  const els = document.querySelectorAll("#app > *:not(#bg), body > *:not(#app), #bgShade, #cvglow");
+  for (const el of els) { el.style.visibility = on ? "hidden" : ""; }
+};
+const LAYERS = (show) => {     // couches de lumière (.cv-l*) masquées : référence « salle seule »
+  for (const el of document.querySelectorAll("#cvwall .cv-l")) { el.style.visibility = show ? "" : "hidden"; }
+};
+const FREEZE = (frac) => {      // toutes les animations CSS figées à la même fraction de leur cycle
+  document.getAnimations().forEach((a) => {
+    if (a.animationName === undefined) { return; }
+    const d = a.effect.getTiming().duration;
+    a.pause();
+    a.currentTime = d * frac;
+  });
+};
+async function analyze(ana, png, ref) {
+  return ana.evaluate(async (x) => {
+    const load = (b64) => new Promise((res, rej) => {
+      const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = "data:image/png;base64," + b64; });
+    const px = async (b64) => {
+      const img = await load(b64), c = document.createElement("canvas");
+      c.width = 1920; c.height = 1080;
+      const g = c.getContext("2d"); g.drawImage(img, 0, 0);
+      return g.getImageData(0, 0, 1920, 1080).data;
+    };
+    const a = await px(x.png), b = x.ref ? await px(x.ref) : null, B = 16, W = 1920 / B, H = Math.ceil(1080 / B);
+    const blocks = (d) => {   // moyenne par bloc 16×16 : luminance, rouge, bleu (le tramage des dégradés s'annule)
+      const o = { y: new Float64Array(W * H), r: new Float64Array(W * H), b: new Float64Array(W * H), n: new Float64Array(W * H) };
+      for (let y = 0; y < 1080; y++) {
+        for (let xx = 0; xx < 1920; xx++) {
+          const k = (y * 1920 + xx) * 4, i = Math.floor(y / B) * W + Math.floor(xx / B);
+          o.y[i] += 0.2126 * d[k] + 0.7152 * d[k + 1] + 0.0722 * d[k + 2]; o.r[i] += d[k]; o.b[i] += d[k + 2]; o.n[i] += 1;
+        }
+      }
+      for (let i = 0; i < W * H; i++) { o.y[i] /= o.n[i]; o.r[i] /= o.n[i]; o.b[i] /= o.n[i]; }
+      return o;
+    };
+    const A = blocks(a), R = b ? blocks(b) : null;
+    let maxY = 0, maxStep = 0, maxD = 0, maxAt = null, sumD = 0, lit = 0, warm = 0, warmN = 0;
+    let rawMax = 0;
+    for (let k = 0; k < a.length; k += 4) { rawMax = Math.max(rawMax, 0.2126 * a[k] + 0.7152 * a[k + 1] + 0.0722 * a[k + 2]); }
+    for (let j = 0; j < H; j++) {
+      for (let i = 0; i < W; i++) {
+        const n = j * W + i, y = A.y[n];
+        maxY = Math.max(maxY, y);
+        if (i + 1 < W) { maxStep = Math.max(maxStep, Math.abs(A.y[n + 1] - y)); }
+        if (j + 1 < H) { maxStep = Math.max(maxStep, Math.abs(A.y[n + W] - y)); }
+        if (R) {
+          const d = y - R.y[n];
+          sumD += Math.abs(d);
+          if (d > maxD) { maxD = d; maxAt = [i * B + B / 2, j * B + B / 2]; }
+          if (d >= 3) { lit += 1; warm += (A.r[n] - R.r[n]) - (A.b[n] - R.b[n]); warmN += 1; }
+        }
+      }
+    }
+    return { maxY: maxY, rawMax: rawMax, maxStep: maxStep, maxDelta: maxD, maxAt: maxAt, meanDelta: R ? sumD / (W * H) : null,
+             litFrac: R ? lit / (W * H) : null, warmth: warmN ? warm / warmN : null };
+  }, { png: png.toString("base64"), ref: ref ? ref.toString("base64") : null });
+}
+async function diffMean(ana, p1, p2) {
+  return ana.evaluate(async (x) => {
+    const load = (b64) => new Promise((res) => { const i = new Image(); i.onload = () => res(i); i.src = "data:image/png;base64," + b64; });
+    const px = async (b64) => { const img = await load(b64), c = document.createElement("canvas"); c.width = 1920; c.height = 1080;
+      const g = c.getContext("2d"); g.drawImage(img, 0, 0); return g.getImageData(0, 0, 1920, 1080).data; };
+    const a = await px(x.a), b = await px(x.b);
+    let s = 0; for (let k = 0; k < a.length; k += 4) { s += Math.abs(a[k] - b[k]) + Math.abs(a[k + 1] - b[k + 1]) + Math.abs(a[k + 2] - b[k + 2]); }
+    return s / (a.length / 4) / 3;
+  }, { a: p1.toString("base64"), b: p2.toString("base64") });
+}
+S.projection = async (browser) => {
+  const { ctx, page, F } = await open(browser, { noTransitions: true });
+  const ana = await browser.newPage();   // page vierge hors du contexte simulé : analyse des pixels
+  await waitMode(page, "run");
+  const out = {};
+  let rev = 20;
+  for (const mo of ["off", "calm", "alive"]) {
+    F.state.canvas = view(Object.assign(clone(P.cinema), { motion: mo }), { state: "applied", revision: rev++, preset: null });
+    await until(async () => { const b = await bodyCls(page); return b.indexOf("cv-wp-affiche") >= 0 && b.indexOf("cv-m-" + mo) >= 0; }, 5000);
+    const st = await waitMode(page, mo === "off" ? "static" : "run", 4000);
+    await sleep(700);   // fondu du halo de la carte terminé
+    const r = { mode: st.mode, running: st.running, anims: st.anims };
+    r.layers = await page.evaluate(() => Array.prototype.map.call(document.querySelectorAll("#cvwall > div"), (e) => {
+      const c = getComputedStyle(e), b = e.getBoundingClientRect();
+      return { cls: e.id || e.className, display: c.display, z: c.zIndex, before: getComputedStyle(e, "::before").content,
+               after: getComputedStyle(e, "::after").content, text: e.textContent, kids: e.children.length,
+               rect: [b.left, b.top, b.right, b.bottom] };
+    }));
+    // l'ambiance reste DERRIÈRE : chaque point du héros, des cartes et de la coque appartient à la coque/au contenu
+    r.behind = await page.evaluate(() => {
+      const ids = ["htitle", "gear", "rqr", "clock"], bad = [];
+      ids.concat([".card.focused"]).forEach((s) => {
+        const e = s[0] === "." ? document.querySelector(s) : document.getElementById(s);
+        if (!e) { return; }
+        const b = e.getBoundingClientRect(), hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+        if (!hit || hit.closest("#bg")) { bad.push(s); }
+      });
+      return bad;
+    });
+    await page.evaluate(FREEZE, 0.37);
+    await page.screenshot({ path: path.join(cfg.shots, "projection-" + mo + ".png") });
+    await page.evaluate(LIGHT_ONLY, true);
+    const light = await page.screenshot();
+    fs.writeFileSync(path.join(cfg.shots, "projection-" + mo + "-light.png"), light);
+    await page.evaluate(LAYERS, false);
+    const room = await page.screenshot();
+    await page.evaluate(LAYERS, true);
+    r.px = await analyze(ana, light, room);
+    if (mo !== "off") {   // mouvement : même fraction de cycle décalée, toujours sans coque
+      await page.evaluate(FREEZE, 0.87);
+      r.moved = await diffMean(ana, light, await page.screenshot());
+      // cadence de la couche diffuse : opacité échantillonnée à 1/24 s sur un cycle complet
+      r.cadence = await page.evaluate(() => {
+        const a = document.getAnimations().filter((x) => x.animationName !== undefined && x.effect.target.className === "cv-l cv-l3")[0];
+        if (!a) { return null; }
+        const d = a.effect.getTiming().duration, el = a.effect.target, v = [];
+        for (let f = 0; f <= Math.round(d * 24 / 1000); f++) { a.currentTime = f * 1000 / 24; v.push(parseFloat(getComputedStyle(el).opacity)); }
+        let maxStep = 0, dips = 0, dipN = 0, inDip = false;
+        for (let i = 0; i < v.length; i++) {
+          if (i) { maxStep = Math.max(maxStep, Math.abs(v[i] - v[i - 1])); }
+          // creux bref : sous la moyenne de ses voisins à ± 0,5 s (une respiration lente n'y descend jamais)
+          const lo = v[Math.max(0, i - 12)], hi = v[Math.min(v.length - 1, i + 12)];
+          const dip = (lo + hi) / 2 - v[i] > 0.01;
+          if (dip) { dipN += 1; if (!inDip) { dips += 1; } }
+          inDip = dip;
+        }
+        return { name: a.animationName, duration: d, samples: v.length, min: Math.min.apply(null, v), max: Math.max.apply(null, v),
+                 maxStep: maxStep, dips: dips, dipFrac: dipN / v.length };
+      });
+    } else {
+      await sleep(1500);
+      const again = await page.screenshot();
+      r.moved = await diffMean(ana, light, again);
+    }
+    await page.evaluate(LIGHT_ONLY, false);
+    // relâche le gel WAAPI : une animation de même nom garderait sinon son état figé au mode suivant
+    await page.evaluate(() => document.getAnimations().forEach((a) => { if (a.animationName !== undefined) { a.play(); } }));
+    out[mo] = r;
+  }
+  // repli statique complet : « Réduire les animations » sur « Vivant » rend exactement la lumière fixe de « Coupé »
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  out.reduced = await waitMode(page, "static", 4000);
+  await page.evaluate(LIGHT_ONLY, true);
+  out.reducedVsOff = await diffMean(ana, await page.screenshot(), fs.readFileSync(path.join(cfg.shots, "projection-off-light.png")));
+  await page.evaluate(LIGHT_ONLY, false);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await ana.close();
+  await ctx.close();
+  return out;
+};
+
 S.shell = async (browser) => {
   const { ctx, page, F } = await open(browser, { noTransitions: true });
   await waitMode(page, "run");
