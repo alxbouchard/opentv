@@ -80,7 +80,15 @@
     if (!Array.isArray(list)) { list = []; }
     return list.filter(function (t) { return typeof t === "number" && t <= now && now - t < RELOAD_WINDOW_MS; });
   }
-  function showOffline(text) { $("offline").textContent = text; $("offline").hidden = false; cvPaint(); }
+  // voile « Reconnexion… » : il recouvre tout, donc une feuille Canvas dessous serait un consentement invisible.
+  // Sans « Oui » en vol, elle est refusée tout de suite (chemin sûr « Non », annulation bornée) ; avec un « Oui » en
+  // vol, ses touches restent bloquées (sheetKey) jusqu'à la réponse ou l'échéance CV_ROUTE_MS.
+  function showOffline(text) {
+    $("offline").textContent = text; $("offline").hidden = false;
+    if (cvSheet && !cvSheet.busy) { sheetChoose("no", "offline"); }
+    cvPaint();
+  }
+  function offlineShown() { return !$("offline").hidden; }
   function scheduleReload() {
     if (reloadTimer) { return; }
     var st = reloadStore();
@@ -800,7 +808,7 @@
       if (j.muse && j.muse.last && typeof j.muse.last.seq === "number") { museSeq = j.muse.last.seq; }
       museSkipToast = false;
       openMuseSetup();
-      api("GET", "/api/tv/state").then(render).catch(onApiError);   // QR sans attendre le poll
+      readState().then(function (r) { render(r.s, null, r.fresh); }).catch(onApiError);   // QR sans attendre le poll
     }).catch(function (e) {
       if (!onApiError(e)) { closePanel(); toast("Impossible pour l'instant : la TV doit être connectée au réseau."); }
     });
@@ -1021,7 +1029,7 @@
             return;
           }
           openAgents(base);
-          api("GET", "/api/tv/state").then(render).catch(onApiError);   // QR tout de suite, sans attendre le poll
+          readState().then(function (r) { render(r.s, null, r.fresh); }).catch(onApiError);   // QR tout de suite
         }).catch(function (e) {
           if (!onApiError(e)) { closePanel(); toast("Impossible pour l'instant : la TV doit être connectée au réseau."); }
         });
@@ -1153,13 +1161,24 @@
   //   (carte/Réglages mémorisés, sans anneau) et l'aide du bas nomme ses touches (OK = choix au focus, Retour = Non).
   // - aucune action d'assistant n'est réclamée ni appliquée pendant la feuille ; « restore_failed » (see_state) montre
   //   l'état réel relu par le service, jamais « rien n'a changé ».
+  // - réponse d'une route qui fait foi (confirm, cancel, apply, rollback, reset) : adoptée seulement si elle est la plus
+  //   récente ENVOYÉE, et chaque adoption incrémente la génération cvGen. Un état (/api/tv/state) n'apporte sa vue
+  //   Canvas que si cvGen n'a pas bougé depuis son ENVOI (et s'il est plus récent que le dernier état adopté) : un poll
+  //   parti avant une confirmation et arrivé après ne repeint jamais l'ancienne ambiance ni ne reconstruit les rangées.
+  //   Jamais la révision du magasin pour en juger (« Ambiance d'origine » la fait reculer).
+  // - toute requête Canvas est bornée (CV_ROUTE_MS) : un « Oui » sans réponse ne piège jamais la télécommande ; issue
+  //   ambiguë => état réel relu, jamais « rien n'a changé ».
   var CV = window.OpenTVCanvas || null;
-  var CV_GATE_MS = 800, CV_SHEET_MARGIN_S = 3;
+  var CV_GATE_MS = 800, CV_SHEET_MARGIN_S = 3, CV_ROUTE_MS = 5000;
+  var cvGen = 0, cvTicket = 0, cvRouteAt = 0, cvGetAt = 0;
   var cvPub = null, cvSheet = null, cvSheetTimer = null, cvDone = {}, cvGate = null;
   var humanGen = 0, evPending = 0, rowOrder = null, rowOrderSig = "";
   var busyAcked = null, busyFlight = false, busyWait = [], busyRetry = null;
   var MSG_CV_SEE = "L'ambiance n'a peut-être pas été enregistrée comme prévu.\nL'écran montre l'ambiance réellement active.";
   var MSG_CV_LOST = "Réponse perdue : vérifie l'ambiance affichée (Réglages → Ambiance OpenTV).";
+  var MSG_CV_UNAVAILABLE = "Ambiance indisponible pour l'instant : rien n'a changé.";
+  var MSG_CV_UNAVAILABLE_LONG = "Ambiance indisponible sur cette boîte : l'ambiance de base reste affichée et ne peut pas " +
+    "être modifiée pour l'instant. Si cela dure, redémarre la boîte OpenTV.";
   var CV_ERR = { no_change: "Déjà active : rien n'a changé.", nothing_to_rollback: "Aucune version précédente : rien n'a changé.",
                  store_corrupt: "Ambiance illisible : choisis « Ambiance d'origine ». Rien n'a changé.",
                  store_busy: "OpenTV est occupé : réessaie. Rien n'a changé." };
@@ -1180,13 +1199,51 @@
   }
   function cvOn() { return !!(state && state.canvas); }   // service Canvas (sinon : OpenTV v23 inchangé)
   function capi(path, body) {   // POST Canvas : la réponse JSON fait foi même en 409/503 (outcome, canvas relu)
-    return fetch(path, { method: "POST", headers: { "X-OpenTV-TV": KEY, "Content-Type": "application/json" },
-                         body: JSON.stringify(body), cache: "no-store" }).then(function (r) {
-      return r.json().catch(function () { return null; }).then(function (j) {
-        if (r.status === 403 && j && j.error === "tv_key") { var e = new Error("tv_key"); e.tvKey = true; throw e; }
-        if (!j || typeof j !== "object") { throw new Error(r.status); }
-        return j;
+    // échéance CV_ROUTE_MS : requête abandonnée (AbortController si présent) et promesse rejetée « timeout » ; une
+    // réponse plus tardive n'est jamais lue
+    var ctl = typeof AbortController === "function" ? new AbortController() : null, timer = null;
+    var req = fetch(path, { method: "POST", headers: { "X-OpenTV-TV": KEY, "Content-Type": "application/json" },
+                            body: JSON.stringify(body), cache: "no-store", signal: ctl ? ctl.signal : undefined })
+      .then(function (r) {
+        return r.json().catch(function () { return null; }).then(function (j) {
+          if (r.status === 403 && j && j.error === "tv_key") { var e = new Error("tv_key"); e.tvKey = true; throw e; }
+          if (!j || typeof j !== "object") { throw new Error(r.status); }
+          return j;
+        });
       });
+    var limit = new Promise(function (res, rej) {
+      timer = setTimeout(function () {
+        var e = new Error("timeout");
+        e.timeout = true;
+        if (ctl) { try { ctl.abort(); } catch (x) { /* déjà terminée */ } }
+        rej(e);
+      }, CV_ROUTE_MS);
+    });
+    return Promise.race([req, limit]).then(function (j) { clearTimeout(timer); return j; },
+                                           function (e) { clearTimeout(timer); throw e; });
+  }
+  // route Canvas qui fait foi : sa vue est adoptée seulement si aucune route envoyée APRÈS elle n'a déjà été adoptée ;
+  // l'adoption change la génération (tout état lu avant n'apporte plus sa vue Canvas)
+  function cvRoute(path, body) {
+    var t = ++cvTicket;
+    return capi(path, body).then(function (j) {
+      var c = j.canvas;
+      if (t > cvRouteAt && c && typeof c === "object") {
+        cvRouteAt = t;
+        cvGen += 1;
+        cvAdopt(c);
+      }
+      return j;
+    });
+  }
+  // seule lecture de /api/tv/state : génération capturée à l'ENVOI -> {s, fresh} ; fresh = aucune route adoptée
+  // depuis l'envoi et aucun état plus récemment envoyé déjà adopté
+  function readState() {
+    var g = cvGen, t = ++cvTicket;
+    return api("GET", "/api/tv/state").then(function (s) {
+      var fresh = g === cvGen && t > cvGetAt;
+      if (fresh) { cvGetAt = t; }
+      return { s: s, fresh: fresh };
     });
   }
   // ---- occupation de la page : ensemble complet, une seule requête en vol, toujours le plus récent en dernier
@@ -1388,7 +1445,8 @@
     if (state) { runActions(state); }
   }
   function sheetKey(a) {   // touches de consentement : jamais d'événement ordinaire, jamais d'occupation
-    if (!cvSheet || cvSheet.busy) { return true; }
+    // voile hors-ligne visible : la feuille n'est plus vue, aucune de ses touches n'agit (quelle que soit la requête)
+    if (!cvSheet || cvSheet.busy || offlineShown()) { return true; }
     if (a === "left" || a === "up") { cvSheet.btn = 0; paintSheet(); }
     else if (a === "right" || a === "down") { cvSheet.btn = 1; paintSheet(); }
     else if (a === "ok") { sheetChoose(cvSheet.btn === 1 ? "yes" : "no", "owner"); }
@@ -1399,16 +1457,17 @@
     var sh = cvSheet;
     if (!sh || sh.busy) { return; }
     cvDone[sh.id] = true;
-    if (choice !== "yes") {   // « Non », Retour ou échéance : l'aperçu est retiré, la scène publiée n'a pas bougé
+    if (choice !== "yes") {   // « Non », Retour, échéance ou hors-ligne : aperçu retiré, scène publiée inchangée
       closeSheet();
-      capi("/api/tv/canvas/cancel", { preview_id: sh.id }).then(function (j) { cvAdopt(j.canvas); }, onApiError);
-      toast(why === "timeout" ? "Sans réponse : l'ambiance ne change pas." : "Ambiance refusée : rien n'a changé.");
+      cvRoute("/api/tv/canvas/cancel", { preview_id: sh.id }).catch(onApiError);   // borné, jamais bloquant
+      toast(why === "timeout" ? "Sans réponse : l'ambiance ne change pas." :
+            why === "offline" ? "Connexion perdue : proposition d'ambiance refusée, l'ambiance ne change pas." :
+            "Ambiance refusée : rien n'a changé.");
       return;
     }
     sh.busy = true;
-    capi("/api/tv/canvas/confirm", { preview_id: sh.id, confirm: true }).then(function (j) {
-      closeSheet();
-      cvAdopt(j.canvas);
+    cvRoute("/api/tv/canvas/confirm", { preview_id: sh.id, confirm: true }).then(function (j) {
+      closeSheet();   // vue de la réponse déjà adoptée (cvRoute) : rangées réordonnées une seule fois, ici
       if (j.ok) { toast("Nouvelle ambiance appliquée.\nRéglages → Ambiance OpenTV → Version précédente pour revenir.", true); }
       else if (j.outcome === "see_state") { toast(MSG_CV_SEE, true); }
       else if (j.error === "unknown_preview" || j.error === "preview_expired") { toast("Proposition expirée : rien n'a changé."); }
@@ -1420,7 +1479,7 @@
       refreshState();
     });
   }
-  function refreshState() { api("GET", "/api/tv/state").then(function (s) { render(s); }).catch(onApiError); }
+  function refreshState() { readState().then(function (r) { render(r.s, null, r.fresh); }).catch(onApiError); }
   // ---- Réglages « Ambiance OpenTV » (propriétaire seulement : jamais une touche d'assistant, écritures confirmées)
   function cvView() { return (state && state.canvas) || {}; }
   function styleOf(sc) { var w = sc && sc.wallpaper; return w === "brume" ? "mist" : w === "affiche" ? "cinema" : "canvas"; }
@@ -1447,13 +1506,17 @@
     return { btns: btns, idx: idx, actions: list.map(function (x) { return x[0]; }) };
   }
   function openAmbiance(sel) {
-    var c = cvView(), list = [["style", "◐", "Style", "Actuel : " + styleName()],
-                              ["motion", "≈", "Mouvement du fond", "Actuel : " + motionName()]];
-    if (c.can_rollback) { list.push(["undo", "↩", "Version précédente", "Revenir à l'ambiance d'avant"]); }
-    list.push(["reset", "↺", "Ambiance d'origine", "Canvas, mouvement calme"]);
+    var c = cvView(), list = [];
+    // magasin indisponible (toute écriture échouerait, « Ambiance d'origine » comprise) : aucune écriture proposée
+    if (c.status !== "unavailable") {
+      list.push(["style", "◐", "Style", "Actuel : " + styleName()]);
+      list.push(["motion", "≈", "Mouvement du fond", "Actuel : " + motionName()]);
+      if (c.can_rollback) { list.push(["undo", "↩", "Version précédente", "Revenir à l'ambiance d'avant"]); }
+      list.push(["reset", "↺", "Ambiance d'origine", "Canvas, mouvement calme"]);
+    }
     list.push(["back", "←", "Retour", "Revenir aux Réglages"]);
     var text = c.status === "corrupt" ? "Ambiance enregistrée illisible : l'écran montre l'ambiance d'origine. « Ambiance d'origine » la répare." :
-      c.status === "unavailable" ? "Ambiance indisponible sur cette boîte : l'ambiance d'origine reste affichée." :
+      c.status === "unavailable" ? MSG_CV_UNAVAILABLE_LONG :
       "Fond et couleurs de l'accueil. Rien ne change sans ton choix ici ou ton « Oui » sur la TV.";
     var l = listButtons(list, sel);
     showPanel("ambiance", "Réglages", "Ambiance OpenTV", text, l.btns, l.idx, { actions: l.actions });
@@ -1483,11 +1546,11 @@
     panel.pending = true;
     body.confirm = true;
     var p = panel;
-    capi("/api/tv/canvas/" + action, body).then(function (j) {
-      cvAdopt(j.canvas);
+    cvRoute("/api/tv/canvas/" + action, body).then(function (j) {   // vue de la réponse adoptée par cvRoute
       if (panel === p) { openAmbiance(sel); }   // feuille Ambiance à jour (l'ordre des rangées attend sa fermeture)
       if (j.ok) { toast(okMsg); }
       else if (j.outcome === "see_state") { toast(MSG_CV_SEE, true); }
+      else if (cvView().status === "unavailable") { toast(MSG_CV_UNAVAILABLE); }
       else { toast(CV_ERR[j.error] || "Impossible pour l'instant : rien n'a changé."); }
     }).catch(function (e) {
       if (onApiError(e)) { return; }
@@ -1589,8 +1652,11 @@
   });
 
   // ---- état global
-  function render(s, gen) {
+  // fresh = false (état lu avant l'adoption d'une réponse de route, ou dépassé par un état plus récent) : tout l'état
+  // est rendu SAUF sa vue Canvas, qui reste celle déjà adoptée (jamais d'ancienne ambiance ni de feuille rouverte)
+  function render(s, gen, fresh) {
     var wasSetup = !!(state && state.setup.active);
+    if (!fresh && state) { s.canvas = state.canvas; }
     state = s;
     if (wasSetup && !s.setup.active) {   // succès confirmé sur la TV, sans terminal ni jargon
       // succès partiel (Wi-Fi/nom appliqués, assistants non enregistrés) : jamais un « tout est prêt » à tort
@@ -1664,14 +1730,16 @@
       loadForYou(false);
     }
     renderRemote();
-    if (s.canvas) { cvAdopt(s.canvas); cvState(s.canvas, gen); } else { cvPub = null; cvState(null); renderCanvas(); }
+    if (!fresh) { renderCanvas(); }   // vue Canvas périmée : celle déjà adoptée reste peinte, aucune feuille décidée
+    else if (s.canvas) { cvAdopt(s.canvas); cvState(s.canvas, gen); }
+    else { cvPub = null; cvState(null); renderCanvas(); }
     cvPaint();
     runActions(s);
     resumePlay(s.playback);
   }
   function poll() {
     var gen = humanGen;   // feuille Canvas : seulement d'un état demandé APRÈS le dernier geste humain
-    api("GET", "/api/tv/state").then(function (s) { fails = 0; $("offline").hidden = true; render(s, gen); })
+    readState().then(function (r) { fails = 0; $("offline").hidden = true; render(r.s, gen, r.fresh); })
       .catch(function (e) {
         if (onApiError(e)) { return; }
         fails += 1;

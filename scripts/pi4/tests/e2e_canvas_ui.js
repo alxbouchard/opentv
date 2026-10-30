@@ -152,7 +152,7 @@ class Fake {
 }
 
 const INIT = `
-window.__ev = []; window.__hidden = false;
+window.__ev = []; window.__hidden = false; window.__body = []; window.__vis = [];
 Object.defineProperty(document, "hidden", { configurable: true, get: function () { return window.__hidden; } });
 (function () {
   var of = window.fetch;
@@ -167,6 +167,7 @@ Object.defineProperty(document, "hidden", { configurable: true, get: function ()
     get: function () { return d.get.call(this); },
     set: function (v) {
       var old = d.get.call(this);
+      if (this === document.body && v !== old) { window.__body.push({ t: performance.now(), v: String(v) }); }
       if (/\\bfocused\\b/.test(v) && !/\\bfocused\\b/.test(old)) {
         window.__ev.push({ k: "focus", t: performance.now(), txt: (this.textContent || "").slice(0, 40) });
       }
@@ -178,6 +179,9 @@ Object.defineProperty(document, "hidden", { configurable: true, get: function ()
     set: function (v) {
       if ((this.id === "panel" || this.id === "playov") && !!v !== h.get.call(this)) {
         window.__ev.push({ k: "focus", t: performance.now(), txt: this.id + (v ? ":hide" : ":show") });
+      }
+      if ((this.id === "offline" || this.id === "cvsheet") && !!v !== h.get.call(this)) {
+        window.__vis.push({ t: performance.now(), id: this.id, shown: !v });
       }
       h.set.call(this, v);
     } });
@@ -192,10 +196,11 @@ async function open(browser, opts) {
   if (opts.state) { opts.state(F.state); }
   if (opts.before) { opts.before(F); }
   await page.addInitScript(INIT);
-  await ctx.route("**/*", (route) => F.handle(route));
+  // réponse retenue puis contexte fermé : jamais un rejet non géré (le processus de test resterait sain)
+  await ctx.route("**/*", (route) => F.handle(route).catch(() => {}));
   if (opts.clock) { await page.clock.install(); }
   await page.goto(ORIGIN + "/tv");
-  if (!opts.clock) {
+  if (!opts.clock && !opts.noWait) {
     await page.waitForFunction(() => document.body.getAttribute("data-cv-mode") === "run" ||
                                       document.body.getAttribute("data-cv-mode") === "static" ||
                                       document.body.className === "cv-setup", null, { timeout: 15000 });
@@ -380,6 +385,53 @@ const MOTION = () => {
            styles: L.map((e) => { const c = getComputedStyle(e); return c.transform + "|" + c.opacity; }) };
 };
 const hintText = (page) => page.evaluate(() => document.getElementById("hint").innerText);
+// prochaine lecture de /api/tv/state RETENUE (déterministe, sans délai fixe) : instantané de l'état au moment de la
+// requête, livré seulement à release() — reproduit un poll parti AVANT une réponse de route et arrivé APRÈS
+function holdNextState(F) {
+  const h = { got: false, delivered: false, i: -1 };
+  let open = null;
+  const gate = new Promise((r) => { open = r; });
+  h.release = () => open();
+  F.hooks["GET /api/tv/state"] = async (e, f) => {
+    delete f.hooks["GET /api/tv/state"];
+    const snap = clone(f.state);
+    h.got = true; h.i = e.i;
+    await gate;
+    h.delivered = true;
+    return { json: snap };
+  };
+  return h;
+}
+const wpOf = (cls) => (String(cls).split(" ").filter((c) => c.indexOf("cv-wp-") === 0)[0] || "");
+// réponse de route adoptée, poll périmé libéré : aucun fond intermédiaire, aucune reconstruction des rangées, puis le
+// poll légitime suivant est toujours adopté
+async function staleCheck(page, F, h, want, after) {
+  const out = {};
+  const mark = await page.evaluate(() => window.__body.length);
+  await probeRows(page);
+  out.rowsBefore = await rowTitles(page);
+  h.release();
+  await until(async () => h.delivered, 3000);
+  // le poll suivant ne part qu'après le traitement complet du poll retenu ; il est retenu à son tour pour que les
+  // mesures (et `after`) voient l'effet du poll périmé SEUL, avant qu'un état frais ne le masque
+  const h2 = holdNextState(F);
+  await until(async () => h2.got, 6000);
+  await sleep(300);
+  const hist = await page.evaluate((m) => window.__body.slice(m).map((x) => x.v), mark);
+  out.wallpapers = hist.map(wpOf).filter((w, i, a) => w && a.indexOf(w) === i);
+  out.wpNow = wpOf(await bodyCls(page));
+  out.rowsSameNodes = await probed(page);
+  out.rowsAfter = await rowTitles(page);
+  out.sheetShown = await sheetShown(page);
+  out.want = want;
+  if (after) { await after(out); }
+  h2.release();
+  // poll légitime plus récent : toujours adopté (jamais bloqué par la garde)
+  const later = want === "cv-wp-brume" ? P.canvas : P.mist;
+  F.state.canvas = view(later, { state: "applied", revision: 42, preset: null, can_rollback: true });
+  out.laterPollAdopted = await until(async () => wpOf(await bodyCls(page)) === "cv-wp-" + later.wallpaper, 6000);
+  return out;
+}
 async function geom(page, name) {
   await sleep(250);
   const g = await page.evaluate(GEOM);
@@ -399,6 +451,11 @@ S.load = async (browser) => {
   const r = { firstCanvasPost: first ? { p: first.p, b: first.b } : null, mode: await page.evaluate(() => document.body.getAttribute("data-cv-mode")),
               body: await bodyCls(page), external: F.external, pill: await page.evaluate(() => document.getElementById("cvpill").textContent),
               whyChip: why };
+  // pastille de scène : tient dans la ligne de date (hauteur fixe du v23), sans déborder dessus ni dessous
+  r.pillGeom = await page.evaluate(() => {
+    const R = (e) => { const b = e.getBoundingClientRect(); return [b.top, b.bottom, b.height]; };
+    return { pill: R(document.getElementById("cvpill")), line: R(document.querySelector(".dateline")) };
+  });
   await ctx.close();
   return r;
 };
@@ -808,12 +865,19 @@ S.motion = async (browser) => {
       out.combos[wp + "-" + mo] = await waitMode(page, "run");
     }
   }
+  const halo = () => page.evaluate(() => ["cvga", "cvgb"].map((i) => {
+    const c = getComputedStyle(document.getElementById(i));
+    return c.transitionProperty + "/" + c.transitionDuration;
+  }));
+  out.haloRun = await halo();
   F.state.canvas = view(Object.assign(clone(P.canvas), { motion: "off" }), { state: "applied", revision: 4, preset: null });
   out.off = await waitMode(page, "static");
+  out.haloOff = await halo();
   F.state.canvas = view(Object.assign(clone(P.canvas), { motion: "alive" }), { state: "applied", revision: 5, preset: null });
   await waitMode(page, "run");
   await page.emulateMedia({ reducedMotion: "reduce" });
   out.reduced = await waitMode(page, "static", 4000);
+  out.haloReduced = await halo();
   await page.emulateMedia({ reducedMotion: "no-preference" });
   out.reduced_back = await waitMode(page, "run", 4000);
   out.resume = await anims(page);
@@ -1034,6 +1098,266 @@ S.settings = async (browser) => {
   };
   F.state.actions.pending = [{ seq: 11, kind: "key", key: "ok", age_ms: 0 }];
   await until(async () => out.agentOkInAmbiance !== undefined, 6000);
+  await ctx.close();
+  return out;
+};
+
+// ---------------------------------------------------------------- réponses de route qui font foi (tâche 3, correctif)
+// « Oui » de la feuille : un poll parti avant la réponse de confirmation et livré après ne repeint jamais l'ancienne
+// ambiance et ne reconstruit pas les rangées (ordre publié gardé)
+S.staleConfirm = async (browser) => {
+  const { ctx, page, F } = await open(browser);
+  await waitMode(page, "run");
+  await press(page, "ArrowDown");
+  await sleep(1800);
+  const id = pid(40);
+  setPreview(F.state, id, P.cinema);
+  await until(() => sheetShown(page), 4000);
+  const published = view(P.cinema, { state: "applied", revision: 1, preset: "cinema", can_rollback: true });
+  F.hooks["POST /api/tv/canvas/confirm"] = async (e, f) => {
+    f.state.canvas = clone(published);
+    return { json: { ok: true, error: null, outcome: "applied", result: { revision: 1 }, canvas: clone(published) } };
+  };
+  const h = holdNextState(F);
+  await until(async () => h.got, 4000);   // poll en vol : instantané AVANT la confirmation
+  await press(page, "ArrowRight");
+  await press(page, "Enter", 0);
+  await until(async () => !(await sheetShown(page)) && wpOf(await bodyCls(page)) === "cv-wp-affiche" &&
+                          (await rowTitles(page))[1] === ROW_TITLES.top, 4000);
+  // vue Canvas de l'état périmé jamais retenue non plus hors du rendu : « Version précédente » (can_rollback de la
+  // réponse de confirmation) reste proposée dans Ambiance OpenTV
+  const out = await staleCheck(page, F, h, "cv-wp-affiche", async (o) => {
+    for (const k of ["Home", "ArrowUp", "Enter", "ArrowDown", "ArrowDown", "Enter"]) { await press(page, k, 200); }
+    o.ambRows = await page.evaluate(() => Array.prototype.map.call(document.querySelectorAll("#pbtns button"),
+                                                                     (b) => b.getAttribute("data-label") || b.textContent));
+    await press(page, "Escape", 200);
+    await press(page, "Escape", 300);
+  });
+  out.confirmPosts = F.posts("/api/tv/canvas/confirm").length;
+  await ctx.close();
+  return out;
+};
+
+// écritures du propriétaire dans « Ambiance OpenTV » (appliquer, version précédente, ambiance d'origine — révision qui
+// RECULE) : même garantie
+S.staleOwner = async (browser) => {
+  const out = {};
+  const cases = [
+    ["apply", P.canvas, 0, P.cinema, 1, ["ArrowDown", "ArrowDown", "Enter", "Enter", "ArrowDown", "ArrowDown"]],
+    ["rollback", P.cinema, 2, P.mist, 1, ["ArrowDown", "ArrowDown", "Enter", "ArrowDown", "ArrowDown", "Enter", "ArrowUp"]],
+    ["reset", P.mist, 3, P.canvas, 0, ["ArrowDown", "ArrowDown", "Enter", "ArrowDown", "ArrowDown", "ArrowDown", "Enter", "ArrowUp"]]];
+  for (const [name, from, rev, to, newRev, keys] of cases) {
+    const { ctx, page, F } = await open(browser, { state: (st) => {
+      st.canvas = view(from, { state: rev ? "applied" : "default", revision: rev, preset: null, can_rollback: true });
+    } });
+    await waitMode(page, "run");
+    await press(page, "ArrowUp");
+    await press(page, "Enter", 300);
+    for (const k of keys) { await press(page, k, 200); }
+    F.hooks["POST /api/tv/canvas/" + name] = async (e, f) => {
+      f.state.canvas = view(to, { state: newRev ? "applied" : "default", revision: newRev, preset: null, can_rollback: !!newRev });
+      return { json: { ok: true, error: null, outcome: "applied", result: {}, canvas: clone(f.state.canvas) } };
+    };
+    const h = holdNextState(F);
+    await until(async () => h.got, 4000);
+    const mark = F.seq;
+    await press(page, "Enter", 0);
+    await until(async () => wpOf(await bodyCls(page)) === "cv-wp-" + to.wallpaper, 4000);
+    const r = await staleCheck(page, F, h, "cv-wp-" + to.wallpaper);
+    r.posts = F.posts("/api/tv/canvas/" + name, mark).length;
+    out[name] = r;
+    await ctx.close();
+  }
+  return out;
+};
+
+// ordre des routes : « Non » (annulation lente) puis Style « Cinéma » ; la réponse tardive de l'annulation (envoyée
+// AVANT l'application, vue Canvas antérieure) n'est jamais adoptée par-dessus celle de l'application
+S.staleRoute = async (browser) => {
+  const { ctx, page, F } = await open(browser);
+  await waitMode(page, "run");
+  await sleep(1800);
+  setPreview(F.state, pid(44), P.cinema);
+  await until(() => sheetShown(page), 4000);
+  let free = null, delivered = false;
+  const gate = new Promise((r) => { free = r; });
+  F.hooks["POST /api/tv/canvas/cancel"] = async (e, f) => {
+    const snap = clone(f.state.canvas);   // vue AVANT l'application (aurore, aperçu encore là)
+    clearPreview(f.state);
+    await gate;
+    delivered = true;
+    return { json: { ok: true, error: null, outcome: "applied", result: {}, canvas: snap } };
+  };
+  F.hooks["POST /api/tv/canvas/apply"] = async (e, f) => {
+    f.state.canvas = view(P.cinema, { state: "applied", revision: 1, preset: "cinema", can_rollback: true });
+    return { json: { ok: true, error: null, outcome: "applied", result: {}, canvas: clone(f.state.canvas) } };
+  };
+  const t0 = Date.now();
+  await press(page, "Enter", 200);   // « Non » au focus : annulation envoyée, retenue
+  for (const k of ["ArrowUp", "Enter", "ArrowDown", "ArrowDown", "Enter", "Enter", "ArrowDown", "ArrowDown"]) { await press(page, k, 180); }
+  await press(page, "Enter", 0);
+  const out = { applied: await until(async () => wpOf(await bodyCls(page)) === "cv-wp-affiche", 3000) };
+  const mark = await page.evaluate(() => window.__body.length);
+  free();
+  await until(async () => delivered, 3000);
+  await sleep(400);
+  out.withinRouteDeadline = Date.now() - t0;
+  out.wallpapers = (await page.evaluate((m) => window.__body.slice(m).map((x) => x.v), mark)).map(wpOf)
+    .filter((w, i, a) => w && a.indexOf(w) === i);
+  out.wpNow = wpOf(await bodyCls(page));
+  await ctx.close();
+  return out;
+};
+
+// ordre des lectures d'état : un poll ancien (retenu) livré après une relecture plus récente (après une réponse
+// perdue) n'écrase jamais la vue Canvas plus récente
+S.staleGet = async (browser) => {
+  const { ctx, page, F } = await open(browser);
+  await waitMode(page, "run");
+  await press(page, "ArrowDown");
+  await sleep(1800);
+  setPreview(F.state, pid(45), P.cinema);
+  await until(() => sheetShown(page), 4000);
+  F.hooks["POST /api/tv/canvas/confirm"] = async (e, f) => {   // publiée, mais réponse perdue
+    f.state.canvas = view(P.cinema, { state: "applied", revision: 1, preset: "cinema", can_rollback: true });
+    return "abort";
+  };
+  const h = holdNextState(F);
+  await until(async () => h.got, 4000);
+  await press(page, "ArrowRight");
+  await press(page, "Enter", 0);
+  // relecture après la réponse perdue (refreshState) : état plus récent, adopté
+  await until(async () => !(await sheetShown(page)) && wpOf(await bodyCls(page)) === "cv-wp-affiche" &&
+                          (await rowTitles(page))[1] === ROW_TITLES.top, 4000);
+  const out = await staleCheck(page, F, h, "cv-wp-affiche");
+  out.toast = await toastText(page);
+  await ctx.close();
+  return out;
+};
+
+// hors-ligne pendant la feuille : refus sûr immédiat (aucun « Oui » possible derrière le voile), annulation tentée
+// (ici sans réponse : jamais bloquante), scène publiée inchangée ; puis voile forcé avec feuille ouverte : touches
+// de la feuille bloquées quel que soit l'état des requêtes
+S.offlineSheet = async (browser) => {
+  const out = {};
+  let o = await open(browser);
+  await waitMode(o.page, "run");
+  await sleep(1800);
+  out.pid = pid(41);
+  setPreview(o.F.state, out.pid, P.cinema);
+  out.shown = await until(() => sheetShown(o.page), 4000);
+  let freeCancel = null;
+  const hung = new Promise((r) => { freeCancel = r; });
+  o.F.hooks["POST /api/tv/canvas/cancel"] = async () => { await hung; return "abort"; };   // annulation pendue
+  const mark = o.F.seq;
+  o.F.stateFail = 1000;
+  out.offline = await until(() => o.page.evaluate(() => !document.getElementById("offline").hidden), 9000);
+  out.vis = await o.page.evaluate(() => window.__vis.slice());
+  out.sheetAtOverlay = await sheetShown(o.page);
+  out.cancelPosts = o.F.posts("/api/tv/canvas/cancel", mark).map((x) => x.b);
+  for (const k of ["ArrowDown", "Enter", "ArrowRight", "Enter", "ArrowDown", "Enter"]) { await press(o.page, k, 200); }
+  out.confirmPosts = o.F.posts("/api/tv/canvas/confirm", mark).length;
+  out.published = { wp: o.F.state.canvas.scene.wallpaper, rev: o.F.state.canvas.revision };
+  out.toast = await toastText(o.page);
+  o.F.stateFail = 0;
+  out.recovered = await until(() => o.page.evaluate(() => document.getElementById("offline").hidden), 9000);
+  await sleep(2500);
+  out.reshown = await sheetShown(o.page);
+  out.wpAfter = wpOf(await bodyCls(o.page));
+  freeCancel();
+  await o.ctx.close();
+  // voile visible (forcé) pendant que la feuille est ouverte : ↓/OK/Retour n'ont aucun effet sur la feuille
+  o = await open(browser);
+  await waitMode(o.page, "run");
+  await sleep(1800);
+  setPreview(o.F.state, pid(42), P.cinema);
+  await until(() => sheetShown(o.page), 4000);
+  const h = holdNextState(o.F);   // aucun poll ne masque le voile pendant la mesure
+  await until(async () => h.got, 4000);
+  const m2 = o.F.seq;
+  await o.page.evaluate(() => { document.getElementById("offline").hidden = false; });
+  for (const k of ["ArrowDown", "Enter", "ArrowDown", "Enter"]) { await press(o.page, k, 150); }
+  out.forced = { focus: await sheetFocus(o.page), shown: await sheetShown(o.page),
+                 posts: o.F.posts("/api/tv/canvas/", m2).filter((x) => x.p !== "/api/tv/canvas/ui").map((x) => x.p) };
+  h.release();
+  await o.ctx.close();
+  return out;
+};
+
+// « Oui » sans réponse : la feuille ne piège jamais la télécommande au-delà d'une échéance bornée ; issue ambiguë =>
+// état réel relu, jamais « rien n'a changé »
+S.hungYes = async (browser) => {
+  const { ctx, page, F } = await open(browser);
+  await waitMode(page, "run");
+  await sleep(1800);
+  setPreview(F.state, pid(43), P.cinema, { exp: 25 });
+  await until(() => sheetShown(page), 4000);
+  let free = null;
+  const hang = new Promise((r) => { free = r; });
+  F.hooks["POST /api/tv/canvas/confirm"] = async () => { await hang; return "abort"; };
+  await press(page, "ArrowRight");
+  const t0 = Date.now(), mark = F.seq;
+  await press(page, "Enter", 300);
+  await press(page, "Escape", 300);   // « Oui » en vol : sans effet, aucune annulation envoyée
+  const out = { busyCancel: F.posts("/api/tv/canvas/cancel", mark).length, shownDuring: await sheetShown(page) };
+  out.closed = await until(async () => !(await sheetShown(page)), 12000);
+  out.elapsed_ms = Date.now() - t0;
+  out.toast = await toastText(page);
+  const at = F.seq;
+  out.refetched = await until(async () => F.log.some((x) => x.m === "GET" && x.p === "/api/tv/state" && x.i >= at), 3000);
+  const before = await focusOf(page);
+  await press(page, "ArrowRight", 400);
+  out.keysFree = (await focusOf(page)) !== before;
+  free();
+  await ctx.close();
+  return out;
+};
+
+// démarrage : rien de la scène Canvas avant le premier état du service (fond v23 fixe) ; configuration d'abord =>
+// jamais d'aurore intermédiaire
+S.boot = async (browser) => {
+  const out = {};
+  for (const name of ["setup", "home"]) {
+    let free = null;
+    const gate = new Promise((r) => { free = r; });
+    const o = await open(browser, { noWait: true, before: (f) => {
+      if (name === "setup") { f.state.setup = { active: true, url: "http://192.168.2.40:8096/setup?t=abc", expires_in: 600, phase: "waiting" }; }
+      f.hooks["GET /api/tv/state"] = async (e, ff) => { delete ff.hooks["GET /api/tv/state"]; await gate; return null; };
+    } });
+    await until(() => o.page.evaluate(() => !!window.OpenTVCanvas), 5000);
+    await sleep(400);
+    const pre = { body: await bodyCls(o.page), mode: await o.page.evaluate(() => document.body.getAttribute("data-cv-mode")),
+                  wall: await o.page.evaluate(() => getComputedStyle(document.getElementById("cvwall")).display) };
+    free();
+    if (name === "setup") { await until(async () => (await bodyCls(o.page)) === "cv-setup", 5000); }
+    else { await waitMode(o.page, "run"); }
+    const hist = await o.page.evaluate(() => window.__body.map((x) => x.v));
+    out[name] = { pre: pre, hist: hist, final: await bodyCls(o.page) };
+    await o.ctx.close();
+  }
+  return out;
+};
+
+// magasin indisponible : aucune écriture proposée (elle échouerait), texte honnête sans « Ambiance d'origine »
+S.unavailable = async (browser) => {
+  const { ctx, page } = await open(browser, { state: (st) => {
+    st.canvas = view(P.canvas, { status: "unavailable", state: "default", revision: 0, can_rollback: false });
+  } });
+  await waitMode(page, "run");
+  await press(page, "ArrowUp");
+  await press(page, "Enter", 300);
+  const sub = await page.evaluate(() => {
+    const b = Array.prototype.filter.call(document.querySelectorAll("#pbtns button"), (x) => x.getAttribute("data-label") === "Ambiance OpenTV")[0];
+    return b ? b.querySelector(".ts").textContent : null;
+  });
+  await press(page, "ArrowDown");
+  await press(page, "ArrowDown");
+  await press(page, "Enter", 300);
+  const out = { sub: sub, rows: await page.evaluate(() => Array.prototype.map.call(document.querySelectorAll("#pbtns button"),
+                                                                                  (b) => b.getAttribute("data-label") || b.textContent)),
+                text: await page.evaluate(() => document.getElementById("pmeta").textContent) };
+  await press(page, "Enter", 300);   // seule action : Retour aux Réglages
+  out.back = await page.evaluate(() => document.getElementById("ptitle").textContent);
   await ctx.close();
   return out;
 };

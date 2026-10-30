@@ -110,6 +110,27 @@ class TestCanvasJsStatic(unittest.TestCase):
         m = re.search(r"\.style\.[a-zA-Z]+\s*=\s*[^;]*(cvPub|cvSheet|scene\b|state\.canvas|\.wallpaper|\.accent)", tvjs)
         self.assertIsNone(m, m and m.group(0))
 
+    def test_state_reads_go_through_one_generation_checked_reader(self):
+        """Toute lecture de /api/tv/state passe par readState (génération d'adoption capturée à l'envoi) ; toute
+        réponse de route Canvas passe par cvRoute (adoption ordonnée, génération incrémentée) ; aucun autre cvAdopt."""
+        code = strip_js_comments(read(TV_JS))
+        self.assertEqual(code.count('api("GET", "/api/tv/state")'), 1)
+        body = re.search(r"function readState\(\) \{(.*?)\n  \}", code, re.S).group(1)
+        self.assertIn('api("GET", "/api/tv/state")', body)
+        self.assertIn("cvGen", body)
+        for m in re.finditer(r"\brender\(([^)]*)\)", code):
+            self.assertIn("fresh", m.group(1), m.group(0))                 # jamais un état sans sa fraîcheur
+        calls = re.findall(r"(?<!function )\bcvAdopt\(([^)]*)\)", code)
+        self.assertEqual(sorted(calls), sorted(["c", "s.canvas"]), calls)   # route (cvRoute) + état frais seulement
+        self.assertNotRegex(code, r'capi\("/api/tv/canvas/(confirm|cancel|apply|rollback|reset)')
+        m = re.search(r"\bCV_ROUTE_MS = (\d+)[,;]", code)
+        self.assertTrue(m and 1000 <= int(m.group(1)) <= 10000, "échéance des routes Canvas bornée")
+        self.assertIn("AbortController", code)
+
+    def test_canvas_starts_off_until_first_state(self):
+        js = strip_js_comments(read(CANVAS_JS))
+        self.assertRegex(js, r"var S = \{ on: false,")
+
     def test_deadlines_use_monotonic_clock(self):
         code = strip_js_comments(read(TV_JS))
         self.assertIn('typeof window.performance.now === "function"', code)
@@ -626,6 +647,104 @@ class TestCanvasUiBrowser(unittest.TestCase):
         self.assertIn("cv-wp-brume", x["seeStateBody"])
         self.assertIn("rien n'a changé", x["noChangeToast"])
         self.assertEqual(x["agentOkInAmbiance"], "settings_forbidden")
+
+    # ---- correctif tâche 3 : réponses de route qui font foi, consentement jamais invisible
+    def assert_no_stale_adoption(self, x, name):
+        self.assertTrue(x["laterPollAdopted"], (name, x))                  # poll légitime suivant : adopté
+        self.assertEqual(x["wallpapers"], [x["want"]] if x["wallpapers"] else [], (name, x))   # aucun ancien fond
+        self.assertEqual(x["wpNow"], x["want"], (name, x))
+        self.assertTrue(x["rowsSameNodes"], (name, x))                     # aucune reconstruction des rangées
+        self.assertEqual(x["rowsAfter"], x["rowsBefore"], (name, x))
+        self.assertFalse(x["sheetShown"], (name, x))
+
+    def test_stale_state_poll_never_overrides_confirm_response(self):
+        x = self.r("staleConfirm")
+        self.assertEqual(x["confirmPosts"], 1)
+        self.assertIn("Version précédente", x["ambRows"])                  # can_rollback de la réponse, jamais l'ancien
+        self.assertEqual(x["rowsBefore"][:2], ["Le choix de ce soir", "Les mieux notés que tu n'as pas vus"])
+        self.assert_no_stale_adoption(x, "confirm")
+
+    def test_stale_state_poll_never_overrides_owner_apply_rollback_reset(self):
+        x = self.r("staleOwner")
+        for name in ("apply", "rollback", "reset"):   # « reset » : révision qui recule (0), garde par génération
+            self.assertEqual(x[name]["posts"], 1, name)
+            self.assert_no_stale_adoption(x[name], name)
+
+    def test_late_older_route_response_never_overrides_newer_route(self):
+        x = self.r("staleRoute")
+        self.assertTrue(x["applied"])
+        self.assertLess(x["withinRouteDeadline"], 5000)                    # réponse tardive livrée avant l'échéance
+        self.assertEqual(x["wallpapers"], [], x)                            # « Non » tardif : jamais l'ancien fond
+        self.assertEqual(x["wpNow"], "cv-wp-affiche")
+
+    def test_older_state_read_never_overrides_newer_state_read(self):
+        x = self.r("staleGet")
+        self.assertIn("Réponse perdue", x["toast"])
+        self.assertEqual(x["rowsBefore"][:2], ["Le choix de ce soir", "Les mieux notés que tu n'as pas vus"])
+        self.assert_no_stale_adoption(x, "get-order")
+
+    def test_offline_overlay_rejects_open_sheet_and_blocks_its_keys(self):
+        x = self.r("offlineSheet")
+        self.assertTrue(x["shown"])
+        self.assertTrue(x["offline"])
+        self.assertFalse(x["sheetAtOverlay"])                              # jamais de feuille sous le voile
+        shows = [v for v in x["vis"] if v["id"] == "offline" and v["shown"]]
+        hides = [v for v in x["vis"] if v["id"] == "cvsheet" and not v["shown"]]
+        self.assertTrue(shows and hides, x["vis"])
+        self.assertLessEqual(hides[0]["t"] - shows[0]["t"], 50, x["vis"])   # refus dans la même tâche que le voile
+        self.assertEqual(x["cancelPosts"], [{"preview_id": x["pid"]}])     # annulation tentée (ici pendue)
+        self.assertEqual(x["confirmPosts"], 0)                             # ↓ puis OK : jamais de « Oui »
+        self.assertEqual(x["published"], {"wp": "aurore", "rev": 0})
+        self.assertTrue(x["recovered"])
+        self.assertFalse(x["reshown"])
+        self.assertEqual(x["wpAfter"], "cv-wp-aurore")
+        f = x["forced"]                                                    # voile visible, feuille ouverte
+        self.assertTrue(f["shown"])
+        self.assertEqual(f["focus"], "Non, garder l'ambiance actuelle")     # ↓ sans effet
+        self.assertEqual(f["posts"], [])                                   # OK sans effet : ni Oui ni Non envoyés
+
+    def test_hung_yes_is_bounded_and_rereads_actual_state(self):
+        x = self.r("hungYes")
+        self.assertTrue(x["shownDuring"])
+        self.assertEqual(x["busyCancel"], 0)
+        self.assertTrue(x["closed"], x)
+        self.assertGreaterEqual(x["elapsed_ms"], 3500, x)
+        self.assertLess(x["elapsed_ms"], 9000, x)
+        self.assertIn("Réponse perdue", x["toast"])
+        self.assertNotIn("rien n'a changé", x["toast"])
+        self.assertTrue(x["refetched"])
+        self.assertTrue(x["keysFree"])
+
+    def test_boot_keeps_v23_until_first_state_and_never_flashes_canvas_before_setup(self):
+        x = self.r("boot")
+        for name in ("setup", "home"):
+            self.assertEqual(x[name]["pre"]["body"], "", (name, x[name]))
+            self.assertEqual(x[name]["pre"]["mode"], "off", (name, x[name]))
+            self.assertEqual(x[name]["pre"]["wall"], "none", (name, x[name]))
+        self.assertEqual(x["setup"]["final"], "cv-setup")
+        self.assertEqual([c for c in x["setup"]["hist"] if "cv-wp-" in c], [], x["setup"]["hist"])
+        self.assertIn("cv-wp-aurore", x["home"]["final"])
+
+    def test_unavailable_store_offers_no_failing_write(self):
+        x = self.r("unavailable")
+        self.assertEqual(x["rows"], ["Retour"])
+        self.assertIn("indisponible", x["text"].lower())
+        self.assertNotIn("Ambiance d'origine", x["text"])
+        self.assertNotIn("répare", x["text"])
+        self.assertEqual(x["back"], "Réglages")
+        self.assertIn("Indisponible", x["sub"])
+
+    def test_reduced_motion_and_static_drop_halo_crossfade(self):
+        x = self.r("motion")
+        self.assertEqual(x["haloRun"], ["opacity/0.6s"] * 2)
+        self.assertEqual(x["haloOff"], ["none/0s"] * 2)
+        self.assertEqual(x["haloReduced"], ["none/0s"] * 2)
+
+    def test_scene_pill_fits_dateline(self):
+        g = self.r("load")["pillGeom"]
+        self.assertGreaterEqual(g["pill"][0], g["line"][0] - 0.5, g)
+        self.assertLessEqual(g["pill"][1], g["line"][1] + 0.5, g)
+        self.assertLessEqual(g["pill"][2], g["line"][2], g)
 
 
 # --------------------------------------------------------------------------- navigateur réel : vrai service

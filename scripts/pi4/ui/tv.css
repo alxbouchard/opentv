@@ -376,13 +376,16 @@ footer { flex: 0 0 auto; display: flex; align-items: center; gap: 36px; padding-
 .cv-anim.cv-m-calm.cv-wp-affiche .cv-l1, .cv-anim.cv-m-calm.cv-wp-brume .cv-l3 { animation-duration: 44s; }
 .cv-paused #cvwall > div { animation-play-state: paused; }
 .cv-static #cvwall > div { animation: none; }
+/* fond fixe (mouvement coupé, « réduire les animations », cadence dégradée) : le halo change sans fondu enchaîné */
+.cv-static .cv-g { transition: none; }
 @media (prefers-reduced-motion: reduce) { #cvwall > div { animation: none !important; } }
 
 /* ---- contenu de l'accueil (jamais la coque) : pastille de scène, raison de la proposition, rangées, cartes */
-.cvpill { display: none; flex: 0 0 auto; margin-left: 18px; font-size: 19px; line-height: 24px; padding: 5px 14px 5px 32px;
+.cvpill { display: none; flex: 0 0 auto; margin-left: 18px; font-size: 19px; line-height: 24px; padding: 4px 14px 4px 32px;
   border-radius: 999px; position: relative; color: var(--text-1); background: rgba(255, 255, 255, .1);
   border: 1px solid rgba(255, 255, 255, .16); white-space: nowrap; }
-.cvpill::before { content: ""; position: absolute; left: 13px; top: 12px; width: 10px; height: 10px; border-radius: 50%;
+/* hauteur 24 + 2 × 4 + 2 × 1 = 34 px = .dateline : la pastille ne déborde jamais de la ligne de date */
+.cvpill::before { content: ""; position: absolute; left: 13px; top: 11px; width: 10px; height: 10px; border-radius: 50%;
   background: rgb(var(--cv-acc)); }
 .cv .cvpill { display: inline-block; }
 .cv .cvpill[hidden] { display: none; }

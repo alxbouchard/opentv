@@ -106,7 +106,9 @@
   var $ = function (id) { return document.getElementById(id); };
   var mq = null;
   try { mq = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null; } catch (e) { mq = null; }
-  var S = { on: true, scene: copy(DEFAULT), invalid: false, preview: false, setup: false, reasons: [], degraded: false,
+  // éteint jusqu'au premier état du service (tv.js appelle apply) : fond OpenTV v23 fixe, jamais d'aurore avant de
+  // savoir si la configuration (fond v23) ou un service sans Canvas doit s'afficher
+  var S = { on: false, scene: copy(DEFAULT), invalid: false, preview: false, setup: false, reasons: [], degraded: false,
             want: -1, hue: null, glow: "cvga", glowTimer: null, raf: null, gaps: [], last: 0, mode: "" };
 
   function reduced() {   // préférence lue EN DIRECT (l'événement « change » peut arriver après le rendu)
@@ -219,7 +221,7 @@
     if (mq.addEventListener) { mq.addEventListener("change", onPref); } else if (mq.addListener) { mq.addListener(onPref); }
   }
   document.addEventListener("visibilitychange", function () { draw(); });
-  S.reasons = ["boot"];   // ambiance d'origine figée jusqu'au premier état du service (jamais un écran vide)
+  S.reasons = ["boot"];   // premier rendu (on: false) : fond v23 fixe jusqu'au premier état (jamais un écran vide)
   draw();
 
   window.OpenTVCanvas = Object.freeze({
