@@ -17,7 +17,7 @@ import struct
 import threading
 import time
 
-from . import agents, bounded, tools
+from . import agents, bounded, canvas_tools, tools
 
 MAX_REQUEST = 16 * 1024
 MAX_RESPONSE = 1024 * 1024
@@ -35,6 +35,11 @@ TOOL_RATES = {
     "play_title": ((1, 10.0), (6, 600.0)),
     "close_player": ((1, 2.0), (30, 600.0)),
     "remote_control": ((3, 1.0), (60, 60.0)),
+    # Canvas (permission facultative) : propositions espacées ; état et retrait bornés (le propriétaire, lui, n'est
+    # jamais limité : ses décisions passent par la page /tv, pas par l'Agent Port)
+    "canvas_preview": ((1, 5.0), (20, 600.0)),
+    "canvas_status": ((2, 1.0), (60, 60.0)),
+    "canvas_cancel": ((2, 1.0), (30, 60.0)),
 }
 MAX_TRACKED_UIDS = 256    # tables de débit/verrouillage bornées (les entrées inactives sont purgées)
 # Refus SANS aucun effet (rien en file, aucune lecture) dont le produit demande une nouvelle tentative immédiate
@@ -47,6 +52,15 @@ class _Stamp(float):
     """Horodatage d'UN appel dans une fenêtre TOOL_RATES : comparé comme un float (débits, purge), mais identifiable
     par identité — un remboursement ne retire jamais l'horodatage (même valeur) d'un autre appel."""
     __slots__ = ()
+
+
+def _tool(name):
+    """-> (schéma, module) d'un outil connu : catalogue fixe (tools, 11 outils) puis outils Canvas facultatifs."""
+    for mod in (tools, canvas_tools):
+        t = mod.TOOL_BY_NAME.get(name) if isinstance(name, str) else None
+        if t is not None:
+            return t, mod
+    return None, None
 
 
 class AgentService:
@@ -130,20 +144,19 @@ class AgentService:
             # IMMÉDIATE, appel par appel — aucun outil (lecture, avis, message, pilotage) ni whoami n'est servi, rien
             # n'est marqué « actif » ; l'audit garde l'identité authentifiée. Jeton valide : jamais compté comme un
             # échec d'authentification (pas de verrouillage du compte). Identités génériques jamais concernées.
-            known = tool if isinstance(tool, str) and tool in tools.TOOL_BY_NAME else None
-            return self._deny(agent, known, None, agents.BRIDGE_PAUSED, t0)
+            return self._deny(agent, tool if _tool(tool)[0] else None, None, agents.BRIDGE_PAUSED, t0)
         seen = getattr(self.ctx, "agent_seen", None)   # activité réelle (Réglages TV : « connecté », jamais supposé)
         if callable(seen):
             seen(agent)
         if req["op"] == "whoami":
             return {"ok": True, "result": {"agent": agent, "scopes": scopes}}
-        t = tools.TOOL_BY_NAME.get(tool) if isinstance(tool, str) else None
+        t, mod = _tool(tool)
         if t is None:
             return self._deny(agent, None, None, "unknown_tool", t0)
-        if t["scope"] not in scopes:
+        if t["scope"] not in scopes:   # droits relus à CET appel (jamais ceux d'une liste d'outils antérieure)
             return self._deny(agent, tool, None, "forbidden_scope", t0)
         try:
-            a = tools.validate_args(tool, args)
+            a = mod.validate_args(tool, args)
         except ValueError:
             return self._deny(agent, tool, None, "invalid_params", t0)
         # budgets de débit au nom de l'agent PROPRIÉTAIRE : une identité liée (« muse-device ») partage ceux de son
@@ -171,16 +184,19 @@ class AgentService:
         if limited:
             return self._deny(agent, tool, a, "rate_limited", t0)
         try:
-            res = tools.dispatch(self.ctx, agent, scopes, tool, a)
+            res = mod.dispatch(self.ctx, agent, scopes, tool, a)
         except tools.ToolError as e:
             code = str(e) if str(e) else "failed"
             if code in REFUND_TOOL_RATE_ERRORS and stamp is not None:
                 self._refund_tool_slot(owner, tool, stamp)
+            if isinstance(e, canvas_tools.Audited):   # proposition refusée par l'App : déjà auditée (« canvas »)
+                return {"ok": False, "error": code}
             return self._deny(agent, tool, a, code, t0)
         except Exception as e:   # jamais de trace ni de détail interne vers l'agent
             self.log("agent_tool_error", tool=tool, error=type(e).__name__)
             return self._deny(agent, tool, a, "internal", t0)
-        self.audit.record(agent, tool, a, True, None, (time.monotonic() - t0) * 1000)
+        if tool not in canvas_tools.SELF_AUDITED:   # proposition Canvas : auditée une seule fois, par l'App
+            self.audit.record(agent, tool, a, True, None, (time.monotonic() - t0) * 1000)
         return {"ok": True, "result": res}
 
 

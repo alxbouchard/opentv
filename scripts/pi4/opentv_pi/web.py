@@ -31,7 +31,7 @@ import threading
 import time
 import urllib.parse
 
-from . import VERSION, bounded, musesetup, museweb, phoneremote, validate, wifiscan
+from . import VERSION, agents, bounded, musesetup, museweb, phoneremote, validate, wifiscan
 from . import app as appmod   # constantes d'erreur du formulaire (app n'importe pas web : pas de cycle)
 
 TV_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; "
@@ -733,6 +733,7 @@ class LANHandler(_Base):
 AGENT_STEPS = 3
 LEVEL_SHORT = {"none": "Aucun accès", "read": "Voir seulement", "feedback": "Voir + donner mon avis",
                "full": "Avis + messages sur la TV", "control": "Piloter OpenTV : proposer et lancer des films"}
+CANVAS_LABEL = "Changer l'ambiance OpenTV"   # permission facultative (case séparée, jamais un niveau)
 BRIDGE_NEEDS = "Piloter OpenTV"   # niveau dont le pont lié a besoin (agents.LINKED_REQUIRED = niveau « control »)
 AGENTS_DENIED = ("Ce QR a expiré ou a déjà servi. Sur la TV : Réglages, puis «\u00a0Gérer les assistants\u00a0» pour "
                  "en afficher un nouveau.")
@@ -767,8 +768,11 @@ def _agent_status_html(x):
     """Deux lignes distinctes, jamais confondues : « Autorisé » (ce que tu permets) et « Connecté » (installé sur la
     boîte, avec sa clé). Une autorisation seule n'est jamais présentée comme une connexion."""
     e = html.escape
+    what = LEVEL_SHORT[x["level"]] if x["level"] != "none" or not x.get("canvas") else CANVAS_LABEL + " seulement"
+    if x.get("canvas") and x["level"] != "none":
+        what += " + " + CANVAS_LABEL[0].lower() + CANVAS_LABEL[1:]
     auth = ("<li class=\"st %s\"><b>Autorisé</b><span>%s</span></li>"
-            % ("yes" if x["authorized"] else "no", e(LEVEL_SHORT[x["level"]] if x["authorized"] else "Non")))
+            % ("yes" if x["authorized"] else "no", e(what if x["authorized"] else "Non")))
     b = x.get("bridge")
     paused = bool(b) and b["state"] == "paused"
     if x["connected"]:
@@ -816,9 +820,14 @@ def agents_choose_page(token, csrf, lst, error=None, values=None):
             cur = appmod.AGENT_KEEP if x["over"] else x["level"]
         opts = "".join("<option value=\"%s\"%s>%s</option>" % (k, " selected" if k == cur else "", e(t))
                        for k, t in labels)
+        c = v.get("canvas_" + x["id"])   # GET : case absente = décochée ; POST : keep|on|off
+        on = c == "on" or (c == appmod.AGENT_KEEP or (c is None and not v)) and x["canvas"]
+        box = ("<label class=\"check\"><input type=\"checkbox\" name=\"canvas_%s\" value=\"on\"%s><span>%s<small>"
+               "Proposer une ambiance (fond, couleurs) : tu confirmes toujours sur la TV.</small></span></label>"
+               % (x["id"], " checked" if on else "", e(CANVAS_LABEL)))
         parts.append("<section class=\"agent\"><h2>%s</h2>%s%s<label>Ce que %s peut faire"
-                     "<select name=\"agent_%s\">%s</select></label></section>"
-                     % (e(x["name"]), _agent_status_html(x), note, e(x["name"]), x["id"], opts))
+                     "<select name=\"agent_%s\">%s</select></label>%s</section>"
+                     % (e(x["name"]), _agent_status_html(x), note, e(x["name"]), x["id"], opts, box))
     parts.append("<button type=\"submit\" class=\"primary\">Continuer</button></form>")
     parts.append(_cancel_form(token, csrf))
     parts.append("<p class=\"hint\">«\u00a0Autorisé\u00a0» : ce que tu permets. «\u00a0Connecté\u00a0» : l'assistant "
@@ -832,9 +841,12 @@ def agents_plan(lst, values):
     out = []
     for x in lst:
         new = values.get("agent_" + x["id"])
-        if new not in LEVEL_SHORT and new != appmod.AGENT_KEEP:
+        c = values.get("canvas_" + x["id"])
+        if new not in LEVEL_SHORT and new != appmod.AGENT_KEEP or c not in (None, "on"):
             return None
-        out.append({"x": x, "new": new, "change": appmod.choice_changes(x, new)})
+        c = "on" if c == "on" else "off"   # GET d'un formulaire : case absente = décochée
+        lv, cv = appmod.choice_changes(x, new), agents.canvas_changes(x, c)
+        out.append({"x": x, "new": new, "canvas": c, "level_change": lv, "canvas_change": cv, "change": lv or cv})
     return out
 
 
@@ -879,6 +891,14 @@ def _consequence(x, new):
     return " ".join(out) or None
 
 
+def _canvas_consequence(x, p):
+    if p["canvas"] == "on":
+        tail = (" Son installation actuelle ne l'a pas encore : il faudra la réinstaller." if x["connected"] and
+                agents.CANVAS not in x["have"] else "")
+        return "Pourra proposer une ambiance ; rien ne change sans ton « Oui » sur la TV." + tail
+    return "Ne pourra plus proposer d'ambiance%s." % (" (retiré tout de suite)" if agents.CANVAS in x["have"] else "")
+
+
 def agents_confirm_page(token, csrf, plan, fp):
     e = html.escape
     changes = [p for p in plan if p["change"]]
@@ -890,15 +910,18 @@ def agents_confirm_page(token, csrf, plan, fp):
     parts.append("<ul class=\"recap\">")
     for p in plan:
         x = p["x"]
-        if p["change"] and p["new"] == x["level"]:   # même niveau, mais l'identité installée y est ramenée
+        if p["level_change"] and p["new"] == x["level"]:   # même niveau, mais l'identité installée y est ramenée
             line = "Connecté (%s) → <strong>%s</strong>" % (e(LEVEL_SHORT[x["connected_level"]].lower()),
                                                             e(LEVEL_SHORT[p["new"]]))
-        elif p["change"]:
+        elif p["level_change"]:
             line = "%s → <strong>%s</strong>" % (e(LEVEL_SHORT[x["level"]]), e(LEVEL_SHORT[p["new"]]))
         else:
             line = "Inchangé : %s" % e(LEVEL_SHORT[x["level"]])
+        if p["canvas_change"]:
+            line += "<br>%s : <strong>%s</strong>" % (e(CANVAS_LABEL), "oui" if p["canvas"] == "on" else "non")
         if p["change"]:
-            cons = _consequence(x, p["new"])
+            cons = " ".join(t for t in (_consequence(x, p["new"]) if p["level_change"] else None,
+                                        _canvas_consequence(x, p) if p["canvas_change"] else None) if t) or None
         elif x["connected"]:   # vrai pour une identité au-delà de son autorisation : elle n'est pas touchée
             cons = "Reste connecté (%s) : rien ne change pour lui." % LEVEL_SHORT[x["connected_level"]].lower()
         elif x.get("bridge"):   # pont lié en pause : toujours installé, jamais présenté comme absent
@@ -916,7 +939,9 @@ def agents_confirm_page(token, csrf, plan, fp):
                                                                         e(fp, quote=True)))
         for p in plan:   # ligne inchangée ⇒ « keep » : le serveur n'écrit que les lignes réellement modifiées
             parts.append("<input type=\"hidden\" name=\"agent_%s\" value=\"%s\">"
-                         % (p["x"]["id"], p["new"] if p["change"] else appmod.AGENT_KEEP))
+                         "<input type=\"hidden\" name=\"canvas_%s\" value=\"%s\">"
+                         % (p["x"]["id"], p["new"] if p["level_change"] else appmod.AGENT_KEEP,
+                            p["x"]["id"], p["canvas"] if p["canvas_change"] else appmod.AGENT_KEEP))
         parts.append("<button type=\"submit\" class=\"primary\">Oui, enregistrer</button></form>")
         parts.append(_cancel_form(token, csrf))
     else:
@@ -997,7 +1022,7 @@ class AgentsHandler(_Base):
         if u.path != "/assistants":
             return self.send(404, "introuvable", "text/plain; charset=utf-8")
         try:
-            q = urllib.parse.parse_qs(u.query, max_num_fields=4)
+            q = urllib.parse.parse_qs(u.query, max_num_fields=1 + 2 * len(appmod.KNOWN_AGENTS))
         except ValueError:
             return self.send(400, agents_result_page("bad_request"))
         one = lambda k: q[k][0] if len(q.get(k) or ()) == 1 else None   # noqa: E731
@@ -1006,7 +1031,7 @@ class AgentsHandler(_Base):
             return self.send(403, agents_result_page("denied"))
         lst, fp = self.app.assistants_state()
         csrf = self.app.agents_csrf(tok)
-        values = {k: one(k) for k in ("agent_" + a for a in appmod.KNOWN_AGENTS) if k in q}
+        values = {k: one(k) for a in appmod.KNOWN_AGENTS for k in ("agent_" + a, "canvas_" + a) if k in q}
         if values:
             plan = agents_plan(lst, values)
             if plan is None:
@@ -1027,7 +1052,9 @@ class AgentsHandler(_Base):
         if raw is None:
             return self.send(413, agents_result_page("denied"))
         try:
-            q = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True, max_num_fields=8)   # t c action v + 3
+            # t c action v + un niveau et une case par assistant
+            q = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True,
+                                      max_num_fields=4 + 2 * len(appmod.KNOWN_AGENTS))
         except (ValueError, UnicodeDecodeError):
             return self.send(400, agents_result_page("bad_request"))
         form = {k: v[0] for k, v in q.items() if len(v) == 1}
@@ -1042,7 +1069,8 @@ class AgentsHandler(_Base):
             if code == 503:   # écriture impossible : politique en place conservée, nouvel essai possible
                 page = agents_result_page("error", error=err)
             elif self.app.check_agents_token(tok):
-                vals = {k: form.get(k) for k in ("agent_" + a for a in appmod.KNOWN_AGENTS)}
+                vals = dict({"canvas_" + a: form.get("canvas_" + a) or appmod.AGENT_KEEP for a in appmod.KNOWN_AGENTS},
+                            **{"agent_" + a: form.get("agent_" + a) for a in appmod.KNOWN_AGENTS})
                 page = agents_choose_page(tok, self.app.agents_csrf(tok), self.app.assistants(), err, vals)
             else:
                 page = agents_result_page("denied")

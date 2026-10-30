@@ -45,7 +45,7 @@ import stat
 import sys
 import time
 
-from . import fsutil, museadmin, musesetup
+from . import agents, fsutil, museadmin, musesetup
 
 NAME_RE = re.compile(r"([a-z0-9]{16})\.json")
 JOURNAL_DIR = "/var/lib/opentv-muse-setup"
@@ -452,7 +452,7 @@ class MuseHelper:
             cur = sorted(view["muse"]["allowed"])
             if cur == sorted(before):
                 return "unchanged"
-            if cur != sorted(AGENT_LEVELS["control"]):
+            if cur != agents.with_optional(AGENT_LEVELS["control"], before):   # exactement ce que la séance écrit
                 return "kept"
             reg.apply_policy_changes({"muse": sorted(before)}, KNOWN_AGENTS, fp, **adm.service_ids())
             return "restored"

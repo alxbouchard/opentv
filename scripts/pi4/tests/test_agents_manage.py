@@ -1040,6 +1040,9 @@ class TestAgentsEndToEnd(unittest.TestCase):
         self.assertIn("Étape 1 sur 3", res["step1"])
         self.assertIn("Non, pas installé sur la boîte", res["step1"])
         self.assertEqual(res["defaults"], [["agent_muse", "none"], ["agent_hermit", "read"], ["agent_hermes", "keep"]])
+        self.assertEqual(res["canvas_boxes"], [["canvas_%s" % x, False, "Changer l'ambiance OpenTV"]
+                                               for x in ("muse", "hermit", "hermes")])
+        self.assertIn("Changer l'ambiance OpenTV : oui", res["step2"])
         self.assertIn("Reste connecté (voir seulement) : rien ne change pour lui", res["step2"])
         self.assertIn("Étape 2 sur 3", res["step2"])
         self.assertIn("Étape 3 sur 3", res["step3"])
@@ -1053,7 +1056,8 @@ class TestAgentsEndToEnd(unittest.TestCase):
         self.assertFalse(res["after"]["panel"])
         self.assertIn("C'est enregistré", res["after"]["toast"])
         self.assertIn("Assistants autorisés : 2 · connectés : 2", res["after"]["toast"])
-        self.assertEqual(a.registry.policy(), {"muse": ["feedback", "read"], "hermit": ["read"], "hermes": []})
+        self.assertEqual(a.registry.policy(),
+                         {"muse": ["canvas", "feedback", "read"], "hermit": ["read"], "hermes": []})
         self.assertEqual(a.registry.authenticate("hermit", hermit_tok), ["read"])
         self.assertEqual(a.registry.authenticate("hermes", hermes_tok), ["read"])   # jamais révoqué en silence
         # en-tête TV : identités installées, dans l'ordre canonique de la liste des compteurs (Muse, Hermit, Hermes)
@@ -1070,7 +1074,8 @@ class TestAgentsEndToEnd(unittest.TestCase):
         self.assertFalse(res["after_cancel"]["panel"])
         self.assertEqual(res["after_cancel"]["toast"], "Annulé sur le téléphone : rien n'a changé.")
         self.assertIsNone(s.web.lan_port())                                     # écoute bien fermée
-        self.assertEqual(a.registry.policy(), {"muse": ["feedback", "read"], "hermit": ["read"], "hermes": []})
+        self.assertEqual(a.registry.policy(),
+                         {"muse": ["canvas", "feedback", "read"], "hermit": ["read"], "hermes": []})
         self.assertNotIn("muse", a.registry.list())
         self.assertEqual(snapshot(a), before)
         for t in (res["step1"], res["step2"], res["step3"], res["cancelled"]):

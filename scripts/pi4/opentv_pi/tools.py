@@ -131,6 +131,14 @@ def validate_args(name, args):
     t = TOOL_BY_NAME.get(name)
     if t is None:
         raise ValueError("unknown_tool")
+    out = check_schema(t, args)
+    if name == "display_message" or (name == "present_title" and "text" in out):
+        out["text"] = validate.message_text(out["text"])
+    return out
+
+
+def check_schema(t, args):
+    """Contrôle d'un schéma fermé (partagé avec canvas_tools) -> arguments complétés des défauts ; ValueError."""
     if args is None:
         args = {}
     if not isinstance(args, dict):
@@ -161,8 +169,6 @@ def validate_args(name, args):
             if "pattern" in p and not re.match(p["pattern"], v):
                 raise ValueError("invalid_params")
         out[k] = v
-    if name == "display_message" or (name == "present_title" and "text" in out):
-        out["text"] = validate.message_text(out["text"])
     return out
 
 

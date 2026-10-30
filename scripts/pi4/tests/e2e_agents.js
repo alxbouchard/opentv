@@ -79,14 +79,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     out.phone_js = (await ph.$("script")) !== null;   // aucune balise <script> : parcours entièrement sans JS
     out.step1 = await ph.textContent("main");
     out.targets = [];
-    for (const sel of ["select[name=agent_muse]", "select[name=agent_hermit]", "#choose button.primary", ".cancel button"]) {
+    for (const sel of ["select[name=agent_muse]", "select[name=agent_hermit]",
+                       "label.check:has(input[name=canvas_muse])", "#choose button.primary", ".cancel button"]) {
       const b = await (await ph.$(sel)).boundingBox();
       out.targets.push([sel, Math.round(b.height), Math.round(b.width)]);
     }
     out.targets_ok = out.targets.every((t) => t[1] >= 56 && t[2] >= 280);
     out.defaults = await ph.$$eval("select", (ss) => ss.map((s) => [s.name, s.value]));
+    // permission facultative « Changer l'ambiance OpenTV » : une case séparée par assistant, décochée par défaut
+    out.canvas_boxes = await ph.$$eval("input[type=checkbox]", (bs) => bs.map((b) => [b.name, b.checked,
+      b.closest("label").firstChild.nextSibling.firstChild.textContent]));
     await ph.screenshot({ path: path.join(cfg.shots, "phone-agents-step1.png"), fullPage: true });
     await ph.selectOption("select[name=agent_muse]", "feedback");
+    await ph.check("input[name=canvas_muse]");
     await submit("#choose button.primary");                                     // « Continuer » (GET)
     out.step2 = await ph.textContent("main");
     const step2Url = ph.url();

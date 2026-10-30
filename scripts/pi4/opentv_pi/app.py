@@ -13,8 +13,8 @@ import string
 import threading
 import time
 
-from . import (VERSION, agents, bootid, canvas_tv, cec, config, fsutil, musesetup, netjobs, netstate, nethelper,
-               peeruid, phoneremote, tools, tvcontrol, validate, wifiscan)
+from . import (VERSION, agents, bootid, canvas_tools, canvas_tv, cec, config, fsutil, musesetup, netjobs, netstate,
+               nethelper, peeruid, phoneremote, tools, tvcontrol, validate, wifiscan)
 from .foryou import ForYou, EngineError
 from . import promotion
 from . import source as sourcemod
@@ -61,7 +61,7 @@ def choice_changes(x, new):
     Un assistant affiché « Inchangé » n'est donc jamais réduit ni révoqué."""
     if new == AGENT_KEEP:
         return False
-    return new != x["level"] or not set(x["have"] or ()) <= set(AGENT_LEVELS[new])
+    return new != x["level"] or not set(agents.level_scopes(x["have"])) <= set(AGENT_LEVELS[new])
 
 
 def assistant_row(a, v, seen_at, now):
@@ -97,7 +97,8 @@ def assistant_row(a, v, seen_at, now):
             "client": level_of(own) if own else None, "bridge": bridge,
             # identité liée enregistrée (quels que soient ses droits) : sert à dater l'état public de la boîte Muse
             "linked_present": any(sc is not None for sc in (v.get("linked") or {}).values()),
-            "over": bool(own) and not set(own) <= set(AGENT_LEVELS[lvl]),
+            "over": bool(own) and not set(own) <= set(AGENT_LEVELS[lvl]) | ({agents.CANVAS} & set(allowed)),
+            "canvas": agents.CANVAS in allowed,   # permission facultative, hors niveaux (case séparée)
             "seen_s": int(max(0, now - seen_at)) if (have and seen_at is not None) else None}
 AP_PSK_ALPHABET = "abcdefghijkmnopqrstuvwxyz23456789"
 AP_RETRY_S = 120.0
@@ -199,6 +200,8 @@ class App:
         self.audit = agents.Audit(cfg.audit_file)
         # OpenTV Canvas : scène publiée + aperçu agent à confirmer sur la TV (canvas_tv), jamais l'inverse
         self.canvas = canvas_tv.TvCanvas.for_config(cfg, self.audit, log, mono)
+        self.canvas_cooldown = canvas_tools.Cooldown(mono)   # délai de grâce des agents après un refus humain
+        self.canvas.on_refused = self.canvas_cooldown.note
         # Porte aperçu Canvas ⇄ actions d'assistant : « vérifier l'aperçu + mettre en file / lancer » et « vérifier la
         # file + créer l'aperçu » sont exclusifs (jamais une feuille ET une action en file/réclamée). Ordre : porte ->
         # self.lock / verrous du magasin et de la file ; jamais prise sous un autre verrou ni sur un chemin humain ;
@@ -837,7 +840,7 @@ class App:
             self.device = config.load_device(self.cfg)
             reason = None
             try:   # droits réduits au QR : l'ancien accès est révoqué dans la MÊME écriture (verrou inter-processus)
-                self.registry.set_policy(policy, revoke_exceeding=True)
+                self.registry.set_policy(policy, revoke_exceeding=True, preserve=validate.OPTIONAL_SCOPES)
             except (ValueError, OSError) as e:
                 # registre illisible (jamais remplacé : les assistants restent refusés, la TV l'affiche) ou verrou /
                 # écriture en échec : le Wi-Fi et le nom ne sont jamais bloqués par le fichier des assistants, mais
@@ -1061,16 +1064,20 @@ class App:
                     self.agents_token.fail_attempt()
                     return 400, "form", ERR_AGENTS_LEVEL, None
                 return 409, "form", ERR_AGENTS_STALE, None
-            changes = {}
+            changes, partial = {}, set()
             for x in lst:   # chaque agent connu explicitement (aucune valeur par défaut implicite)
-                lvl = g("agent_" + x["id"])
-                if lvl not in AGENT_LEVELS and lvl != AGENT_KEEP:
+                lvl, cvs = g("agent_" + x["id"]), g("canvas_" + x["id"]) or AGENT_KEEP   # case absente : keep
+                if lvl not in AGENT_LEVELS and lvl != AGENT_KEEP or cvs not in agents.CANVAS_CHOICES:
                     self.agents_token.fail_attempt()
                     return 400, "form", ERR_AGENTS_LEVEL, None
-                if choice_changes(x, lvl):   # seules les lignes réellement modifiées sont écrites
-                    changes[x["id"]] = list(AGENT_LEVELS[lvl])
+                lv_ch, cv_ch = choice_changes(x, lvl), agents.canvas_changes(x, cvs)
+                if lv_ch or cv_ch:   # seules les lignes réellement modifiées sont écrites
+                    changes[x["id"]] = agents.row_scopes(AGENT_LEVELS[lvl] if lv_ch else x["allowed"], x["allowed"],
+                                                         cvs if cv_ch else AGENT_KEEP)
+                    if not lv_ch:   # niveau inchangé : seule la permission facultative est touchée
+                        partial.add(x["id"])
             try:
-                changed = self.registry.apply_policy_changes(changes, KNOWN_AGENTS, fp)
+                changed = self.registry.apply_policy_changes(changes, KNOWN_AGENTS, fp, partial=partial)
             except ValueError as e:
                 if str(e) == "stale":
                     return 409, "form", ERR_AGENTS_STALE, None
@@ -1375,6 +1382,9 @@ class App:
         with self.agent_tv_gate:
             self.canvas_sync()
             return self.canvas.preview(agent, changes, blocked=self.tv_actions.busy())
+
+    def canvas_agent_status(self, agent):
+        return self.canvas.agent_status(agent)
 
     def canvas_agent_cancel(self, agent, preview_id):
         return self.canvas.agent_cancel(agent, preview_id)

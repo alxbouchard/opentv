@@ -10,7 +10,7 @@ import os
 import stat
 import sys
 
-from . import VERSION, agentport, tools, validate
+from . import VERSION, agentport, canvas_tools, tools, validate
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 MAX_LINE = 1024 * 1024
@@ -35,6 +35,10 @@ ERRORS_FR = {"unauthorized": "agent non autorisé", "forbidden_scope": "outil ho
              "tv_busy": "la TV est dans un réglage : réessaie après", "tv_setup_active": "OpenTV est en configuration",
              "tv_queue_full": "trop d'actions en attente sur la TV", "control_unavailable": "pilotage indisponible",
              "bridge_paused": "pont en pause : le pilotage n'est plus autorisé sur la TV",
+             "canvas_cooldown": "proposition refusée récemment : attends avant d'en proposer une autre",
+             "preview_pending": "une proposition d'ambiance attend déjà la décision d'Alex",
+             "no_change": "c'est déjà l'ambiance actuelle", "unknown_preview": "aucune proposition à toi en attente",
+             "canvas_unavailable": "ambiance OpenTV indisponible",
              "already_seen": "film déjà vu par Alex : propose-en un autre (mode=rewatch seulement s'il demande "
                              "explicitement de le revoir)"}
 
@@ -137,13 +141,17 @@ class Session:
             r = self._service({"op": "whoami"})
             if not r.get("ok"):
                 return _err(mid, -32603, "OpenTV : %s" % ERRORS_FR.get(r.get("error"), r.get("error")))
-            return _ok(mid, {"tools": tools.public_tools(r["result"].get("scopes") or [])})
+            # liste recalculée à CHAQUE demande depuis les droits authentifiés de CETTE session (whoami) : jamais un
+            # cache partagé ; les outils Canvas n'apparaissent qu'avec la permission facultative « canvas »
+            sc = r["result"].get("scopes") or []
+            return _ok(mid, {"tools": tools.public_tools(sc) + canvas_tools.public_tools(sc)})
         if method == "tools/call":
             name, args = params.get("name"), params.get("arguments", {})
-            if not isinstance(name, str) or name not in tools.TOOL_BY_NAME:
+            mod = next((m for m in (tools, canvas_tools) if isinstance(name, str) and name in m.TOOL_BY_NAME), None)
+            if mod is None:
                 return _err(mid, -32602, "Unknown tool")
             try:
-                a = tools.validate_args(name, args)
+                a = mod.validate_args(name, args)
             except ValueError:
                 return _ok(mid, _tool_error("invalid_params"))
             r = self._service({"op": "call", "tool": name, "args": a})

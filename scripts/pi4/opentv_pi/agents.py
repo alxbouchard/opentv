@@ -50,6 +50,33 @@ def linked_paused(agent, scopes):
     return need is not None and sorted(scopes or ()) != sorted(need)
 
 
+def level_scopes(scopes):
+    """Partie EMBOÎTÉE (niveaux none ⊂ read ⊂ … ⊂ control) de `scopes`, sans les permissions facultatives
+    (validate.OPTIONAL_SCOPES, ex. « canvas »), triée : c'est elle que comparent niveaux, pont lié et pilotage."""
+    return sorted(x for x in set(scopes or ()) if x not in validate.OPTIONAL_SCOPES)
+
+
+def with_optional(level, previous):
+    """Scopes d'un niveau `level` + les permissions facultatives déjà présentes dans `previous` (triés) : changer de
+    niveau (pilotage root, QR de configuration) ne retire jamais une permission facultative en silence."""
+    return sorted(set(level) | (set(previous or ()) & set(validate.OPTIONAL_SCOPES)))
+
+
+CANVAS = "canvas"
+CANVAS_CHOICES = ("keep", "on", "off")   # case « Changer l'ambiance OpenTV » : keep = ligne non modifiée
+
+
+def canvas_changes(row, choice):
+    """Le choix de la case modifie-t-il la permission AUTORISÉE de cette ligne (assistant_row) ? keep ⇒ jamais."""
+    return choice != "keep" and (choice == "on") != (CANVAS in row["allowed"])
+
+
+def row_scopes(level, allowed, choice):
+    """Nouvelle ligne de politique : partie emboîtée de `level` + « canvas » selon `choice` (keep : comme `allowed`)."""
+    on = (CANVAS in allowed) if choice == "keep" else choice == "on"
+    return sorted(set(level_scopes(level)) | ({CANVAS} if on else set()))
+
+
 def linked_of(parent):
     """Identités dédiées liées à `parent` (ordre stable)."""
     return tuple(sorted(c for c, p in LINKED_POLICY.items() if p == parent))
@@ -272,11 +299,17 @@ class Registry:
             finally:
                 os.close(fd)   # libère le flock
 
-    def set_policy(self, policy, uid=None, gid=None, revoke_exceeding=False):
+    def set_policy(self, policy, uid=None, gid=None, revoke_exceeding=False, preserve=()):
         """Politique complète (QR de configuration). revoke_exceeding : dans la MÊME écriture, toute identité dont
-        les scopes dépassent sa nouvelle autorisation (ou étrangère à la politique) est révoquée. -> [révoqués]."""
+        les scopes dépassent sa nouvelle autorisation (ou étrangère à la politique) est révoquée. `preserve` : scopes
+        facultatifs (« canvas ») repris de la ligne enregistrée de chaque agent, sous le même verrou — le QR, qui ne
+        les montre pas, ne les retire jamais. -> [révoqués]."""
         clean = {validate.agent_id(k): validate.scopes(v) for k, v in policy.items()}
         with self._mutating(uid, gid):
+            old = self.data.get("policy") if isinstance(self.data.get("policy"), dict) else {}
+            for a in clean:
+                kept = set(_valid_scopes(old.get(a))) & set(preserve)
+                clean[a] = sorted(set(clean[a]) | kept)
             self.data["policy"] = clean
             self.data["policy_at"] = round(self.clock(), 3)
             gone = []
@@ -301,7 +334,7 @@ class Registry:
             v = view_of(self.data, known)
             return v, view_fingerprint(v), self.corrupt
 
-    def apply_policy_changes(self, changes, known, expect, uid=None, gid=None):
+    def apply_policy_changes(self, changes, known, expect, uid=None, gid=None, partial=()):
         """Gestion des assistants depuis la TV : `changes` = {agent: scopes} pour les SEULES lignes réellement
         modifiées par l'utilisateur. Sous un seul verrou : registre illisible ⇒ ValueError("registry_unreadable") ;
         état différent de l'empreinte `expect` montrée au téléphone ⇒ ValueError("stale") ; rien n'est écrit.
@@ -311,6 +344,8 @@ class Registry:
         non modifié ⇒ sa lecture validée actuelle (absente/invalide ⇒ [] = « Aucun accès » déjà affiché) et son
         identité n'est JAMAIS touchée ; entrées étrangères conservées telles quelles. N'émet jamais de jeton ni
         d'identité. Aucun changement ⇒ aucune écriture. Échec d'écriture ⇒ OSError, état mémoire rétabli.
+        `partial` : agents dont seule une permission facultative change (niveau « Ne rien changer ») — leurs
+        identités (et identités liées) ne perdent alors QUE des scopes facultatifs, jamais leurs autres droits.
         -> {agent: "policy"|"restricted"|"revoked"} pour chaque agent modifié."""
         known = tuple(validate.agent_id(k) for k in known)
         clean = {validate.agent_id(k): validate.scopes(v) for k, v in changes.items()}
@@ -335,7 +370,7 @@ class Registry:
                 if not isinstance(e, dict):
                     continue
                 have = cur[a]["have"] or []   # déjà validé et trié ; invalide ⇒ [] ⇒ révoquée (fail-closed)
-                keep = [x for x in have if x in allowed]
+                keep = [x for x in have if x in allowed or (a in partial and x not in validate.OPTIONAL_SCOPES)]
                 if not keep:
                     del self.data["agents"][a]
                     out[a] = "revoked"
@@ -347,7 +382,8 @@ class Registry:
                 if parent not in clean or e is None:
                     continue
                 have = _valid_scopes(e.get("scopes")) if isinstance(e, dict) else []
-                keep = [x for x in have if x in clean[parent]]
+                keep = [x for x in have if x in clean[parent] or
+                        (parent in partial and x not in validate.OPTIONAL_SCOPES)]
                 if not keep:
                     del self.data["agents"][child]
                 elif keep != have:

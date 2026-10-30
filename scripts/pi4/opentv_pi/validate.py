@@ -5,7 +5,10 @@ import unicodedata
 # « control » : pilotage sémantique d'OpenTV (proposer un film à l'écran, naviguer, lancer un film accepté par le lecteur
 # officiel promu, fermer le lecteur). Jamais accordé par défaut ni par une installation : choix explicite du
 # propriétaire (« Gérer les assistants » sur la TV, ou `opentv-pi muse authorize-control --yes` en root).
-SCOPES = ("control", "display", "feedback", "read")
+# « canvas » : permission FACULTATIVE, hors des niveaux emboîtés (jamais dans AGENT_LEVELS, MUSE_SCOPES ni
+# LINKED_REQUIRED) : proposer une ambiance OpenTV que le propriétaire confirme sur la TV (outils canvas_tools).
+SCOPES = ("canvas", "control", "display", "feedback", "read")
+OPTIONAL_SCOPES = ("canvas",)
 AGENT_ID_RE = re.compile(r"[a-z][a-z0-9-]{1,23}")
 HEX64_RE = re.compile(r"[0-9a-fA-F]{64}")
 # toute forme d'adresse : schéma, www., hôte.tld, IP, schémas dangereux (plus strict que le moteur : un message

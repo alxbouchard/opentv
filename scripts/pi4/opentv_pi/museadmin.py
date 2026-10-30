@@ -812,7 +812,9 @@ class Admin:
                                 "note": "L'identité %s a changé pendant la vérification sans venir de cet "
                                         "appariement : rien modifié. Remplacement explicite : sudo "
                                         "/opt/opentv/bin/opentv-pi muse pair --replace-identity" % AGENT_ID}, 2
-                    if ident_state["state"] != "owned" or sorted(allowed or []) != list(musebridge.MUSE_SCOPES):
+                    # partie emboîtée seulement : une permission facultative du parent (« canvas ») ne change rien
+                    if ident_state["state"] != "owned" or \
+                            agents.level_scopes(allowed) != list(musebridge.MUSE_SCOPES):
                         healthy = None
                 if healthy is not None:
                     if healthy["enabled"] != "enabled":
@@ -964,7 +966,9 @@ class Admin:
         if corrupt:
             return {"ok": False, "error": "registry_unreadable", "note": "Registre des agents illisible : rien écrit."}, 2
         before = list(view[LEGACY_ID]["allowed"])
-        after = list(AGENT_LEVELS["control"]) if grant else [x for x in before if x != "control"]
+        # la permission facultative « canvas » (hors niveaux) n'est jamais retirée par le pilotage
+        after = agents.with_optional(AGENT_LEVELS["control"], before) if grant else \
+            [x for x in before if x != "control"]
         plan = {"agent": LEGACY_ID, "policy_before": before, "policy_after": after,
                 "bridge_identity": AGENT_ID, "other_agents": "unchanged"}
         if sorted(after) == sorted(before):

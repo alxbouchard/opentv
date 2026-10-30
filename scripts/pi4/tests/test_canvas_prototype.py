@@ -765,7 +765,7 @@ PROTECTED = ("scripts/pi4/ui", "scripts/pi4/opentv_pi", "scripts/pi4/install.sh"
 PROTO_MARKERS = re.compile(r"canvas_model|prototypes[/\\]canvas|OTVCanvas|e2e_canvas_prototype")
 # modules internes de production importés relativement dans opentv_pi (jamais le prototype `canvas_model`)
 PRODUCTION_CANVAS_MODULES = frozenset(("canvas", "canvas_schema", "canvas_storage", "canvas_activity",
-                                       "canvas_roles", "canvas_tv"))
+                                       "canvas_roles", "canvas_tv", "canvas_tools"))
 
 
 def production_files():

@@ -69,6 +69,7 @@ class TvCanvas:
         self._props = collections.OrderedDict()   # preview_id -> {"id", "agent", "hash", "preset"} (borné)
         self._inflight = 0         # créations d'aperçu en cours (sous `_pl`)
         self._deferred = []        # annulations humaines d'aperçus pas encore attribués, à auditer après leur création
+        self.on_refused = None     # agent -> None : refus du propriétaire / geste humain (délai de grâce, tâche 4)
 
     @classmethod
     def for_config(cls, cfg, audit, log, mono):
@@ -220,6 +221,9 @@ class TvCanvas:
             for g in self._settle(meta):
                 self._audit(g["agent"], "cancelled", True, None, g)
 
+    def agent_status(self, agent):
+        return self.store.agent_api(agent).status()
+
     def agent_cancel(self, agent, preview_id):
         return self.store.agent_api(agent).cancel(preview_id)
 
@@ -301,3 +305,5 @@ class TvCanvas:
             if type(info.get("revision")) is int:
                 args["revision"] = info["revision"]
         self.audit.record(agent or agents.OWNER_ACTOR, "canvas", args, ok, error, 0)
+        if ok and agent and event in ("rejected", "cancelled") and self.on_refused is not None:
+            self.on_refused(agent)   # aperçu d'un agent refusé (« Non », échéance) ou annulé par un geste humain
