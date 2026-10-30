@@ -7,9 +7,10 @@
    sont fixes dans tv.html. La coque (configuration, Réglages, confirmations, boutons, QR, lecteur, hors-ligne) n'est
    jamais stylée par la scène.
    Mouvement : au plus quatre couches continues (.cv-l1, .cv-l2, .cv-l3, #cvglow), transform/opacity seulement, aucun
-   filtre, flou, vidéo ni worker. Figées (pause) pendant un panneau, la lecture et son retour, le hors-ligne ou une page
-   cachée ; fond fixe (aucune animation) en configuration, mouvement « off », préférence « réduire les animations »
-   (relue en direct à chaque rendu) ou performance dégradée (cadence d'images mesurée, définitif pour la session).
+   filtre, flou, vidéo ni worker. Figées (pause) pendant un panneau, la feuille de confirmation Canvas (aperçu figé),
+   la lecture et son retour, le hors-ligne ou une page cachée ; fond fixe (aucune animation) en configuration,
+   mouvement « off », préférence « réduire les animations » (relue en direct à chaque rendu) ou performance dégradée
+   (cadence d'images mesurée, définitif pour la session).
    Halo du héros : teinte du visuel dessiné de la carte au focus (même empreinte que tv.js), quantifiée en douze
    classes fermées ; jamais une adresse d'image, jamais le fond entier qui change de carte en carte. */
 (function () {
@@ -22,7 +23,8 @@
   var KEYS = ["schema_version", "wallpaper", "motion", "accent", "shade", "hero_focus", "row_order"];
   var ENUM_KEYS = ["wallpaper", "motion", "accent", "shade", "hero_focus"];
   var FIRST_ROW = "tonight";
-  var PAUSE_REASONS = ["setup", "panel", "playback", "offline", "hidden"];
+  // « sheet » : feuille de confirmation Canvas (l'aperçu est peint figé, jamais en mouvement sous le choix)
+  var PAUSE_REASONS = ["setup", "panel", "sheet", "playback", "offline", "hidden"];
   // détecteur de cadence : ≥ BAD_MIN intervalles > GAP_MS parmi les WIN_MAX derniers (au moins WIN_MIN mesurés)
   var GAP_MS = 70, WIN_MIN = 60, WIN_MAX = 90, BAD_MIN = 45;
   var GLOW_DELAY_MS = 180;          // répétition de touche : le halo suit la carte quand la télécommande se pose

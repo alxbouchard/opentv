@@ -372,16 +372,20 @@
       focus.row = Math.max(0, Math.min(focus.row, ROWS.length - 1));
       focus.cols[focus.row] = Math.max(0, Math.min(col(), ROWS[focus.row].items.length - 1));
     }
-    var top = focus.zone === "top";
-    $("gear").className = "qbtn" + (top ? (panel ? " active" : " focused") : "");
-    // panneau ouvert : le message d'assistant s'efface (couche dédiée, jamais sur Réglages/confirmation/fiche)
-    $("app").className = (top ? "zone-top" : "") + (panel || cvSheet ? " has-panel" : "");
+    // feuille Canvas : son choix est le SEUL focus visible ; la carte/Réglages choisis restent mémorisés (focus.*)
+    // et retrouvent leur anneau à la fermeture
+    var top = focus.zone === "top", ring = !cvSheet;
+    $("gear").className = "qbtn" + (top ? (panel ? " active" : ring ? " focused" : "") : "");
+    // panneau ouvert : le message d'assistant s'efface (couche dédiée, jamais sur Réglages/confirmation/fiche) ;
+    // feuille latérale (Réglages, confirmation, Canvas) : la mention Samsung du pied de page ne passe jamais dessous
+    $("app").className = (top ? "zone-top" : "") + (panel || cvSheet ? " has-panel" : "") +
+      (cvSheet || (panel && panel.kind !== "item") ? " has-sheet" : "");
     $("main").className = "main" + (panel ? " dim" : "");
     grid.forEach(function (g, ri) {
       var cur = ri === focus.row, c = focus.cols[ri] || 0, fc = g.cards[c] || g.cards[0];
       g.row.className = "row" + (g.few ? " few" : "") + (cur ? " current" : "");
       g.cards.forEach(function (card, ci) {
-        card.className = "card" + (!top && cur && ci === c ? " focused" : "");
+        card.className = "card" + (ring && !top && cur && ci === c ? " focused" : "");
         if (Math.abs(ri - focus.row) <= 1 && ci <= c + 8) { poster(card, ROWS[ri].items[ci]); }   // affiches proches seulement
       });
       // défilement horizontal par transform (pas de scrollIntoView) : la carte au focus garde une marge à droite
@@ -406,10 +410,14 @@
     item: [["← →", "Choisir"], ["OK", "Valider"], ["Retour", "Fermer"]],
     agents: [["Téléphone", "Scanne le QR"], ["OK ou Retour", "Annuler"]],
     musesetup: [["Téléphone", "Suis les étapes"], ["OK ou Retour", "Annuler"]],
-    panel: [["↑ ↓", "Choisir"], ["OK", "Valider"], ["Retour", "Revenir"]]
+    panel: [["↑ ↓", "Choisir"], ["OK", "Valider"], ["Retour", "Revenir"]],
+    // feuille Canvas : boutons empilés (↑ = « Non » en haut, ↓ = « Oui » ; ← → identiques), OK = choix au focus
+    sheetNo: [["↑ ↓", "Choisir"], ["OK", "Non, garder l'ambiance"], ["Retour", "Non"]],
+    sheetYes: [["↑ ↓", "Choisir"], ["OK", "Oui, appliquer"], ["Retour", "Non"]]
   }, helpKey = "";
   function help() {
-    var k = panel ? (panel.kind === "item" ? "item" : panel.kind === "agents" ? "agents" :
+    var k = cvSheet ? (cvSheet.btn === 1 ? "sheetYes" : "sheetNo") :
+            panel ? (panel.kind === "item" ? "item" : panel.kind === "agents" ? "agents" :
                      panel.kind === "musesetup" ? "musesetup" : "panel") : (focus.zone === "top" ? (ROWS.length ? "top" : "topEmpty") :
                                                                        (focus.row > 0 ? "rows" : "rows0"));
     if (k === helpKey) { return; }
@@ -1141,6 +1149,8 @@
   // - la feuille de confirmation (« Non » au focus) n'est ni un panneau ni un geste ordinaire : ses touches ←/→/↑/↓,
   //   OK et Retour n'envoient ni événement ni occupation. L'aperçu n'est peint QUE pendant qu'elle est affichée, ses
   //   rangées jamais (mémoire spatiale) ; l'ordre de la scène publiée attend la fin de toute fiche/feuille/lecture.
+  //   Pendant la feuille : ambiance figée (raison de pause locale « sheet »), son choix est le seul focus visible
+  //   (carte/Réglages mémorisés, sans anneau) et l'aide du bas nomme ses touches (OK = choix au focus, Retour = Non).
   // - aucune action d'assistant n'est réclamée ni appliquée pendant la feuille ; « restore_failed » (see_state) montre
   //   l'état réel relu par le service, jamais « rien n'a changé ».
   var CV = window.OpenTVCanvas || null;
@@ -1287,6 +1297,7 @@
     var r = [];
     if (state && state.setup && state.setup.active) { r.push("setup"); }
     if (panel) { r.push("panel"); }
+    if (cvSheet) { r.push("sheet"); }   // feuille Canvas : aperçu figé (jamais déclaré au service comme occupation)
     if (play || { loading: 1, playing: 1, closing: 1, closed: 1, unavailable: 1 }[pbState()] === 1) { r.push("playback"); }
     if (!$("offline").hidden) { r.push("offline"); }
     if (document.hidden) { r.push("hidden"); }
@@ -1355,6 +1366,7 @@
   function paintSheet() {
     var b = $("cvbtns").children;
     for (var i = 0; i < b.length; i++) { b[i].className = "lrow" + (cvSheet && i === cvSheet.btn ? " focused" : ""); }
+    help();   // aide du bas : OK nomme le choix au focus
   }
   function tickSheet() {
     clearTimeout(cvSheetTimer);
@@ -1437,8 +1449,8 @@
   function openAmbiance(sel) {
     var c = cvView(), list = [["style", "◐", "Style", "Actuel : " + styleName()],
                               ["motion", "≈", "Mouvement du fond", "Actuel : " + motionName()]];
-    if (c.can_rollback) { list.push(["undo", "↶", "Version précédente", "Revenir à l'ambiance d'avant"]); }
-    list.push(["reset", "⟲", "Ambiance d'origine", "Canvas, mouvement calme"]);
+    if (c.can_rollback) { list.push(["undo", "↩", "Version précédente", "Revenir à l'ambiance d'avant"]); }
+    list.push(["reset", "↺", "Ambiance d'origine", "Canvas, mouvement calme"]);
     list.push(["back", "←", "Retour", "Revenir aux Réglages"]);
     var text = c.status === "corrupt" ? "Ambiance enregistrée illisible : l'écran montre l'ambiance d'origine. « Ambiance d'origine » la répare." :
       c.status === "unavailable" ? "Ambiance indisponible sur cette boîte : l'ambiance d'origine reste affichée." :

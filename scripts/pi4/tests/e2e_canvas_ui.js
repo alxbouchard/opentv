@@ -316,9 +316,74 @@ const GEOM = () => {
   out.focus = f ? f.textContent : ($("gear").className.indexOf("focused") >= 0 ? "gear" : null);
   return out;
 };
+// feuille latérale visible (Réglages ou Canvas) : aucun texte du pied de page peint dessous ; la feuille Canvas n'a pas
+// de grand vide accidentel (marge sous son dernier élément visible, au-delà de son rembourrage)
+const SHEET_GEOM = () => {
+  const $ = (id) => document.getElementById(id);
+  const R = (e) => { const r = e.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
+  const shown = (e) => {
+    for (let x = e; x && x !== document; x = x.parentElement) {
+      const cs = getComputedStyle(x);
+      if (x.hidden || cs.display === "none" || cs.visibility === "hidden") { return false; }
+    }
+    return e.getClientRects().length > 0;
+  };
+  const inter = (a, b) => Math.min(a[2], b[2]) - Math.max(a[0], b[0]) > 0.5 && Math.min(a[3], b[3]) - Math.max(a[1], b[1]) > 0.5;
+  const sheets = [$("cvsheet"), $("panel")].filter((s) => shown(s) && / sheet\b/.test(" " + s.className));
+  const out = { sheets: sheets.map((s) => s.id), footerUnderSheet: [], slack: null };
+  Array.prototype.forEach.call($("help").children, (f) => {
+    if (!shown(f) || !(f.textContent || "").trim()) { return; }
+    sheets.forEach((s) => { if (inter(R(f), R(s))) { out.footerUnderSheet.push(s.id + ">" + (f.id || f.className)); } });
+  });
+  const cs = $("cvsheet");
+  if (shown(cs)) {
+    const kids = Array.prototype.filter.call(cs.children, (k) => shown(k));
+    const last = kids[kids.length - 1];
+    out.slack = Math.round(R(cs)[3] - R(last)[3] - parseFloat(getComputedStyle(cs).paddingBottom));
+    out.sheetRect = R(cs).map(Math.round);
+    out.helpTop = Math.round(R($("help"))[1]);
+  }
+  return out;
+};
+// feuille Canvas : seul son choix porte le focus ; aucune carte/Réglages/bouton de panneau marqué ou agrandi dessous
+const SHEET_FOCUS = () => {
+  const shown = (e) => {
+    for (let x = e; x && x !== document; x = x.parentElement) {
+      const cs = getComputedStyle(x);
+      if (x.hidden || cs.display === "none" || cs.visibility === "hidden") { return false; }
+    }
+    return e.getClientRects().length > 0;
+  };
+  const sheet = document.getElementById("cvsheet"), out = { outside: [], inside: [], ringed: [] };
+  Array.prototype.forEach.call(document.querySelectorAll(".focused"), (e) => {
+    if (!shown(e)) { return; }
+    (sheet.contains(e) ? out.inside : out.outside).push(sheet.contains(e) ? e.textContent : (e.id || e.className) + ":" + (e.textContent || "").slice(0, 30));
+  });
+  Array.prototype.forEach.call(document.querySelectorAll(".card, #gear, #pbtns button"), (e) => {
+    if (!shown(e)) { return; }
+    const cs = getComputedStyle(e);
+    const ring = /rgba?\(255, 255, 255(?:, 0?\.\d+)?\) 0px 0px 0px [1-9]/.test(cs.boxShadow);
+    const scaled = cs.transform !== "none" && !/^matrix\(1, 0, 0, 1, /.test(cs.transform);
+    if (ring || scaled) { out.ringed.push((e.id || e.className) + ":" + (e.textContent || "").slice(0, 20) + " " + cs.transform); }
+  });
+  out.hero = document.getElementById("htitle").textContent;
+  out.hint = document.getElementById("hint").innerText;
+  return out;
+};
+// couches d'ambiance : mode, raisons de pause, animations CSS des quatre couches (état, temps courant, rendu)
+const MOTION = () => {
+  const L = [".cv-l1", ".cv-l2", ".cv-l3", "#cvglow"].map((s) => document.querySelector("#cvwall " + s));
+  const an = document.getAnimations().filter((a) => a.animationName !== undefined && a.effect && L.indexOf(a.effect.target) >= 0);
+  return { mode: document.body.getAttribute("data-cv-mode"), reasons: window.OpenTVCanvas.state().reasons,
+           running: an.filter((a) => a.playState === "running").length, total: an.length,
+           times: an.map((a) => a.animationName + "@" + Math.round(a.currentTime || 0)),
+           styles: L.map((e) => { const c = getComputedStyle(e); return c.transform + "|" + c.opacity; }) };
+};
+const hintText = (page) => page.evaluate(() => document.getElementById("hint").innerText);
 async function geom(page, name) {
   await sleep(250);
   const g = await page.evaluate(GEOM);
+  g.sheetGeom = await page.evaluate(SHEET_GEOM);
   g.shot = path.join(cfg.shots, name + ".png");
   await page.screenshot({ path: g.shot });
   return g;
@@ -424,10 +489,19 @@ S.sheet = async (browser) => {
   const { ctx, page, F } = await open(browser);
   await waitMode(page, "run");
   const out = { pid: pid(5) };
+  await press(page, "ArrowRight", 300);   // carte choisie hors de la position par défaut : rendue intacte au retour
+  out.selectedBefore = await focusOf(page);
+  out.motionBefore = await page.evaluate(MOTION);
+  await sleep(1800);                      // fenêtre de silence : la feuille n'apparaît qu'ensuite
   out.rowsBefore = await rowTitles(page);
   await probeRows(page);
   setPreview(F.state, out.pid, P.cinema);
   out.shown = await until(() => sheetShown(page), 4000);
+  await sleep(400);                       // transitions du focus terminées (anneau, agrandissement)
+  out.motionA = await page.evaluate(MOTION);
+  out.focusProbe = await page.evaluate(SHEET_FOCUS);
+  out.sheetGeom = await page.evaluate(SHEET_GEOM);
+  out.hintNo = await hintText(page);
   out.focus = await sheetFocus(page);
   out.kicker = await page.evaluate(() => document.getElementById("cvkicker").textContent);
   out.changes = await page.evaluate(() => Array.prototype.map.call(document.querySelectorAll("#cvchanges li"), (l) => l.textContent));
@@ -442,22 +516,55 @@ S.sheet = async (browser) => {
   const mark = F.seq;
   await sleep(2500);
   out.claimsDuringSheet = F.posts("/api/tv/action", mark).length;
+  out.motionB = await page.evaluate(MOTION);   // 2,5 s plus tard : aucune couche n'a avancé
   const m2 = F.seq;
-  await press(page, "ArrowRight");
+  await press(page, "ArrowRight", 300);
   out.focusAfterRight = await sheetFocus(page);
+  out.hintYes = await hintText(page);
+  out.focusProbeYes = await page.evaluate(SHEET_FOCUS);
   await press(page, "ArrowLeft");
   out.focusAfterLeft = await sheetFocus(page);
+  out.hintAfterLeft = await hintText(page);
+  await press(page, "ArrowDown");               // boutons empilés : ↓ = « Oui » (en bas), ↑ = « Non » (en haut)
+  out.focusAfterDown = await sheetFocus(page);
+  out.hintAfterDown = await hintText(page);
+  await press(page, "ArrowUp");
+  out.focusAfterUp = await sheetFocus(page);
+  out.hintAfterUp = await hintText(page);
   out.sheetPosts = F.posts("/api/tv/canvas/", m2).map((x) => x.p);
   const m3 = F.seq;
   await press(page, "Escape", 400);
   const c = F.posts("/api/tv/canvas/cancel", m3)[0];
   out.cancelPost = c ? c.b : null;
+  out.selectedAfter = await focusOf(page);
+  out.hintAfter = await hintText(page);
   out.shownAfter = await sheetShown(page);
   out.bodyAfter = await bodyCls(page);
   out.toast = await toastText(page);
+  out.motionAfter = await waitMode(page, "run");
   await sleep(2500);
   out.reshown = await sheetShown(page);
   out.claimsAfter = F.posts("/api/tv/action", m3).length;
+  await ctx.close();
+  return out;
+};
+
+// feuille ouverte alors que Réglages (en haut) a le focus : le cercle n'est plus marqué, puis le retrouve après « Non »
+S.sheetTop = async (browser) => {
+  const { ctx, page, F } = await open(browser);
+  await waitMode(page, "run");
+  await press(page, "ArrowUp", 1900);
+  const out = { before: await focusOf(page) };
+  setPreview(F.state, pid(8), P.cinema);
+  out.shown = await until(() => sheetShown(page), 4000);
+  await sleep(400);
+  out.probe = await page.evaluate(SHEET_FOCUS);
+  out.gearCls = await page.evaluate(() => document.getElementById("gear").className);
+  out.motion = await page.evaluate(MOTION);
+  await press(page, "Enter", 400);   // « Non » au focus
+  out.after = await focusOf(page);
+  out.hintAfter = await hintText(page);
+  out.shownAfter = await sheetShown(page);
   await ctx.close();
   return out;
 };
@@ -847,6 +954,14 @@ S.settings = async (browser) => {
   await press(page, "ArrowDown");
   await press(page, "Enter", 300);
   out.ambRows = await labels();
+  out.ambIcons = await page.evaluate(() => Array.prototype.map.call(document.querySelectorAll("#pbtns button"), (b) => {
+    const ic = b.querySelector(".ic"), r = ic.getBoundingClientRect(), g = document.createRange();
+    g.selectNodeContents(ic);
+    const t = g.getBoundingClientRect();   // glyphe réellement dessiné (police de repli comprise), dans son disque
+    return { label: b.getAttribute("data-label"), icon: ic.textContent, glyph: [Math.round(t.width), Math.round(t.height)],
+             disc: [Math.round(r.width), Math.round(r.height)] };
+  }));
+  out.settingsGeom = await page.evaluate(SHEET_GEOM);
   await probeRows(page);
   // Style -> Cinéma (mouvement gardé)
   F.hooks["POST /api/tv/canvas/apply"] = reply(P.cinema);

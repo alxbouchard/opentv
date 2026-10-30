@@ -78,7 +78,18 @@ async function until(fn, ms) {
     if (!r.ok) { throw new Error("preview: " + JSON.stringify(r)); }
     const shown = await until(q.sheet, 5000);
     let st = await status();
-    out.steps.sheet = { shown: shown, kicker: await q.kicker(), body: await q.body(), revision: st.revision };
+    await sleep(400);   // transitions du focus terminées avant mesure et capture
+    const probe = await page.evaluate(() => {
+      const sheet = document.getElementById("cvsheet");
+      const shownEl = (e) => !e.closest("[hidden]") && e.getClientRects().length > 0;
+      const f = Array.prototype.filter.call(document.querySelectorAll(".focused"), shownEl);
+      const L = [".cv-l1", ".cv-l2", ".cv-l3", "#cvglow"].map((s) => document.querySelector("#cvwall " + s));
+      const an = document.getAnimations().filter((a) => a.animationName !== undefined && L.indexOf(a.effect.target) >= 0);
+      return { hint: document.getElementById("hint").innerText, mode: document.body.getAttribute("data-cv-mode"),
+               running: an.filter((a) => a.playState === "running").length,
+               outside: f.filter((e) => !sheet.contains(e)).length, inside: f.filter((e) => sheet.contains(e)).map((e) => e.textContent) };
+    });
+    out.steps.sheet = Object.assign({ shown: shown, kicker: await q.kicker(), body: await q.body(), revision: st.revision }, probe);
     await shot("sheet");
     await key("Escape", 600);
     st = await status();

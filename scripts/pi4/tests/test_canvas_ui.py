@@ -255,6 +255,9 @@ out.applyOk=C.apply(cases.valid[0],{on:true,preview:true});out.bodyOk=body.class
 C.apply(cases.valid[0],{on:true,setup:true});out.bodySetup=body.className;
 C.apply(null,{on:false});out.bodyOff=body.className;
 C.focus(200);out.glow=[els.cvga.className,els.cvgb.className];
+C.apply(cases.valid[0],{on:true,preview:true});C.pause([]);out.runMode=C.state().mode;
+C.pause(['sheet']);out.sheet=[C.state().mode,C.state().reasons,body.className.indexOf('cv-paused')>=0];
+C.pause([]);out.afterSheet=C.state().mode;
 out.frozen=Object.isFrozen(C);
 process.stdout.write(JSON.stringify(out));
 """
@@ -298,6 +301,9 @@ process.stdout.write(JSON.stringify(out));
         self.assertEqual(out["bodyOff"], "")
         self.assertEqual(out["glow"][1], "cv-g cv-h6 on")                  # teinte 200° -> classe fermée
         self.assertTrue(out["frozen"])
+        self.assertEqual(out["runMode"], "run")
+        self.assertEqual(out["sheet"], ["paused", ["sheet"], True])        # feuille Canvas : couches figées
+        self.assertEqual(out["afterSheet"], "run")
 
 
 # --------------------------------------------------------------------------- navigateur réel : API simulée
@@ -403,6 +409,71 @@ class TestCanvasUiBrowser(unittest.TestCase):
         self.assertGreaterEqual(x["claimsAfter"], 1)                       # file reprise après la feuille
         self.assertEqual(x["sheetPanelOverlapQr"], False)
         self.assertEqual(x["sheetInView"], True)
+
+    def test_sheet_pauses_every_ambient_layer(self):
+        """Feuille Canvas = écran recouvert : l'aperçu est peint figé — aucune animation continue ne tourne et aucune
+        couche n'avance (temps courant ET rendu calculé identiques à 2,5 s d'écart) ; reprise après la fermeture."""
+        x = self.r("sheet")
+        self.assertEqual(x["motionBefore"]["mode"], "run")
+        self.assertGreater(x["motionBefore"]["running"], 0)
+        for k in ("motionA", "motionB"):
+            m = x[k]
+            self.assertEqual(m["mode"], "paused", (k, m))
+            self.assertIn("sheet", m["reasons"], (k, m))
+            self.assertEqual(m["running"], 0, (k, m))
+            self.assertGreater(m["total"], 0, (k, m))                     # aperçu : couches présentes, figées
+        self.assertEqual(x["motionA"]["times"], x["motionB"]["times"])
+        self.assertEqual(x["motionA"]["styles"], x["motionB"]["styles"])
+        self.assertEqual(x["motionAfter"]["mode"], "run")
+        self.assertGreater(x["motionAfter"]["running"], 0)
+        self.assertEqual(self.r("sheetTop")["motion"]["mode"], "paused")
+        self.assertEqual(self.r("sheetTop")["motion"]["running"], 0)
+
+    def test_sheet_footer_names_exact_consent_controls(self):
+        x = self.r("sheet")
+        no = "↑ ↓ Choisir · OK Non, garder l'ambiance · Retour Non"
+        yes = "↑ ↓ Choisir · OK Oui, appliquer · Retour Non"
+        self.assertEqual(x["hintNo"], no)
+        self.assertEqual(x["hintYes"], yes)
+        self.assertEqual(x["hintAfterLeft"], no)
+        self.assertEqual((x["focusAfterDown"], x["hintAfterDown"]), ("Oui, appliquer", yes))      # ↓ = bouton du bas
+        self.assertEqual((x["focusAfterUp"], x["hintAfterUp"]), ("Non, garder l'ambiance actuelle", no))
+        self.assertIn("Parcourir", x["hintAfter"])                        # feuille fermée : aide de l'accueil
+        self.assertNotIn("Confirmer", x["hintAfter"])
+        self.assertIn("Réglages", self.r("sheetTop")["hintAfter"])
+
+    def test_sheet_choice_is_the_only_visible_focus_and_selection_survives(self):
+        x = self.r("sheet")
+        p = x["focusProbe"]
+        self.assertEqual(p["inside"], ["Non, garder l'ambiance actuelle"])
+        self.assertEqual(p["outside"], [])                                # aucune carte/Réglages marqué dessous
+        self.assertEqual(p["ringed"], [])                                 # ni anneau blanc ni agrandissement
+        self.assertEqual(x["focusProbeYes"]["inside"], ["Oui, appliquer"])
+        self.assertEqual((x["focusProbeYes"]["outside"], x["focusProbeYes"]["ringed"]), ([], []))
+        self.assertNotEqual(x["selectedBefore"], "Film 1")                # carte déplacée avant la feuille
+        self.assertEqual(p["hero"], x["selectedBefore"])                  # le héros décrit toujours la carte choisie
+        self.assertEqual(x["selectedAfter"], x["selectedBefore"])         # « Non » : même carte, focus rendu
+        t = self.r("sheetTop")
+        self.assertEqual(t["before"], "gear")
+        self.assertTrue(t["shown"])
+        self.assertNotIn("focused", t["gearCls"].split())
+        self.assertEqual((t["probe"]["outside"], t["probe"]["ringed"]), ([], []))
+        self.assertEqual(t["probe"]["inside"], ["Non, garder l'ambiance actuelle"])
+        self.assertFalse(t["shownAfter"])
+        self.assertEqual(t["after"], "gear")
+
+    def test_sheets_never_cover_footer_text_and_canvas_sheet_fits_content(self):
+        x = self.r("sheet")
+        g = x["sheetGeom"]
+        self.assertEqual(g["sheets"], ["cvsheet"])
+        self.assertEqual(g["footerUnderSheet"], [])
+        self.assertLessEqual(g["slack"], 40, g)                           # aucun grand vide sous « Sans réponse… »
+        self.assertLessEqual(g["sheetRect"][3], g["helpTop"], g)          # feuille au-dessus du pied de page
+        s = self.r("settings")["settingsGeom"]
+        self.assertEqual(s["sheets"], ["panel"])
+        self.assertEqual(s["footerUnderSheet"], [])
+        for name, m in self.r("geometry").items():
+            self.assertEqual(m["sheetGeom"]["footerUnderSheet"], [], name)
 
     def test_sheet_yes_publishes_and_reorders_rows_after_close(self):
         x = self.r("yes")
@@ -536,6 +607,12 @@ class TestCanvasUiBrowser(unittest.TestCase):
         x = self.r("settings")
         self.assertEqual(x["rows"], ["Reconfigurer", "Gérer les assistants", "Ambiance OpenTV", "Fermer"])
         self.assertEqual(x["ambRows"], ["Style", "Mouvement du fond", "Version précédente", "Ambiance d'origine", "Retour"])
+        icons = {i["label"]: i for i in x["ambIcons"]}
+        for k in ("Version précédente", "Ambiance d'origine"):   # bloc « Flèches » (DejaVu Sans du Pi), jamais ⟲
+            self.assertEqual(len(icons[k]["icon"]), 1, icons[k])
+            self.assertTrue(0x2190 <= ord(icons[k]["icon"]) <= 0x21FF, icons[k])
+            self.assertGreater(icons[k]["glyph"][0], 0, icons[k])
+            self.assertLessEqual(icons[k]["glyph"][0], icons[k]["disc"][0], icons[k])
         self.assertEqual(x["stylePost"], {"changes": {"preset": "cinema", "motion": "calm"}, "confirm": True})
         self.assertEqual(x["motionPost"], {"changes": {"motion": "off"}, "confirm": True})
         self.assertEqual(x["undoFocusDefault"], "Non")
@@ -665,6 +742,9 @@ class TestCanvasRealService(unittest.TestCase):
         self.assertEqual(p["kicker"], "Proposé par Muse")
         self.assertIn("cv-preview", p["body"])
         self.assertEqual(p["revision"], 0)                                 # aperçu : rien publié
+        self.assertEqual((p["mode"], p["running"]), ("paused", 0))          # feuille : ambiance figée
+        self.assertEqual(p["hint"], "↑ ↓ Choisir · OK Non, garder l'ambiance · Retour Non")
+        self.assertEqual((p["outside"], p["inside"]), (0, ["Non, garder l'ambiance actuelle"]))
         self.assertEqual(st["no"]["revision"], 0)
         self.assertIsNone(st["no"]["preview"])
         self.assertEqual(st["yes"]["revision"], 1)
