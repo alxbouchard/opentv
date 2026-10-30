@@ -37,6 +37,16 @@ TOOL_RATES = {
     "remote_control": ((3, 1.0), (60, 60.0)),
 }
 MAX_TRACKED_UIDS = 256    # tables de débit/verrouillage bornées (les entrées inactives sont purgées)
+# Refus SANS aucun effet (rien en file, aucune lecture) dont le produit demande une nouvelle tentative immédiate
+# (autre titre non vu, ou mode=rewatch sur demande explicite) : la place TOOL_RATES prise par CET appel est rendue.
+# Le plafond global CALLS_PER_S, lui, reste compté (aucune rafale possible).
+REFUND_TOOL_RATE_ERRORS = frozenset({"already_seen"})
+
+
+class _Stamp(float):
+    """Horodatage d'UN appel dans une fenêtre TOOL_RATES : comparé comme un float (débits, purge), mais identifiable
+    par identité — un remboursement ne retire jamais l'horodatage (même valeur) d'un autre appel."""
+    __slots__ = ()
 
 
 class AgentService:
@@ -74,6 +84,18 @@ class AgentService:
         while q and q[0] <= now - longest:
             q.popleft()
         return any(sum(1 for t in q if t > now - span) >= n for n, span in rates)
+
+    def _refund_tool_slot(self, agent, tool, stamp):
+        """Rend la place TOOL_RATES prise par l'appel qui a ajouté `stamp` (et elle seule) ; absente (déjà purgée ou
+        fenêtre recréée) : rien. Jamais d'effet sur CALLS_PER_S, les échecs d'authentification ni un autre appel."""
+        with self.lock:
+            q = self.tool_calls.get((agent, tool))
+            if not q:
+                return
+            for i, x in enumerate(q):
+                if x is stamp:
+                    del q[i]
+                    return
 
     def _deny(self, agent, tool, args, code, t0):
         self.audit.record(agent, tool, args, False, code, (time.monotonic() - t0) * 1000)
@@ -129,6 +151,7 @@ class AgentService:
         # authentifiée
         owner = agents.canonical_agent(agent)
         key = (uid, owner)
+        stamp = None   # horodatage TOOL_RATES ajouté par CET appel (remboursable par identité)
         with self.lock:
             win = [x for x in self.calls.get(key, []) if x > now - 1.0]
             if len(win) >= CALLS_PER_S:
@@ -141,7 +164,8 @@ class AgentService:
                 win.append(now)
                 self.calls[key] = win
                 if tool in TOOL_RATES:
-                    self.tool_calls.setdefault((owner, tool), collections.deque()).append(now)
+                    stamp = _Stamp(now)
+                    self.tool_calls.setdefault((owner, tool), collections.deque()).append(stamp)
             if len(self.calls) > MAX_TRACKED_UIDS or len(self.tool_calls) > MAX_TRACKED_UIDS:
                 self._prune(now)
         if limited:
@@ -149,7 +173,10 @@ class AgentService:
         try:
             res = tools.dispatch(self.ctx, agent, scopes, tool, a)
         except tools.ToolError as e:
-            return self._deny(agent, tool, a, str(e) if str(e) else "failed", t0)
+            code = str(e) if str(e) else "failed"
+            if code in REFUND_TOOL_RATE_ERRORS and stamp is not None:
+                self._refund_tool_slot(owner, tool, stamp)
+            return self._deny(agent, tool, a, code, t0)
         except Exception as e:   # jamais de trace ni de détail interne vers l'agent
             self.log("agent_tool_error", tool=tool, error=type(e).__name__)
             return self._deny(agent, tool, a, "internal", t0)

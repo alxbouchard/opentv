@@ -12,6 +12,7 @@ Contrat (autorisé par Alex) :
 """
 import json
 import os
+import threading
 import time
 import unittest
 from unittest import mock
@@ -470,6 +471,146 @@ class TestCalibrationProtocol(unittest.TestCase):
     def test_protocol_mutations_only_use_existing_feedback_actions(self):
         for act in ("seen", "like", "dislike", "watchlist"):
             self.assertIn(act, tools.FEEDBACK_ACTIONS)
+
+
+# ------------------------------------------------------------------------------------------- already_seen et débits
+class TestAlreadySeenRefundsOnlyItsToolSlot(unittest.TestCase):
+    """Un refus `already_seen` n'a aucun effet (rien en file, aucune lecture) et le produit demande de réessayer AUSSITÔT
+    (autre titre non vu, ou mode=rewatch sur demande explicite) : la place TOOL_RATES prise par CET appel est rendue,
+    par identité (jamais celle d'un autre appel, même de même horodatage). Le plafond global CALLS_PER_S reste compté ;
+    aucun autre refus n'est remboursé. Chemin réel : AgentService.handle -> tools.dispatch -> App.agent_control."""
+
+    def setUp(self):
+        self.a = tp.TestAppIntegration.app(self)
+        self.fy = self.a.foryou
+        self.a.registry.set_policy({"muse": appmod.AGENT_LEVELS["control"], "hermit": [], "hermes": []})
+        self.tok = self.a.registry.issue("muse-device", appmod.AGENT_LEVELS["control"])
+        self.t = [5000.0]
+        self.svc = agentport.AgentService(self.a, self.a.registry, self.a.audit, clock=lambda: self.t[0])
+        feedback(self.fy, "films/106", "seen")
+
+    def call(self, tool, **args):
+        return self.svc.handle({"v": 1, "agent": "muse-device", "token": self.tok, "op": "call", "tool": tool,
+                                "args": args}, peer_uid=1000)
+
+    def audit(self, n):
+        with open(self.a.cfg.audit_file, encoding="utf-8") as f:
+            rows = [json.loads(l) for l in f if l.strip()]
+        return [(x["agent"], x["tool"], x["ok"], x.get("error")) for x in rows[-n:]]
+
+    def slots(self, tool):
+        with self.svc.lock:
+            return list(self.svc.tool_calls.get(("muse", tool), ()))
+
+    def test_seen_present_then_immediate_unseen_present_succeeds(self):
+        self.assertEqual(self.call("present_title", id="films/106"), {"ok": False, "error": "already_seen"})
+        self.assertEqual(self.slots("present_title"), [])                   # place de CET appel rendue
+        r = self.call("present_title", id="films/101")                      # même instant : pas rate_limited
+        self.assertTrue(r["ok"], r)
+        self.assertEqual((r["result"]["accepted"], r["result"]["action"]["state"]), (True, "queued"))
+        self.assertEqual([x["id"] for x in self.a.tv_state()["actions"]["pending"]], ["films/101"])
+        self.assertEqual(self.audit(2), [("muse-device", "present_title", False, "already_seen"),
+                                         ("muse-device", "present_title", True, None)])
+        # le débit propre de present_title s'applique toujours au succès
+        self.assertEqual(self.call("present_title", id="films/102")["error"], "rate_limited")
+        self.t[0] += 3.01
+        self.assertTrue(self.call("present_title", id="films/102")["ok"])
+
+    def test_seen_play_then_immediate_rewatch_play_enters_normal_path(self):
+        with mock.patch.object(self.a.playback, "start", wraps=self.a.playback.start) as start:
+            self.assertEqual(self.call("play_title", id="films/106"), {"ok": False, "error": "already_seen"})
+            start.assert_not_called()
+            r = self.call("play_title", id="films/106", mode="rewatch")     # même instant : pas rate_limited
+            self.assertTrue(r["ok"], r)
+            self.assertEqual(start.call_count, 1)
+        self.assertEqual(r["result"]["playback"]["state"], "loading")
+        self.assertEqual(tp.wait_state(self.a.playback, ("playing",))["state"], "playing")
+        self.assertTrue(marks(self.fy, "films/106")["seen"])                 # jamais démarqué
+        self.assertEqual(self.audit(2), [("muse-device", "play_title", False, "already_seen"),
+                                         ("muse-device", "play_title", True, None)])
+        self.assertEqual(self.call("play_title", id="films/101")["error"], "rate_limited")   # 1 / 10 s intact
+
+    def test_already_seen_still_counts_toward_the_global_calls_per_second_cap(self):
+        for _ in range(agentport.CALLS_PER_S):
+            self.assertEqual(self.call("present_title", id="films/106")["error"], "already_seen")
+        self.assertEqual(self.call("present_title", id="films/101")["error"], "rate_limited")
+        self.assertEqual(self.call("play_title", id="films/106", mode="rewatch")["error"], "rate_limited")
+        self.assertEqual(self.call("status")["error"], "rate_limited")
+        self.assertEqual(self.a.tv_state()["actions"]["pending"], [])
+        self.t[0] += 1.01
+        self.assertTrue(self.call("present_title", id="films/101")["ok"])
+
+    def test_other_refusals_never_refund_the_tool_slot(self):
+        self.assertEqual(self.call("present_title", id="films/999")["error"], "unknown_id")
+        self.assertEqual(len(self.slots("present_title")), 1)
+        self.assertEqual(self.call("present_title", id="films/101")["error"], "rate_limited")
+        with self.a.lock:
+            self.a.agents_mode = True
+        self.assertEqual(self.call("play_title", id="films/106")["error"], "tv_busy")   # porte AVANT already_seen
+        with self.a.lock:
+            self.a.agents_mode = False
+        self.assertEqual(self.call("play_title", id="films/101")["error"], "rate_limited")
+        with mock.patch.object(self.a, "agent_control", side_effect=RuntimeError("boom")):
+            self.assertEqual(self.call("close_player")["error"], "internal")
+        self.assertEqual(self.call("close_player")["error"], "rate_limited")
+        with mock.patch.object(self.a, "agent_control", side_effect=tools.ToolError("")):
+            self.t[0] += 3.01
+            self.assertEqual(self.call("present_title", id="films/101")["error"], "failed")
+        self.assertEqual(self.call("present_title", id="films/101")["error"], "rate_limited")
+
+    def blocked_seen_call(self, tool, **args):
+        """Lance un appel already_seen dans un fil, bloqué DANS dispatch (après sa prise de place) jusqu'à release."""
+        entered, release, out = threading.Event(), threading.Event(), {}
+        orig = self.a.agent_control
+
+        def gated(agent, name, a):
+            if a.get("id") == "films/106" and a.get("mode") == "new" and not entered.is_set():
+                entered.set()
+                self.assertTrue(release.wait(5))
+            return orig(agent, name, a)
+        p = mock.patch.object(self.a, "agent_control", side_effect=gated)
+        p.start()
+        self.addCleanup(p.stop)
+        th = threading.Thread(target=lambda: out.update(r=self.call(tool, **args)), daemon=True)
+        th.start()
+        self.assertTrue(entered.wait(5))
+        return release, th, out
+
+    def test_refund_removes_only_its_own_equal_valued_stamp(self):
+        with mock.patch.dict(agentport.TOOL_RATES, {"present_title": ((2, 3.0), (20, 600.0))}):
+            self.assertTrue(self.call("present_title", id="films/101")["ok"])        # B : succès, t = 5000
+            b = self.slots("present_title")
+            release, th, out = self.blocked_seen_call("present_title", id="films/106")   # A : même t, en vol
+            q = self.slots("present_title")
+            self.assertEqual(len(q), 2)
+            self.assertIs(q[0], b[0])
+            self.assertEqual(q[0], q[1])                                     # même valeur, appels distincts
+            release.set()
+            th.join(5)
+            self.assertEqual(out["r"], {"ok": False, "error": "already_seen"})
+            after = self.slots("present_title")
+            self.assertEqual(len(after), 1)
+            self.assertIs(after[0], b[0])                                    # la place de B reste, celle de A rendue
+            self.assertTrue(self.call("present_title", id="films/102")["ok"])
+            self.assertEqual(self.call("present_title", id="films/103")["error"], "rate_limited")
+
+    def test_refund_of_an_already_pruned_stamp_never_touches_a_newer_call(self):
+        release, th, out = self.blocked_seen_call("present_title", id="films/106")   # A en vol, t = 5000
+        self.t[0] += 601.0                                                   # fenêtre la plus longue écoulée
+        r = self.call("present_title", id="films/101")                       # B : purge la place de A, prend la sienne
+        self.assertTrue(r["ok"], r)
+        b = self.slots("present_title")
+        self.assertEqual(len(b), 1)
+        release.set()
+        th.join(5)
+        self.assertEqual(out["r"], {"ok": False, "error": "already_seen"})
+        after = self.slots("present_title")
+        self.assertEqual(len(after), 1)
+        self.assertIs(after[0], b[0])                                        # rien de retiré : place de A absente
+        self.assertEqual(self.call("present_title", id="films/102")["error"], "rate_limited")
+        self.assertEqual(self.audit(3), [("muse-device", "present_title", True, None),
+                                         ("muse-device", "present_title", False, "already_seen"),
+                                         ("muse-device", "present_title", False, "rate_limited")])
 
 
 if __name__ == "__main__":
