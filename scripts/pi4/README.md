@@ -1136,8 +1136,12 @@ reçue.
 worker), aucune ressource distante. Ambiance **figée** pendant un panneau, la feuille de confirmation, le
 chargement/la lecture/le retour, le hors-ligne et une page cachée ; **fond fixe** en configuration, en mouvement
 « Coupé », si le système demande « Réduire les animations » (`prefers-reduced-motion`, relu en direct) ou si la
-cadence mesurée se dégrade (≥ 45 intervalles > 70 ms parmi les 60–90 dernières images ⇒ mode dégradé statique jusqu'au
-rechargement de la page). Le focus, les QR et la lisibilité ne dépendent jamais d'une image animée.
+cadence mesurée se dégrade (≥ 45 intervalles > 70 ms parmi 60–90 images consécutives d'une même rafale ⇒ mode dégradé
+statique jusqu'au rechargement de la page). La cadence est sondée par rafales bornées — 90 intervalles dès que le
+mouvement démarre ou reprend, puis une rafale toutes les 12 s — jamais par une boucle `requestAnimationFrame`
+permanente, qui forcerait une image du fil principal à chaque vsync alors que les couches tournent sur le compositeur ;
+pause, page cachée, configuration ou fond fixe annulent la rafale et son minuteur. Le focus, les QR et la lisibilité
+ne dépendent jamais d'une image animée.
 
 **Récupération.** TV : « Version précédente » puis, au besoin, « Ambiance d'origine ». État illisible ou dangereux
 (lien, FIFO, lien dur, mauvais propriétaire/mode, trop grand, JSON invalide) : l'écran montre l'ambiance d'origine et

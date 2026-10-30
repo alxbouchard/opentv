@@ -10,7 +10,7 @@
    filtre, flou, vidéo ni worker. Figées (pause) pendant un panneau, la feuille de confirmation Canvas (aperçu figé),
    la lecture et son retour, le hors-ligne ou une page cachée ; fond fixe (aucune animation) en configuration,
    mouvement « off », préférence « réduire les animations » (relue en direct à chaque rendu) ou performance dégradée
-   (cadence d'images mesurée, définitif pour la session).
+   (cadence d'images mesurée par rafales bornées, définitif pour la session).
    Halo du héros : teinte du visuel dessiné de la carte au focus (même empreinte que tv.js), quantifiée en douze
    classes fermées ; jamais une adresse d'image, jamais le fond entier qui change de carte en carte. */
 (function () {
@@ -25,8 +25,11 @@
   var FIRST_ROW = "tonight";
   // « sheet » : feuille de confirmation Canvas (l'aperçu est peint figé, jamais en mouvement sous le choix)
   var PAUSE_REASONS = ["setup", "panel", "sheet", "playback", "offline", "hidden"];
-  // détecteur de cadence : ≥ BAD_MIN intervalles > GAP_MS parmi les WIN_MAX derniers (au moins WIN_MIN mesurés)
-  var GAP_MS = 70, WIN_MIN = 60, WIN_MAX = 90, BAD_MIN = 45;
+  // sonde de cadence par RAFALES (budget CPU du Pi) : les couches tournent sur le compositeur ; une boucle rAF
+  // permanente forcerait à chaque vsync une image du fil principal (style, commit). Une rafale mesure au plus WIN_MAX
+  // intervalles consécutifs (≥ BAD_MIN intervalles > GAP_MS dès WIN_MIN mesurés ⇒ dégradé), puis dort PROBE_SLEEP_MS
+  // sans aucun rAF. Rafale immédiate quand le mouvement démarre ou reprend ; rAF et minuteur annulés hors mouvement.
+  var GAP_MS = 70, WIN_MIN = 60, WIN_MAX = 90, BAD_MIN = 45, PROBE_SLEEP_MS = 12000;
   var GLOW_DELAY_MS = 180;          // répétition de touche : le halo suit la carte quand la télécommande se pose
   var HUES = 12;                    // teintes fermées du halo (cv-h0 … cv-h11), cv-hn = neutre (accent)
 
@@ -109,7 +112,8 @@
   // éteint jusqu'au premier état du service (tv.js appelle apply) : fond OpenTV v23 fixe, jamais d'aurore avant de
   // savoir si la configuration (fond v23) ou un service sans Canvas doit s'afficher
   var S = { on: false, scene: copy(DEFAULT), invalid: false, preview: false, setup: false, reasons: [], degraded: false,
-            want: -1, hue: null, glow: "cvga", glowTimer: null, raf: null, gaps: [], last: 0, mode: "" };
+            want: -1, hue: null, glow: "cvga", glowTimer: null, mode: "",
+            raf: null, sleep: null, gen: 0, last: 0, n: 0, bad: 0, probes: 0 };   // sonde : n intervalles, bad lents
 
   function reduced() {   // préférence lue EN DIRECT (l'événement « change » peut arriver après le rendu)
     try { return !!(mq && mq.matches); } catch (e) { return false; }
@@ -163,29 +167,51 @@
   }
 
   // ------------------------------------------------------------------ cadence d'images (repli statique)
-  function frame(t) {
+  // Chaque rappel porte la génération de sa sonde : un rappel rAF ou un réveil périmé (sonde arrêtée ou remplacée
+  // entre-temps) ne fait rien, jamais une seconde chaîne ni une relance hors mouvement.
+  function stopProbe() {
+    S.gen++;
+    if (S.raf !== null && window.cancelAnimationFrame) { window.cancelAnimationFrame(S.raf); }
+    if (S.sleep !== null) { clearTimeout(S.sleep); }
+    S.raf = null; S.sleep = null; S.last = 0; S.n = 0; S.bad = 0;
+  }
+  function nextFrame(g) {
+    S.raf = window.requestAnimationFrame(function (t) { frame(t, g); });
+  }
+  function startProbe() {
+    var g = S.gen;
+    S.sleep = null; S.last = 0; S.n = 0; S.bad = 0;
+    S.probes++;
+    nextFrame(g);
+  }
+  function wake(g) {
+    if (g !== S.gen) { return; }
+    S.sleep = null;
+    if (mode() !== "run") { stopProbe(); return; }
+    startProbe();
+  }
+  function frame(t, g) {   // temps constant : deux compteurs, aucune liste d'intervalles
+    if (g !== S.gen) { return; }
     S.raf = null;
-    if (mode() !== "run") { S.gaps = []; S.last = 0; return; }
+    if (mode() !== "run") { stopProbe(); return; }
     if (S.last) {
-      S.gaps.push(t - S.last);
-      if (S.gaps.length > WIN_MAX) { S.gaps.shift(); }
-      var bad = 0;
-      for (var i = 0; i < S.gaps.length; i++) { if (S.gaps[i] > GAP_MS) { bad++; } }
-      if (S.gaps.length >= WIN_MIN && bad >= BAD_MIN) { S.degraded = true; S.gaps = []; S.last = 0; draw(); return; }
+      S.n++;
+      if (t - S.last > GAP_MS) { S.bad++; }
+      if (S.n >= WIN_MIN && S.bad >= BAD_MIN) { S.degraded = true; stopProbe(); draw(); return; }
+      if (S.n >= WIN_MAX) {
+        S.last = 0;
+        S.sleep = setTimeout(function () { wake(g); }, PROBE_SLEEP_MS);
+        return;
+      }
     }
     S.last = t;
-    S.raf = window.requestAnimationFrame(frame);
+    nextFrame(g);
   }
   function monitor() {
-    var run = S.mode === "run";
-    if (run && S.raf === null && window.requestAnimationFrame) {
-      S.last = 0;
-      S.raf = window.requestAnimationFrame(frame);
-    } else if (!run) {
-      if (S.raf !== null && window.cancelAnimationFrame) { window.cancelAnimationFrame(S.raf); }
-      S.raf = null;
-      S.last = 0;
-      S.gaps = [];
+    if (S.mode !== "run") {
+      if (S.raf !== null || S.sleep !== null) { stopProbe(); }
+    } else if (S.raf === null && S.sleep === null && window.requestAnimationFrame) {
+      startProbe();
     }
   }
 
@@ -213,7 +239,8 @@
   }
   function snapshot() {
     return { on: S.on, mode: mode(), scene: copy(S.scene), invalid: S.invalid, preview: S.preview, setup: S.setup,
-             reasons: S.reasons.slice(), degraded: S.degraded, reduced: reduced(), hue: S.hue, gaps: S.gaps.length };
+             reasons: S.reasons.slice(), degraded: S.degraded, reduced: reduced(), hue: S.hue, gaps: S.n,
+             probing: S.raf !== null, sleeping: S.sleep !== null, probes: S.probes };
   }
 
   if (mq) {

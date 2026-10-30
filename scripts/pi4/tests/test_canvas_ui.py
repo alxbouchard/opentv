@@ -327,6 +327,188 @@ process.stdout.write(JSON.stringify(out));
         self.assertEqual(out["afterSheet"], "run")
 
 
+@unittest.skipUnless(NODE, "node absent")
+class TestCanvasCadenceProbe(unittest.TestCase):
+    """Sonde de cadence par rafales bornées (budget CPU Pi) : canvas.js dans node avec rAF et minuteurs simulés et
+    pilotables. Jamais de boucle rAF permanente ; rafale immédiate au démarrage/reprise, WIN_MAX intervalles
+    consécutifs puis sommeil PROBE_SLEEP_MS sans rAF ; rAF ET minuteur annulés hors mouvement ; rappels périmés
+    sans effet ; repli dégradé ≥ BAD_MIN intervalles > GAP_MS parmi WIN_MIN..WIN_MAX d'une même rafale, définitif."""
+    RUN = r"""
+var vm=require('vm'),fs=require('fs');
+function E(id){return {id:id,className:'',hidden:false,textContent:'',attrs:{},setAttribute:function(k,v){this.attrs[k]=v;}};}
+function make(){
+  var els={};['cvpill','cvga','cvgb'].forEach(function(i){els[i]=E(i);});
+  var H={raf:{},rafId:0,cancelled:[],timers:{},tId:0,cleared:[],now:0,listeners:{},hidden:false,mq:{matches:false}};
+  var body=E('body');
+  var win={requestAnimationFrame:function(cb){H.rafId++;H.raf[H.rafId]=cb;return H.rafId;},
+    cancelAnimationFrame:function(id){H.cancelled.push(id);delete H.raf[id];},
+    matchMedia:function(){return {get matches(){return H.mq.matches;},addListener:function(f){H.listeners.mq=f;}};}};
+  var doc={body:body,get hidden(){return H.hidden;},getElementById:function(i){return els[i]||null;},
+    addEventListener:function(k,f){H.listeners[k]=f;}};
+  var ctx={window:win,document:doc,setTimeout:function(f,d){H.tId++;H.timers[H.tId]={f:f,d:d};return H.tId;},
+    clearTimeout:function(id){H.cleared.push(id);delete H.timers[id];},Object:Object,JSON:JSON,Math:Math,isFinite:isFinite};
+  vm.createContext(ctx);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),ctx);
+  H.C=ctx.window.OpenTVCanvas;H.body=body;
+  H.rafs=function(){return Object.keys(H.raf).length;};
+  H.tms=function(){return Object.keys(H.timers).map(function(k){return H.timers[k].d;});};
+  H.pump=function(dt){var ids=Object.keys(H.raf);if(!ids.length){return 0;}H.now+=dt;
+    ids.forEach(function(id){var cb=H.raf[id];delete H.raf[id];cb(H.now);});return ids.length;};
+  H.fire=function(){var ids=Object.keys(H.timers);ids.forEach(function(id){var t=H.timers[id];delete H.timers[id];t.f();});return ids.length;};
+  // séquence d'intervalles (ms) : renvoie le nombre de rappels servis avant que la sonde ne s'arrête
+  H.run=function(gaps){var n=0;if(H.pump(16)){n++;}for(var i=0;i<gaps.length;i++){if(!H.pump(gaps[i])){break;}n++;}return n;};
+  H.snap=function(){var s=H.C.state();return {mode:s.mode,degraded:s.degraded,probing:s.probing,sleeping:s.sleeping,
+    probes:s.probes,rafs:H.rafs(),timers:H.tms(),cls:body.className};};
+  return H;
+}
+function rep(v,n){var a=[];for(var i=0;i<n;i++){a.push(v);}return a;}
+var SC={schema_version:1,wallpaper:'aurore',motion:'calm',accent:'ice',shade:'balanced',hero_focus:'title',
+  row_order:['tonight','watchlist','new','top','more']};
+function go(H){H.C.apply(SC,{on:true});H.C.pause([]);}
+var out={};
+// 1. rafale saine : immédiate, 1 + WIN_MAX rappels, puis sommeil sans rAF ; états répétés : ni relance ni réarmement
+var H=make();out.boot=H.snap();go(H);out.start=H.snap();
+out.healthyCallbacks=H.run(rep(16,200));out.healthy=H.snap();
+var t0=Object.keys(H.timers).join(',');
+for(var i=0;i<5;i++){go(H);H.C.apply(SC,{on:true});}
+out.repeat=H.snap();out.sameTimer=Object.keys(H.timers).join(',')===t0;
+H.fire();out.woke=H.snap();
+out.secondCallbacks=H.run(rep(16,200));out.second=H.snap();
+// 2. images lentes : dégradé après exactement WIN_MIN intervalles, définitif, plus aucun rAF ni minuteur
+H=make();go(H);out.slowCallbacks=H.run(rep(100,200));out.slow=H.snap();
+H.C.pause(['panel']);H.C.pause([]);go(H);H.listeners.visibilitychange();out.sticky=H.snap();
+// 3. seuils : 44 mauvais sur 90 ⇒ sain ; 45 mauvais (dont 5 bons d'abord) ⇒ dégradé à WIN_MIN, pas avant
+H=make();go(H);out.c44=H.run(rep(16,46).concat(rep(100,44)));out.s44=H.snap();
+H.fire();out.c45=H.run(rep(16,5).concat(rep(100,45)).concat(rep(16,40)));out.s45=H.snap();
+// compteurs remis à zéro à chaque rafale (44 + 44 mauvais en deux rafales ⇒ sain)
+H=make();go(H);H.run(rep(16,46).concat(rep(100,44)));H.fire();H.run(rep(100,44).concat(rep(16,46)));out.split=H.snap();
+// limite GAP_MS : 70 ms n'est pas un mauvais intervalle, 71 ms l'est
+H=make();go(H);H.run(rep(70,90));out.g70=H.snap();
+H=make();go(H);out.c71=H.run(rep(71,90));out.g71=H.snap();
+// 4. annulation : panneau pendant la rafale ⇒ cancelAnimationFrame, rappel périmé sans relance
+H=make();go(H);H.run(rep(16,10));var rid=Object.keys(H.raf)[0],cb=rid?H.raf[rid]:function(){};
+H.C.pause(['panel']);out.pPanel=H.snap();out.cancelledRaf=H.cancelled.indexOf(+rid)>=0;
+cb(H.now+16);out.pStale=H.snap();
+H.C.pause([]);out.pResume=H.snap();
+cb(H.now+16);out.pStaleAfter=H.snap();   // rappel périmé pendant la nouvelle rafale : jamais une 2e chaîne
+// panneau pendant le sommeil ⇒ clearTimeout, minuteur périmé sans relance, reprise ⇒ rafale immédiate
+H.run(rep(16,200));out.pSleep=H.snap();var tid=Object.keys(H.timers)[0],tf=tid?H.timers[tid].f:function(){};
+H.C.pause(['hidden']);out.sHidden=H.snap();out.clearedTimer=H.cleared.indexOf(+tid)>=0;
+tf();out.sStale=H.snap();
+H.C.pause([]);out.sResume=H.snap();
+tf();out.sStaleAfter=H.snap();
+// page cachée (visibilitychange), configuration, mouvement coupé, réduire les animations : tout est libéré
+H.run(rep(16,200));H.hidden=true;H.listeners.visibilitychange();out.vHidden=H.snap();
+H.hidden=false;H.listeners.visibilitychange();out.vBack=H.snap();
+H.run(rep(16,200));H.C.apply(SC,{on:true,setup:true});out.setup=H.snap();
+H.C.apply(SC,{on:true});out.afterSetup=H.snap();
+H.run(rep(16,200));var off=JSON.parse(JSON.stringify(SC));off.motion='off';H.C.apply(off,{on:true});out.off=H.snap();
+H.C.apply(SC,{on:true});H.run(rep(16,30));H.mq.matches=true;H.listeners.mq();out.reduced=H.snap();
+H.mq.matches=false;H.listeners.mq();out.unreduced=H.snap();
+H.C.apply(null,{on:false});out.turnedOff=H.snap();
+// changement non encore signalé (événement « change »/visibilitychange en retard) : la rafale et le réveil relisent
+// le mode en direct et s'arrêtent d'eux-mêmes
+H=make();go(H);H.run(rep(16,5));H.mq.matches=true;H.pump(16);out.lateReduced=H.snap();
+H=make();go(H);H.run(rep(16,200));H.hidden=true;H.fire();out.lateHidden=H.snap();
+process.stdout.write(JSON.stringify(out));
+"""
+
+    @classmethod
+    def setUpClass(cls):
+        p = subprocess.run([NODE, "-e", cls.RUN, CANVAS_JS], capture_output=True, timeout=60)
+        cls.err = p.stderr.decode()
+        cls.out = json.loads(p.stdout) if p.returncode == 0 else None
+
+    def setUp(self):
+        self.assertIsNotNone(self.out, self.err)
+
+    def idle(self, s, mode):
+        self.assertEqual(s["mode"], mode, s)
+        self.assertEqual((s["rafs"], s["timers"], s["probing"], s["sleeping"]), (0, [], False, False), s)
+
+    def test_constants_keep_the_documented_budget(self):
+        js = strip_js_comments(read(CANVAS_JS))
+        m = re.search(r"var GAP_MS = (\d+), WIN_MIN = (\d+), WIN_MAX = (\d+), BAD_MIN = (\d+), "
+                      r"PROBE_SLEEP_MS = (\d+);", js)
+        self.assertTrue(m, "constantes de la sonde")
+        self.assertEqual(tuple(int(x) for x in m.groups()[:4]), (70, 60, 90, 45))
+        self.assertTrue(10000 <= int(m.group(5)) <= 15000, m.group(5))
+        body = re.search(r"function frame\([^)]*\) \{(.*?)\n  \}", js, re.S).group(1)
+        self.assertNotRegex(body, r"\bfor\b|\bwhile\b|\.shift\(|\.push\(", "suivi en temps constant")
+
+    def test_burst_then_sleep_never_a_permanent_loop(self):
+        o = self.out
+        self.assertEqual((o["boot"]["rafs"], o["boot"]["timers"]), (0, []))        # éteint : aucune sonde
+        self.assertEqual((o["start"]["rafs"], o["start"]["probing"], o["start"]["probes"]), (1, True, 1))
+        self.assertEqual(o["start"]["timers"], [])
+        self.assertEqual(o["healthyCallbacks"], 91)                                 # 1 + WIN_MAX intervalles
+        h = o["healthy"]
+        self.assertEqual((h["mode"], h["degraded"], h["rafs"], h["probing"], h["sleeping"]), ("run", False, 0, False, True))
+        self.assertEqual(len(h["timers"]), 1)
+        self.assertTrue(10000 <= h["timers"][0] <= 15000, h["timers"])
+        self.assertEqual((o["repeat"]["rafs"], len(o["repeat"]["timers"])), (0, 1))  # états répétés : rien de relancé
+        self.assertTrue(o["sameTimer"])
+        self.assertEqual((o["woke"]["rafs"], o["woke"]["probing"], o["woke"]["probes"], o["woke"]["timers"]),
+                         (1, True, 2, []))
+        self.assertEqual(o["secondCallbacks"], 91)
+        self.assertEqual((o["second"]["sleeping"], o["second"]["probes"]), (True, 2))
+
+    def test_slow_cadence_degrades_deterministically_and_sticks(self):
+        o = self.out
+        self.assertEqual(o["slowCallbacks"], 61)                                    # 1 + WIN_MIN intervalles
+        self.assertTrue(o["slow"]["degraded"])
+        self.idle(o["slow"], "static")
+        self.assertIn("cv-static", o["slow"]["cls"])
+        self.assertTrue(o["sticky"]["degraded"])
+        self.idle(o["sticky"], "static")                                            # définitif pour la session
+
+    def test_degraded_threshold_is_exact_and_per_burst(self):
+        o = self.out
+        self.assertEqual(o["c44"], 91)
+        self.assertFalse(o["s44"]["degraded"])
+        self.assertTrue(o["s44"]["sleeping"])
+        self.assertEqual(o["c45"], 61)                                              # jamais avant WIN_MIN
+        self.assertTrue(o["s45"]["degraded"])
+        self.idle(o["s45"], "static")
+        self.assertFalse(o["split"]["degraded"])                                    # compteurs par rafale
+        self.assertFalse(o["g70"]["degraded"])
+        self.assertTrue(o["g71"]["degraded"])
+        self.assertEqual(o["c71"], 61)
+
+    def test_pause_cancels_raf_and_timer_and_stale_callbacks_never_restart(self):
+        o = self.out
+        self.idle(o["pPanel"], "paused")
+        self.assertTrue(o["cancelledRaf"])
+        self.idle(o["pStale"], "paused")                                            # rappel rAF périmé
+        self.assertEqual((o["pResume"]["rafs"], o["pResume"]["probing"], o["pResume"]["timers"]), (1, True, []))
+        self.assertEqual(o["pSleep"]["sleeping"], True)
+        self.idle(o["sHidden"], "paused")
+        self.assertTrue(o["clearedTimer"])
+        self.idle(o["sStale"], "paused")                                            # minuteur périmé
+        self.assertEqual((o["sResume"]["rafs"], o["sResume"]["probing"], o["sResume"]["timers"]), (1, True, []))
+        for k in ("pStaleAfter", "sStaleAfter"):                                    # jamais deux sondes
+            base = o[k.replace("StaleAfter", "Resume")]
+            self.assertEqual((o[k]["rafs"], o[k]["timers"], o[k]["probes"]), (1, [], base["probes"]), k)
+
+    def test_hidden_setup_off_reduced_release_everything_then_probe_immediately(self):
+        o = self.out
+        self.idle(o["vHidden"], "paused")
+        self.assertEqual((o["vBack"]["rafs"], o["vBack"]["probing"]), (1, True))
+        self.idle(o["setup"], "static")
+        self.assertEqual((o["afterSetup"]["rafs"], o["afterSetup"]["probing"]), (1, True))
+        self.idle(o["off"], "static")
+        self.idle(o["reduced"], "static")
+        self.assertEqual((o["unreduced"]["rafs"], o["unreduced"]["probing"]), (1, True))
+        self.idle(o["turnedOff"], "off")
+        for k in ("vHidden", "setup", "off", "reduced", "turnedOff"):
+            self.assertFalse(o[k]["degraded"], k)
+
+    def test_probe_rereads_live_mode_before_each_frame_and_wake(self):
+        for k in ("lateReduced", "lateHidden"):
+            s = self.out[k]
+            self.assertEqual((s["rafs"], s["timers"], s["probing"], s["sleeping"], s["degraded"]),
+                             (0, [], False, False, False), k)
+
+
 # --------------------------------------------------------------------------- navigateur réel : API simulée
 def run_node(tc, script, cfg, timeout=600):
     p = subprocess.run([NODE, os.path.join(PI4, "tests", script), playwright_dir(), json.dumps(cfg)],
@@ -649,9 +831,10 @@ class TestCanvasUiBrowser(unittest.TestCase):
 
     def test_pause_static_and_layer_budget(self):
         x = self.r("motion")
-        for k in ("panel", "playback", "offline", "hidden", "setup"):
+        for k in ("panel", "playback", "offline", "hidden", "setup", "off", "reduced"):
             self.assertEqual(x[k]["running"], 0, (k, x[k]))
             self.assertIn(x[k]["mode"], ("paused", "static"), k)
+            self.assertEqual((x[k]["probe"]["probing"], x[k]["probe"]["sleeping"]), (False, False), k)   # rien en attente
         self.assertEqual(x["setup"]["body"], "cv-setup")
         self.assertEqual((x["setup"]["mode"], x["setup"]["total"]), ("static", 0))   # configuration : repli fixe
         for k in ("off", "reduced"):
@@ -666,15 +849,25 @@ class TestCanvasUiBrowser(unittest.TestCase):
                 self.assertTrue(set(a["props"]) <= {"transform", "opacity"}, a)
                 self.assertIn(a["target"], ("cv-l cv-l1", "cv-l cv-l2", "cv-l cv-l3", "cvglow"), a)
         self.assertEqual(x["resume"]["mode"], "run")
+        self.assertTrue(x["resume"]["probe"]["probing"] or x["resume"]["probe"]["sleeping"], x["resume"])
         self.assertGreater(x["resume"]["running"], 0)
 
     def test_frame_gap_watchdog_degrades_to_static(self):
         x = self.r("watchdog")
         self.assertEqual(x["healthy"]["mode"], "run")
         self.assertEqual(x["healthy"]["degraded"], "0")
+        self.assertEqual(x["healthy"]["probe"], {"probing": False, "sleeping": True, "probes": 1})   # rafale finie
+        self.assertEqual(x["asleep"]["probe"], {"probing": False, "sleeping": True, "probes": 1})    # sommeil ≥ 9 s
+        self.assertEqual(x["asleep"]["running"], x["healthy"]["running"])          # couches CSS toujours animées
+        self.assertGreater(x["healthy"]["running"], 0)
         self.assertEqual(x["slow"]["degraded"], "1")
         self.assertEqual(x["slow"]["mode"], "static")
         self.assertEqual(x["slow"]["running"], 0)
+        self.assertEqual(x["slow"]["probe"]["probes"], 2)
+        # fin du sommeil (≤ 15 s après la rafale saine) puis 60 intervalles lents : jamais avant, jamais bien après
+        self.assertTrue(60 <= x["slowSteps"] <= 60 + 70, x["slowSteps"])
+        self.assertEqual(x["after"]["probe"], {"probing": False, "sleeping": False, "probes": 2})
+        self.assertEqual((x["after"]["mode"], x["after"]["degraded"]), ("static", "1"))
 
     def test_shell_and_qr_are_never_styled_or_animated_by_the_scene(self):
         x = self.r("shell")

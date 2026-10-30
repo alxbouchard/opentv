@@ -44,7 +44,7 @@ persistant : `epoch`, `history` (5 entrées max : `agent`, `at`, `hash`, `revisi
 | `opentv_pi/canvas_roles.py` | façades Agent (aperçu, annulation) / Propriétaire (confirmer, appliquer, annuler, réinitialiser) | publication par un agent |
 | `opentv_pi/canvas_tv.py` | vue TV épurée, feuille, routes `/api/tv/canvas/*`, occupation service/page, audit | chemins, identités brutes, raisons internes dans la vue |
 | `opentv_pi/canvas_tools.py` | permission facultative `canvas`, outils MCP, codes stables, délai après refus | confirmation, scène brute, `row_order` |
-| `ui/canvas.js` | peinture seulement : classes `cv-*` fermées, 4 couches, pause/dégradé/mouvement réduit | réseau, minuteurs d'API, texte du service |
+| `ui/canvas.js` | peinture seulement : classes `cv-*` fermées, 4 couches, pause/dégradé (sonde de cadence par rafales, 12 s)/mouvement réduit | réseau, minuteurs d'API, boucle rAF permanente, texte du service |
 | `ui/tv.js` | cycle de vie : état, feuille, routes bornées, adoption causale, Réglages « Ambiance OpenTV » | styles venus d'une scène |
 
 Ne jamais nommer un module de production `canvas_model` (marqueur du prototype `scripts/pi4/prototypes/canvas/`, jamais

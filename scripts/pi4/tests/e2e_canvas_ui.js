@@ -242,6 +242,8 @@ const anims = (page) => page.evaluate(() => {
   const running = all.filter((a) => a.playState === "running");
   return { total: all.length, running: running.length, mode: document.body.getAttribute("data-cv-mode"),
            degraded: document.body.getAttribute("data-cv-degraded"), body: document.body.className,
+           probe: (function () { const c = window.OpenTVCanvas && window.OpenTVCanvas.state();
+             return c ? { probing: c.probing, sleeping: c.sleeping, probes: c.probes } : null; })(),
            anims: running.map((a) => {
              const props = {};
              a.effect.getKeyframes().forEach((k) => Object.keys(k).forEach((x) => {
@@ -897,6 +899,8 @@ S.motion = async (browser) => {
 };
 
 S.watchdog = async (browser) => {
+  // sonde par rafales : une rafale saine (≈ 1,5 s) puis sommeil sans rAF ; des images lentes ne sont mesurées qu'à la
+  // rafale suivante (après PROBE_SLEEP_MS), qui dégrade alors deterministiquement (≥ 45 intervalles > 70 ms)
   const { ctx, page } = await open(browser, { clock: true });
   for (let i = 0; i < 80; i++) {
     await page.clock.runFor(250);
@@ -906,10 +910,18 @@ S.watchdog = async (browser) => {
   await page.clock.pauseAt(now + 1000);
   await page.clock.runFor(2000);
   const healthy = await anims(page);
-  for (let i = 0; i < 70; i++) { await page.clock.fastForward(100); }
-  const slow = await anims(page);
+  await page.clock.runFor(7000);                         // toujours endormie : aucune nouvelle rafale avant ~10 s
+  const asleep = await anims(page);
+  let steps = 0, slow = null;
+  for (; steps < 200; steps++) {
+    await page.clock.fastForward(100);
+    slow = await anims(page);
+    if (slow.degraded === "1") { break; }
+  }
+  await page.clock.runFor(30000);                         // dégradé définitif : ni rafale ni minuteur ensuite
+  const after = await anims(page);
   await ctx.close();
-  return { healthy: healthy, slow: slow };
+  return { healthy: healthy, asleep: asleep, slow: slow, slowSteps: steps + 1, after: after };
 };
 
 S.shell = async (browser) => {
