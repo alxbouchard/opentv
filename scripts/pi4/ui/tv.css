@@ -336,8 +336,8 @@ footer { flex: 0 0 auto; display: flex; align-items: center; gap: 36px; padding-
 .cv-wp-brume #cvglow { opacity: .42; }
 
 /* affiche (Cinéma) : salle sombre traversée par une lumière de projection DIFFUSE, ivoire chaud, venue d'au-delà du
-   cadre (en haut à droite) ; aucun projecteur, appareil ni silhouette : le point chaud de chaque dégradé reste HORS de
-   l'écran et tous les bords sont plumés par des dégradés locaux superposés (aucun filtre, flou ni masque).
+   cadre (en haut à droite) ; aucun projecteur, appareil ni silhouette : le point le plus lumineux du composite reste au
+   bord du cadre et la brume large, sans bord visible, est plumée par des dégradés locaux (aucun filtre, flou ni masque).
    l2 = faisceau large (pivote autour de sa source hors champ), l3 = halo diffus de la projection, l1 = reflet de
    balayage (« Vivant » seulement) ; #cvglow = halo de l'affiche au focus, comme ailleurs. */
 .cv-wp-affiche .cv-base { background: linear-gradient(90deg, #07080c 0%, #0a0b12 40%, #0c0d14 100%); }
