@@ -826,9 +826,14 @@ class TestNonImpact(unittest.TestCase):
         self.assertGreater(seen, 50)
 
     def test_production_package_import_does_not_load_prototype(self):
-        code = ("import sys,pkgutil,importlib;sys.path.insert(0,sys.argv[1]);import opentv_pi;"
+        # le module de production opentv_pi.canvas (phase 2) est légitime ; seul le PROTOTYPE est interdit : aucun
+        # module nommé comme lui ni chargé depuis prototypes/
+        code = ("import os,sys,pkgutil,importlib;sys.path.insert(0,sys.argv[1]);import opentv_pi;"
                 "[importlib.import_module('opentv_pi.'+m.name) for m in pkgutil.iter_modules(opentv_pi.__path__)];"
-                "bad=[n for n in sys.modules if 'canvas' in n.lower()];print(bad);sys.exit(1 if bad else 0)")
+                "proto=os.path.join(os.path.realpath(sys.argv[1]),'prototypes')+os.sep;"
+                "bad=[n for n,m in list(sys.modules.items()) if 'canvas_model' in n.lower() or "
+                "os.path.realpath(getattr(m,'__file__',None) or '/').startswith(proto)];"
+                "print(bad);sys.exit(1 if bad or 'opentv_pi.canvas' not in sys.modules else 0)")
         p = subprocess.run([sys.executable, "-I", "-c", code, PI4], capture_output=True, timeout=120)
         self.assertEqual(p.returncode, 0, (p.stdout.decode()[-1000:], p.stderr.decode()[-2000:]))
 
