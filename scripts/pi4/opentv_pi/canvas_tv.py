@@ -18,7 +18,9 @@ Pont entre `canvas.CanvasStore` (tâche 1) et l'App / la page /tv (loopback, cl�
   (`_props`, verrou court `_pl` jamais tenu pendant un appel au magasin : instantané -> opération du magasin ->
   retrait conditionnel de CET identifiant seulement) ; l'aperçu annulé par un geste humain est relevé par le magasin
   sous le verrou de l'annulation. Auteur inconnu ou action du propriétaire : acteur réservé `agents.OWNER_ACTOR`,
-  jamais un autre agent.
+  jamais un autre agent. Ordre : « proposed » est audité AVANT l'attribution (`_settle`) ; une annulation humaine d'un
+  aperçu pas encore attribué pendant une création en cours est différée jusqu'à la fin de celle-ci (jamais perdue,
+  jamais avant sa proposition).
 - Exclusion aperçu ⇄ actions d'assistant (file tvcontrol) : portée par la porte de l'App (`agent_tv_gate`). Relais
   tâche 3 : la page /tv ne doit JAMAIS appliquer une action d'assistant réclamée pendant que la feuille est affichée.
 - Échec `restore_failed` : jamais annoncé « inchangé » ; la réponse porte l'état relu du disque (`see_state`).
@@ -58,6 +60,8 @@ class TvCanvas:
         self._held = {}            # raison -> jeton (service ET page : raisons disjointes)
         self._pl = threading.Lock()   # court : `_props` seulement, jamais tenu pendant un appel au magasin
         self._props = collections.OrderedDict()   # preview_id -> {"id", "agent", "hash", "preset"} (borné)
+        self._inflight = 0         # créations d'aperçu en cours (sous `_pl`)
+        self._deferred = []        # annulations humaines d'aperçus pas encore attribués, à auditer après leur création
 
     @classmethod
     def for_config(cls, cfg, audit, log, mono):
@@ -99,16 +103,32 @@ class TvCanvas:
             return False
         out, gone = self.store._human_event(kind)   # aperçu annulé relevé atomiquement par le magasin
         if gone is not None:
-            self._forget(gone["id"])
-            self._audit(gone["agent"], "cancelled", True, None, gone)
+            with self._pl:          # aperçu pas encore attribué pendant une création : audité après sa proposition
+                now = gone["id"] in self._props or not self._inflight
+                self._props.pop(gone["id"], None)
+                if not now:
+                    self._deferred.append(gone)
+            if now:
+                self._audit(gone["agent"], "cancelled", True, None, gone)
         return out["preview_cancelled"]
 
     # ------------------------------------------------------------------ propriété des aperçus (id -> auteur)
-    def _own(self, meta):
+    def _settle(self, meta):
+        """Fin d'une création (`meta` : aperçu créé ET déjà audité « proposed », ou None) : attribution, puis
+        annulations différées qui lui reviennent (ou toutes, s'il ne reste aucune création en cours). -> à auditer."""
         with self._pl:
-            self._props[meta["id"]] = meta
-            while len(self._props) > PROPS_MAX:
-                self._props.popitem(last=False)
+            self._inflight -= 1
+            if meta is not None:
+                self._props[meta["id"]] = meta
+                while len(self._props) > PROPS_MAX:
+                    self._props.popitem(last=False)
+            done, keep = [], []
+            for g in self._deferred:
+                (done if not self._inflight or (meta is not None and g["id"] == meta["id"]) else keep).append(g)
+            self._deferred = keep
+            for g in done:
+                self._props.pop(g["id"], None)
+        return done
 
     def _forget(self, pid):
         """Retrait conditionnel : l'entrée de CET identifiant seulement (jamais celle d'un aperçu plus récent)."""
@@ -117,7 +137,7 @@ class TvCanvas:
 
     def _owner_of(self, pid):
         """Instantané de l'auteur de l'aperçu `pid` (liaison identifiant -> agent immuable) ; entre la création dans
-        le magasin et `_own`, l'aperçu vivant du magasin fait foi (lu hors de `_pl`). -> méta ou None."""
+        le magasin et `_settle`, l'aperçu vivant du magasin fait foi (lu hors de `_pl`). -> méta ou None."""
         if type(pid) is not str:
             return None
         with self._pl:
@@ -158,19 +178,25 @@ class TvCanvas:
     # ------------------------------------------------------------------ agent (point d'intégration tâche 4)
     def preview(self, agent, changes, blocked=False):
         """Aperçu par un agent authentifié (façade agent : codes nus). `blocked` : actions d'assistant en cours."""
+        with self._pl:
+            self._inflight += 1
+        meta = None
         try:
-            if blocked:
-                raise cv.CanvasError("ui_busy")
-            r = self.store.agent_api(agent).preview(changes)
-        except cv.CanvasError as e:
-            code = e.code
-        else:
-            meta = {"id": r["preview_id"], "agent": agent, "hash": r["hash"], "preset": r["preset"]}
-            self._own(meta)
-            self._audit(agent, "proposed", True, None, dict(meta, revision=r["base_revision"]))
-            return r
-        self._audit(agent, "proposed", False, code, None)
-        raise cv.CanvasError(code)
+            try:
+                if blocked:
+                    raise cv.CanvasError("ui_busy")
+                r = self.store.agent_api(agent).preview(changes)
+            except cv.CanvasError as e:
+                code = e.code
+            else:
+                meta = {"id": r["preview_id"], "agent": agent, "hash": r["hash"], "preset": r["preset"]}
+                self._audit(agent, "proposed", True, None, dict(meta, revision=r["base_revision"]))
+                return r
+            self._audit(agent, "proposed", False, code, None)
+            raise cv.CanvasError(code)
+        finally:                    # toujours : jamais une création « en cours » ni une annulation perdue
+            for g in self._settle(meta):
+                self._audit(g["agent"], "cancelled", True, None, g)
 
     def agent_cancel(self, agent, preview_id):
         return self.store.agent_api(agent).cancel(preview_id)

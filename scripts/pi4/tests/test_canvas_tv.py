@@ -590,6 +590,37 @@ class TestOwnershipRaces(Base):
         self.assertIn("out", box)
         self.assertIsNone(a.canvas.view()["preview"])
         self.assertEqual([x for x in canvas_audit(a) if x[1] == "cancelled"], [("muse-device", "cancelled", True)])
+        # ordre de l'audit : la proposition précède toujours son annulation (annulation différée, jamais perdue)
+        self.assertEqual(canvas_audit(a)[-2:], [("muse-device", "proposed", True), ("muse-device", "cancelled", True)])
+        self.assertNotIn(box["out"]["preview_id"], a.canvas._props)   # aperçu annulé : jamais réattribué
+
+    def test_cancel_deferred_during_failed_creation_is_still_audited(self):
+        """Annulation humaine d'un aperçu NON attribué par TvCanvas pendant une création qui échoue : différée
+        jusqu'à la fin de la création, puis auditée une seule fois au nom de son auteur (jamais perdue)."""
+        a = self.app()
+        a.canvas.store.agent_api("hermit").preview({"preset": "mist"})   # hors de TvCanvas : auteur inconnu d'elle
+        entered, go = threading.Event(), threading.Event()
+
+        def failing_preview(*x, **k):
+            entered.set()
+            if not go.wait(WAIT_S):
+                raise AssertionError("go")
+            raise cv.CanvasError("ui_busy")
+        with mock.patch.object(a.canvas.store, "agent_preview", side_effect=failing_preview):
+            t, box = run_bg(self.propose, a, "muse-device", {"preset": "cinema"})
+            self.assertTrue(entered.wait(WAIT_S))
+            self.assertTrue(a.canvas_human("key"))
+            self.assertEqual(canvas_audit(a), [])        # différée : la création en cours n'est pas terminée
+            go.set()
+            t.join(WAIT_S)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(getattr(box.get("err"), "code", None), "ui_busy", box)
+        self.assertEqual(canvas_audit(a), [("muse-device", "proposed", False), ("hermit", "cancelled", True)])
+        self.assertEqual((a.canvas._inflight, a.canvas._deferred), (0, []))
+        a.mono_clock.t += cv.NAV_QUIET_S                  # sans création en cours : annulation auditée aussitôt
+        a.canvas.store.agent_api("hermit").preview({"preset": "mist"})
+        self.assertTrue(a.canvas_human("key"))
+        self.assertEqual(canvas_audit(a)[-1], ("hermit", "cancelled", True))
 
     def test_confirm_of_unknown_id_never_names_the_live_preview_agent(self):
         a = self.app()
@@ -835,6 +866,170 @@ class TestPreviewActionGate(Base):
         q.push("key", "muse", {"key": "ok"})
         t[0] = tvcontrol.CLAIM_TTL_S
         self.assertFalse(q.busy())                        # expirée : plus en cours
+
+
+# --------------------------------------------------------------------------- courses : synchronisation des raisons
+class OwnedLock:
+    """Verrou instrumenté : propriétaire connu (`mine`), signale toute tentative d'entrée pendant qu'il est tenu,
+    contrôle facultatif à chaque entrée (`on_enter`, appelé AVANT l'acquisition)."""
+
+    def __init__(self, contended=None, on_enter=None):
+        self._l, self.owner, self.contended, self.on_enter = threading.Lock(), None, contended, on_enter
+
+    def __enter__(self):
+        if self.on_enter is not None:
+            self.on_enter()
+        if not self._l.acquire(blocking=False):
+            if self.contended is not None:
+                self.contended.set()
+            self._l.acquire()
+        self.owner = threading.get_ident()
+
+    def __exit__(self, *exc):
+        self.owner = None
+        self._l.release()
+
+    def mine(self):
+        return self.owner == threading.get_ident()
+
+
+def _enter_loading(a):
+    set_playback(a, "loading")
+
+
+def _enter_setup(a):
+    with a.lock:
+        a.setup_mode = True
+
+
+def _enter_assistants(a):
+    with a.lock:
+        a.agents_mode = True
+
+
+class TestServiceSyncRace(Base):
+    """Une synchronisation PÉRIMÉE (raisons lues « libres », appliquées plus tard) ne peut jamais écraser une
+    synchronisation plus récente : relevé des raisons et application sur TvCanvas sont linéarisés par
+    `App.canvas_sync_lock`. Sans cela, une lecture « idle » retardée effacerait « loading » et rouvrirait l'aperçu
+    pendant le chargement du lecteur."""
+
+    def stale_race(self, enter, reason):
+        a = self.app()
+        either, read, go = threading.Event(), threading.Event(), threading.Event()
+        a.canvas_sync_lock = OwnedLock(either)
+        real, first = a._canvas_reasons, [True]
+
+        def reasons():
+            r = real()
+            if first[0]:                   # synchronisation périmée : raisons relevées (libres), pas appliquées
+                first[0] = False
+                read.set()
+                if not go.wait(WAIT_S):
+                    raise AssertionError("go")
+            return r
+        with mock.patch.object(a, "_canvas_reasons", side_effect=reasons):
+            t1, b1 = run_bg(a.canvas_sync)
+            self.assertTrue(read.wait(WAIT_S), reason)
+            self.assertEqual(b1, {}, reason)              # en pause entre relevé et application
+            enter(a)                                      # l'occupation commence…
+            t2, b2 = run_bg(a.canvas_sync)                # …et une synchronisation fraîche la relève
+
+            def done():
+                t2.join()
+                either.set()
+            threading.Thread(target=done, daemon=True).start()
+            self.assertTrue(either.wait(WAIT_S), reason)  # fraîche bloquée par le verrou, ou terminée (sans lui)
+            go.set()                                      # la périmée reprend
+            t1.join(WAIT_S)
+            t2.join(WAIT_S)
+        self.assertFalse(t1.is_alive() or t2.is_alive(), reason)
+        self.assertEqual((b1, b2), ({"out": None}, {"out": None}), reason)
+        self.assertIn(reason, a.canvas.store.status()["busy"], reason)   # l'état final reste occupé
+        with self.assertRaises(cv.CanvasError) as e:      # sans resynchronisation : seul l'état appliqué compte
+            a.canvas.preview("hermit", {"preset": "mist"})
+        self.assertEqual(e.exception.code, "ui_busy", reason)
+        self.assertIsNone(a.canvas.view()["preview"], reason)
+        self.assertIsNone(a.canvas.view()["sheet"], reason)
+        return a
+
+    def test_stale_idle_sync_never_overwrites_fresh_loading(self):
+        self.stale_race(_enter_loading, "loading")
+
+    def test_stale_idle_sync_never_overwrites_fresh_setup(self):
+        self.stale_race(_enter_setup, "setup")
+
+    def test_stale_idle_sync_never_overwrites_fresh_assistants(self):
+        self.stale_race(_enter_assistants, "assistants")
+
+    def test_stale_idle_sync_never_overwrites_fresh_muse_setup(self):
+        flag = [False]
+        with mock.patch.object(type(self.app().muse), "busy", autospec=True, side_effect=lambda s: flag[0]):
+            self.stale_race(lambda a: flag.__setitem__(0, True), "muse_setup")
+
+    def test_lock_order_gate_then_sync_then_service_then_canvas(self):
+        """agent_tv_gate -> canvas_sync_lock -> App.lock / lecture / Muse -> TvCanvas._mu -> magasin ; jamais
+        canvas_sync sous App.lock ni sous un verrou plus profond, jamais la porte sous le verrou de synchronisation."""
+        a = self.app()
+        bad, seen = [], []
+
+        def on_sync():
+            for name, held in (("App.lock", a.lock._is_owned()), ("muse", a.muse.lock._is_owned()),
+                               ("playback", a.playback.lock.locked()), ("TvCanvas._mu", a.canvas._mu.locked()),
+                               ("store", a.canvas.store._mu._is_owned())):
+                if held:
+                    bad.append("sync sous " + name)
+        sync = OwnedLock(on_enter=on_sync)
+        gate = OwnedLock(on_enter=lambda: sync.mine() and bad.append("porte sous sync"))
+        a.canvas_sync_lock, a.agent_tv_gate = sync, gate
+        real_reasons, real_apply = a._canvas_reasons, a.canvas.sync
+
+        def reasons():
+            seen.append(("read", sync.mine()))
+            return real_reasons()
+
+        def apply(r):
+            seen.append(("apply", sync.mine()))
+            if not a.canvas._mu.acquire(blocking=False):   # TvCanvas._mu libre à l'entrée (pris dessous)
+                bad.append("_mu tenu avant application")
+            else:
+                a.canvas._mu.release()
+            return real_apply(r)
+        with mock.patch.object(a, "_canvas_reasons", side_effect=reasons), \
+                mock.patch.object(a.canvas, "sync", side_effect=apply):
+            a.tick()
+            a.tv_state()
+            r = self.propose(a)
+            a.canvas_tv_post("cancel", {"preview_id": r["preview_id"]})
+            a.canvas_tv_post("ui", {"busy": []})
+            try:
+                a.agent_control("muse", "play_title", tools.validate_args("play_title", {"id": "films/101"}))
+            except tools.ToolError:
+                pass
+            a.tick()
+        self.assertEqual(bad, [])
+        self.assertGreaterEqual(len(seen), 10)
+        self.assertTrue(all(mine for _, mine in seen), seen)   # relevé ET application sous le verrou
+
+    def test_canvas_sync_never_called_lexically_under_app_lock(self):
+        import ast
+        with open(os.path.join(PI4, "opentv_pi", "app.py"), encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        entry = {"canvas_sync", "canvas_view", "canvas_tv_post", "canvas_agent_preview"}
+        users = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Attribute) and sub.attr == "canvas_sync_lock":
+                        users.append(node.name)
+            if not isinstance(node, ast.With):
+                continue
+            ctx = [ast.unparse(x.context_expr) for x in node.items]
+            if "self.lock" not in ctx:
+                continue
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute):
+                    self.assertNotIn(sub.func.attr, entry, ast.unparse(sub))
+        self.assertEqual(sorted(set(users)), ["__init__", "canvas_sync"])
 
 
 # --------------------------------------------------------------------------- découpage

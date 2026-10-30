@@ -204,6 +204,10 @@ class App:
         # self.lock / verrous du magasin et de la file ; jamais prise sous un autre verrou ni sur un chemin humain ;
         # le magasin n'y fait aucune attente de flock (aperçu et état : mémoire + lecture sans verrou de fichier).
         self.agent_tv_gate = threading.Lock()
+        # Synchronisation Canvas linéarisée : relevé des raisons du service ET application sur TvCanvas sous le même
+        # verrou (une lecture « libre » périmée n'écrase jamais une occupation plus récente). Ordre : agent_tv_gate ->
+        # canvas_sync_lock -> self.lock / lecture / Muse -> TvCanvas._mu -> magasin ; jamais pris sous self.lock.
+        self.canvas_sync_lock = threading.Lock()
         try:
             self.foryou = ForYou(cfg.engine_dir, cfg.foryou_state, cfg.catalogue_file, cfg.source_id, log=log)
         except (EngineError, ValueError) as e:
@@ -1346,8 +1350,10 @@ class App:
                   "closed": ("returning",), "unavailable": ("returning",)}.get(st, ()))
         return r
 
-    def canvas_sync(self):
-        self.canvas.sync(self._canvas_reasons())
+    def canvas_sync(self):   # jamais sous self.lock (voir canvas_sync_lock)
+        with self.canvas_sync_lock:
+            reasons = self._canvas_reasons()
+            self.canvas.sync(reasons)
 
     def canvas_view(self):
         self.canvas_sync()
