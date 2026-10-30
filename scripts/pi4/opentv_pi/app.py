@@ -13,8 +13,8 @@ import string
 import threading
 import time
 
-from . import (VERSION, agents, bootid, cec, config, fsutil, musesetup, netjobs, netstate, nethelper, peeruid,
-               phoneremote, tools, tvcontrol, validate, wifiscan)
+from . import (VERSION, agents, bootid, canvas_tv, cec, config, fsutil, musesetup, netjobs, netstate, nethelper,
+               peeruid, phoneremote, tools, tvcontrol, validate, wifiscan)
 from .foryou import ForYou, EngineError
 from . import promotion
 from . import source as sourcemod
@@ -197,6 +197,8 @@ class App:
         # « Connecter Muse » (Réglages TV → Gérer les assistants → Muse) : séance courte + jobs root dédiés
         self.muse = musesetup.MuseSetup(cfg, mono=mono, log=log)
         self.audit = agents.Audit(cfg.audit_file)
+        # OpenTV Canvas : scène publiée + aperçu agent à confirmer sur la TV (canvas_tv), jamais l'inverse
+        self.canvas = canvas_tv.TvCanvas.for_config(cfg, self.audit, log, mono)
         try:
             self.foryou = ForYou(cfg.engine_dir, cfg.foryou_state, cfg.catalogue_file, cfg.source_id, log=log)
         except (EngineError, ValueError) as e:
@@ -527,6 +529,7 @@ class App:
         self._cec_refresh()
         self._mdns_refresh()
         self.playback.refresh()
+        self.canvas_sync()
         if prime:
             self._scan_prime()
 
@@ -1119,6 +1122,7 @@ class App:
                     **agents_out)
 
     def tv_state(self):
+        canvas = self.canvas_view()   # hors du verrou du service (lecture disque du magasin Canvas)
         with self.lock:
             m = self.message
             if m and self.mono() >= m["until"]:
@@ -1136,7 +1140,7 @@ class App:
                     "assistants": dict(assistants, manage=self._agents_view()),
                     "muse": self._muse_tv(assistants),
                     "foryou": self.foryou is not None, "remote": self._remote_view(),
-                    "playback": self.playback.view(),
+                    "playback": self.playback.view(), "canvas": canvas,
                     # pilotage par assistant : actions en attente (fiche, film lancé, touche), à réclamer une fois
                     "actions": {"pending": [] if self.setup_mode else self.tv_actions.pending()}}
 
@@ -1243,6 +1247,8 @@ class App:
                 raise tools.ToolError("tv_busy")
         if self.muse.busy():   # connexion/déconnexion de Muse en cours sur la TV : l'humain d'abord
             raise tools.ToolError("tv_busy")
+        if self.canvas.preview_live():   # feuille Canvas : seul le propriétaire décide, jamais une touche d'agent
+            raise tools.ToolError("tv_busy")
         if name in ("remote_control", "present_title") and self.playback.returning():
             # fin de lecture pas encore acquittée : la page /tv revient sur la fiche du film ; une touche ou une fiche
             # d'assistant ferait courir ce retour contre elle (même refus que play_title). close_player reste permis.
@@ -1311,3 +1317,45 @@ class App:
             changed = self.tv_actions.done(seq, ok, reason if isinstance(reason, str) else None)
             return (200 if changed else 409), {"ok": changed}
         return 400, {"ok": False, "error": "bad_phase"}
+
+    # -- OpenTV Canvas (canvas_tv) : raisons d'occupation du service, vue TV, routes du propriétaire, aperçu agent
+    def _canvas_reasons(self):
+        r = set()
+        with self.lock:
+            if self.setup_mode or self.device is None:
+                r.add("setup")
+            if self.agents_mode:
+                r.add("assistants")
+        if self.muse.busy():
+            r.add("muse_setup")
+        st = self.playback.view()["state"]
+        r.update({"loading": ("loading",), "playing": ("playback",), "closing": ("closing",),
+                  "closed": ("returning",), "unavailable": ("returning",)}.get(st, ()))
+        return r
+
+    def canvas_sync(self):
+        self.canvas.sync(self._canvas_reasons())
+
+    def canvas_view(self):
+        self.canvas_sync()
+        return self.canvas.view()
+
+    def canvas_human(self, kind):
+        """Geste humain ordinaire de la page /tv (hors feuille de confirmation) : annule l'aperçu AVANT l'action."""
+        return self.canvas.human(kind)
+
+    def canvas_tv_post(self, action, body):
+        self.canvas_sync()
+        return self.canvas.post(action, body)
+
+    def _agent_actions_pending(self):
+        return any(x["state"] in ("queued", "claimed") for x in self.tv_actions.recent(tvcontrol.HISTORY_MAX))
+
+    def canvas_agent_preview(self, agent, changes):
+        """Point d'intégration de l'Agent Port (tâche 4) : aperçu proposé par l'identité authentifiée `agent`.
+        -> résultat de la façade agent ; canvas.CanvasError au code nu sinon. Jamais de confirmation ici."""
+        self.canvas_sync()
+        return self.canvas.preview(agent, changes, blocked=self._agent_actions_pending())
+
+    def canvas_agent_cancel(self, agent, preview_id):
+        return self.canvas.agent_cancel(agent, preview_id)

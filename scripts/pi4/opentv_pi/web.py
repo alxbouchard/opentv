@@ -96,6 +96,12 @@ REMOTE_FORM_MAX = 512
 REMOTE_RETRY_S = 30.0   # écoute impossible (adresse pas encore prête) : nouvel essai au plus toutes les 30 s
 MAX_JSON = 2048
 TV_KEY_ERROR = "tv_key"   # 403 de /api/tv/* : clé de page périmée (service redémarré) -> tv.js recharge /tv, borné
+CANVAS_PREFIX = "/api/tv/canvas/"
+# Routes POST déclenchées par une navigation humaine ordinaire (jamais la réclamation d'une action d'assistant ni
+# l'acquittement de lecture, qui sont de la tenue de page) : chacune annule d'abord l'aperçu Canvas vivant.
+TV_HUMAN_POSTS = frozenset(("/api/tv/feedback", "/api/tv/play", "/api/tv/play/close", "/api/tv/setup",
+                            "/api/tv/remote/revoke", "/api/tv/agents", "/api/tv/agents/cancel", "/api/tv/muse/probe",
+                            "/api/tv/muse/start", "/api/tv/muse/cancel", "/api/tv/muse/disconnect"))
 MAX_FORM = 4096
 AGENT_LABELS = (("muse", "Muse"), ("hermit", "Hermit"), ("hermes", "Hermes"))
 LEVEL_LABELS = (("none", "Aucun accès"), ("read", "Voir seulement"), ("feedback", "Voir + donner mon avis"),
@@ -332,6 +338,10 @@ class TVHandler(_Base):
             return self.send_json(400, {"ok": False, "error": "bad_json"})
         if not isinstance(body, dict):
             return self.send_json(400, {"ok": False, "error": "bad_json"})
+        if path.startswith(CANVAS_PREFIX):   # feuille de confirmation et Réglages : jamais un geste « ordinaire »
+            return self.send_json(*self.app.canvas_tv_post(path[len(CANVAS_PREFIX):], body))
+        if path in TV_HUMAN_POSTS:   # geste humain ordinaire : l'aperçu Canvas est annulé AVANT l'action
+            self.app.canvas_human("key")
         if path == "/api/tv/feedback":
             state, msg = self.app.tv_feedback(body.get("id"), body.get("action"))
             return self.send_json(200 if state is not None else 400, {"ok": state is not None, "state": state,

@@ -16,7 +16,8 @@ import time
 from . import fsutil, validate
 
 SAFE_ARG_RE = re.compile(r"[a-z0-9/-]{1,40}")
-SAFE_ARG_KEYS = ("action", "list", "id", "key")   # « key » : énumération fermée de remote_control
+SAFE_ARG_KEYS = ("action", "list", "id", "key",   # « key » : énumération fermée de remote_control
+                 "preset", "hash")                # Canvas : préréglage énuméré, empreinte courte (16 hex)
 # Attente bornée du verrou inter-processus (service ⇄ CLI root) : jamais de blocage infini. Le service l'attend sous
 # App.lock (QR de configuration, « Gérer les assistants ») : pendant une écriture admin concurrente — rare — le poll
 # d'état de la TV peut donc rester suspendu jusqu'à cette durée, puis reprend seul (README, « Écritures concurrentes »).
