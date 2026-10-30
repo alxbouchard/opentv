@@ -303,12 +303,17 @@ class Registry:
         """Politique complète (QR de configuration). revoke_exceeding : dans la MÊME écriture, toute identité dont
         les scopes dépassent sa nouvelle autorisation (ou étrangère à la politique) est révoquée. `preserve` : scopes
         facultatifs (« canvas ») repris de la ligne enregistrée de chaque agent, sous le même verrou — le QR, qui ne
-        les montre pas, ne les retire jamais. -> [révoqués]."""
+        les montre pas, ne les retire jamais lors d'un simple changement de Wi-Fi ou de niveau. Exception : un agent
+        ramené EXPLICITEMENT à « Aucun accès » (niveau enregistré non vide -> nouveau niveau vide) perd aussi ses scopes
+        facultatifs ; un agent déjà sans niveau (« ambiance seulement ») garde les siens. -> [révoqués]."""
         clean = {validate.agent_id(k): validate.scopes(v) for k, v in policy.items()}
         with self._mutating(uid, gid):
             old = self.data.get("policy") if isinstance(self.data.get("policy"), dict) else {}
             for a in clean:
-                kept = set(_valid_scopes(old.get(a))) & set(preserve)
+                prev = _valid_scopes(old.get(a))
+                if not level_scopes(clean[a]) and level_scopes(prev):
+                    continue   # « Aucun accès » choisi : niveau ET permissions facultatives retirés
+                kept = set(prev) & set(preserve)
                 clean[a] = sorted(set(clean[a]) | kept)
             self.data["policy"] = clean
             self.data["policy_at"] = round(self.clock(), 3)

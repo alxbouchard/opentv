@@ -1102,12 +1102,90 @@ recherche de nouveau les notes manquantes.
 
 This product uses the TMDB API but is not endorsed or certified by TMDB.
 
+## 6 quinquies. OpenTV Canvas : ambiance animée de l'accueil (0.7.0)
+
+L'accueil garde la coque OpenTV v23 (navigation, Réglages, QR, feuilles, lecteur, hors-ligne, configuration :
+**jamais** modifiables par une ambiance). Seule la couche « Canvas » change : fond animé, couleur d'accent, voile,
+mise en avant du film choisi et ordre des rangées « Pour toi » (« Le choix de ce soir » reste la première). Une
+ambiance est une **donnée fermée** (schéma v1 : `wallpaper`, `motion`, `accent`, `shade`, `hero_focus`,
+`row_order`, valeurs énumérées seulement), jamais du HTML/CSS/JavaScript, une URL, un chemin ou du texte libre.
+Préréglages : `canvas` (défaut d'une boîte neuve : aurore + halo du titre, mouvement calme), `mist` (brume
+d'OpenTV), `cinema` (salle sombre, halo de l'affiche). Passation pour les agents de développement :
+[docs/opentv-canvas.md](../../docs/opentv-canvas.md) (dans le dépôt).
+
+**Propriétaire (télécommande, sans terminal).** Réglages → Ambiance OpenTV : « Style » (Canvas, Brume, Cinéma),
+« Mouvement du fond » (Coupé, Calme, Vivant), « Version précédente » (annule la dernière ambiance publiée ;
+historique de 5 versions) et « Ambiance d'origine » (Canvas, mouvement calme ; répare aussi un état illisible). Chaque
+écriture est confirmée (« Non » au focus) et appliquée atomiquement ; une réponse perdue relit l'état réel
+(« Réponse perdue : vérifie l'ambiance affichée »), jamais « rien n'a changé ».
+
+**Proposition d'un assistant (permission facultative, absente par défaut).** Réglages → Gérer les assistants : case
+« Changer l'ambiance OpenTV », séparée de chaque niveau (jamais accordée par la configuration QR ni par un niveau ;
+« Aucun accès » choisi explicitement au QR la retire aussi, un simple changement de Wi-Fi la garde). Un assistant
+autorisé voit trois outils MCP fermés : `canvas_status`, `canvas_preview` (préréglage et valeurs énumérées seulement)
+et `canvas_cancel` (sa propre proposition). Budget : 1 proposition / 5 s et 20 / 10 min par assistant (identités
+liées repliées sur Muse), et 2 min de délai après un « Non » ou une touche humaine. Il ne peut **jamais** publier :
+la TV affiche une feuille « Proposé par … » qui liste les changements sur l'aperçu figé, avec « Non, garder
+l'ambiance actuelle » au focus et « Oui, appliquer » ; Retour, l'échéance (~30 s) ou toute autre touche = « Non ».
+Pas de feuille pendant la configuration, « Gérer les assistants », la connexion de Muse, une fiche ou un panneau, le
+chargement, la lecture ou son retour (la proposition est refusée `tv_busy`). Le pont Muse garde ses 11 commandes et
+reste « prêt » sans cette permission ; Muse ne voit les outils d'ambiance que si son identité générique `muse` l'a
+reçue.
+
+**Mouvement sûr.** Au plus quatre couches continues, transform/opacity seulement (aucun flou, filtre, vidéo ni
+worker), aucune ressource distante. Ambiance **figée** pendant un panneau, la feuille de confirmation, le
+chargement/la lecture/le retour, le hors-ligne et une page cachée ; **fond fixe** en configuration, en mouvement
+« Coupé », si le système demande « Réduire les animations » (`prefers-reduced-motion`, relu en direct) ou si la
+cadence mesurée se dégrade (≥ 45 intervalles > 70 ms parmi les 60–90 dernières images ⇒ mode dégradé statique jusqu'au
+rechargement de la page). Le focus, les QR et la lisibilité ne dépendent jamais d'une image animée.
+
+**Récupération.** TV : « Version précédente » puis, au besoin, « Ambiance d'origine ». État illisible ou dangereux
+(lien, FIFO, lien dur, mauvais propriétaire/mode, trop grand, JSON invalide) : l'écran montre l'ambiance d'origine et
+seule « Ambiance d'origine » le remplace. Magasin indisponible : ambiance de base, aucune écriture proposée.
+Secours administrateur : `sudo systemctl stop opentv` puis `sudo rm -f /var/lib/opentv/canvas/state.json` puis
+`sudo systemctl start opentv` (ambiance d'origine ; le verrou reste au compte `opentv`).
+
+**Installation et état.** `install.sh` livre `opentv_pi/canvas*.py` et `ui/canvas.js` (manifeste) ; tmpfiles crée
+`/var/lib/opentv/canvas` (opentv:opentv 0700) avant tout (re)démarrage d'unité ; seul `opentv.service` y lit et
+écrit (le kiosque passe par `/api/tv/canvas/*`), toutes les autres unités le masquent (`InaccessiblePaths=`). Une
+mise à jour et un retour arrière d'installation ne touchent jamais son contenu ; `uninstall.sh` le conserve, `--purge`
+l'efface (sans suivre de lien). Tout fichier Canvas livré entre dans l'empreinte de la promotion de « Regarder » :
+après une installation 0.7.0, `opentv-pi playback status` est `stale` jusqu'au canari HDMI puis
+`sudo /opt/opentv/bin/opentv-pi playback promote --field-validated`.
+
+**Budget de performance (porte terrain, à mesurer sur la Pi).** Référence = même accueil en mouvement « Coupé »,
+mesurée dans la même séance, 1920×1080 à 60 Hz. Mouvement « Calme » pendant 10 min sur l'accueil : CPU moyen
+Chromium + Cage ≤ référence + 15 % d'un cœur (relevés de 60 s), RSS ≤ référence + 64 Mio, jamais de mode dégradé
+(`document.body.dataset.cvDegraded` reste `0`), température ≤ 70 °C, `vcgencmd get_throttled` = `0x0`,
+`hvs_underrun` inchangé. Pendant une lecture : aucune animation active et CPU revenu à la référence avant l'ouverture
+du lecteur. « Vivant » doit tenir le même budget, sinon il reste un choix du propriétaire et le défaut reste
+« Calme ». Hors budget : ambiance d'origine en « Coupé » et rapport, jamais un réglage silencieux.
+
+**Contrôles terrain exacts (Pi réelle, après `install.sh` 0.7.0 et redémarrage).**
+1. `ls -ld /var/lib/opentv/canvas` = `drwx------ opentv opentv` ; `sudo systemd-analyze verify` des unités livrées ;
+   `systemd-analyze security opentv opentv-catalogue-refresh opentv-player` relus.
+2. Masques réels : pour `opentv-catalogue-refresh`, `opentv-cec`, `opentv-player`, `opentv-net-helper` (pendant un
+   passage), `grep ' /var/lib/opentv/canvas ' /proc/<MainPID>/mountinfo` présent ; absent pour `opentv` ;
+   `sudo -u opentv-kiosk ls /var/lib/opentv` refusé.
+3. Photo/vidéo 1920×1080 à distance de canapé : ambiance Canvas animée, focus et QR nets ; Réglages → Ambiance OpenTV :
+   chaque style, chaque mouvement, « Version précédente », « Ambiance d'origine ».
+4. Assistant de test autorisé (`canvas`) : `canvas_preview` ⇒ feuille, « Non » au focus ; Retour ⇒ ambiance inchangée
+   (`state_hash` identique) ; nouvelle proposition ⇒ « Oui, appliquer » ⇒ appliquée ; assistant sans la permission ⇒
+   `forbidden_scope` ; aucun outil ne confirme.
+5. Préférence « Réduire les animations » forcée (Chromium `--force-prefers-reduced-motion` en essai contrôlé) ⇒ fond
+   fixe ; budget ci-dessus relevé (CPU, RSS, température, `get_throttled`, `hvs_underrun`).
+6. « Regarder » : ambiance figée puis lecteur seul, Retour sur la même carte, ambiance reprise ; `playback status`
+   `stale` après l'installation puis `promoted` seulement après le canari HDMI.
+7. `systemctl restart opentv` et `sudo reboot` ⇒ même ambiance ; `uninstall.sh` puis réinstallation ⇒ même ambiance ;
+   `--purge` ⇒ ambiance d'origine à la réinstallation.
+
 ## 7. Retour arrière
 
 ```sh
 sudo /opt/opentv/uninstall.sh            # services + garde arrêtés, Wi-Fi temporaire OpenTV arrêté ET supprimé,
                                          # puis fichiers du manifeste retirés, originaux restaurés, tty1 rendu
-sudo /opt/opentv/uninstall.sh --purge    # + état OpenTV, /etc/opentv (le Wi-Fi configuré reste)
+sudo /opt/opentv/uninstall.sh --purge    # + état OpenTV (ambiance Canvas comprise), /etc/opentv (le Wi-Fi
+                                         # configuré reste) ; sans --purge, /var/lib/opentv/canvas est conservé
 sudo /opt/opentv/uninstall.sh --purge --forget-wifi   # + profil Wi-Fi opentv-wifi
 sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : console tty1 de retour
 ```
@@ -1211,6 +1289,11 @@ sauvegardes OpenTV, jamais un paquet.
   liste du site donne-t-elle bien tout le catalogue accepté (196 éléments au dernier relevé) ? Sinon chaque passage
   sera refusé (`count_drop`) jusqu'à ce que la source fournisse une liste complète.
 
+- **OpenTV Canvas (0.7.0) : vérifié hors matériel seulement** (Python 3.11/3.13, Chromium headless réel, racines
+  d'installation temporaires). Cadence, CPU/RSS, température, `get_throttled`, `hvs_underrun`, masques réels des
+  unités (`mountinfo`), création tmpfiles du dossier sur Bookworm et rendu à distance de canapé restent la porte
+  terrain « Ambiance (Canvas) » (§6 quinquies, §9).
+
 ## 9. Checklist terrain (critères distincts)
 
 | Critère | Preuve exigée |
@@ -1229,6 +1312,7 @@ sauvegardes OpenTV, jamais un paquet.
 | **Regarder** | `opentv-pi playback status` → `promotion: missing` après installation (bouton absent même avec `source.env`) ; après les essais HDMI ci-dessus et `playback promote --field-validated` : bouton présent ; `playback demote` pendant une lecture ⇒ lecteur fermé, retour même carte, bouton absent en ≤ 10 s ; télécommande USB débranchée et CEC absent ⇒ bouton absent (`devices: 0`) ; unité du lecteur : décodage H.264 matériel toujours actif (`/dev/video10` tenu) avec `DevicePolicy=closed` + `SystemCallFilter=~@debug`, `systemd-analyze security opentv-player` relu, `/dev/cec0`/`/dev/input` inaccessibles depuis le lecteur, `curl http://127.0.0.1:<port TV>` refusé depuis l'unité ; groupes effectifs (`/proc/<pid>/status`) : Cage avec `input`, `playerd`/Chromium du lecteur sans `input`, `opentv-player-keys` avec `input` seulement ; photo/vidéo d'Alex |
 | **Catalogue quotidien** | `systemctl list-timers opentv-catalogue-refresh.timer` : prochain passage planifié ; `sudo /opt/opentv/bin/opentv-pi catalogue refresh` → `updated` (ou `unchanged`), puis `catalogue status` : nombre attendu, `snapshot` présent, SHA-256 lu ; second passage → `unchanged` sans réécriture ; `catalogue rollback` → `rolled_back`, `hold.held: true`, puis `catalogue refresh` → `held` et SHA-256 inchangé ; `catalogue resume` → `resumed`, passage suivant `updated`/`unchanged` ; fiche ouverte ou lecture pendant un remplacement ⇒ Retour sur la même carte (photo) ; `ls -l /var/lib/opentv/catalogue.json*` : tout `opentv` ; Wi-Fi coupé → `discovery_failed` et SHA-256 inchangé ; accueil peuplé avec le nouveau catalogue en ≤ 120 s (attendu ≤ ~62 s) sans redémarrage de service ; `journalctl -u opentv-catalogue-refresh` sans hôte, préfixe, jeton ni URL ; `systemd-analyze security opentv-catalogue-refresh` relu |
 | **Notes TMDb quotidiennes** | `ls -ld /etc/opentv/tmdb` = `root opentv` `drwxr-x---` dès l'installation ; `getent group opentv` sans membre supplémentaire ; `sudo /opt/opentv/bin/opentv-pi catalogue ratings-credential` (jeton depuis le trousseau, jamais affiché) puis `ls -l /etc/opentv/tmdb/token` = `root opentv` `-rw-r-----` ; pour `opentv`, `opentv-cec` (pendant un passage) et le rafraîchissement : `grep ' /etc/opentv/tmdb ' /proc/<MainPID>/mountinfo` présent et `sudo nsenter -t <MainPID> -m ls /etc/opentv/tmdb` refusé ; jeton remplacé une 2e fois ⇒ masque toujours présent dans `opentv` sans redémarrage ; `catalogue refresh` puis `systemctl show -p ActiveEnterTimestamp,Result opentv-catalogue-ratings` (déclenchée après le rafraîchissement) ; `catalogue status` : `ratings.last.result` `updated`/`unchanged`, `coverage.pending` = 0, `rated` cohérent (aujourd'hui 110/116 : un spécial TV sans vote TMDb reste « indisponible », jamais 0) ; second `catalogue ratings` → `unchanged`, SHA-256 inchangé ; `IPAddressDeny` et DNS : passage réel réussi sous le bac à sable ; panne simulée (réseau coupé pendant le seul passage des notes) → `provider_unavailable`, unité `failed`, `health.warnings` = `ratings_enrichment_failed`, catalogue du rafraîchissement inchangé (SHA-256), puis réseau rétabli ⇒ `systemctl list-timers opentv-catalogue-ratings-retry.timer` et reprise réussie dans ≤ ~1 h 30 (`ratings.retry.attempts` 1, résultat `updated`), et heure suivante : reprise sans requête ; `journalctl -u opentv-catalogue-ratings*` et `-u opentv-catalogue-refresh` sans jeton, titre, hôte ni URL ; `systemd-analyze verify` et `security` des deux unités des notes relus ; `uninstall.sh` pendant un rafraîchissement ⇒ aucun passage des notes démarré (journal), `/run/opentv-uninstalling` retiré à la fin ; nouvelle note visible à l'accueil en ≤ 120 s sans redémarrage |
+| **Ambiance (Canvas)** | les 7 contrôles terrain du §6 quinquies : dossier `opentv:opentv 0700`, masques réels (`mountinfo`), photo/vidéo 1920×1080 des styles et mouvements, proposition d'un assistant autorisé refusée puis acceptée sur la TV (« Non » au focus), assistant sans permission refusé, mouvement réduit, budget (CPU/RSS, température, `get_throttled=0x0`, `hvs_underrun` stable), ambiance figée pendant « Regarder » et même carte au retour, ambiance conservée après redémarrage/réinstallation ; photo d'Alex |
 | **Agent** | `opentv-mcp` depuis le compte de l'agent : `tools/list` filtré par scopes, `recommend` sans URL, scope refusé, audit présent sans secret |
 
 ## 10. Développement
@@ -1241,7 +1325,8 @@ python3.11 -m unittest discover -s scripts/pi4/tests -t scripts/pi4   # version 
 #   (formulaires du téléphone sans JavaScript, Origin: null refusé, écran TV 1920×1080 sans chevauchement du QR,
 #    « Gérer les assistants » de bout en bout : tests/e2e_agents.js, captures tv-agents-*.png / phone-agents-*.png ;
 #    « Regarder » : tests/e2e_play.js, captures item/loading/playing/held/returned/unavailable.png ;
-#    validation des calques du lecteur dans un vrai Chromium : tests/e2e_assist.js)
+#    validation des calques du lecteur dans un vrai Chromium : tests/e2e_assist.js ;
+#    OpenTV Canvas : tests/e2e_canvas_ui.js et e2e_canvas_service.js ; paquet/cycle de vie : test_canvas_packaging.py)
 ./scripts/pi4/install.sh --dry-run ; ./scripts/pi4/install.sh --root /tmp/rfs --skip-preflight
 # image Plymouth : régénérée (Chromium headless, aucun réseau) puis réencodée en PNG RVB déterministe ; fichiers livrés
 #   scripts/pi4/system/plymouth/opentv.png (1920×1080) et opentv-mask.png (bande sans « Démarrage… »)

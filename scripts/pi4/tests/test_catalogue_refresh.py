@@ -1161,7 +1161,7 @@ class TestRefreshSandboxPaths(unittest.TestCase):
         c = config.Config({})
         for attr in ("device_file", "setup_flag", "hotspot_state", "hotspot_rearm", "apply_state", "jobs_dir",
                      "jobs_tmp", "results_dir", "registry_file", "audit_file", "foryou_state", "remote_file",
-                     "agent_clients_dir", "nm_dir"):
+                     "agent_clients_dir", "nm_dir", "canvas_dir"):
             self.assertIn(getattr(c, attr), paths, attr)
         self.assertIn(c.registry_file + ".lock", paths)
         for run in (c.run_dir, os.path.dirname(c.player_socket), os.path.dirname(c.player_keys_socket),

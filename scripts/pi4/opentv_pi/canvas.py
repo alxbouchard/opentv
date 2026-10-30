@@ -436,5 +436,5 @@ class CanvasStore:
 
 
 def store_for(cfg, **kw):
-    """Magasin du produit : `<OPENTV_STATE_DIR>/canvas` (/var/lib/opentv/canvas par défaut)."""
-    return CanvasStore(os.path.join(cfg.state_dir, DIR_NAME), **kw)
+    """Magasin du produit : `cfg.canvas_dir` = `<OPENTV_STATE_DIR>/canvas` (/var/lib/opentv/canvas par défaut)."""
+    return CanvasStore(cfg.canvas_dir, **kw)

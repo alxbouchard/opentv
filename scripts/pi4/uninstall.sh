@@ -22,10 +22,11 @@
 #                                            /var/lib/opentv) et son fichier client /etc/opentv/agents/
 #                                            agent-muse-device-<uid>.json — une réinstallation se reconnecte. Pour
 #                                            les effacer : sudo opentv-pi muse unpair --forget-token AVANT, ou --purge
-#                                            Le jeton TMDb (/etc/opentv/tmdb/token) et la source approuvée restent aussi.
-#   ... --purge                              efface aussi l'état (/var/lib/opentv*, /etc/opentv, appariement Muse,
-#                                            jeton TMDb compris, /var/cache/opentv) ; l'appareil reste à retirer dans
-#                                            l'app Muse
+#                                            Le jeton TMDb (/etc/opentv/tmdb/token), la source approuvée et
+#                                            l'ambiance OpenTV Canvas (/var/lib/opentv/canvas) restent aussi.
+#   ... --purge                              efface aussi l'état (/var/lib/opentv*, ambiance Canvas comprise, sans
+#                                            suivre de lien ; /etc/opentv, appariement Muse, jeton TMDb compris,
+#                                            /var/cache/opentv) ; l'appareil reste à retirer dans l'app Muse
 #   ... --purge --forget-wifi                oublie aussi le Wi-Fi configuré par OpenTV (opentv-wifi)
 #   ... --dry-run | --root <dossier>         plan seul / rootfs de test
 set -Eeuo pipefail
@@ -43,7 +44,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1; shift ;;
     --purge) PURGE=1; shift ;;
     --forget-wifi) FORGET_WIFI=1; shift ;;
-    -h|--help) sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "option inconnue : $1" ;;
   esac
 done
@@ -677,6 +678,9 @@ if [ "$PURGE" = 1 ]; then
   say "comptes système conservés (sans effet) : sudo userdel opentv; sudo userdel opentv-kiosk; sudo userdel opentv-keys; sudo userdel opentv-muse; sudo groupdel opentv-agent"
 else
   say "jeton TMDb conservé (/etc/opentv/tmdb/token, dossier root:opentv 0750) : effacé seulement par --purge"
+  if [ -d "$(dest /var/lib/opentv/canvas)" ] && [ ! -L "$(dest /var/lib/opentv/canvas)" ]; then
+    say "ambiance OpenTV conservée (/var/lib/opentv/canvas : scène publiée et historique) : effacée seulement par --purge"
+  fi
 fi
 # unités retirées et rechargées : le témoin n'a plus rien à bloquer
 if [ -e "$UNINSTALLING" ] || [ -L "$UNINSTALLING" ]; then act rm -f -- "$UNINSTALLING"; fi

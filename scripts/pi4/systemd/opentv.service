@@ -25,7 +25,9 @@ NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 ProtectSystem=strict
-# jobs de connexion de Muse (jeton SDK) : tmpfs seulement (tmpfiles), un seul montage pour file + brouillons
+# jobs de connexion de Muse (jeton SDK) : tmpfs seulement (tmpfiles), un seul montage pour file + brouillons.
+# Ambiance OpenTV Canvas (/var/lib/opentv/canvas, tmpfiles opentv:opentv 0700) : lue et ecrite par CE service seul
+# (le kiosque passe par /api/tv/canvas/*, toute autre unite la masque).
 ReadWritePaths=/var/lib/opentv /run/opentv -/run/opentv-musejobs
 # dossier du jeton TMDb (root:opentv 0750, cree par tmpfiles avant toute unite) : lu seulement par les unites des
 # notes. Le DOSSIER est masque (un remplacement atomique du fichier ne peut pas le demasquer).

@@ -21,6 +21,8 @@ ProtectSystem=strict
 # file des jobs (tmpfs, tmpfiles) : réclamer un job = retirer son nom ; absente ⇒ montée en lecture seule, rien réclamé
 ReadWritePaths=/var/lib/opentv -/run/opentv-musejobs /var/lib/opentv-muse /var/lib/opentv-muse-setup /etc/opentv/agents
 InaccessiblePaths=-/etc/opentv/tmdb -/etc/opentv/source.env -/etc/NetworkManager/system-connections
+# ambiance OpenTV Canvas (scene + historique) : reservee a opentv.service (dossier toujours present : tmpfiles)
+InaccessiblePaths=-/var/lib/opentv/canvas
 InaccessiblePaths=-/var/lib/opentv-kiosk -/run/opentv-player -/run/opentv-player-keys -/run/opentv-cec
 ProtectHome=yes
 PrivateTmp=yes

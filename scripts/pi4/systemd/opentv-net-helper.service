@@ -14,6 +14,8 @@ CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
 ProtectSystem=strict
 # dossier du jeton TMDb : jamais visible ici (lu seulement par les unites des notes)
 InaccessiblePaths=-/etc/opentv/tmdb
+# ambiance OpenTV Canvas (scene + historique) : reservee a opentv.service (dossier toujours present : tmpfiles)
+InaccessiblePaths=-/var/lib/opentv/canvas
 ReadWritePaths=/var/lib/opentv /etc/NetworkManager/system-connections
 ProtectHome=yes
 PrivateTmp=yes

@@ -23,6 +23,8 @@ ProtectSystem=strict
 # dossier du jeton TMDb (root:opentv 0750, cree par tmpfiles avant toute unite) : lu seulement par les unites des
 # notes. Le DOSSIER est masque (un remplacement atomique du fichier ne peut pas le demasquer).
 InaccessiblePaths=-/etc/opentv/tmdb
+# ambiance OpenTV Canvas (scene + historique) : reservee a opentv.service (dossier toujours present : tmpfiles)
+InaccessiblePaths=-/var/lib/opentv/canvas
 ProtectHome=yes
 PrivateTmp=yes
 PrivateNetwork=yes

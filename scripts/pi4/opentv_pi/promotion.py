@@ -12,8 +12,8 @@ n'est disponible que si un témoin de promotion terrain existe aussi :
 Le témoin est lié à la version ET à l'empreinte de la LIVRAISON ENTIÈRE (`code_digest`) : SHA-256 du manifeste installé
 /opt/opentv/MANIFEST.sha256 (root:root, non inscriptible par un autre compte), après vérification que CHAQUE fichier
 qu'il liste a toujours l'empreinte annoncée et que tous les fichiers dont dépend la lecture y figurent (modules de
-lecture et du service, page /tv — tv.js/tv.html/tv.css/keys.js —, unités systemd, politique Chromium du lecteur,
-lanceurs, résolveur NanoPi). Toute livraison (tv.js, unité, politique, module…) ou toute modification locale d'un
+lecture et du service, page /tv — tv.js/tv.html/tv.css/keys.js/canvas.js —, modules OpenTV Canvas, unités systemd,
+politique Chromium du lecteur, lanceurs, résolveur NanoPi). Toute livraison (tv.js, unité, politique, module…) ou toute modification locale d'un
 fichier livré referme donc la porte jusqu'à une nouvelle promotion terrain.
 
 Propriété : root SEULEMENT (TRUSTED_UIDS), partout — service, contrôleur du lecteur et CLI. Fichier absent, lien,
@@ -43,7 +43,13 @@ REQUIRED = ("opentv_pi/assist.py", "opentv_pi/cdp.py", "opentv_pi/evkeys.py", "o
             "opentv_pi/__init__.py", "ui/tv.js", "ui/tv.html", "ui/tv.css", "ui/keys.js",
             "opentv-player.service", "opentv-player-keys.service", "opentv-kiosk.service", "opentv.service",
             "chromium-player-policy/opentv-player.json", "bin/opentv-player", "bin/opentv-player-keys",
-            "opentv_bridge.py")
+            "opentv_bridge.py",
+            # OpenTV Canvas : canvas.js est chargé par tv.html et fige/coupe l'ambiance pendant le chargement, la lecture
+            # et le retour ; ses modules (routes TV, occupation, aperçu d'agent, magasin) partagent les portes de
+            # l'interface avec « Regarder » — une livraison Canvas incomplète n'est jamais promue.
+            "ui/canvas.js", "opentv_pi/canvas.py", "opentv_pi/canvas_schema.py", "opentv_pi/canvas_storage.py",
+            "opentv_pi/canvas_activity.py", "opentv_pi/canvas_roles.py", "opentv_pi/canvas_tv.py",
+            "opentv_pi/canvas_tools.py")
 PLAYBACK_MODULES = tuple(r.split("/", 1)[1] for r in REQUIRED if r.startswith("opentv_pi/"))
 STATUSES = ("promoted", "missing", "unsafe", "invalid", "stale")
 LINE_RE = re.compile(r"^([0-9a-f]{64})  (/[^\0\n]{1,1024})$")

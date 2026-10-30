@@ -850,19 +850,24 @@ def agents_plan(lst, values):
     return out
 
 
-def _consequence(x, new):
+def _consequence(x, new, canvas_on=False):
     """Effet réel d'un choix sur un assistant (jamais d'affirmation de connexion pour un assistant absent).
 
     Deux faits distincts : son identité du même nom (« client ») et, pour Muse, le pont dédié lié (« bridge ») dont
     les droits suivent cette autorisation dans la même écriture. Le pont ne fonctionne qu'avec « Piloter OpenTV » :
     le réduire le met en pause tout de suite (identité toujours installée ; l'Agent Port refuse chacun de ses appels,
     bridge_paused, et le pont ferme sa session et reste arrêté), « Aucun accès » révoque son identité ; dans les deux
-    cas il faudra le réinstaller sur la boîte."""
+    cas il faudra le réinstaller sur la boîte. `canvas_on` : permission facultative « Changer l'ambiance OpenTV »
+    après ce choix — avec « Aucun accès », une identité qui la détient la garde (seuls ses autres droits sont retirés
+    dans la même écriture) : elle reste connectée, jamais annoncée « déconnectée »."""
     rank = {"none": 0, "read": 1, "feedback": 2, "full": 3, "control": 4}
     cl = x["client"] if "client" in x else (x["connected_level"] if x["connected"] else None)
     b, name, out = x.get("bridge"), x["name"], []
     if cl is not None:
-        if new == "none":
+        if new == "none" and canvas_on and agents.CANVAS in (x.get("have") or ()):
+            out.append("Il perd tout de suite ses autres droits ; il reste connecté seulement pour proposer une "
+                       "ambiance (rien ne change sans ton « Oui » sur la TV).")
+        elif new == "none":
             out.append("Il sera déconnecté tout de suite (il faudra le réinstaller pour lui redonner accès).")
         elif rank[new] < rank[cl]:
             out.append("Il perd tout de suite les droits retirés.")
@@ -920,7 +925,7 @@ def agents_confirm_page(token, csrf, plan, fp):
         if p["canvas_change"]:
             line += "<br>%s : <strong>%s</strong>" % (e(CANVAS_LABEL), "oui" if p["canvas"] == "on" else "non")
         if p["change"]:
-            cons = " ".join(t for t in (_consequence(x, p["new"]) if p["level_change"] else None,
+            cons = " ".join(t for t in (_consequence(x, p["new"], p["canvas"] == "on") if p["level_change"] else None,
                                         _canvas_consequence(x, p) if p["canvas_change"] else None) if t) or None
         elif x["connected"]:   # vrai pour une identité au-delà de son autorisation : elle n'est pas touchée
             cons = "Reste connecté (%s) : rien ne change pour lui." % LEVEL_SHORT[x["connected_level"]].lower()

@@ -213,6 +213,9 @@ class Config:
         self.foryou_state = os.path.join(s, "foryou")
         self.remote_file = os.path.join(s, "remote.json")
         self.source_state = os.path.join(s, "source")
+        # OpenTV Canvas : scène publiée + historique (opentv_pi/canvas*.py). Dossier créé par tmpfiles (opentv:opentv
+        # 0700, avant toute unité) : seul opentv.service l'écrit ; toute autre unité le masque (InaccessiblePaths=).
+        self.canvas_dir = os.path.join(s, "canvas")
 
     @classmethod
     def load(cls, path=ENV_FILE, environ=None):

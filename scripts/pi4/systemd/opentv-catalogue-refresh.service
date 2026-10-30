@@ -52,6 +52,8 @@ InaccessiblePaths=-/var/lib/opentv-kiosk -/var/lib/opentv-install
 InaccessiblePaths=-/etc/opentv/agents -/etc/NetworkManager/system-connections
 # dossier du jeton TMDb : lu seulement par les unites des notes (dossier masque, jamais le seul fichier)
 InaccessiblePaths=-/etc/opentv/tmdb
+# ambiance OpenTV Canvas (scene + historique) : reservee a opentv.service (dossier toujours present : tmpfiles)
+InaccessiblePaths=-/var/lib/opentv/canvas
 # sockets locaux OpenTV (Agent Port, lecteur, aide des touches, CEC) : jamais joignables depuis ce passage. AF_UNIX
 # reste permis pour la resolution DNS (nss-resolve) seulement.
 InaccessiblePaths=-/run/opentv -/run/opentv-player -/run/opentv-player-keys -/run/opentv-cec

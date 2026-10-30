@@ -964,6 +964,8 @@ drop_kiosk_input() {
 }
 post systemd-sysusers /etc/sysusers.d/opentv.conf
 post drop_kiosk_input
+# dossiers d'état, dont /var/lib/opentv/canvas (ambiance OpenTV : opentv:opentv 0700, créé s'il manque, contenu jamais
+# lu ni écrit ici) AVANT tout (re)démarrage : chaque unité qui le masque (InaccessiblePaths=) le trouve présent
 post systemd-tmpfiles --create /etc/tmpfiles.d/opentv.conf
 post chown root:opentv "$ENVF"
 # témoin d'une désinstallation interrompue (/run/opentv-uninstalling : bloque rafraîchissement et notes) : retiré

@@ -238,7 +238,7 @@ ITEM = {"site_id": "101", "detail_path": "b/tok/101", "title": "Film"}
 # manifeste SHA-256 aux chemins ABSOLUS de ces copies
 DELIVERY = [("opentv_pi/%s" % n, "opt/opentv/lib/opentv_pi/%s" % n)
             for n in sorted(os.listdir(os.path.join(PI4, "opentv_pi"))) if n.endswith(".py")] + \
-    [("ui/%s" % n, "opt/opentv/share/ui/%s" % n) for n in ("tv.html", "tv.js", "keys.js", "tv.css")] + \
+    [("ui/%s" % n, "opt/opentv/share/ui/%s" % n) for n in ("tv.html", "tv.js", "keys.js", "canvas.js", "tv.css")] + \
     [("systemd/%s" % n, "etc/systemd/system/%s" % n)
      for n in ("opentv.service", "opentv-kiosk.service", "opentv-player.service", "opentv-player-keys.service")] + \
     [("system/chromium-policy-opentv-player.json", "opt/opentv/share/chromium-player-policy/opentv-player.json"),
@@ -535,7 +535,9 @@ class TestPromotionMarker(unittest.TestCase):
         for rel in ("opt/opentv/share/ui/tv.js", "etc/systemd/system/opentv-player.service",
                     "etc/systemd/system/opentv-kiosk.service", "opt/opentv/share/chromium-player-policy/opentv-player.json",
                     "opt/opentv/lib/foryou/opentv_bridge.py", "opt/opentv/lib/opentv_pi/web.py",
-                    "opt/opentv/lib/opentv_pi/playerd.py", "opt/opentv/bin/opentv-player", "opt/opentv/README.md"):
+                    "opt/opentv/lib/opentv_pi/playerd.py", "opt/opentv/bin/opentv-player", "opt/opentv/README.md",
+                    "opt/opentv/share/ui/canvas.js", "opt/opentv/lib/opentv_pi/canvas_tv.py",
+                    "opt/opentv/lib/opentv_pi/canvas_tools.py"):
             full = os.path.join(self.root, rel)
             with open(full, "rb") as f:
                 orig = f.read()

@@ -46,6 +46,8 @@ InaccessiblePaths=-/var/lib/opentv/hotspot-rearm -/var/lib/opentv/wifi-apply.jso
 InaccessiblePaths=-/var/lib/opentv/netjobs -/var/lib/opentv/netjobs-tmp -/var/lib/opentv/netresults
 InaccessiblePaths=-/run/opentv-musejobs -/var/lib/opentv/museresults
 InaccessiblePaths=-/var/lib/opentv/foryou -/var/lib/opentv/agents.json -/var/lib/opentv/agents.json.lock
+# ambiance OpenTV Canvas (scene + historique) : reservee a opentv.service (dossier toujours present : tmpfiles)
+InaccessiblePaths=-/var/lib/opentv/canvas
 InaccessiblePaths=-/var/lib/opentv/audit.jsonl -/var/lib/opentv/remote.json -/var/lib/opentv/source
 InaccessiblePaths=-/var/lib/opentv-kiosk -/var/lib/opentv-install
 InaccessiblePaths=-/etc/opentv/agents -/etc/opentv/source.env -/etc/NetworkManager/system-connections

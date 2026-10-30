@@ -18,6 +18,8 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 # dossier du jeton TMDb : jamais visible ici (lu seulement par les unites des notes)
 InaccessiblePaths=-/etc/opentv/tmdb
+# ambiance OpenTV Canvas (scene + historique) : reservee a opentv.service (dossier toujours present : tmpfiles)
+InaccessiblePaths=-/var/lib/opentv/canvas
 ProtectHome=yes
 PrivateTmp=yes
 UMask=0077
