@@ -11,8 +11,9 @@ Pont entre `canvas.CanvasStore` (tâche 1) et l'App / la page /tv (loopback, cl�
   panneau. Toute autre touche ou action humaine de la page passe par `human` AVANT d'agir.
 - Raisons d'occupation : celles du SERVICE (configuration, assistants, Muse, lecture et retour) sont des jetons
   synchronisés sur l'état de l'App (`sync`) ; celles de la PAGE (panneau, page cachée, hors ligne) sont déclarées
-  par la page (`page_busy`, ensemble complet). Un rechargement de la page ne rend que SES jetons : jamais de
-  `busy_reset` global.
+  par la page (`page_busy` : ensemble complet daté (page, seq), bail périodique), appliqué sous `_mu` seulement si
+  `seq` croît pour la page active ; une page jamais vue prend la main et retire l'ancienne (périmée à vie, borné).
+  Un rechargement ne rend que les jetons de la PAGE (jamais `busy_reset`) ; identifiants de page jamais exposés.
 - Audit : outil « canvas », identité authentifiée de l'agent, action et préréglage énumérés, révision, empreinte
   courte (16 hex) ; jamais la scène, du texte libre ni un chemin. L'auteur d'un aperçu est lié à SON identifiant
   (`_props`, verrou court `_pl` jamais tenu pendant un appel au magasin : instantané -> opération du magasin ->
@@ -26,12 +27,16 @@ Pont entre `canvas.CanvasStore` (tâche 1) et l'App / la page /tv (loopback, cl�
 - Échec `restore_failed` : jamais annoncé « inchangé » ; la réponse porte l'état relu du disque (`see_state`).
 """
 import collections
+import re
 import threading
 
 from . import agents, canvas as cv
 
 SERVICE_REASONS = ("setup", "assistants", "muse_setup", "playback", "loading", "closing", "returning")
 PAGE_REASONS = ("panel", "hidden", "offline")
+PAGE_ID = re.compile(r"[0-9a-f]{32}")   # identifiant aléatoire d'un chargement de /tv (aucun secret)
+SEQ_MAX = 2 ** 53 - 1                   # entier exact côté navigateur
+RETIRED_PAGES = 32                      # pages remplacées retenues (≫ plafond de rechargements automatiques)
 PROPS_MAX = 8                  # auteurs d'aperçus récents retenus (le magasin n'a qu'UN aperçu vivant)
 SHEET_MIN_S = 3.0              # en deçà, plus de feuille : jamais un « Oui » qui court contre l'échéance
 APPLY_KEYS = ("preset",) + tuple(f for f in cv.FIELDS if f != "row_order")   # Réglages : énumérations plates
@@ -58,6 +63,8 @@ class TvCanvas:
         self.available = not isinstance(store, Unavailable)
         self._mu = threading.Lock()
         self._held = {}            # raison -> jeton (service ET page : raisons disjointes)
+        self._page, self._seq = None, 0                 # page active et dernier numéro appliqué (sous `_mu`)
+        self._retired = collections.OrderedDict()       # pages remplacées : périmées (borné, sous `_mu`)
         self._pl = threading.Lock()   # court : `_props` seulement, jamais tenu pendant un appel au magasin
         self._props = collections.OrderedDict()   # preview_id -> {"id", "agent", "hash", "preset"} (borné)
         self._inflight = 0         # créations d'aperçu en cours (sous `_pl`)
@@ -73,26 +80,41 @@ class TvCanvas:
         return cls(store, audit, log)
 
     # ------------------------------------------------------------------ occupation
+    def _apply(self, owned, want):   # sous `_mu`
+        for r in owned:
+            if r in want and r not in self._held:
+                self._held[r] = self.store.busy_enter(r)
+            elif r not in want and r in self._held:
+                self.store.busy_exit(self._held.pop(r))
+
     def _set(self, owned, want):
         with self._mu:
-            for r in owned:
-                if r in want and r not in self._held:
-                    self._held[r] = self.store.busy_enter(r)
-                elif r not in want and r in self._held:
-                    self.store.busy_exit(self._held.pop(r))
+            self._apply(owned, want)
 
     def sync(self, reasons):
         """Raisons du service (ensemble courant) : entre/sort les jetons correspondants ; annule l'aperçu."""
         if self.available:
             self._set(SERVICE_REASONS, set(reasons))
 
-    def page_busy(self, reasons):
-        """Raisons déclarées par la page (ensemble complet, [] au chargement). -> False si invalide."""
-        if type(reasons) is not list or len(reasons) > len(PAGE_REASONS) or \
-                any(type(r) is not str or r not in PAGE_REASONS for r in reasons):
-            return False
-        if self.available:
-            self._set(PAGE_REASONS, set(reasons))
+    def page_busy(self, reasons, page, seq):
+        """Raisons de la page (ensemble complet, [] au chargement) datées (page, seq). -> None si invalide,
+        True si appliqué, False si périmé (page retirée ou numéro déjà dépassé : aucun effet)."""
+        if type(reasons) is not list or len(reasons) > len(PAGE_REASONS) or len(set(reasons)) != len(reasons) or \
+                any(type(r) is not str or r not in PAGE_REASONS for r in reasons) or \
+                type(page) is not str or not PAGE_ID.fullmatch(page) or type(seq) is not int or not 0 < seq <= SEQ_MAX:
+            return None
+        with self._mu:
+            if page in self._retired or (page == self._page and seq <= self._seq):
+                return False
+            if page != self._page:     # page jamais vue : elle prend la main, l'ancienne est retirée pour toujours
+                if self._page is not None:
+                    self._retired[self._page] = True
+                while len(self._retired) > RETIRED_PAGES:
+                    self._retired.popitem(last=False)
+                self._page = page
+            self._seq = seq
+            if self.available:
+                self._apply(PAGE_REASONS, set(reasons))
         return True
 
     def human(self, kind):
@@ -212,9 +234,10 @@ class TvCanvas:
                 return 200, {"ok": True, "preview_cancelled": self.human(body.get("kind"))}
             except cv.CanvasError:
                 return 400, {"ok": False, "error": "invalid_event"}
-        if action == "ui":
-            ok = self.page_busy(body.get("busy"))
-            return (200 if ok else 400), {"ok": ok, "error": None if ok else "invalid_event"}
+        if action == "ui":   # périmé (stale) : 200 sans effet ; invalide : 400
+            done = self.page_busy(body.get("busy"), body.get("page"), body.get("seq"))
+            return (400, {"ok": False, "error": "invalid_event"}) if done is None else \
+                (200, {"ok": True, "error": None, "stale": not done})
         if action not in EVENTS:
             return 404, {"ok": False, "error": "not_found"}
         # instantané AVANT l'opération : auteur de l'aperçu VISÉ (jamais « le dernier connu »)

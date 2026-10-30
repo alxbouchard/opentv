@@ -7,6 +7,7 @@ routes POST de la TV derrière la clé de page + Host + UID du pair, annulation 
 l'action, raisons d'occupation du service conservées au rechargement de la page, audit borné et vérité après
 restore_failed.
 """
+import itertools
 import json
 import os
 import threading
@@ -19,6 +20,13 @@ from tests.test_service import Servers, make_app
 from opentv_pi import agents as agents_mod, canvas as cv, canvas_storage, config, tools
 
 HEX32 = "0" * 32
+PAGE_A, PAGE_B, PAGE_C = "a" * 32, "b" * 32, "c" * 32
+_SEQ = itertools.count(1)
+
+
+def ui(busy, page=PAGE_A, seq=None):
+    """Corps de POST /api/tv/canvas/ui : ensemble complet, page émettrice, numéro strictement croissant."""
+    return {"busy": busy, "page": page, "seq": next(_SEQ) if seq is None else seq}
 
 
 def configured(tc, **kw):
@@ -158,7 +166,7 @@ class TestTvState(Base):
         self.assertEqual((e.exception.code, e.exception.detail), ("store_corrupt", None))
         code, out = a.canvas_tv_post("reset", {"confirm": True})
         self.assertEqual((code, out["error"], out["outcome"]), (409, "store_corrupt", "unchanged"))
-        self.assertEqual(a.canvas_tv_post("ui", {"busy": ["panel"]})[0], 200)
+        self.assertEqual(a.canvas_tv_post("ui", ui(["panel"]))[0], 200)
         self.assertEqual(a.canvas_tv_post("event", {"kind": "key"}), (200, {"ok": True, "preview_cancelled": False}))
         self.assertEqual(a.canvas_tv_post("event", {"kind": "nope"})[0], 400)
         self.assertEqual(a.agent_control("muse", "remote_control",
@@ -407,18 +415,18 @@ class TestTvRoutes(Base):
 
     def test_page_ui_busy_is_page_scoped_and_reload_keeps_service_tokens(self):
         r = self.propose(self.a)
-        code, out = self.post("ui", {"busy": ["panel"]})
+        code, out = self.post("ui", ui(["panel"]))
         self.assertEqual((code, out["ok"]), (200, True))
         self.assertIsNone(self.state()["preview"])              # panneau ouvert : aperçu annulé
         with self.assertRaises(cv.CanvasError):
             self.propose(self.a)
         for bad in ({"busy": ["playback"]}, {"busy": ["setup"]}, {"busy": "panel"}, {"busy": ["panel"] * 4},
                     {"busy": [1]}, {}):
-            self.assertEqual(self.post("ui", bad)[0], 400, bad)
+            self.assertEqual(self.post("ui", dict(ui([]), **bad) if bad else {})[0], 400, bad)
         set_playback(self.a, "playing")
         self.a.canvas_sync()
         with mock.patch.object(self.a.canvas.store, "busy_reset", side_effect=AssertionError("busy_reset")):
-            self.assertEqual(self.post("ui", {"busy": []})[0], 200)      # rechargement de la page
+            self.assertEqual(self.post("ui", ui([]))[0], 200)      # rechargement de la page
         self.assertIn("playback", self.a.canvas.store.busy_reasons())  # jeton du service conservé
         self.assertNotIn("panel", self.a.canvas.store.busy_reasons())
         with self.assertRaises(cv.CanvasError):
@@ -427,8 +435,8 @@ class TestTvRoutes(Base):
         self.a.canvas_sync()
         self.assertEqual(self.a.canvas.store.busy_reasons(), ())
         r = self.propose(self.a)
-        self.assertEqual(self.post("ui", {"busy": ["hidden", "panel"]})[0], 200)
-        self.assertEqual(self.post("ui", {"busy": ["panel"]})[0], 200)  # idempotent : un seul jeton par raison
+        self.assertEqual(self.post("ui", ui(["hidden", "panel"]))[0], 200)
+        self.assertEqual(self.post("ui", ui(["panel"]))[0], 200)  # idempotent : un seul jeton par raison
         self.assertEqual(self.a.canvas.store.busy_reasons(), ("panel",))
         self.assertEqual(self.post("confirm", {"preview_id": r["preview_id"], "confirm": True})[0], 409)
 
@@ -568,8 +576,8 @@ class TestOwnershipRaces(Base):
     def test_human_key_between_store_creation_and_metadata_names_the_new_agent(self):
         a = self.app()
         self.propose(a, "hermit")                         # aperçu antérieur d'un AUTRE agent…
-        self.assertEqual(a.canvas_tv_post("ui", {"busy": ["panel"]})[0], 200)   # …retiré hors de TvCanvas
-        self.assertEqual(a.canvas_tv_post("ui", {"busy": []})[0], 200)
+        self.assertEqual(a.canvas_tv_post("ui", ui(["panel"]))[0], 200)   # …retiré hors de TvCanvas
+        self.assertEqual(a.canvas_tv_post("ui", ui([]))[0], 200)
         real, created, go = a.canvas.store.agent_preview, threading.Event(), threading.Event()
 
         def slow_preview(*x, **k):
@@ -1000,7 +1008,7 @@ class TestServiceSyncRace(Base):
             a.tv_state()
             r = self.propose(a)
             a.canvas_tv_post("cancel", {"preview_id": r["preview_id"]})
-            a.canvas_tv_post("ui", {"busy": []})
+            a.canvas_tv_post("ui", ui([]))
             try:
                 a.agent_control("muse", "play_title", tools.validate_args("play_title", {"id": "films/101"}))
             except tools.ToolError:
@@ -1032,12 +1040,155 @@ class TestServiceSyncRace(Base):
         self.assertEqual(sorted(set(users)), ["__init__", "canvas_sync"])
 
 
+# --------------------------------------------------------------------------- occupation de la page : séquence
+class TestPageSequence(Base):
+    """POST /api/tv/canvas/ui = ensemble complet daté par (page, seq) : appliqué sous le verrou de TvCanvas
+    seulement s'il vient de la page active avec un numéro strictement plus grand ; une page jamais vue prend la main
+    et retire l'ancienne, dont toute requête tardive reste périmée pour la vie du processus. Périmé ⇒ 200,
+    `stale: true`, aucun effet. Identifiants de page jamais exposés (état TV, audit, journal)."""
+
+    def setUp(self):
+        self.a = self.app()
+
+    def post(self, busy, page=PAGE_A, seq=None):
+        return self.a.canvas_tv_post("ui", ui(busy, page, seq))
+
+    def busy(self):
+        return self.a.canvas.store.busy_reasons()
+
+    def assert_applied(self, r):
+        self.assertEqual(r, (200, {"ok": True, "error": None, "stale": False}))
+
+    def assert_stale(self, r):
+        self.assertEqual(r, (200, {"ok": True, "error": None, "stale": True}))
+
+    def test_older_or_equal_seq_is_ignored(self):
+        self.assert_applied(self.post(["panel"], seq=2))
+        self.assert_stale(self.post([], seq=1))              # liste vide plus ancienne livrée après : sans effet
+        self.assertEqual(self.busy(), ("panel",))
+        self.assert_stale(self.post([], seq=2))              # même numéro : jamais rejoué
+        self.assertEqual(self.busy(), ("panel",))
+        self.assert_applied(self.post([], seq=3))
+        self.assertEqual(self.busy(), ())
+
+    def test_new_page_takes_over_and_retired_page_stays_stale(self):
+        self.assert_applied(self.post(["panel"], PAGE_A, 5))
+        self.assert_applied(self.post([], PAGE_B, 1))        # rechargement : nouvelle page, numéro repart à 1
+        self.assertEqual(self.busy(), ())
+        self.assert_stale(self.post(["panel"], PAGE_A, 6))   # requête tardive de l'ancienne page : ignorée
+        self.assert_stale(self.post(["panel"], PAGE_A, 10 ** 6))
+        self.assertEqual(self.busy(), ())
+        self.assert_applied(self.post(["hidden"], PAGE_B, 2))
+        self.assert_applied(self.post([], PAGE_C, 1))
+        for page, seq in ((PAGE_B, 99), (PAGE_A, 7)):        # toute page retirée : périmée pour toujours
+            self.assert_stale(self.post(["panel"], page, seq))
+        self.assertEqual(self.busy(), ())
+        self.assert_applied(self.post(["panel"], PAGE_C, 2))
+        self.assertEqual(self.busy(), ("panel",))
+
+    def test_retired_pages_are_bounded_and_exceed_reload_cap(self):
+        from opentv_pi import canvas_tv
+        self.assertGreaterEqual(canvas_tv.RETIRED_PAGES, 16)
+        pages = ["%032x" % (0xabc000 + i) for i in range(canvas_tv.RETIRED_PAGES + 6)]
+        for p in pages:
+            self.assert_applied(self.post([], p, 1))
+        self.assertLessEqual(len(self.a.canvas._retired), canvas_tv.RETIRED_PAGES)
+        for p in pages[-canvas_tv.RETIRED_PAGES - 1:-1]:     # les plus récentes retirées : encore toutes périmées
+            self.assert_stale(self.post(["panel"], p, 2))
+        self.assertEqual(self.busy(), ())
+
+    def test_malformed_page_or_seq_refused_without_effect(self):
+        self.assert_applied(self.post(["panel"], PAGE_A, 3))
+        bad_pages = (None, 1, "", "A" * 32, "a" * 31, "a" * 33, "g" * 32, "a" * 31 + "\n", " " + "a" * 31,
+                     "\u0661" * 32, "ａ" * 32, ["a" * 32], {"p": 1})
+        bad_seqs = (None, True, False, 0, -1, 2 ** 53, 10 ** 30, 1.0, 4.5, "4", [4], float("nan"))
+        cases = [{"busy": [], "page": p, "seq": 4} for p in bad_pages] + \
+                [{"busy": [], "page": PAGE_B, "seq": q} for q in bad_seqs] + \
+                [{"busy": [], "page": PAGE_A, "seq": q} for q in bad_seqs] + \
+                [{"busy": []}, {"busy": [], "page": PAGE_B}, {"busy": [], "seq": 4}, {"page": PAGE_B, "seq": 4},
+                 {"busy": ["panel", "panel"], "page": PAGE_B, "seq": 1}, {"busy": ["setup"], "page": PAGE_B, "seq": 1}]
+        for body in cases:
+            self.assertEqual(self.a.canvas_tv_post("ui", body), (400, {"ok": False, "error": "invalid_event"}), body)
+        self.assertEqual(self.busy(), ("panel",))
+        self.assert_applied(self.post([], PAGE_A, 4))        # page A toujours active, numéro 3 seul retenu
+        self.assert_applied(self.post(["panel"], PAGE_A, 2 ** 53 - 1))
+        self.assertEqual(self.busy(), ("panel",))
+
+    def test_unchanged_set_is_reapplied_as_lease_and_never_cancels_preview(self):
+        """Bail (ré-envoi périodique du même ensemble) : accepté à chaque numéro plus récent, jeton unique, et un bail
+        vide ne retire jamais un aperçu vivant (aucune entrée/sortie d'occupation)."""
+        self.assert_applied(self.post([]))
+        r = self.propose(self.a)
+        with mock.patch.object(self.a.canvas.store, "busy_enter", side_effect=AssertionError("enter")), \
+                mock.patch.object(self.a.canvas.store, "busy_exit", side_effect=AssertionError("exit")):
+            for _ in range(3):
+                self.assert_applied(self.post([]))
+        self.assertEqual(self.a.canvas.store.status()["preview"]["preview_id"], r["preview_id"])
+        for _ in range(3):
+            self.assert_applied(self.post(["panel"]))
+        self.assertEqual(self.busy(), ("panel",))
+        self.assertIsNone(self.a.canvas.store.status()["preview"])
+        self.assert_applied(self.post([]))
+        self.assertEqual(self.busy(), ())
+
+    def test_check_and_apply_are_linearized_under_the_canvas_lock(self):
+        """Seq 3 (liste vide) bloquée dans le magasin APRÈS sa vérification ; seq 2 ([panel]) arrive ensuite : elle
+        doit attendre le verrou puis être périmée — jamais une vérification hors verrou qui passerait avant."""
+        self.assert_applied(self.post(["panel"], PAGE_A, 1))
+        st, direct = self.a.canvas.store, lambda b, p, q: self.a.canvas.post("ui", ui(b, p, q))   # noqa: E731
+        st._mu.acquire()               # TvCanvas directement : jamais bloqué plus tôt par canvas_sync
+        try:
+            t3, b3 = run_bg(direct, [], PAGE_A, 3)
+            deadline = time.monotonic() + WAIT_S
+            while not self.a.canvas._mu.locked() and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertTrue(self.a.canvas._mu.locked())       # seq 3 tient le verrou de TvCanvas, dans le magasin
+            t2, b2 = run_bg(direct, ["panel"], PAGE_A, 2)
+            time.sleep(0.2)
+        finally:
+            st._mu.release()
+        for t in (t3, t2):
+            t.join(WAIT_S)
+            self.assertFalse(t.is_alive())
+        self.assertEqual(b3, {"out": (200, {"ok": True, "error": None, "stale": False})})
+        self.assertEqual(b2, {"out": (200, {"ok": True, "error": None, "stale": True})})
+        self.assertEqual(self.busy(), ())
+
+    def test_page_ids_never_reach_state_audit_or_logs(self):
+        pages = ["%032x" % (0x5eed0000 + i) for i in range(3)]
+        for i, p in enumerate(pages):
+            self.post(["panel"] if i % 2 else [], p, 1)
+            self.post([], pages[0], 9)                        # retirée : périmée
+        st = blob(self.a.tv_state())
+        try:
+            with open(self.a.cfg.audit_file, encoding="utf-8") as f:
+                aud = f.read()
+        except FileNotFoundError:
+            aud = ""
+        logs = blob(getattr(self.a, "test_logs", []))
+        for p in pages:
+            for text in (st, aud, logs, blob(self.a.canvas.view())):
+                self.assertNotIn(p, text)
+
+    def test_http_route_carries_stale_flag(self):
+        s = Servers(self, self.a)
+        h = dict(s.tv_headers(), **{"Content-Type": "application/json"})
+        req = lambda b: s.req("POST", "/api/tv/canvas/ui", json.dumps(b), headers=h)   # noqa: E731
+        code, _, text = req(ui(["panel"], PAGE_A, 8))
+        self.assertEqual((code, json.loads(text)), (200, {"ok": True, "error": None, "stale": False}))
+        code, _, text = req(ui([], PAGE_A, 7))
+        self.assertEqual((code, json.loads(text)), (200, {"ok": True, "error": None, "stale": True}))
+        code, _, text = req({"busy": [], "page": PAGE_A.upper(), "seq": 9})
+        self.assertEqual(code, 400)
+        self.assertEqual(self.busy(), ("panel",))
+
+
 # --------------------------------------------------------------------------- découpage
 class TestModule(unittest.TestCase):
     def test_line_caps_and_imports(self):
         import ast
         import sys
-        for name, cap in (("canvas_tv", 300), ("app", 1400), ("web", 1530)):
+        for name, cap in (("canvas_tv", 320), ("app", 1400), ("web", 1530)):
             with open(os.path.join(PI4, "opentv_pi", name + ".py"), encoding="utf-8") as f:
                 n = len(f.read().splitlines())
             self.assertLessEqual(n, cap, name)

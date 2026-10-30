@@ -1153,7 +1153,11 @@
   //   (« remote » pour le téléphone : le service ne la voit pas autrement). Aperçu vivant connu (sans feuille) : la
   //   touche n'agit qu'après la confirmation de son annulation (CV_GATE_MS au plus), sinon elle est seulement consommée ;
   // - l'ensemble occupé de la page (panneau, page cachée, hors ligne) est déclaré COMPLET par POST
-  //   /api/tv/canvas/ui, une requête à la fois (jamais une ancienne liste vide après une plus récente) ;
+  //   /api/tv/canvas/ui {busy, page, seq}, une requête à la fois, le plus récent gagnant : `page` identifie CE
+  //   chargement (32 hex aléatoires, aucun secret), `seq` croît à chaque envoi ; le service n'applique qu'un numéro
+  //   plus récent de la page active (une liste vide tardive ou une ancienne page n'écrase jamais l'état courant).
+  //   Échec, échéance ou réponse « stale » : plus aucun accusé, l'ensemble courant repart ; et il est ré-envoyé
+  //   tel quel au moins toutes les CV_BUSY_LEASE_MS (bail : répare toute perte, même sans changement) ;
   // - la feuille de confirmation (« Non » au focus) n'est ni un panneau ni un geste ordinaire : ses touches ←/→/↑/↓,
   //   OK et Retour n'envoient ni événement ni occupation. L'aperçu n'est peint QUE pendant qu'elle est affichée, ses
   //   rangées jamais (mémoire spatiale) ; l'ordre de la scène publiée attend la fin de toute fiche/feuille/lecture.
@@ -1173,9 +1177,12 @@
   var cvGen = 0, cvTicket = 0, cvRouteAt = 0, cvGetAt = 0;
   var cvPub = null, cvSheet = null, cvSheetTimer = null, cvDone = {}, cvGate = null;
   var humanGen = 0, evPending = 0, rowOrder = null, rowOrderSig = "";
-  var busyAcked = null, busyFlight = false, busyWait = [], busyRetry = null;
+  var CV_BUSY_LEASE_MS = 9000, CV_BUSY_RETRY_MS = 2000;
+  var busyPage = newPageId(), busySeq = 0, busyAcked = null, busyFailed = null, busySentAt = 0;
+  var busyFlight = false, busyWait = [], busyTimer = null, cvOwnerLock = false;
   var MSG_CV_SEE = "L'ambiance n'a peut-être pas été enregistrée comme prévu.\nL'écran montre l'ambiance réellement active.";
   var MSG_CV_LOST = "Réponse perdue : vérifie l'ambiance affichée (Réglages → Ambiance OpenTV).";
+  var MSG_CV_CHECK = "Vérification de l'ambiance en cours : réessaie dans un instant.";
   var MSG_CV_UNAVAILABLE = "Ambiance indisponible pour l'instant : rien n'a changé.";
   var MSG_CV_UNAVAILABLE_LONG = "Ambiance indisponible sur cette boîte : l'ambiance de base reste affichée et ne peut pas " +
     "être modifiée pour l'instant. Si cela dure, redémarre la boîte OpenTV.";
@@ -1246,7 +1253,14 @@
       return { s: s, fresh: fresh };
     });
   }
-  // ---- occupation de la page : ensemble complet, une seule requête en vol, toujours le plus récent en dernier
+  // ---- occupation de la page : ensemble complet daté, une seule requête en vol, toujours le plus récent en dernier
+  function newPageId() {   // 32 hex minuscules : aléa cryptographique si présent (jamais un secret, seulement unique)
+    var b = [], i, h = "", c = window.crypto;
+    try { var u = new Uint8Array(16); c.getRandomValues(u); for (i = 0; i < 16; i++) { b.push(u[i]); } }
+    catch (e) { b = []; for (i = 0; i < 16; i++) { b.push(Math.floor(Math.random() * 256)); } }
+    for (i = 0; i < 16; i++) { h += (b[i] < 16 ? "0" : "") + b[i].toString(16); }
+    return h;
+  }
   function pageBusy() {
     var b = [];
     if (panel) { b.push("panel"); }
@@ -1255,30 +1269,48 @@
     return b;
   }
   function busySettle(ok) { var w = busyWait; busyWait = []; w.forEach(function (f) { f(ok); }); }
+  function busyLater(ms) {
+    clearTimeout(busyTimer);
+    busyTimer = setTimeout(function () { busyTimer = null; pumpBusy(); }, Math.max(50, ms));
+  }
   function pumpBusy() {
     if (busyFlight || !cvOn()) { return; }
-    var want = pageBusy(), sig = want.join(",");
-    if (sig === busyAcked) { busySettle(true); return; }
-    if (busyRetry) { clearTimeout(busyRetry); busyRetry = null; }
+    var want = pageBusy(), sig = want.join(","), age = mono() - busySentAt;
+    // accusé valable et bail encore frais : réglé, prochain ré-envoi à l'échéance du bail
+    if (sig === busyAcked && age < CV_BUSY_LEASE_MS) { busySettle(true); busyLater(CV_BUSY_LEASE_MS - age); return; }
+    clearTimeout(busyTimer);
+    busyTimer = null;
     busyFlight = true;
-    capi("/api/tv/canvas/ui", { busy: want }).then(function (j) { return !!j.ok; },
-                                                  function (e) { onApiError(e); return false; })
+    busySeq += 1;
+    busySentAt = mono();
+    capi("/api/tv/canvas/ui", { busy: want, page: busyPage, seq: busySeq })
+      .then(function (j) {
+        // « stale » sur l'envoi le plus récent : cette page a été remplacée (une ancienne requête d'un autre
+        // chargement a pris la main) — nouvel identifiant, la page courante reprend la main au prochain envoi
+        if (j.ok && j.stale) { busyPage = newPageId(); busySeq = 0; }
+        return !!(j.ok && !j.stale);
+      }, function (e) { onApiError(e); return false; })
       .then(function (ok) {
         busyFlight = false;
-        if (ok) { busyAcked = sig; }
-        if (!ok) {   // service injoignable : nouvel essai borné ; personne n'attend indéfiniment
-          busySettle(false);
-          busyRetry = setTimeout(function () { busyRetry = null; pumpBusy(); }, 2000);
+        busyAcked = ok ? sig : null;    // échec, échéance, périmé : jamais d'accusé gardé, l'ensemble courant repart
+        busyFailed = ok ? null : sig;
+        if (!ok) {
+          busySettle(false);            // personne n'attend indéfiniment
+          // ensemble changé pendant l'envoi : le plus récent part tout de suite ; sinon nouvel essai borné
+          if (pageBusy().join(",") !== sig) { pumpBusy(); } else { busyLater(CV_BUSY_RETRY_MS); }
           return;
         }
-        pumpBusy();   // l'ensemble a changé pendant l'envoi : le plus récent part maintenant (sinon : réglé)
+        pumpBusy();   // l'ensemble a changé pendant l'envoi : le plus récent part maintenant (sinon : réglé + bail)
       });
   }
   function syncBusy() {   // -> promesse : true quand le service connaît l'ensemble courant (false : échec)
     if (!cvOn()) { return Promise.resolve(true); }
     return new Promise(function (res) { busyWait.push(res); pumpBusy(); });
   }
-  function noteBusy() { if (cvOn() && !busyFlight && pageBusy().join(",") !== busyAcked) { pumpBusy(); } }
+  function noteBusy() {   // changement visible : envoi immédiat, sauf l'ensemble qui vient d'échouer (essai borné)
+    var sig = cvOn() && !busyFlight ? pageBusy().join(",") : null;
+    if (sig !== null && sig !== busyAcked && sig !== busyFailed) { pumpBusy(); }
+  }
   // ---- gestes humains ordinaires
   function humanEvent(kind) {
     humanGen += 1;   // tout état demandé avant ce geste ne peut plus ouvrir de feuille
@@ -1315,6 +1347,7 @@
     return true;
   }
   function remoteKey(a) {   // téléphone appairé : même règle, événement « remote » (le service ne le voit pas)
+    if (offlineShown()) { lastHumanAt = Date.now(); return; }   // voile « Reconnexion… » : rien d'invisible
     if (cvSheet) { lastHumanAt = Date.now(); sheetKey(a); return; }
     humanKey("remote", a, false);
   }
@@ -1540,24 +1573,35 @@
               "« Réduire les animations » du système et une lecture fluide passent toujours avant.", l.btns, l.idx,
               { actions: l.actions });
   }
-  // écriture du propriétaire (confirmation littérale de l'API) ; la réponse porte l'état relu du service
+  // écriture du propriétaire (confirmation littérale de l'API) ; la réponse porte l'état relu du service. Une seule
+  // à la fois, toutes feuilles confondues : réponse perdue (échéance) => issue inconnue, aucune nouvelle écriture
+  // tant qu'un état demandé APRÈS n'a pas été relu (jamais un doublon, ex. deux « Version précédente »)
   function ownerCanvas(action, body, okMsg, sel) {
     if (!panel || panel.pending) { return; }
+    if (cvOwnerLock) { toast(MSG_CV_CHECK); return; }
     panel.pending = true;
+    cvOwnerLock = true;
     body.confirm = true;
     var p = panel;
     cvRoute("/api/tv/canvas/" + action, body).then(function (j) {   // vue de la réponse adoptée par cvRoute
+      cvOwnerLock = false;
       if (panel === p) { openAmbiance(sel); }   // feuille Ambiance à jour (l'ordre des rangées attend sa fermeture)
       if (j.ok) { toast(okMsg); }
       else if (j.outcome === "see_state") { toast(MSG_CV_SEE, true); }
       else if (cvView().status === "unavailable") { toast(MSG_CV_UNAVAILABLE); }
       else { toast(CV_ERR[j.error] || "Impossible pour l'instant : rien n'a changé."); }
     }).catch(function (e) {
-      if (onApiError(e)) { return; }
-      if (panel === p) { p.pending = false; }
+      if (onApiError(e)) { return; }   // clé périmée : la page se recharge (verrou gardé jusque-là)
       toast(MSG_CV_LOST, true);
-      refreshState();
+      ownerResolve(p, sel);
     });
+  }
+  function ownerResolve(p, sel) {   // issue inconnue : verrou levé seulement après un état réel relu
+    readState().then(function (r) {
+      render(r.s, null, r.fresh);
+      cvOwnerLock = false;
+      if (panel === p) { openAmbiance(sel); }   // l'ambiance réellement active, jamais une issue devinée
+    }).catch(function (e) { if (!onApiError(e)) { setTimeout(function () { ownerResolve(p, sel); }, 2000); } });
   }
   function ambianceAct(a) {   // -> true si l'action relève de l'ambiance
     if (panel.kind === "ambiance") {
@@ -1633,6 +1677,9 @@
     if (KEYS.isBrowserNav(e) || a === "back" || a === "home") { e.preventDefault(); }
     if (!a) { return; }
     lastHumanAt = Date.now();   // télécommande d'Alex : prioritaire sur toute touche d'assistant
+    // voile plein écran « Reconnexion… » : l'écran dessous n'est plus vu, aucune touche n'y agit (ni titre, ni
+    // « Regarder », ni avis, ni feuille) ; la reprise automatique (poll, rechargement) n'en dépend pas
+    if (offlineShown()) { e.preventDefault(); return; }
     if (cvSheet) {   // feuille Canvas : touches de consentement seulement (aucun geste ordinaire, aucune rafale)
       if (!(e.repeat && (a === "ok" || a === "back" || a === "home"))) { sheetKey(a); }
       e.preventDefault();
@@ -1646,6 +1693,7 @@
   document.addEventListener("mouseup", function (e) {
     if (e.button === 3 || e.button === 4) {
       e.preventDefault();
+      if (offlineShown()) { return; }   // voile hors-ligne : rien d'invisible
       if (e.button === 3 && cvSheet) { sheetKey("back"); }
       else if (e.button === 3 && (play || !guarded("back"))) { humanKey("pointer", "back", false); }
     }

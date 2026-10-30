@@ -1,7 +1,7 @@
 /* Bout en bout OpenTV Canvas avec le VRAI service (tests seulement, jamais installé) : API TV, magasin Canvas réel sur
    disque, horloge monotone réelle ; la page /tv réelle 1920×1080. Les gestes d'agent (aperçu), du téléphone et les
    pannes injectées passent par un canal fichier ligne à ligne exécuté côté Python (cfg.ctl -> cfg.res).
-   argv[2] = module playwright ; argv[3] = JSON {chromium, tv, shots, ctl, res, sparse?}. Sortie : une ligne JSON. */
+   argv[2] = module playwright ; argv[3] = JSON {chromium, tv, shots, ctl, res, sparse?, stall?}. Sortie : une ligne JSON. */
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -62,6 +62,36 @@ async function until(fn, ms) {
     await page.waitForSelector(".card.focused", { timeout: 15000 });
     await until(async () => (await q.mode()) === "run", 5000);
     await sleep(700);
+    if (cfg.stall) {
+      // Réglages ouverts (occupation « panel » acquittée), puis verrou du magasin tenu au-delà de l'échéance de la
+      // page : fermer / rouvrir Réglages pendant ce temps ; la liste vide est livrée en retard (cfg.ctl « stall »)
+      await key("ArrowUp");
+      await key("Enter", QUIET_MS);
+      const x = { before: (await status()).busy };
+      x.held = (await ctl("stall", { hold_s: cfg.stall })).result;
+      const t0 = Date.now();
+      await key("Escape", 400);
+      await key("Enter", 300);
+      x.panelOpen = await page.evaluate(() => !document.getElementById("panel").hidden);
+      let st = null, late = null;
+      x.repaired = await until(async () => {
+        late = (await ctl("late")).result;
+        st = await status();
+        return !!late.result && st.busy.indexOf("panel") >= 0;
+      }, 20000);
+      x.elapsedMs = Date.now() - t0;
+      x.busy = st.busy;
+      x.late = late.result;
+      const pv = await ctl("preview", { changes: { preset: "cinema" } });
+      x.preview = { ok: pv.ok, error: pv.error };
+      await key("Escape", 300);
+      await until(async () => (await status()).busy.length === 0, 12000);
+      x.closed = (await status()).busy;
+      await sleep(QUIET_MS);
+      x.previewAfter = await ctl("preview", { changes: { preset: "cinema" } });
+      out.steps.stall = x;
+      return;
+    }
     out.steps.load = { busy: (await status()).busy };
     await shot("populated");
 

@@ -373,7 +373,10 @@ class TestCanvasUiBrowser(unittest.TestCase):
 
     def test_load_declares_empty_busy_then_renders_default(self):
         x = self.r("load")
-        self.assertEqual(x["firstCanvasPost"], {"p": "/api/tv/canvas/ui", "b": {"busy": []}})
+        first = x["firstCanvasPost"]
+        self.assertEqual((first["p"], sorted(first["b"])), ("/api/tv/canvas/ui", ["busy", "page", "seq"]))
+        self.assertEqual((first["b"]["busy"], first["b"]["seq"]), ([], 1))
+        self.assertRegex(first["b"]["page"], r"^[0-9a-f]{32}$")
         self.assertEqual(x["mode"], "run")
         for c in ("cv", "cv-wp-aurore", "cv-acc-ice", "cv-shade-balanced", "cv-hero-title", "cv-m-calm", "cv-anim"):
             self.assertIn(c, x["body"].split())
@@ -544,6 +547,81 @@ class TestCanvasUiBrowser(unittest.TestCase):
         self.assertEqual(x["offline"], ["offline"])
         self.assertEqual(x["recovered"], [])
         self.assertEqual(x["retried_after_failure"], True)
+
+    # ---- occupation datée (page, seq), bail et échéances
+    def test_busy_posts_carry_page_and_strictly_increasing_seq(self):
+        x = self.r("busySeq")
+        first = x["first"]
+        self.assertGreaterEqual(len(first), 3)
+        for e in first + x["afterStale"] + x["reload"]:
+            self.assertEqual(e["keys"], ["busy", "page", "seq"], e)
+            self.assertRegex(e["page"], x["hex"])
+            self.assertIs(type(e["seq"]), int)
+        self.assertEqual({e["page"] for e in first}, {first[0]["page"]})          # un identifiant par chargement
+        self.assertEqual([e["seq"] for e in first], list(range(1, len(first) + 1)))   # +1 par envoi
+        self.assertEqual([e["busy"] for e in first][:1], [[]])
+        st = x["afterStale"]                                                       # « stale » : page remplacée
+        self.assertTrue(x["retook"])
+        self.assertEqual((st[0]["page"], st[0]["seq"], st[0]["busy"]), (first[0]["page"], len(first) + 1, ["panel"]))
+        self.assertNotEqual(st[1]["page"], first[0]["page"])                       # nouvel identifiant…
+        self.assertEqual((st[1]["seq"], st[1]["busy"]), (1, ["panel"]))            # …qui reprend la main
+        self.assertEqual({e["page"] for e in st[1:]}, {st[1]["page"]})
+        self.assertEqual([e["seq"] for e in st[1:]], list(range(1, len(st))))
+        rl = x["reload"]                                                           # rechargement : nouvelle page
+        self.assertNotIn(rl[0]["page"], {first[0]["page"], st[1]["page"]})
+        self.assertEqual((rl[0]["seq"], rl[0]["busy"]), (1, []))
+        self.assertIn(st[1]["page"], x["retired"])
+        self.assertEqual(x["maxInflight"], 1)
+
+    def test_busy_lease_resends_unchanged_set_and_repairs_service(self):
+        x = self.r("busyLease")
+        self.assertTrue(x["repaired"], x)
+        self.assertLessEqual(x["repairMs"], 10000, x)                              # dans la borne du bail
+        leases = x["leases"]
+        self.assertGreaterEqual(len(leases), 3, leases)                            # ~29 s sans aucun changement
+        for e in leases:
+            self.assertEqual(e["busy"], ["panel"], e)
+        seqs = [e["seq"] for e in leases]
+        self.assertEqual(seqs, sorted(set(seqs)))
+        ts = [0] + [e["t"] for e in leases]
+        gaps = [b - a for a, b in zip(ts, ts[1:])]
+        self.assertLessEqual(max(gaps), 10000, gaps)                               # au plus toutes les 10 s
+        self.assertGreaterEqual(min(gaps[1:]), 4000, gaps)                         # jamais une rafale
+        self.assertEqual(x["maxInflight"], 1)
+        self.assertTrue(x["panelOpen"])
+
+    def test_busy_timeout_forgets_ack_and_resends_current_set(self):
+        x = self.r("busyLost")
+        self.assertTrue(x["panelOpen"])
+        self.assertEqual(x["hung"]["busy"], [])
+        self.assertTrue(x["resent"], x)
+        r = x["resend"]
+        self.assertEqual((r["busy"], r["seq"]), (["panel"], x["hung"]["seq"] + 1))
+        self.assertGreaterEqual(r["ms"], 4500, r)                                  # après l'échéance CV_ROUTE_MS…
+        self.assertLess(r["ms"], 6500, r)                                          # …tout de suite, jamais au bail
+        self.assertEqual(x["serverBusy"], ["panel"])
+
+    def test_offline_overlay_consumes_every_ordinary_key(self):
+        x = self.r("offlineKeys")
+        self.assertTrue(x["panelBefore"]["shown"])
+        self.assertTrue(x["offline"])
+        self.assertTrue(x["stillOffline"])
+        self.assertEqual(x["posts"], [])                  # ni Regarder, ni avis, ni geste, ni réclamation
+        self.assertIsNotNone(x["focusBefore"])
+        self.assertEqual((x["focusDuring"], x["cardDuring"]), (x["focusBefore"], x["cardBefore"]))
+        self.assertEqual(x["panelDuring"], x["panelBefore"])   # fiche intacte sous le voile
+        self.assertTrue(x["recovered"])                   # reprise automatique non gênée
+        self.assertNotEqual(x["focusAfter"], x["focusDuring"])   # touches de nouveau actives
+
+    def test_owner_write_timeout_blocks_duplicates_until_state_reread(self):
+        x = self.r("ownerLost")
+        self.assertEqual(x["focusYes"], "btn:Oui, revenir")
+        self.assertTrue(x["lostToast"])
+        self.assertGreaterEqual(x["lostMs"], 4500)
+        self.assertEqual(x["where"], "Ambiance OpenTV")
+        self.assertEqual(x["postsLocked"], 1)             # issue inconnue : jamais un second « Version précédente »
+        self.assertIn("Vérification", x["lockedToast"])
+        self.assertEqual(x["postsAfter"], 2)              # état réel relu : de nouveau permis
 
     def test_present_action_declares_panel_busy_before_done(self):
         x = self.r("present")
@@ -799,6 +877,36 @@ class TestCanvasRealService(unittest.TestCase):
                 raise cv.CanvasError("restore_failed")
             return orig_apply(changes, confirm=confirm)
         a.canvas.store.owner_apply = owner_apply
+        # panne réelle : verrou du magasin tenu > CV_ROUTE_MS ; la liste vide de la page est livrée APRÈS un
+        # ensemble plus récent de la même page (désordre des connexions), puis appliquée par le vrai TvCanvas
+        late, newer = {"armed": False, "result": None}, threading.Event()
+        orig_page_busy = a.canvas.page_busy
+
+        def page_busy(reasons, page, seq):
+            if late["armed"] and reasons == []:
+                late["armed"] = False
+                newer.wait(20)
+                time.sleep(0.3)
+                done = orig_page_busy(reasons, page, seq)
+                late["result"] = {"applied": done, "busy": list(a.canvas.store.busy_reasons())}
+                return done
+            done = orig_page_busy(reasons, page, seq)
+            if reasons and not late["armed"] and late["result"] is None:
+                newer.set()
+            return done
+        a.canvas.page_busy = page_busy
+
+        def stall(hold_s):
+            held = threading.Event()
+
+            def hold():
+                with a.canvas.store._mu:
+                    held.set()
+                    time.sleep(hold_s)
+            newer.clear()
+            late["armed"] = True
+            threading.Thread(target=hold, daemon=True).start()
+            return held.wait(2)
 
         def loop():
             done = 0
@@ -824,6 +932,10 @@ class TestCanvasRealService(unittest.TestCase):
                             out["result"] = a.remote.command(phone, "192.168.2.50", cmd["key"])
                         elif op == "fail_apply":
                             fail["apply"] = True
+                        elif op == "stall":
+                            out["result"] = stall(cmd["hold_s"])
+                        elif op == "late":
+                            out["result"] = dict(late)
                         elif op == "audit":
                             with open(a.cfg.audit_file, encoding="utf-8") as f:
                                 out["result"] = [json.loads(x)["args"].get("action") for x in f
@@ -890,6 +1002,28 @@ class TestCanvasRealService(unittest.TestCase):
             self.assertIn(want, acts)
         for name in ("populated", "sheet", "settings", "cinema"):
             self.assertTrue(os.path.isfile(os.path.join(cfg["shots"], name + ".png")), name)
+
+    def test_real_service_stalled_store_never_leaves_page_busy_stale(self):
+        """Verrou du magasin tenu 6,5 s (> échéance de la page) pendant que le propriétaire ferme puis rouvre
+        Réglages : la vieille liste vide arrive en retard ; dans la borne du bail, le vrai service connaît « panel »
+        (liste tardive périmée, sans effet) et refuse tout aperçu d'agent (`ui_busy`)."""
+        a = self.app([{"detail_path": "b/fakrov/%d" % (300 + i), "site_id": str(300 + i), "title": "Film %d" % i,
+                       "year": 2020, "genre": "Drame", "description": "Résumé.", "imdb_rating": 7.0,
+                       "imdb_votes": 1000 + i} for i in range(8)])
+        cfg = self.serve(a, "service-stall")
+        cfg["stall"] = 6.5
+        x = run_node(self, "e2e_canvas_service.js", cfg)["steps"]["stall"]
+        self.assertEqual(x["before"], ["panel"])
+        self.assertTrue(x["held"])
+        self.assertTrue(x["panelOpen"])
+        self.assertTrue(x["repaired"], x)
+        self.assertLess(x["elapsedMs"], 6500 + 10000, x)              # verrou + borne du bail
+        self.assertIn("panel", x["busy"])
+        self.assertEqual(x["late"]["applied"], False, x)               # liste vide tardive : périmée…
+        self.assertIn("panel", x["late"]["busy"])                      # …« panel » jamais retiré
+        self.assertEqual(x["preview"], {"ok": False, "error": "ui_busy"})
+        self.assertEqual(x["closed"], [])                              # fermeture réelle : de nouveau libre
+        self.assertTrue(x["previewAfter"]["ok"], x)
 
     def test_real_service_sparse_screenshot(self):
         a = self.app([])

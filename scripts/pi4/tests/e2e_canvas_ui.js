@@ -72,6 +72,7 @@ class Fake {
     this.log = []; this.seq = 0; this.external = [];
     this.busy = null; this.inflightUi = 0; this.maxInflightUi = 0; this.uiDelays = []; this.uiFail = 0;
     this.uiResponses = []; this.eventDelays = []; this.eventFail = 0; this.keepPreview = false;
+    this.uiStale = 0; this.page = null; this.pageSeq = 0; this.retired = [];   // modèle de TvCanvas.page_busy
     this.stateFail = 0; this.sheetServed = 0; this.remoteQ = []; this.rseq = 0; this.hooks = {};
     this.play = { state: "idle", seq: 0 };
     this.noTransitions = !!opts.noTransitions;
@@ -136,9 +137,17 @@ class Fake {
       if (d) { await sleep(d); }
       this.inflightUi -= 1;
       if (this.uiFail > 0) { this.uiFail -= 1; return json({ ok: false, error: "invalid_event" }, 400); }
-      this.busy = body && body.busy;
-      this.uiResponses.push({ t: Date.now(), busy: this.busy });
-      return json({ ok: true, error: null });
+      const b = body || {};
+      // même règle que le service : numéro strictement plus récent de la page active ; page jamais vue = reprise
+      let stale = this.retired.indexOf(b.page) >= 0 || (b.page === this.page && !(b.seq > this.pageSeq));
+      if (this.uiStale > 0) { this.uiStale -= 1; stale = true; }
+      if (!stale) {
+        if (b.page !== this.page) { if (this.page) { this.retired.push(this.page); } this.page = b.page; }
+        this.pageSeq = b.seq;
+        this.busy = b.busy;
+        this.uiResponses.push({ t: Date.now(), busy: this.busy });
+      }
+      return json({ ok: true, error: null, stale: stale });
     }
     if (m === "POST" && p.indexOf("/api/tv/canvas/") === 0) {
       return json({ ok: true, error: null, outcome: "applied", result: {}, canvas: clone(this.state.canvas) });
@@ -402,6 +411,8 @@ function holdNextState(F) {
   };
   return h;
 }
+// bail périodique de l'occupation (même ensemble vide ré-envoyé) : ni geste ni déclaration d'occupation
+const notLease = (x) => !(x.p === "/api/tv/canvas/ui" && x.b && Array.isArray(x.b.busy) && x.b.busy.length === 0);
 const wpOf = (cls) => (String(cls).split(" ").filter((c) => c.indexOf("cv-wp-") === 0)[0] || "");
 // réponse de route adoptée, poll périmé libéré : aucun fond intermédiaire, aucune reconstruction des rangées, puis le
 // poll légitime suivant est toujours adopté
@@ -588,7 +599,7 @@ S.sheet = async (browser) => {
   await press(page, "ArrowUp");
   out.focusAfterUp = await sheetFocus(page);
   out.hintAfterUp = await hintText(page);
-  out.sheetPosts = F.posts("/api/tv/canvas/", m2).map((x) => x.p);
+  out.sheetPosts = F.posts("/api/tv/canvas/", m2).filter(notLease).map((x) => x.p);
   const m3 = F.seq;
   await press(page, "Escape", 400);
   const c = F.posts("/api/tv/canvas/cancel", m3)[0];
@@ -721,7 +732,7 @@ S.phone = async (browser) => {
   F.remoteQ.push({ a: "right" });
   await until(async () => (await sheetFocus(page)) === "Oui, appliquer", 3000);
   out.sheetFocus = await sheetFocus(page);
-  out.sheetPosts = F.posts("/api/tv/canvas/", m2).map((x) => x.p);
+  out.sheetPosts = F.posts("/api/tv/canvas/", m2).filter(notLease).map((x) => x.p);
   await ctx.close();
   return out;
 };
@@ -1358,6 +1369,190 @@ S.unavailable = async (browser) => {
                 text: await page.evaluate(() => document.getElementById("pmeta").textContent) };
   await press(page, "Enter", 300);   // seule action : Retour aux Réglages
   out.back = await page.evaluate(() => document.getElementById("ptitle").textContent);
+  await ctx.close();
+  return out;
+};
+
+// ---------------------------------------------------------------- occupation datée (page, seq), bail, échéances
+const HEX32 = /^[0-9a-f]{32}$/;
+const uiPosts = (F, mark) => F.posts("/api/tv/canvas/ui", mark).map((x) => ({ busy: x.b.busy, page: x.b.page, seq: x.b.seq,
+                                                                                t: x.t, keys: Object.keys(x.b).sort() }));
+// chaque envoi : {busy, page, seq} ; page = 32 hex constants pour un chargement, seq +1 par envoi ; réponse « stale »
+// => nouvel identifiant (seq 1) et reprise ; rechargement => nouvel identifiant, seq 1
+S.busySeq = async (browser) => {
+  const out = { hex: HEX32.source };
+  const { ctx, page, F } = await open(browser);
+  await waitMode(page, "run");
+  await press(page, "ArrowUp");
+  await press(page, "Enter", 300);
+  await until(async () => JSON.stringify(F.busy) === '["panel"]', 3000);
+  await press(page, "Escape", 300);
+  await until(async () => JSON.stringify(F.busy) === "[]", 3000);
+  out.first = uiPosts(F);
+  const mark = F.seq;
+  F.uiStale = 1;
+  await press(page, "Enter", 300);   // Réglages : réponse « stale » (page remplacée), puis reprise sous un nouvel id
+  out.retook = await until(async () => JSON.stringify(F.busy) === '["panel"]', 6000);
+  out.afterStale = uiPosts(F, mark);
+  await press(page, "Escape", 300);
+  await until(async () => JSON.stringify(F.busy) === "[]", 3000);
+  const m2 = F.seq;
+  await page.reload();
+  await page.waitForSelector(".card.focused", { timeout: 15000 });
+  await until(async () => F.posts("/api/tv/canvas/ui", m2).length >= 1, 4000);
+  out.reload = uiPosts(F, m2);
+  out.retired = F.retired.slice();
+  out.maxInflight = F.maxInflightUi;
+  await ctx.close();
+  return out;
+};
+
+// bail : sans aucun changement, l'ensemble courant est ré-envoyé au plus toutes les 10 s ; un service désynchronisé
+// (état perdu ou écrasé) est réparé sans geste
+S.busyLease = async (browser) => {
+  const out = {};
+  const { ctx, page, F } = await open(browser);
+  await waitMode(page, "run");
+  await press(page, "ArrowUp");
+  await press(page, "Enter", 300);
+  await until(async () => JSON.stringify(F.busy) === '["panel"]', 3000);
+  await sleep(200);
+  const mark = F.seq, t0 = Date.now();
+  F.busy = [];   // le service a perdu « panel » (liste vide tardive d'un service sans séquence, redémarrage…)
+  out.repaired = await until(async () => JSON.stringify(F.busy) === '["panel"]', 12000);
+  out.repairMs = Date.now() - t0;
+  await sleep(19500);
+  out.leases = uiPosts(F, mark).map((x) => ({ busy: x.busy, seq: x.seq, t: x.t - t0, page: x.page }));
+  out.maxInflight = F.maxInflightUi;
+  out.panelOpen = await page.evaluate(() => !document.getElementById("panel").hidden);
+  await ctx.close();
+  return out;
+};
+
+// échéance d'un envoi (réponse jamais reçue) : l'accusé précédent est oublié ; panneau fermé puis rouvert pendant
+// l'envoi perdu => l'ensemble courant [panel] repart dès l'échec, sans attendre le bail
+S.busyLost = async (browser) => {
+  const out = {};
+  const { ctx, page, F } = await open(browser);
+  await waitMode(page, "run");
+  await press(page, "ArrowUp");
+  await press(page, "Enter", 300);
+  await until(async () => JSON.stringify(F.busy) === '["panel"]', 3000);
+  await sleep(300);
+  let hung = null;
+  F.hooks["POST /api/tv/canvas/ui"] = async (e, f) => {
+    delete f.hooks["POST /api/tv/canvas/ui"];
+    hung = { t: e.t, seq: e.b.seq, busy: e.b.busy };
+    await sleep(30000);   // jamais de réponse avant l'échéance de la page (contexte fermé avant)
+    return "abort";
+  };
+  const mark = F.seq;
+  await press(page, "Escape", 400);   // [] envoyé, perdu
+  await press(page, "Enter", 300);    // Réglages rouverts pendant l'envoi
+  out.panelOpen = await page.evaluate(() => !document.getElementById("panel").hidden);
+  // aucun rendu d'état pendant l'attente (polls retenus) : le ré-envoi vient de l'échec lui-même, pas d'un repaint
+  let free = null;
+  const gate = new Promise((r) => { free = r; });
+  F.hooks["GET /api/tv/state"] = async () => { await gate; return null; };
+  out.resent = await until(async () => uiPosts(F, mark).some((x) => hung && x.seq > hung.seq &&
+                                                                  JSON.stringify(x.busy) === '["panel"]'), 12000);
+  delete F.hooks["GET /api/tv/state"];
+  free();
+  const r = uiPosts(F, mark).filter((x) => hung && x.seq > hung.seq)[0];
+  out.hung = hung;
+  out.resend = r ? { busy: r.busy, seq: r.seq, ms: r.t - hung.t } : null;
+  out.serverBusy = F.busy;
+  await ctx.close();
+  return out;
+};
+
+// voile « Reconnexion… » : toutes les touches ordinaires (télécommande, téléphone, bouton précédent de la souris)
+// sont consommées — jamais un « Regarder », un avis ni une navigation invisibles ; reprise automatique intacte
+S.offlineKeys = async (browser) => {
+  const out = {};
+  const { ctx, page, F } = await open(browser);
+  await waitMode(page, "run");
+  await press(page, "ArrowRight", 200);
+  await press(page, "Enter", 400);   // fiche du titre : Regarder, J'aime, …
+  const panelInfo = () => page.evaluate(() => ({ shown: !document.getElementById("panel").hidden,
+                                                 title: document.getElementById("ptitle").textContent }));
+  const btnFocus = () => page.evaluate(() => {   // action de la fiche au focus (la carte reste marquée dessous)
+    const f = document.querySelector("#pbtns .focused");
+    return f ? f.getAttribute("data-label") || f.textContent : null;
+  });
+  out.panelBefore = await panelInfo();
+  out.focusBefore = await btnFocus();
+  out.cardBefore = await focusOf(page);
+  await sleep(1800);
+  F.stateFail = 100000;
+  out.offline = await until(() => page.evaluate(() => !document.getElementById("offline").hidden), 9000);
+  const mark = F.seq;
+  for (const k of ["Enter", "ArrowRight", "Enter", "ArrowRight", "Enter", "Escape", "ArrowDown", "Enter", "Home",
+                   "ArrowUp", "Enter", "Backspace"]) { await press(page, k, 120); }
+  F.remoteQ.push({ a: "ok" }, { a: "right" }, { a: "ok" }, { a: "back" });
+  await until(async () => F.remoteQ.length === 0, 4000);
+  await page.evaluate(() => { document.dispatchEvent(new MouseEvent("mouseup", { button: 3, bubbles: true })); });
+  await sleep(900);
+  out.stillOffline = await page.evaluate(() => !document.getElementById("offline").hidden);
+  out.posts = F.posts("/api/", mark).filter((x) => x.p !== "/api/tv/canvas/ui").map((x) => x.p);
+  out.focusDuring = await btnFocus();
+  out.cardDuring = await focusOf(page);
+  out.panelDuring = await panelInfo();
+  F.stateFail = 0;
+  out.recovered = await until(() => page.evaluate(() => document.getElementById("offline").hidden), 9000);
+  await sleep(300);
+  await press(page, "ArrowRight", 300);
+  out.focusAfter = await btnFocus();
+  await ctx.close();
+  return out;
+};
+
+// écriture du propriétaire sans réponse (échéance) : issue inconnue, aucune nouvelle écriture tant qu'un état réel
+// n'a pas été relu — ni sur la même feuille, ni en rouvrant « Version précédente » — puis de nouveau permise
+S.ownerLost = async (browser) => {
+  const out = {};
+  const { ctx, page, F } = await open(browser, { state: (st) => { st.canvas.can_rollback = true; } });
+  await waitMode(page, "run");
+  for (const k of ["ArrowUp", "Enter", "ArrowDown", "ArrowDown", "Enter", "ArrowDown", "ArrowDown", "Enter", "ArrowUp"]) {
+    await press(page, k, 250);
+  }
+  out.focusYes = await focusOf(page);
+  let free = null, holding = false;
+  const gate = new Promise((r) => { free = r; });
+  F.hooks["POST /api/tv/canvas/rollback"] = async () => { await sleep(30000); return "abort"; };   // réponse perdue
+  const mark = F.seq, t0 = Date.now();
+  await press(page, "Enter", 0);
+  await sleep(1000);
+  holding = true;   // à partir d'ici, aucune lecture d'état n'aboutit avant la libération
+  F.hooks["GET /api/tv/state"] = async () => { if (holding) { await gate; } return null; };
+  out.lostToast = await until(async () => (await toastText(page)).indexOf("Réponse perdue") >= 0, 9000);
+  out.lostMs = Date.now() - t0;
+  await press(page, "Enter", 300);   // même feuille : rien
+  await press(page, "Escape", 300);
+  out.where = await page.evaluate(() => document.getElementById("ptitle").textContent);
+  await press(page, "Enter", 300);   // « Version précédente » rouverte (focus gardé) puis « Oui »
+  await press(page, "ArrowUp", 200);
+  await press(page, "Enter", 400);
+  out.lockedToast = await toastText(page);
+  out.postsLocked = F.posts("/api/tv/canvas/rollback", mark).length;
+  holding = false;
+  delete F.hooks["GET /api/tv/state"];
+  F.hooks["POST /api/tv/canvas/rollback"] = async (e, f) => {
+    f.state.canvas = view(P.canvas, { state: "default", revision: 2, preset: "canvas", can_rollback: false });
+    return { json: { ok: true, error: null, outcome: "applied", result: {}, canvas: clone(f.state.canvas) } };
+  };
+  const m2 = F.seq;
+  free();
+  await until(async () => F.log.some((x) => x.m === "GET" && x.p === "/api/tv/state" && x.i >= m2), 4000);
+  await sleep(500);
+  out.where2 = await page.evaluate(() => document.getElementById("ptitle").textContent);
+  out.focus2 = await focusOf(page);
+  if (out.focus2 !== "btn:Oui, revenir") {   // feuille Ambiance relue : rouvrir « Version précédente »
+    await press(page, "Enter", 300);
+    await press(page, "ArrowUp", 200);
+  }
+  await press(page, "Enter", 600);
+  out.postsAfter = F.posts("/api/tv/canvas/rollback", mark).length;
   await ctx.close();
   return out;
 };
