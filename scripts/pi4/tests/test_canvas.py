@@ -945,16 +945,48 @@ class TestTruthfulCommit(Base):
         self.assert_agrees(s)
         self.assertEqual(self.entries(), [cv.LOCK_NAME])
 
-    def test_persistent_dir_fsync_eio_still_restores_visible_state(self):
+    def test_persistent_dir_fsync_eio_reports_restore_failed(self):
+        # Octets précédents visibles mais fsync du dossier en échec : restauration non durable ⇒ restore_failed.
         s, before = self.seeded()
         with PostRenameFault(dir_fsync="always") as f:
             with self.assertRaises(cv.CanvasError) as cm:
                 s.owner_api().apply({"preset": "cinema"}, confirm=True)
         self.assertGreaterEqual(f.fired, 2)
-        self.assertEqual(self.code(cm), "write_failed")
+        self.assertEqual(self.code(cm), "restore_failed")
         self.assertEqual(rd(self.file), before)
+        self.assertEqual((s._raw, s._revision), (before, 1))
         self.assert_agrees(s)
         self.assertEqual(self.entries(), sorted([cv.STATE_NAME, cv.LOCK_NAME]))
+
+    def test_first_write_persistent_dir_fsync_eio_reports_restore_failed(self):
+        # Candidat retiré (unlink réussi) mais retrait non rendu durable ⇒ restore_failed, jamais write_failed.
+        s = self.store()
+        with PostRenameFault(dir_fsync="always") as f:
+            with self.assertRaises(cv.CanvasError) as cm:
+                self.publish(s, {"preset": "mist"})
+        self.assertGreaterEqual(f.fired, 2)
+        self.assertEqual(self.code(cm), "restore_failed")
+        self.assertFalse(os.path.exists(self.file))
+        self.assertEqual((s.status()["state"], s.status()["revision"]), ("default", 0))
+        self.assertEqual(s.current_scene(), cv.DEFAULT_SCENE)
+        self.assert_agrees(s)
+        self.assertEqual(self.entries(), [cv.LOCK_NAME])
+
+    def test_corrupt_reset_persistent_dir_fsync_eio_reports_restore_failed(self):
+        self.seeded()
+        with open(self.file, "wb") as f:
+            f.write(b"{")
+        s = self.store()
+        self.assertEqual(s.status()["state"], "corrupt")
+        with PostRenameFault(dir_fsync="always") as f:
+            with self.assertRaises(cv.CanvasError) as cm:
+                s.owner_api().reset(confirm=True)
+        self.assertGreaterEqual(f.fired, 2)
+        self.assertEqual(self.code(cm), "restore_failed")
+        self.assertFalse(os.path.exists(self.file))              # candidat retiré, jamais l'ancien corrompu réécrit
+        self.assertEqual((s.status()["state"], s.status()["reason"]), ("default", None))
+        self.assert_agrees(s)
+        self.assertEqual(self.entries(), [cv.LOCK_NAME])
 
     def test_failed_restore_reports_restore_failed_and_memory_matches_disk(self):
         s, _ = self.seeded()

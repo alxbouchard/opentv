@@ -17,8 +17,8 @@ Publication (`commit`) « échouer et restaurer » : temporaire exclusif, fsync,
 octet pour octet. Échec AVANT le rename ⇒ write_failed, rien n'a changé. Toute panne APRÈS le rename (fsync du
 dossier, relecture) ⇒ restauration des octets précédents exacts, ou retrait du candidat quand l'état visé est
 l'absence (premier enregistrement, réinitialisation d'un état corrompu), fsync du dossier, puis vérification par
-relecture : restauration confirmée ⇒ write_failed / readback_failed ; sinon restore_failed. L'appelant recharge
-toujours le disque ensuite, si bien que le résultat, le disque et la mémoire concordent.
+relecture : restauration durable (fsync réussi) et confirmée ⇒ write_failed / readback_failed ; sinon
+restore_failed. L'appelant recharge toujours le disque ensuite : le résultat, le disque et la mémoire concordent.
 """
 import contextlib
 import errno
@@ -340,8 +340,9 @@ def commit(dfd, data, previous, owner, root, gid=-1):
 
 
 def _restore(dfd, previous, owner, root, gid):
-    """Ramène le disque à `previous` (octets) ou à l'absence (None), fsync du dossier. -> True si la relecture le
-    confirme (un fsync de dossier en échec n'empêche pas la vérification de l'état visible)."""
+    """Ramène le disque à `previous` (octets) ou à l'absence (None), fsync du dossier. -> True seulement si ce fsync
+    réussit ET que la relecture confirme l'état visé ; un fsync de dossier en échec ⇒ False (restauration non
+    durable : jamais un write_failed/readback_failed « propre »)."""
     try:
         if previous is None:
             os.unlink(STATE_NAME, dir_fd=dfd)
@@ -352,6 +353,6 @@ def _restore(dfd, previous, owner, root, gid):
     try:
         os.fsync(dfd)
     except OSError:
-        pass
+        return False
     seen = _observe(dfd, owner)
     return seen is not _BAD and seen == previous
