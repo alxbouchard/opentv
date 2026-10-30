@@ -763,6 +763,9 @@ PROTECTED = ("scripts/pi4/ui", "scripts/pi4/opentv_pi", "scripts/pi4/install.sh"
              "scripts/pi4/uninstall.sh", "scripts/pi4/systemd", "scripts/pi4/system", "scripts/pi4/vendor",
              "scripts/pi4/bin", "scripts/pi4/tools", "scripts/nanopi", "native")
 PROTO_MARKERS = re.compile(r"canvas_model|prototypes[/\\]canvas|OTVCanvas|e2e_canvas_prototype")
+# modules internes de production importés relativement dans opentv_pi (jamais le prototype `canvas_model`)
+PRODUCTION_CANVAS_MODULES = frozenset(("canvas", "canvas_schema", "canvas_storage", "canvas_activity",
+                                       "canvas_roles"))
 
 
 def production_files():
@@ -814,12 +817,20 @@ class TestNonImpact(unittest.TestCase):
                     tree = ast.parse(data)
                 except SyntaxError:
                     continue
+                in_pkg = os.path.dirname(path) == os.path.join(PI4, "opentv_pi")
                 for node in ast.walk(tree):
                     names = []
                     if isinstance(node, ast.Import):
                         names = [a.name for a in node.names]
                     elif isinstance(node, ast.ImportFrom):
                         names = [node.module or ""] + [a.name for a in node.names]
+                        if in_pkg and node.level == 1:
+                            # modules de PRODUCTION du paquet (opentv_pi.canvas*) et leurs symboles, jamais le
+                            # prototype : `from .canvas_schema import CanvasError`, `from . import canvas_storage`
+                            if node.module in PRODUCTION_CANVAS_MODULES:
+                                names = []
+                            elif node.module is None:
+                                names = [a.name for a in node.names if a.name not in PRODUCTION_CANVAS_MODULES]
                     for n in names:
                         self.assertNotIn("canvas", n.lower(), (path, n))
                         self.assertNotIn("prototypes", n.lower(), (path, n))
