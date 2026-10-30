@@ -1517,7 +1517,6 @@ class WebServers:
 
     def lan_port(self):
         return self.lan.server_address[1] if self.lan else None
-
     def remote_port(self):
         return self.remote.server_address[1] if self.remote else None
 
