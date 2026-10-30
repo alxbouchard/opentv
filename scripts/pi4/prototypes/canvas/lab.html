@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<!-- Laboratoire OpenTV Canvas (prototype phase 1, jamais installé) : coque fixe, scènes fermées, aucune ressource
+     externe, aucun éditeur HTML/CSS/JS, aucune adresse saisissable. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'none'; media-src 'none'; worker-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; object-src 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="viewport" content="width=1920, initial-scale=1">
+<title>OpenTV Canvas — laboratoire</title>
+<link rel="stylesheet" href="lab.css">
+</head>
+<body>
+<div id="tv" class="tv v-canvas wp-aurore acc-ice shade-balanced hero-title motion-full">
+  <!-- fond : une base statique, au plus quatre couches animées (transform/opacity), l'œuvre du titre au focus, le voile -->
+  <div id="wall" class="wall" aria-hidden="true">
+    <div class="base"></div>
+    <div class="layer l1 anim"></div>
+    <div class="layer l2 anim"></div>
+    <div class="layer l3 anim"></div>
+    <div id="artbox" class="artbox anim"><div id="artA" class="art on"></div><div id="artB" class="art"></div></div>
+    <div class="shade"></div>
+  </div>
+
+  <header class="top">
+    <div class="clockbox">
+      <div id="clock" class="clock">20:41</div>
+      <div class="dateline"><span id="date" class="date">Vendredi 30 octobre</span><span id="scenepill" class="scenepill">Soirée calme</span></div>
+    </div>
+    <div class="spacer"></div>
+    <div id="pv" class="pv" hidden><span class="pvdot"></span><span id="pvtext">Aperçu</span></div>
+    <div class="spacer"></div>
+    <div class="quick">
+      <div class="qrow">
+        <span id="glabel" class="qlabel">Réglages</span>
+        <div id="gear" class="qbtn" role="button" aria-label="Réglages"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
+      </div>
+      <div class="status"><span class="device">Salon</span><span class="badge net">Wi-Fi</span></div>
+    </div>
+  </header>
+
+  <section id="home" class="home">
+    <div id="main" class="main">
+      <div id="hero" class="hero">
+        <div class="htext">
+          <p id="hkicker" class="kicker"></p>
+          <h1 id="htitle" class="htitle"></h1>
+          <p id="hmeta" class="hmeta"></p>
+          <div id="hchips" class="hchips"></div>
+          <p id="hreason" class="hreason"></p>
+          <p id="hdesc" class="hdesc"></p>
+        </div>
+      </div>
+      <div id="rows" class="rows"><div id="rowsin" class="rowsin"></div></div>
+    </div>
+    <!-- colonne réservée de 300 px : jamais recouverte par une carte, un panneau ou une scène -->
+    <aside id="remotebox" class="remotebox">
+      <b>Télécommande sur ton téléphone</b>
+      <canvas id="rqr" width="232" height="232"></canvas>
+      <ol class="rsteps"><li>Même Wi-Fi que la TV</li><li>Appareil photo : vise ce QR</li><li>Touche « Oui »</li></ol>
+      <p class="rnote">QR de démonstration (laboratoire).</p>
+    </aside>
+  </section>
+
+  <div id="panel" class="panel" hidden>
+    <p id="pkicker" class="kicker"></p>
+    <h2 id="ptitle"></h2>
+    <p id="pmeta" class="pmeta"></p>
+    <div id="pbtns" class="pbtns"></div>
+  </div>
+
+  <section id="setup" class="cover" hidden><div><p class="kicker">Première mise en route</p><h1>Bienvenue ! Configurons ta TV</h1><p class="covermsg">Le fond est figé pendant la configuration.</p></div></section>
+  <div id="offline" class="cover dark" hidden><div><h1>Reconnexion à OpenTV…</h1></div></div>
+  <div id="playov" class="cover play" hidden><div><div class="pbrand">Open<b>TV</b></div><div id="playtitle" class="ptl"></div><div class="pmsg">Chargement… (simulation, aucun lecteur)</div></div></div>
+
+  <footer id="help" class="help">
+    <span id="hint" class="hint"><span class="hk">← →</span> Parcourir · <span class="hk">↓</span> Rangée suivante · <span class="hk">↑</span> Réglages · <span class="hk">OK</span> Ouvrir</span>
+    <span class="samsung">Les applis Samsung (YouTube, Netflix…) : depuis le menu de la TV.</span>
+    <span class="brand">OpenTV</span>
+  </footer>
+</div>
+
+<!-- Commandes du laboratoire seulement (hors du cadre TV 1920×1080) : choix fermés, jamais de saisie libre -->
+<section id="lab" class="lab" aria-label="Laboratoire">
+  <h2>Laboratoire OpenTV Canvas — prototype, non installé</h2>
+  <div class="labrow"><span>Variante</span>
+    <button type="button" data-lab="select" data-arg="mist">Brume vivante</button>
+    <button type="button" data-lab="select" data-arg="cinema">Cinéma</button>
+    <button type="button" data-lab="select" data-arg="canvas">Canvas (recommandé)</button></div>
+  <div class="labrow"><span>Aperçu 10 s</span>
+    <button type="button" data-lab="preview" data-arg="accent:ember">Accent ambre</button>
+    <button type="button" data-lab="preview" data-arg="accent:jade">Accent jade</button>
+    <button type="button" data-lab="preview" data-arg="wallpaper:brume">Fond brume</button>
+    <button type="button" data-lab="preview" data-arg="motion:off">Mouvement coupé</button>
+    <button type="button" data-lab="confirm">Garder l'aperçu</button>
+    <button type="button" data-lab="cancel">Annuler l'aperçu</button></div>
+  <div class="labrow"><span>Historique</span>
+    <button type="button" data-lab="undo">Annuler la dernière scène</button>
+    <button type="button" data-lab="reset">Scène OpenTV d'origine</button></div>
+  <div class="labrow"><span>États (pause)</span>
+    <button type="button" data-lab="toggle" data-arg="setup">Configuration</button>
+    <button type="button" data-lab="toggle" data-arg="playback">Lecture</button>
+    <button type="button" data-lab="toggle" data-arg="offline">Hors ligne</button>
+    <button type="button" data-lab="toggle" data-arg="degraded">Dégradé</button></div>
+  <pre id="labstate" class="labstate"></pre>
+</section>
+<script src="canvas.js"></script>
+</body>
+</html>
