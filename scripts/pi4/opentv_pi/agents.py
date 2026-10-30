@@ -16,6 +16,9 @@ import time
 from . import fsutil, validate
 
 SAFE_ARG_RE = re.compile(r"[a-z0-9/-]{1,40}")
+# Acteur d'audit RÉSERVÉ du propriétaire (page /tv derrière la clé TV : Réglages, retour arrière, réinitialisation,
+# aperçu d'origine inconnue) : hors de validate.AGENT_ID_RE, donc jamais une identité émise (« tv » l'est).
+OWNER_ACTOR = "@tv"
 SAFE_ARG_KEYS = ("action", "list", "id", "key",   # « key » : énumération fermée de remote_control
                  "preset", "hash")                # Canvas : préréglage énuméré, empreinte courte (16 hex)
 # Attente bornée du verrou inter-processus (service ⇄ CLI root) : jamais de blocage infini. Le service l'attend sous
@@ -490,7 +493,7 @@ class Audit:
         self.lock = threading.Lock()
 
     def record(self, agent, tool, args, ok, error, ms):
-        rec = {"ts": round(self.clock(), 3), "agent": agent if isinstance(agent, str) and
+        rec = {"ts": round(self.clock(), 3), "agent": agent if agent == OWNER_ACTOR or isinstance(agent, str) and
                validate.AGENT_ID_RE.fullmatch(agent) else "?", "tool": tool if isinstance(tool, str) and
                SAFE_ARG_RE.fullmatch(tool.replace("_", "-")) else "?", "ok": bool(ok),
                "error": error if isinstance(error, str) and SAFE_ARG_RE.fullmatch(error.replace("_", "-")) else None,

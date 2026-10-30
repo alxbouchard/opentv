@@ -107,6 +107,13 @@ class TvActions:
             self._expire(self.mono())
             return [self._public(a) for a in list(self.items.values())[-n:]]
 
+    def busy(self):
+        """Vrai si une action d'assistant est en file ou réclamée, sur TOUTE la file (jamais une fenêtre d'historique :
+        la purge ne retire jamais une action en cours). Porte de l'aperçu Canvas (App.canvas_agent_preview)."""
+        with self.lock:
+            self._expire(self.mono())
+            return any(a["state"] in ("queued", "claimed") for a in self.items.values())
+
     def cancel_queued(self, reason):
         """Configuration, gestion des assistants : toute action non réclamée est abandonnée (jamais appliquée)."""
         with self.lock:

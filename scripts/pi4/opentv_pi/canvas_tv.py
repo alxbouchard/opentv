@@ -14,15 +14,23 @@ Pont entre `canvas.CanvasStore` (tâche 1) et l'App / la page /tv (loopback, cl�
   par la page (`page_busy`, ensemble complet). Un rechargement de la page ne rend que SES jetons : jamais de
   `busy_reset` global.
 - Audit : outil « canvas », identité authentifiée de l'agent, action et préréglage énumérés, révision, empreinte
-  courte (16 hex) ; jamais la scène, du texte libre ni un chemin.
+  courte (16 hex) ; jamais la scène, du texte libre ni un chemin. L'auteur d'un aperçu est lié à SON identifiant
+  (`_props`, verrou court `_pl` jamais tenu pendant un appel au magasin : instantané -> opération du magasin ->
+  retrait conditionnel de CET identifiant seulement) ; l'aperçu annulé par un geste humain est relevé par le magasin
+  sous le verrou de l'annulation. Auteur inconnu ou action du propriétaire : acteur réservé `agents.OWNER_ACTOR`,
+  jamais un autre agent.
+- Exclusion aperçu ⇄ actions d'assistant (file tvcontrol) : portée par la porte de l'App (`agent_tv_gate`). Relais
+  tâche 3 : la page /tv ne doit JAMAIS appliquer une action d'assistant réclamée pendant que la feuille est affichée.
 - Échec `restore_failed` : jamais annoncé « inchangé » ; la réponse porte l'état relu du disque (`see_state`).
 """
+import collections
 import threading
 
-from . import canvas as cv
+from . import agents, canvas as cv
 
 SERVICE_REASONS = ("setup", "assistants", "muse_setup", "playback", "loading", "closing", "returning")
 PAGE_REASONS = ("panel", "hidden", "offline")
+PROPS_MAX = 8                  # auteurs d'aperçus récents retenus (le magasin n'a qu'UN aperçu vivant)
 SHEET_MIN_S = 3.0              # en deçà, plus de feuille : jamais un « Oui » qui court contre l'échéance
 APPLY_KEYS = ("preset",) + tuple(f for f in cv.FIELDS if f != "row_order")   # Réglages : énumérations plates
 # Codes après lesquels l'état publié est garanti inchangé ; tout autre échec renvoie l'état relu (« see_state »)
@@ -48,7 +56,8 @@ class TvCanvas:
         self.available = not isinstance(store, Unavailable)
         self._mu = threading.Lock()
         self._held = {}            # raison -> jeton (service ET page : raisons disjointes)
-        self._last = None          # dernier aperçu créé par `preview` : {"id", "agent", "hash", "preset"}
+        self._pl = threading.Lock()   # court : `_props` seulement, jamais tenu pendant un appel au magasin
+        self._props = collections.OrderedDict()   # preview_id -> {"id", "agent", "hash", "preset"} (borné)
 
     @classmethod
     def for_config(cls, cfg, audit, log, mono):
@@ -88,11 +97,36 @@ class TvCanvas:
             raise cv.CanvasError("invalid_event")
         if not self.available:
             return False
-        out = self.store.human_event(kind)
-        if out["preview_cancelled"]:
-            last, self._last = self._last, None
-            self._audit(last and last["agent"], "cancelled", True, None, last)
+        out, gone = self.store._human_event(kind)   # aperçu annulé relevé atomiquement par le magasin
+        if gone is not None:
+            self._forget(gone["id"])
+            self._audit(gone["agent"], "cancelled", True, None, gone)
         return out["preview_cancelled"]
+
+    # ------------------------------------------------------------------ propriété des aperçus (id -> auteur)
+    def _own(self, meta):
+        with self._pl:
+            self._props[meta["id"]] = meta
+            while len(self._props) > PROPS_MAX:
+                self._props.popitem(last=False)
+
+    def _forget(self, pid):
+        """Retrait conditionnel : l'entrée de CET identifiant seulement (jamais celle d'un aperçu plus récent)."""
+        with self._pl:
+            self._props.pop(pid, None)
+
+    def _owner_of(self, pid):
+        """Instantané de l'auteur de l'aperçu `pid` (liaison identifiant -> agent immuable) ; entre la création dans
+        le magasin et `_own`, l'aperçu vivant du magasin fait foi (lu hors de `_pl`). -> méta ou None."""
+        if type(pid) is not str:
+            return None
+        with self._pl:
+            meta = self._props.get(pid)
+        if meta is None and self.available:
+            p = self.store.status()["preview"]
+            if p is not None and p["preview_id"] == pid:
+                meta = {"id": pid, "agent": p["agent"], "hash": p["hash"], "preset": p["preset"]}
+        return meta
 
     # ------------------------------------------------------------------ vue TV
     def view(self):
@@ -131,8 +165,9 @@ class TvCanvas:
         except cv.CanvasError as e:
             code = e.code
         else:
-            self._last = {"id": r["preview_id"], "agent": agent, "hash": r["hash"], "preset": r["preset"]}
-            self._audit(agent, "proposed", True, None, dict(self._last, revision=r["base_revision"]))
+            meta = {"id": r["preview_id"], "agent": agent, "hash": r["hash"], "preset": r["preset"]}
+            self._own(meta)
+            self._audit(agent, "proposed", True, None, dict(meta, revision=r["base_revision"]))
             return r
         self._audit(agent, "proposed", False, code, None)
         raise cv.CanvasError(code)
@@ -156,10 +191,8 @@ class TvCanvas:
             return (200 if ok else 400), {"ok": ok, "error": None if ok else "invalid_event"}
         if action not in EVENTS:
             return 404, {"ok": False, "error": "not_found"}
-        last = self._last
-        pid = body.get("preview_id")
-        if last is not None and (action not in ("confirm", "cancel") or pid != last["id"]):
-            last = None             # l'aperçu visé n'est pas le dernier connu : aucun agent attribué
+        # instantané AVANT l'opération : auteur de l'aperçu VISÉ (jamais « le dernier connu »)
+        last = self._owner_of(body.get("preview_id")) if action in ("confirm", "cancel") else None
         try:
             result = self._owner(action, body)
         except cv.CanvasError as e:
@@ -167,7 +200,8 @@ class TvCanvas:
         else:
             if result is None:      # « Non » sans aperçu correspondant : rien à retirer
                 return 409, self._reply(False, "unknown_preview", None)
-            self._last = None
+            if last is not None:
+                self._forget(last["id"])
             self._audit(last and last["agent"], EVENTS[action], True, None, dict(last or {}, **result))
             return 200, self._reply(True, None, result or None)
         if code in BAD_INPUT:       # entrée refusée avant toute opération : jamais auditée
@@ -217,4 +251,4 @@ class TvCanvas:
                 args["hash"] = info["hash"][:16]
             if type(info.get("revision")) is int:
                 args["revision"] = info["revision"]
-        self.audit.record(agent or "tv", "canvas", args, ok, error, 0)
+        self.audit.record(agent or agents.OWNER_ACTOR, "canvas", args, ok, error, 0)

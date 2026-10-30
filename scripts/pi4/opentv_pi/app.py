@@ -199,6 +199,11 @@ class App:
         self.audit = agents.Audit(cfg.audit_file)
         # OpenTV Canvas : scène publiée + aperçu agent à confirmer sur la TV (canvas_tv), jamais l'inverse
         self.canvas = canvas_tv.TvCanvas.for_config(cfg, self.audit, log, mono)
+        # Porte aperçu Canvas ⇄ actions d'assistant : « vérifier l'aperçu + mettre en file / lancer » et « vérifier la
+        # file + créer l'aperçu » sont exclusifs (jamais une feuille ET une action en file/réclamée). Ordre : porte ->
+        # self.lock / verrous du magasin et de la file ; jamais prise sous un autre verrou ni sur un chemin humain ;
+        # le magasin n'y fait aucune attente de flock (aperçu et état : mémoire + lecture sans verrou de fichier).
+        self.agent_tv_gate = threading.Lock()
         try:
             self.foryou = ForYou(cfg.engine_dir, cfg.foryou_state, cfg.catalogue_file, cfg.source_id, log=log)
         except (EngineError, ValueError) as e:
@@ -1247,7 +1252,7 @@ class App:
                 raise tools.ToolError("tv_busy")
         if self.muse.busy():   # connexion/déconnexion de Muse en cours sur la TV : l'humain d'abord
             raise tools.ToolError("tv_busy")
-        if self.canvas.preview_live():   # feuille Canvas : seul le propriétaire décide, jamais une touche d'agent
+        if self.canvas.preview_live():   # feuille Canvas : seul le propriétaire décide (revérifié sous la porte)
             raise tools.ToolError("tv_busy")
         if name in ("remote_control", "present_title") and self.playback.returning():
             # fin de lecture pas encore acquittée : la page /tv revient sur la fiche du film ; une touche ou une fiche
@@ -1284,7 +1289,9 @@ class App:
             # agent : seulement depuis « idle » (atomique dans Playback.start). Une lecture « closed »/« unavailable »
             # pas encore acquittée par la page /tv signifie que la TV revient encore sur la fiche précédente : un
             # nouveau lancement ferait courir ce retour contre le nouveau film (refus « player_returning »).
-            ok, err = self.playback.start(uid, item, require_idle=True)
+            with self.agent_tv_gate:   # aucun aperçu créé entre sa vérification et « loading » (raison du service)
+                self._no_live_preview()
+                ok, err = self.playback.start(uid, item, require_idle=True)
             if not ok:
                 raise tools.ToolError({"busy": "player_busy", "unavailable": "playback_unavailable",
                                        "returning": "player_returning"}.get(err, "playback_refused"))
@@ -1297,12 +1304,18 @@ class App:
             return {"accepted": True, "id": uid, "title": tvitem.get("title"), "playback": pb, "action": act}
         raise tools.ToolError("unknown_tool")
 
+    def _no_live_preview(self):   # sous agent_tv_gate
+        if self.canvas.preview_live():
+            raise tools.ToolError("tv_busy")
+
     def _push(self, kind, agent, payload):
         # « from » (affiché « Proposé par … » sur la TV) = agent PROPRIÉTAIRE : « muse-device » -> « muse »
-        try:
-            return self.tv_actions.push(kind, agents.canonical_agent(agent), payload)
-        except tvcontrol.QueueFull:
-            raise tools.ToolError("tv_queue_full")
+        with self.agent_tv_gate:   # vérification de l'aperçu ET mise en file, sans aperçu créé entre les deux
+            self._no_live_preview()
+            try:
+                return self.tv_actions.push(kind, agents.canonical_agent(agent), payload)
+            except tvcontrol.QueueFull:
+                raise tools.ToolError("tv_queue_full")
 
     def _pb_public(self):
         v = self.playback.view()
@@ -1348,14 +1361,14 @@ class App:
         self.canvas_sync()
         return self.canvas.post(action, body)
 
-    def _agent_actions_pending(self):
-        return any(x["state"] in ("queued", "claimed") for x in self.tv_actions.recent(tvcontrol.HISTORY_MAX))
-
     def canvas_agent_preview(self, agent, changes):
         """Point d'intégration de l'Agent Port (tâche 4) : aperçu proposé par l'identité authentifiée `agent`.
-        -> résultat de la façade agent ; canvas.CanvasError au code nu sinon. Jamais de confirmation ici."""
-        self.canvas_sync()
-        return self.canvas.preview(agent, changes, blocked=self._agent_actions_pending())
+        -> résultat de la façade agent ; canvas.CanvasError au code nu sinon. Jamais de confirmation ici.
+        Sous agent_tv_gate : aucune action d'assistant (file ENTIÈRE, en file ou réclamée) ni lancement ne s'insère
+        entre la vérification et la création de l'aperçu."""
+        with self.agent_tv_gate:
+            self.canvas_sync()
+            return self.canvas.preview(agent, changes, blocked=self.tv_actions.busy())
 
     def canvas_agent_cancel(self, agent, preview_id):
         return self.canvas.agent_cancel(agent, preview_id)

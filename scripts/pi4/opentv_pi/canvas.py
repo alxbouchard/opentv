@@ -214,11 +214,19 @@ class CanvasStore:
 
     def human_event(self, kind):
         """Touche/télécommande humaine : annule l'aperçu vivant AVANT d'agir et ouvre la fenêtre de silence."""
+        return self._human_event(kind)[0]
+
+    def _human_event(self, kind):
+        """human_event + identité de l'aperçu annulé {id, agent, hash, preset} (ou None), relevée sous le MÊME
+        verrou que l'annulation : l'audit de la TV (canvas_tv) ne l'attribue jamais à un autre aperçu."""
         self._act.check_human(kind)
         with self._mu:
+            p = self._preview
             cancelled = self._cancel_live()
             self._act.human()
-            return {"preview_cancelled": cancelled, "busy": list(self._act.reasons())}
+            gone = {"id": p["id"], "agent": p["agent"], "hash": p["hash"], "preset": preset_of(p["scene"])} \
+                if cancelled and p is not None else None
+            return {"preview_cancelled": cancelled, "busy": list(self._act.reasons())}, gone
 
     def busy_enter(self, reason):
         """Entrée dans une raison d'occupation -> jeton (32 hex) à rendre à busy_exit. Annule l'aperçu vivant."""
