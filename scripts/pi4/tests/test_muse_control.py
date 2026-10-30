@@ -1046,7 +1046,9 @@ class TestRealTvControl(unittest.TestCase):
         """Vraie page /tv 1920×1080 : fiche proposée par Muse (film hors des rangées et film des rangées), touche
         d'assistant refusée vers les Réglages et après une touche humaine, lancement par play_title (écran OpenTV
         puis lecteur), fermeture par close_player et retour sur la même fiche ; chaque action appliquée une fois,
-        même après rechargement de la page."""
+        même après rechargement de la page. Anti-répétition par l'Agent Port réel : film marqué « Déjà vu » refusé
+        `already_seen` sans mode (rien en file, aucune lecture, aucune fiche à l'écran), puis montré en
+        `mode: "rewatch"` avec sa marque « ✓ Déjà vu » toujours affichée."""
         a = tp.TestAppIntegration.app(self)
         # horloge réelle pour la file d'actions : l'âge d'une action (priorité humaine) se mesure en vrai temps
         a.tv_actions = tvcontrol.TvActions(mono=time.monotonic, log=a.log)
@@ -1109,8 +1111,21 @@ class TestRealTvControl(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr.decode()[-3000:])
         res = json.loads(p.stdout.decode().strip().splitlines()[-1])
         st = {x["s"]: x for x in res["steps"]}
-        # 1. fiche proposée, film hors des rangées : panneau « Proposé par Muse » avec sa phrase, Regarder en premier
+        # 0. anti-répétition par l'Agent Port réel : films/103 marqué « Déjà vu », mode omis (défaut « new ») ⇒
+        #    present_title et play_title refusés « already_seen », aucune action TV en file, aucune lecture ;
+        #    la vraie page /tv n'a ouvert ni fiche ni écran de chargement
+        for key in ("seen_present_default", "seen_play_default"):
+            self.assertEqual(res[key], {"ok": False, "error": "already_seen", "result": None, "actions": 0,
+                                        "playback": "idle"}, key)
+        self.assertEqual((res["seen_refused_pending"], res["seen_refused_play"]), (0, "idle"))
+        sr = st["seen_refused"]
+        self.assertEqual((sr["panel"], sr["overlay"], sr["kicker"]), (False, False, ""))
+        # 1. revoir explicitement (mode « rewatch ») : fiche proposée, film hors des rangées, panneau « Proposé par
+        #    Muse » avec sa phrase, Regarder en premier — et l'élément affiché porte toujours « ✓ Déjà vu »
         pr = st["proposed"]
+        self.assertIn("✓ Déjà vu", [b["t"] for b in pr["btns"]])
+        self.assertIn("✓ Déjà vu", pr["on"])
+        self.assertIs(a._fy_lookup("films/103")[1]["marks"]["seen"], True)   # rewatch ne démarque jamais
         # identité liée « muse-device » : libellé du PROPRIÉTAIRE, exactement « Proposé par Muse »
         self.assertEqual((pr["panel"], pr["kicker"], pr["ptitle"]), (True, "Proposé par Muse", "Rire Encore"))
         self.assertTrue(pr["pmeta"].startswith("« Une comédie pour finir la semaine. »"), pr["pmeta"])

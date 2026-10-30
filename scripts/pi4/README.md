@@ -607,9 +607,18 @@ Muse » et la phrase de l'assistant ; après une lecture, Retour revient sur cet
 `play_title` refusent `already_seen` un film qu'Alex a explicitement marqué « Déjà vu » (marques relues dans le
 profil local à l'instant, pas dans la sélection TV figée), sauf `mode: "rewatch"` — à n'utiliser que si Alex demande
 explicitement de revoir ce titre ; `rewatch` suit ensuite toutes les portes habituelles. Aucun outil ne démarque ni ne
-marque « vu » implicitement : proposer, lancer ou regarder longtemps un film n'est jamais « vu ». Les priorités
-(configuration, « Gérer les assistants », lecture en cours, retour) passent avant ce refus. Limite : si la base
-« Pour toi » est illisible, seules les marques de la sélection TV servent de repli.
+marque « vu » implicitement : proposer, lancer ou regarder longtemps un film n'est jamais « vu ». Ordre exact des
+vérifications (pas d'ordre total au-delà) : configuration de la TV (`tv_setup_active`), « Gérer les assistants » et
+connexion/déconnexion de Muse en cours (`tv_busy`), puis, pour `present_title` seulement, fin de lecture pas encore
+acquittée (`player_returning`) sont vérifiés **avant** ; vient ensuite la résolution du titre (`unknown_id`) ; puis un
+film connu comme vu est refusé `already_seen` **avant** toute action TV et avant `Playback.start`. Les portes vérifiées
+plus loin ne passent donc **pas** avant ce refus : un film vu proposé pendant une lecture répond `already_seen` (pas
+`player_active`), et `play_title` d'un film vu répond `already_seen` avant `player_busy`, `playback_unavailable` ou
+`player_returning` (portes de `Playback.start`). En mode `rewatch`, toutes ces portes habituelles s'appliquent.
+Limite : si la base « Pour toi » est illisible, seules les marques de la sélection TV figée servent de repli. Une marque
+« Déjà vu » qu'elle porte (même périmée) est conservée et refusée `already_seen` ; un « Déjà vu » donné après le gel de
+la sélection (par exemple dit à Muse) n'y figure pas : l'état est alors réellement inconnu et le garde ne peut pas le
+refuser. `catalogue_list` ne prétend jamais « pas vu » dans ce cas (`marks: null`, `store: unavailable`).
 
 **Identité liée** : le pont Muse s'authentifie comme `muse-device`, mais tout ce que voit Alex porte le nom de
 l'agent propriétaire (`agents.canonical_agent` : « Proposé par Muse », « Message de Muse », jamais l'identifiant

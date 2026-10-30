@@ -170,6 +170,41 @@ class TestSeenGuard(unittest.TestCase):
         self.refused("present_title", "player_active", id="films/104", mode="rewatch")
         self.refused("play_title", "player_busy", id="films/104", mode="rewatch")
 
+    def test_exact_documented_check_order_around_already_seen(self):
+        """README « Anti-répétition » : avant = configuration, « Gérer les assistants », Muse occupée, et pour
+        present_title seulement player_returning ; puis unknown_id ; puis already_seen AVANT player_active et toutes
+        les portes de Playback.start (player_busy, playback_unavailable, player_returning de play_title)."""
+        feedback(self.fy, "films/106", "seen")
+        with self.a.lock:
+            self.a.setup_mode = True
+        for name in ("present_title", "play_title"):
+            self.refused(name, "tv_setup_active", id="films/106")
+        with self.a.lock:
+            self.a.setup_mode = False
+        with mock.patch.object(self.a.muse, "busy", lambda: True):
+            for name in ("present_title", "play_title"):
+                self.refused(name, "tv_busy", id="films/106")
+        # lecteur actif : already_seen passe AVANT player_active / player_busy
+        self.ctl("play_title", id="films/101")
+        tp.wait_state(self.a.playback, ("playing",))
+        self.refused("present_title", "already_seen", id="films/106")
+        self.refused("play_title", "already_seen", id="films/106")
+        self.refused("present_title", "player_active", id="films/106", mode="rewatch")
+        self.refused("play_title", "player_busy", id="films/106", mode="rewatch")
+        # fin de lecture non acquittée : present_title -> player_returning AVANT already_seen ; play_title -> already_seen
+        self.ctl("close_player")
+        v = tp.wait_state(self.a.playback, ("closed",))
+        self.refused("present_title", "player_returning", id="films/106")
+        self.refused("play_title", "already_seen", id="films/106")
+        self.refused("play_title", "player_returning", id="films/106", mode="rewatch")
+        self.assertTrue(self.a.playback.ack(v["seq"]))
+        # production retirée : play_title d'un film vu -> already_seen avant playback_unavailable
+        with mock.patch.object(self.a.playback, "gate", lambda: "missing"):
+            self.a.playback.refresh(force=True)
+            self.refused("play_title", "already_seen", id="films/106")
+            self.refused("play_title", "playback_unavailable", id="films/106", mode="rewatch")
+        self.a.playback.refresh(force=True)
+
     def test_no_seen_is_ever_inferred_from_presenting_playing_or_duration(self):
         self.ctl("present_title", id="films/101")
         self.ctl("play_title", id="films/101")
@@ -223,6 +258,86 @@ class TestSeenGuard(unittest.TestCase):
         r = musebridge.dispatch(port, "opentv.present_title", {"id": "films/106", "mode": "rewatch"})
         self.assertTrue(r["ok"], r)
         no_url(self, r)
+
+
+# ------------------------------------------------------------------------------------------- repli de tv_item
+class TestTvItemFallbackWhenProfileUnreadable(unittest.TestCase):
+    """ForYou.tv_item quand le profil local est illisible (base verrouillée/corrompue : tv.call("profile") -> None) :
+    seule la sélection TV FIGÉE sert de repli. Une marque « Déjà vu » qu'elle contient (même périmée) est conservée et
+    le garde refuse toujours `already_seen` ; si ni le profil ni la sélection figée ne savent que le film est vu,
+    l'état est réellement inconnu : catalogue_list ne prétend jamais « pas vu » (marks null, store unavailable) et le
+    garde de l'App ne peut pas le savoir (limite documentée dans le README)."""
+
+    def setUp(self):
+        self.a = tp.TestAppIntegration.app(self)
+        self.fy = self.a.foryou
+
+    def ctl(self, name, **a):
+        return self.a.agent_control("muse-device", name, tools.validate_args(name, a))
+
+    def refused(self, name, code, **a):
+        with self.assertRaises(tools.ToolError) as e:
+            self.ctl(name, **a)
+        self.assertEqual(str(e.exception), code, (name, a))
+
+    def profile_down(self):
+        """Seule la lecture du profil échoue (comme Bridge.call en panne) ; toute autre opération est réelle."""
+        orig = self.fy.tv.call
+        p = mock.patch.object(self.fy.tv, "call", side_effect=lambda fn, *a, **k:
+                              None if fn == "profile" else orig(fn, *a, **k))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def frozen(self):
+        with self.a.fy_lock:
+            self.a._fy_rebuild()
+            return self.a.fy_session
+
+    def test_stale_frozen_seen_mark_is_preserved_and_still_refused(self):
+        sess = self.frozen()
+        for uid in ("films/106", "films/103"):                       # Alex appuie « Déjà vu » sur la fiche TV
+            self.assertTrue(self.a.tv_feedback(uid, "seen")[0]["seen"], uid)
+            self.assertIs(sess["nav"].marks[uid]["seen"], True, uid)  # marque inscrite dans la sélection figée
+        # puis Muse retire « vu » pour films/103 dans le profil : la marque figée « vu » de la TV devient PÉRIMÉE
+        feedback(self.fy, "films/103", "unseen")
+        self.assertFalse(marks(self.fy, "films/103")["seen"])
+        self.assertIs(sess["nav"].marks["films/103"]["seen"], True)
+        self.profile_down()
+        self.assertIsNone(self.fy.tv.call("profile"))
+        for uid in ("films/106", "films/103"):
+            pub = self.fy.tv_item(sess, uid)
+            self.assertIs(pub["marks"]["seen"], True, uid)              # repli : la marque figée est conservée
+            self.assertIs(self.a._fy_lookup(uid)[1]["marks"]["seen"], True, uid)
+        self.assertIs(self.a.fy_session, sess)                           # aucune sélection reconstruite entre-temps
+        n = len(self.a.tv_actions.items)
+        with mock.patch.object(self.a.playback, "start", wraps=self.a.playback.start) as start:
+            for uid in ("films/106", "films/103"):
+                self.refused("present_title", "already_seen", id=uid)
+                self.refused("play_title", "already_seen", id=uid)
+                self.refused("play_title", "already_seen", id=uid, mode="new")
+            start.assert_not_called()
+        self.assertEqual(len(self.a.tv_actions.items), n)
+        self.assertEqual(self.a.tv_state()["actions"]["pending"], [])
+        self.assertEqual(self.a.playback.view()["state"], "idle")
+        # revoir explicitement reste possible, et la fiche montre toujours « Déjà vu »
+        r = self.ctl("present_title", id="films/106", mode="rewatch")
+        self.assertEqual((r["accepted"], r["action"]["state"]), (True, "queued"))
+        self.assertIs(self.a.tv_state()["actions"]["pending"][0]["item"]["marks"]["seen"], True)
+
+    def test_unknown_when_neither_profile_nor_frozen_selection_knows(self):
+        sess = self.frozen()                                             # sélection figée AVANT l'avis
+        feedback(self.fy, "films/104", "seen")                           # « déjà vu » dit à Muse ensuite
+        self.assertIs((sess["nav"].marks.get("films/104") or {}).get("seen", False), False)   # la TV l'ignore
+        self.assertTrue(self.fy.tv_item(sess, "films/104")["marks"]["seen"])   # profil lisible : connu
+        self.profile_down()
+        # catalogue_list : jamais un faux « pas vu », l'état est déclaré indisponible
+        page = self.fy.catalogue_page(50, 0)
+        self.assertEqual(page["store"], "unavailable")
+        self.assertTrue(page["items"])
+        self.assertTrue(all(it["marks"] is None for it in page["items"]))
+        # tv_item n'a ni profil ni marque figée : le garde de l'App ne PEUT pas savoir (limite du README) ;
+        # aucune marque « vu » n'est inventée non plus
+        self.assertIsNot(self.fy.tv_item(sess, "films/104")["marks"]["seen"], True)
 
 
 # ------------------------------------------------------------------------------------------- catalogue_list

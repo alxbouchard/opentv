@@ -43,11 +43,14 @@ async function finalState(seq, ms) {   // état autoritaire d'une action TV (sta
         const f = document.querySelector(".card.focused .t");
         const btns = Array.prototype.map.call(document.querySelectorAll("#pbtns button"), (b) => ({
           t: b.textContent, focused: b.className.indexOf("focused") >= 0 }));
+        // marques affichées sur la fiche (boutons « ✓ … » de classe « on ») : « ✓ Déjà vu » pour un film vu
+        const on = Array.prototype.filter.call(document.querySelectorAll("#pbtns button"), (b) =>
+          (" " + b.className + " ").indexOf(" on ") >= 0).map((b) => b.textContent);
         const ov = q("playov");
         const bn = q("banner");
         return { banner: bn.hidden ? null : bn.textContent, bodyText: document.body.innerText,
                  focus: f ? f.textContent : null, panel: !q("panel").hidden, ptitle: q("ptitle").textContent,
-                 kicker: q("pkicker").textContent, pmeta: q("pmeta").textContent, btns: btns,
+                 kicker: q("pkicker").textContent, pmeta: q("pmeta").textContent, btns: btns, on: on,
                  overlay: !ov.hidden, ovTitle: q("playtitle").textContent, ovMsg: q("playmsg").textContent,
                  gear: q("gear").className, url: location.pathname, iframes: document.querySelectorAll("iframe").length,
                  html: document.documentElement.outerHTML };
@@ -76,8 +79,24 @@ async function finalState(seq, ms) {   // état autoritaire d'une action TV (sta
     await page.goto(cfg.tv);
     await page.waitForSelector(".card.focused", { timeout: 10000 });
 
-    // 1. proposition d'un film hors des rangées (marqué « Déjà vu ») : fiche « Proposé par Muse » par-dessus
+    // 0. anti-répétition : films/103 est marqué « Déjà vu » ; sans mode (défaut « new ») présenter ET lancer sont
+    //    refusés « already_seen » par l'Agent Port réel, sans aucune action TV mise en file ni lecture démarrée,
+    //    et la vraie page /tv ne montre aucune fiche ni écran de chargement (au-delà d'un cycle de sondage)
+    const refusal = (x) => ({ ok: x.ok, error: x.error || null, result: x.result === undefined ? null : x.result,
+                              actions: (x.status.actions || []).length, playback: x.status.playback.state });
     let r = await agent("present_title", { id: "films/103", text: "Une comédie pour finir la semaine." });
+    out.seen_present_default = refusal(r);
+    r = await agent("play_title", { id: "films/103" });
+    out.seen_play_default = refusal(r);
+    await sleep(2600);
+    const stRef = await api("/api/tv/state");
+    out.seen_refused_pending = (stRef.actions && stRef.actions.pending || []).length;
+    out.seen_refused_play = (await api("/api/tv/play")).state;
+    await snap("seen_refused", true);
+
+    // 1. Alex demande explicitement de REVOIR ce film (mode « rewatch ») : fiche « Proposé par Muse » par-dessus,
+    //    film hors des rangées, et la fiche affichée garde sa marque « ✓ Déjà vu » (rien n'est démarqué)
+    r = await agent("present_title", { id: "films/103", text: "Une comédie pour finir la semaine.", mode: "rewatch" });
     if (!r.ok) { throw new Error("present: " + JSON.stringify(r)); }
     await waitPanel("Rire Encore");
     await sleep(150);
