@@ -4,10 +4,18 @@ Une scène est une DONNÉE validée, jamais du code : six énumérations fermée
 liste fermée. Aucune clé inconnue, URL, CSS, balise, chemin ou nom de ressource arbitraire n'est accepté.
 
 Cycle de vie : aperçu temporaire (horloge monotone, retour automatique) → confirmation explicite (`confirm=True`
-littéral) → publication atomique (fichier temporaire du même dossier, fsync, rename, fsync du dossier, relecture) →
+littéral, refusée tant que l'interface est occupée, échéance revérifiée sous le verrou) → publication atomique (fichier temporaire du même dossier, fsync, rename, fsync du dossier, relecture) →
 historique des cinq dernières publications → retour arrière exact ou défaut immuable d'OpenTV. Un fichier corrompu
 ou dangereux n'est jamais réécrit implicitement : la TV affiche le défaut et seule une réinitialisation confirmée
 peut le remplacer.
+
+Annuler-sur-humain/occupé (`ui_event`) : une touche de navigation et toute transition panneau, lecture, chargement,
+configuration ou hors-ligne annulent l'aperçu vivant AVANT la transition ; il ne peut donc jamais expirer (et
+reconstruire les rangées) sous un panneau ou une lecture. Une touche ouvre une fenêtre de silence monotone de
+NAV_QUIET_S ; les autres états durent jusqu'à `ui_event("idle")`.
+
+Chemin agent : `preview` puis `confirm(preview_id, True)` seulement. `rollback` et `reset_default` sont réservés au
+propriétaire (Réglages) ; aucune méthode ne publie sans aperçu + confirmation littérale.
 
 Bibliothèque standard seulement ; horloges murale et monotone injectables pour les tests.
 """
@@ -20,6 +28,7 @@ import hmac
 import json
 import math
 import os
+import re
 import secrets
 import stat
 import time
@@ -42,6 +51,14 @@ REQUIRED_ROW = "tonight"            # la rangée principale ne peut jamais dispa
 SCENE_KEYS = ("schema_version",) + tuple(ENUMS) + ("row_order",)
 PATCH_KEYS = tuple(k for k in SCENE_KEYS if k != "schema_version")
 UI_STATES = ("idle", "navigating", "panel", "setup", "playback", "offline")
+# événements d'interface typés → état occupé (« key » : fenêtre de silence monotone ; « idle » : fin de l'état)
+UI_EVENTS = {"key": "navigating", "panel": "panel", "playback": "playback", "loading": "playback",
+             "setup": "setup", "offline": "offline", "idle": "idle"}
+NAV_QUIET_S = 1.5
+MAX_AT = 253402300799                 # 9999-12-31T23:59:59Z : horodatage mural borné sans conversion flottante
+MAX_REVISION = 2 ** 53 - 1            # entier sûr partagé avec le JavaScript
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_HEX32 = re.compile(r"[0-9a-f]{32}")
 STORE_KEYS = ("history", "revision", "schema_version", "state_hash")
 ENTRY_KEYS = ("at", "hash", "revision", "scene")
 
@@ -123,6 +140,20 @@ def apply_patch(base, patch):
     return validate_scene(d)
 
 
+def _is_hex(value, rx):
+    """Chaîne hexadécimale minuscule de longueur exacte (ASCII seulement), vérifiée AVANT compare_digest."""
+    return type(value) is str and rx.fullmatch(value) is not None
+
+
+def _valid_at(at):
+    """Horodatage mural borné : entier comparé sans conversion (pas d'OverflowError), flottant fini."""
+    if type(at) is int:
+        return 0 <= at <= MAX_AT
+    if type(at) is float:
+        return math.isfinite(at) and 0.0 <= at <= MAX_AT
+    return False
+
+
 def _canon(obj):
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
 
@@ -185,25 +216,38 @@ def _read_store_bytes(dirfd, name):
 
 
 def _parse_store(data):
-    """Document persistant → (révision, historique) ; toute anomalie ⇒ _Corrupt."""
+    """Document persistant → (révision, historique) ; toute anomalie ⇒ _Corrupt (jamais d'exception brute)."""
+    try:
+        return _parse_store_inner(data)
+    except _Corrupt:
+        raise
+    except SceneError:
+        raise _Corrupt("invalid_scene")
+    except (TypeError, ValueError, OverflowError, RecursionError, MemoryError):
+        raise _Corrupt("invalid_shape")
+
+
+def _parse_store_inner(data):
     try:
         doc = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError):
         raise _Corrupt("invalid_json")
     if type(doc) is not dict or tuple(sorted(doc)) != STORE_KEYS:
         raise _Corrupt("invalid_shape")
+    if not _is_hex(doc["state_hash"], _HEX64):
+        raise _Corrupt("invalid_shape")
     body = {k: v for k, v in doc.items() if k != "state_hash"}
     try:
         want = hashlib.sha256(_canon(body).encode("ascii")).hexdigest()
     except (ValueError, TypeError, RecursionError):
         raise _Corrupt("invalid_shape")
-    if type(doc["state_hash"]) is not str or not hmac.compare_digest(doc["state_hash"], want):
+    if not hmac.compare_digest(doc["state_hash"], want):
         raise _Corrupt("hash_mismatch")
-    if doc["schema_version"] != SCHEMA_VERSION or type(doc["schema_version"]) is not int:
+    if type(doc["schema_version"]) is not int or doc["schema_version"] != SCHEMA_VERSION:
         raise _Corrupt("invalid_shape")
     rev = doc["revision"]
     hist = doc["history"]
-    if type(rev) is not int or rev < 0 or type(hist) is not list or len(hist) > MAX_HISTORY:
+    if type(rev) is not int or not 0 <= rev <= MAX_REVISION or type(hist) is not list or len(hist) > MAX_HISTORY:
         raise _Corrupt("invalid_shape")
     out, last = [], 0
     for e in hist:
@@ -212,13 +256,15 @@ def _parse_store(data):
         r, at = e["revision"], e["at"]
         if type(r) is not int or not last < r <= rev:
             raise _Corrupt("invalid_shape")
-        if type(at) not in (int, float) or not math.isfinite(at):
+        if not _valid_at(at):
+            raise _Corrupt("invalid_shape")
+        if not _is_hex(e["hash"], _HEX64):
             raise _Corrupt("invalid_shape")
         try:
             sc = validate_scene(e["scene"])
         except SceneError:
             raise _Corrupt("invalid_scene")
-        if type(e["hash"]) is not str or not hmac.compare_digest(e["hash"], scene_hash(sc)):
+        if not hmac.compare_digest(e["hash"], scene_hash(sc)):
             raise _Corrupt("hash_mismatch")
         out.append({"revision": r, "hash": e["hash"], "scene": sc, "at": at})
         last = r
@@ -246,6 +292,8 @@ class CanvasStore:
         self._revision, self._history = 0, []
         self._corrupt = None
         self._preview = None
+        self._ui = "idle"                 # état occupé durable (panneau, lecture, configuration, hors-ligne)
+        self._last_key = None             # instant monotone de la dernière touche humaine
         self._reload()
 
     # ------------------------------------------------------------------ état
@@ -326,12 +374,22 @@ class CanvasStore:
         }
 
     # ------------------------------------------------------------------ garde-fous
-    @staticmethod
-    def _check_ui(ui):
+    def _busy(self):
+        """État occupé suivi par le magasin : panneau/lecture/… jusqu'à « idle », touche ⇒ silence monotone."""
+        if self._ui != "idle":
+            return self._ui
+        if self._last_key is not None and self._mono() - self._last_key < NAV_QUIET_S:
+            return "navigating"
+        return None
+
+    def _check_ui(self, ui):
         if type(ui) is not str or ui not in UI_STATES:
             raise StoreError("invalid_ui")
         if ui != "idle":
             raise StoreError("ui_busy", ui)       # jamais pendant navigation, panneau, configuration ou lecture
+        busy = self._busy()
+        if busy:
+            raise StoreError("ui_busy", busy)
 
     @staticmethod
     def _check_confirm(confirm):
@@ -356,12 +414,27 @@ class CanvasStore:
     def cancel_preview(self):
         self._preview = None
 
+    def ui_event(self, event):
+        """Événement d'interface typé (UI_EVENTS). Toute touche et toute transition occupée annulent l'aperçu vivant
+        AVANT la transition (annuler-sur-humain/occupé) ; « idle » termine l'état occupé sans rien annuler."""
+        if type(event) is not str or event not in UI_EVENTS:
+            raise StoreError("invalid_event")
+        cancelled = False
+        if event != "idle":
+            cancelled = self._live_preview() is not None
+            self._preview = None
+        if event == "key":
+            self._last_key = self._mono()
+        else:
+            self._ui = UI_EVENTS[event]
+        return {"ui": self._ui, "preview_cancelled": cancelled}
+
     def confirm(self, preview_id, confirm=False, ui="idle"):
         self._check_confirm(confirm)
         self._check_ui(ui)
         self._check_sane()
         p = self._preview
-        if not p or type(preview_id) is not str or not hmac.compare_digest(preview_id, p["id"]):
+        if not p or not _is_hex(preview_id, _HEX32) or not hmac.compare_digest(preview_id, p["id"]):
             raise StoreError("unknown_preview")
         if self._mono() >= p["expires"]:
             self._preview = None
@@ -369,6 +442,11 @@ class CanvasStore:
         with self._locked() as fd:
             self._reload(fd)
             self._check_sane()
+            if self._preview is not p:              # annulé pendant l'attente (événement, autre opération)
+                raise StoreError("unknown_preview")
+            if self._mono() >= p["expires"]:        # échéance revérifiée après verrou + relecture
+                self._preview = None
+                raise StoreError("preview_expired")
             if self._revision != p["base"]:
                 self._preview = None
                 raise StoreError("stale_preview")
@@ -380,7 +458,8 @@ class CanvasStore:
         return {"revision": rev, "hash": p["hash"]}
 
     def rollback(self, confirm=False):
-        """Annule exactement la dernière publication (jusqu'à cinq fois), puis le défaut immuable."""
+        """PROPRIÉTAIRE SEULEMENT (Réglages) : annule exactement la dernière publication (jusqu'à cinq fois), puis le
+        défaut immuable."""
         self._check_confirm(confirm)
         self._check_sane()
         with self._locked() as fd:
@@ -396,7 +475,8 @@ class CanvasStore:
                 "hash": scene_hash(self.current())}
 
     def reset_default(self, confirm=False):
-        """Seule opération permise sur un magasin corrompu : remplace le fichier par le défaut d'OpenTV."""
+        """PROPRIÉTAIRE SEULEMENT : seule opération permise sur un magasin corrompu ; remplace le fichier par le défaut
+        d'OpenTV."""
         self._check_confirm(confirm)
         with self._locked() as fd:
             self._reload(fd)

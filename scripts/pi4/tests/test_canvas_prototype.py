@@ -307,6 +307,227 @@ class TestStoreLifecycle(unittest.TestCase):
         with self.assertRaises(cm.StoreError):
             s.confirm(p["preview_id"], confirm=True)
 
+    def test_preview_expiry_rechecked_under_lock_before_publishing(self):
+        """L'aperçu peut expirer pendant l'attente du verrou / la relecture : jamais publié après son échéance."""
+        s, clk, d = store(self, preview_ttl_s=30)
+        p = s.preview({"accent": "ember"})
+        clk.m += 29.0
+        real = s._reload
+
+        def slow_reload(dirfd=None):
+            clk.m += 2.0                                                 # verrou + relecture lents
+            return real(dirfd)
+        with mock.patch.object(s, "_reload", slow_reload):
+            with self.assertRaises(cm.StoreError) as e:
+                s.confirm(p["preview_id"], confirm=True)
+        self.assertEqual(e.exception.code, "preview_expired")
+        self.assertFalse(os.path.exists(os.path.join(d, "scene.json")))   # rien publié
+        self.assertEqual(s.status()["revision"], 0)
+        self.assertIsNone(s.status()["preview"])
+
+
+# --------------------------------------------------------------------------- annulation par l'humain / interface occupée
+class TestHumanLifecycle(unittest.TestCase):
+    """Sémantique choisie : annuler-sur-humain/occupé. Toute touche de navigation et toute transition panneau,
+    lecture, chargement, configuration ou hors-ligne annule l'aperçu vivant AVANT la transition ; son expiration ne
+    peut donc jamais reconstruire les rangées sous un panneau ou une lecture ; la confirmation est refusée tant que
+    l'interface est occupée."""
+
+    BUSY = ("panel", "playback", "loading", "setup", "offline")
+
+    def test_every_human_or_busy_event_cancels_live_preview(self):
+        for ev in ("key",) + self.BUSY:
+            s, clk, _ = store(self)
+            p = s.preview({"accent": "ember"})
+            r = s.ui_event(ev)
+            self.assertEqual(r["preview_cancelled"], True, ev)
+            self.assertIsNone(s.status()["preview"], ev)
+            self.assertEqual(s.visible(), cm.DEFAULT_SCENE, ev)
+            with self.assertRaises(cm.StoreError) as e:                  # occupé ⇒ refus, avant tout identifiant
+                s.confirm(p["preview_id"], confirm=True)
+            self.assertEqual(e.exception.code, "ui_busy", ev)
+            with self.assertRaises(cm.StoreError) as e:
+                s.preview({"accent": "jade"})
+            self.assertEqual(e.exception.code, "ui_busy", ev)
+            if ev == "key":
+                clk.m += cm.NAV_QUIET_S + 0.01
+            else:
+                self.assertEqual(s.ui_event("idle")["preview_cancelled"], False)
+            with self.assertRaises(cm.StoreError) as e:                  # l'aperçu annulé ne revient jamais
+                s.confirm(p["preview_id"], confirm=True)
+            self.assertEqual(e.exception.code, "unknown_preview", ev)
+            self.assertEqual(s.status()["revision"], 0)
+
+    def test_event_without_preview_reports_nothing_cancelled(self):
+        s, _, _ = store(self)
+        self.assertEqual(s.ui_event("panel"), {"ui": "panel", "preview_cancelled": False})
+        self.assertEqual(s.ui_event("idle"), {"ui": "idle", "preview_cancelled": False})
+
+    def test_invalid_events_fail_closed_and_keep_preview(self):
+        s, _, _ = store(self)
+        s.preview({"accent": "ember"})
+        for bad in ("nope", "Panel", "idle ", "", None, 1, b"panel", ["key"]):
+            with self.assertRaises(cm.StoreError) as e:
+                s.ui_event(bad)
+            self.assertEqual(e.exception.code, "invalid_event", bad)
+        self.assertEqual(s.visible().accent, "ember")
+
+    def test_key_quiet_window_is_monotonic(self):
+        s, clk, _ = store(self)
+        s.ui_event("key")
+        clk.w -= 86400                                                   # l'heure murale recule d'un jour
+        with self.assertRaises(cm.StoreError) as e:
+            s.preview({"accent": "ember"})
+        self.assertEqual((e.exception.code, str(e.exception)), ("ui_busy", "ui_busy: navigating"))
+        clk.w += 2 * 86400                                               # … puis avance : ne raccourcit rien
+        with self.assertRaises(cm.StoreError):
+            s.preview({"accent": "ember"})
+        clk.m += cm.NAV_QUIET_S + 0.01
+        self.assertEqual(s.preview({"accent": "ember"})["scene"]["accent"], "ember")   # jamais verrouillé
+
+    def _row_preview(self):
+        s, clk, d = store(self, preview_ttl_s=30)
+        p = s.preview({"row_order": ["top", "tonight", "new"]})
+        self.assertEqual(s.visible().row_order, ("top", "tonight", "new"))
+        return s, clk, p
+
+    def test_row_order_preview_then_enter_opens_panel_on_published_rows(self):
+        s, clk, p = self._row_preview()
+        self.assertTrue(s.ui_event("key")["preview_cancelled"])          # OK : touche d'abord
+        self.assertFalse(s.ui_event("panel")["preview_cancelled"])       # puis la fiche
+        shown = s.visible()
+        self.assertEqual(shown.row_order, cm.DEFAULT_SCENE.row_order)
+        clk.m += 60                                                      # échéance de l'ancien aperçu dépassée
+        self.assertIs(s.visible(), shown)                                # aucune reconstruction sous la fiche
+        with self.assertRaises(cm.StoreError) as e:
+            s.confirm(p["preview_id"], confirm=True)
+        self.assertEqual(e.exception.code, "ui_busy")
+
+    def test_row_order_preview_then_playback(self):
+        s, clk, p = self._row_preview()
+        self.assertTrue(s.ui_event("playback")["preview_cancelled"])
+        shown = s.visible()
+        self.assertEqual(shown, cm.DEFAULT_SCENE)
+        clk.m += 60
+        self.assertIs(s.visible(), shown)
+        s.ui_event("idle")
+        with self.assertRaises(cm.StoreError) as e:
+            s.confirm(p["preview_id"], confirm=True)
+        self.assertEqual(e.exception.code, "unknown_preview")
+
+    def test_confirm_refuses_busy_even_with_explicit_idle_argument(self):
+        s, _, _ = store(self)
+        p = s.preview({"accent": "ember"})
+        s.ui_event("setup")
+        with self.assertRaises(cm.StoreError) as e:
+            s.confirm(p["preview_id"], confirm=True, ui="idle")
+        self.assertEqual(e.exception.code, "ui_busy")
+
+
+# --------------------------------------------------------------------------- entrées hostiles : toujours fail-closed
+class TestFailClosedInputs(unittest.TestCase):
+    def test_malformed_preview_ids_are_unknown_preview(self):
+        s, _, _ = store(self)
+        with self.assertRaises(cm.StoreError) as e:                      # aucun aperçu
+            s.confirm("é", True)
+        self.assertEqual(e.exception.code, "unknown_preview")
+        p = s.preview({"accent": "ember"})
+        pid = p["preview_id"]
+        self.assertRegex(pid, r"\A[0-9a-f]{32}\Z")
+        for bad in ("é", "é" * 32, pid.upper(), pid + "0", pid[:-1], " " + pid[1:], "", "０" * 32, "\u0663" * 32,
+                    pid[:-1] + "\n", pid.encode(), 123, None, [pid]):
+            with self.assertRaises(cm.StoreError, msg=repr(bad)) as e:
+                s.confirm(bad, True)
+            self.assertEqual(e.exception.code, "unknown_preview", repr(bad))
+        self.assertEqual(s.visible().accent, "ember")                     # l'aperçu valide survit aux essais
+        self.assertEqual(s.confirm(pid, True)["revision"], 1)
+
+    def good_doc(self):
+        s, clk, d = store(self)
+        s.confirm(s.preview({"accent": "ember"})["preview_id"], confirm=True)
+        path = os.path.join(d, "scene.json")
+        return json.loads(rd(path)), clk, d, path
+
+    @staticmethod
+    def rehash(doc):
+        body = {k: v for k, v in doc.items() if k != "state_hash"}
+        doc["state_hash"] = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"),
+                                                      ensure_ascii=True).encode()).hexdigest()
+        return doc
+
+    def assertCorruptExactly(self, d, clk, reason, label):
+        try:
+            s = cm.CanvasStore(os.path.join(d, "scene.json"), wall=clk.wall, mono=clk.mono)
+        except Exception as e:                                          # jamais d'exception brute au démarrage
+            self.fail("%s: %r" % (label, e))
+        st = s.status()
+        self.assertEqual((st["state"], st["reason"]), ("corrupt", reason), label)
+        self.assertEqual(s.visible(), cm.DEFAULT_SCENE, label)
+
+    def test_exact_corrupt_files(self):
+        good, clk, d, path = self.good_doc()
+        ok_hash = good["history"][0]["hash"]
+        cases = [
+            # (libellé, mutation, recalcul du hachage global, raison exacte)
+            ("at énorme (OverflowError)", lambda x: x["history"][0].__setitem__("at", 10 ** 400), True, "invalid_shape"),
+            ("at négatif", lambda x: x["history"][0].__setitem__("at", -1), True, "invalid_shape"),
+            ("at au-delà de l'an 9999", lambda x: x["history"][0].__setitem__("at", 10 ** 12), True, "invalid_shape"),
+            ("at booléen", lambda x: x["history"][0].__setitem__("at", True), True, "invalid_shape"),
+            ("at texte", lambda x: x["history"][0].__setitem__("at", "1800000000"), True, "invalid_shape"),
+            ("révision énorme", lambda x: x.__setitem__("revision", 10 ** 400), True, "invalid_shape"),
+            ("révision > 2^53", lambda x: x.__setitem__("revision", 2 ** 53), True, "invalid_shape"),
+            ("hachage d'entrée non ASCII", lambda x: x["history"][0].__setitem__("hash", "é" * 64), True,
+             "invalid_shape"),
+            ("hachage d'entrée en majuscules", lambda x: x["history"][0].__setitem__("hash", ok_hash.upper()), True,
+             "invalid_shape"),
+            ("hachage d'entrée court", lambda x: x["history"][0].__setitem__("hash", ok_hash[:-1]), True,
+             "invalid_shape"),
+            ("hachage d'entrée bien formé mais faux", lambda x: x["history"][0].__setitem__("hash", "0" * 64), True,
+             "hash_mismatch"),
+            ("hachage global non ASCII", lambda x: x.__setitem__("state_hash", "é" * 64), False, "invalid_shape"),
+            ("hachage global en majuscules", lambda x: x.__setitem__("state_hash", x["state_hash"].upper()), False,
+             "invalid_shape"),
+            ("hachage global de 63 car.", lambda x: x.__setitem__("state_hash", x["state_hash"][:63]), False,
+             "invalid_shape"),
+            ("hachage global entier", lambda x: x.__setitem__("state_hash", 7), False, "invalid_shape"),
+            ("hachage global bien formé mais faux", lambda x: x.__setitem__("state_hash", "f" * 64), False,
+             "hash_mismatch"),
+            ("schema_version texte", lambda x: x.__setitem__("schema_version", "1"), True, "invalid_shape"),
+        ]
+        for label, mutate, rehash, reason in cases:
+            doc = json.loads(json.dumps(good))
+            mutate(doc)
+            if rehash:
+                self.rehash(doc)
+            with open(path, "w") as f:
+                f.write(json.dumps(doc, sort_keys=True, separators=(",", ":")))
+            self.assertCorruptExactly(d, clk, reason, label)
+        # NaN / Infinity littéraux (json.loads les accepte) : forme invalide, jamais une exception
+        for lit in ("NaN", "Infinity", "-Infinity", "1e400"):
+            raw = json.dumps(good, sort_keys=True, separators=(",", ":"))
+            raw = re.sub(r'"at":[^,}]+', '"at":' + lit, raw)
+            with open(path, "w") as f:
+                f.write(raw)
+            self.assertCorruptExactly(d, clk, "invalid_shape", lit)
+
+    def test_bounded_at_and_hex_helpers_never_raise(self):
+        for at in (10 ** 400, -10 ** 400, 2 ** 1100, float("nan"), float("inf"), -1, -0.5, cm.MAX_AT + 1, True, None,
+                   "1", [1]):
+            self.assertIs(cm._valid_at(at), False, repr(at)[:40])           # aucune conversion flottante
+        for at in (0, 1_800_000_000, 1_800_000_000.25, cm.MAX_AT):
+            self.assertIs(cm._valid_at(at), True, at)
+        good = "a" * 64
+        self.assertTrue(cm._is_hex(good, cm._HEX64))
+        for bad in ("A" * 64, "é" * 64, "a" * 63, "a" * 65, good + "\n", "g" * 64, "\u0663" * 64, b"a" * 64, None, 64):
+            self.assertFalse(cm._is_hex(bad, cm._HEX64), repr(bad)[:30])
+
+    def test_type_value_overflow_errors_while_parsing_become_corrupt(self):
+        _, clk, d, path = self.good_doc()
+        for exc in (TypeError("x"), ValueError("x"), OverflowError("x")):
+            with mock.patch.object(cm, "validate_scene", side_effect=exc):
+                self.assertCorruptExactly(d, clk, "invalid_shape", repr(exc))
+        self.assertEqual(cm.CanvasStore(path, wall=clk.wall, mono=clk.mono).current().accent, "ember")
+
 
 # --------------------------------------------------------------------------- persistance fail-closed
 class TestPersistence(unittest.TestCase):
@@ -505,6 +726,25 @@ class TestLabStatic(unittest.TestCase):
                            capture_output=True, timeout=60)
         self.assertEqual(p.returncode, 0, p.stderr.decode())
 
+    def test_deadlines_use_monotonic_time_only(self):
+        """Échéances d'aperçu et fenêtre de silence : performance.now() (ou repli monotone), jamais Date.now."""
+        js = self.read("canvas.js")
+        code = re.sub(r"/\*.*?\*/|//[^\n]*", "", js, flags=re.S)
+        self.assertEqual(len(re.findall(r"Date\.now\s*\(", code)), 2, "Date.now : horloge murale + repli seulement")
+        self.assertIn("function wallNow() { return Date.now(); }", code)
+        self.assertIn('typeof window.performance.now === "function"', code)
+        m = re.search(r"function mono\(\) \{(.*?)\n  \}", code, re.S)
+        self.assertIsNotNone(m)
+        self.assertIn("perf.now()", m.group(1))
+        for fn in ("previewLive", "busyReason", "tickPreview", "preview", "drawPreviewChip", "snapshot"):
+            body = re.search(r"function %s\([^)]*\) \{(.*?)\n  \}" % fn, code, re.S)
+            self.assertIsNotNone(body, fn)
+            self.assertNotIn("wallNow", body.group(1), fn)
+            self.assertNotIn("Date", body.group(1), fn)
+        key = re.search(r"function onKey\(e\) \{(.*?)\n  \}", code, re.S).group(1)
+        self.assertIn("S.lastKey = mono();", key)
+        self.assertNotIn("1322", code)                                   # largeur de rangée mesurée
+
     def test_js_enums_match_python_model(self):
         js = self.read("canvas.js")
         m = re.search(r"var ENUMS = (\{.*?\});", js, re.S)
@@ -518,32 +758,89 @@ class TestLabStatic(unittest.TestCase):
         self.assertEqual(presets, {k: v.to_dict() for k, v in cm.PRESETS.items()})
 
 
-# --------------------------------------------------------------------------- non-impact production
-BASELINE = "a64e780"
+# --------------------------------------------------------------------------- non-impact production (durable)
 PROTECTED = ("scripts/pi4/ui", "scripts/pi4/opentv_pi", "scripts/pi4/install.sh", "scripts/pi4/prepare-pi.sh",
              "scripts/pi4/uninstall.sh", "scripts/pi4/systemd", "scripts/pi4/system", "scripts/pi4/vendor",
-             "scripts/pi4/bin", "scripts/nanopi", "native")
+             "scripts/pi4/bin", "scripts/pi4/tools", "scripts/nanopi", "native")
+PROTO_MARKERS = re.compile(r"canvas_model|prototypes[/\\]canvas|OTVCanvas|e2e_canvas_prototype")
+
+
+def production_files():
+    for rel in PROTECTED:
+        top = os.path.join(ROOT, rel)
+        if os.path.isfile(top):
+            yield top
+            continue
+        for d, dirs, files in os.walk(top):
+            dirs[:] = [x for x in dirs if x not in ("__pycache__", "node_modules", "test", "tests")]
+            for name in files:
+                yield os.path.join(d, name)
 
 
 class TestNonImpact(unittest.TestCase):
-    def git(self, *a):
-        return subprocess.run(["git", "-C", ROOT] + list(a), capture_output=True, timeout=60)
+    """Garanties durables (indépendantes de tout commit de référence) : l'installation et le manifeste ne livrent
+    jamais le prototype, et aucun code de production ne l'importe ni ne le nomme."""
 
-    def setUp(self):
-        if self.git("cat-file", "-e", BASELINE + "^{commit}").returncode:
-            self.skipTest("référence %s absente" % BASELINE)
-
-    def test_production_paths_byte_identical_to_baseline(self):
-        p = self.git("diff", "--name-only", BASELINE, "--", *PROTECTED)
-        self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertEqual(p.stdout.decode().strip(), "")
-        p = self.git("status", "--porcelain", "--untracked-files=all", "--", *PROTECTED)
-        self.assertEqual(p.stdout.decode().strip(), "")
-
-    def test_installer_never_references_prototypes(self):
+    def test_installer_and_manifest_never_include_prototypes(self):
         for rel in ("scripts/pi4/install.sh", "scripts/pi4/uninstall.sh", "scripts/pi4/prepare-pi.sh"):
             with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
                 self.assertNotIn("prototypes", f.read(), rel)
+        p = subprocess.run(["bash", os.path.join(PI4, "install.sh"), "--dry-run"], capture_output=True, timeout=120,
+                           cwd=PI4)
+        self.assertEqual(p.returncode, 0, p.stderr.decode()[-2000:])
+        out = p.stdout.decode() + p.stderr.decode()
+        copies = re.findall(r"^\[dry-run\] cp -- (\S+) (\S+)$", out, re.M)
+        m = re.search(r"^\[dry-run\] manifeste \S+ : (\d+) fichiers$", out, re.M)
+        self.assertIsNotNone(m, "liste du manifeste introuvable dans --dry-run")
+        self.assertGreater(len(copies), 50)
+        self.assertGreaterEqual(len(copies), int(m.group(1)))          # tout fichier manifesté est copié
+        proto = os.path.join(PI4, "prototypes")
+        for src, dst in copies:
+            self.assertFalse(os.path.realpath(src).startswith(proto + os.sep), src)
+            self.assertNotRegex(dst, r"(?i)prototype|canvas_model|lab\.(?:html|css)|canvas\.js", dst)
+        self.assertNotRegex(out, r"(?i)prototypes|canvas_model")
+
+    def test_production_code_never_imports_or_names_the_prototype(self):
+        import ast
+        seen = 0
+        for path in production_files():
+            with open(path, "rb") as f:
+                data = f.read()
+            seen += 1
+            text = data.decode("utf-8", "replace")
+            self.assertIsNone(PROTO_MARKERS.search(text), path)
+            if path.endswith(".py") or text.startswith("#!/usr/bin/env python") or text.startswith("#!/usr/bin/python"):
+                try:
+                    tree = ast.parse(data)
+                except SyntaxError:
+                    continue
+                for node in ast.walk(tree):
+                    names = []
+                    if isinstance(node, ast.Import):
+                        names = [a.name for a in node.names]
+                    elif isinstance(node, ast.ImportFrom):
+                        names = [node.module or ""] + [a.name for a in node.names]
+                    for n in names:
+                        self.assertNotIn("canvas", n.lower(), (path, n))
+                        self.assertNotIn("prototypes", n.lower(), (path, n))
+        self.assertGreater(seen, 50)
+
+    def test_production_package_import_does_not_load_prototype(self):
+        code = ("import sys,pkgutil,importlib;sys.path.insert(0,sys.argv[1]);import opentv_pi;"
+                "[importlib.import_module('opentv_pi.'+m.name) for m in pkgutil.iter_modules(opentv_pi.__path__)];"
+                "bad=[n for n in sys.modules if 'canvas' in n.lower()];print(bad);sys.exit(1 if bad else 0)")
+        p = subprocess.run([sys.executable, "-I", "-c", code, PI4], capture_output=True, timeout=120)
+        self.assertEqual(p.returncode, 0, (p.stdout.decode()[-1000:], p.stderr.decode()[-2000:]))
+
+    @unittest.skipUnless(os.environ.get("OPENTV_CANVAS_BASELINE"),
+                         "revue seulement : OPENTV_CANVAS_BASELINE=<commit> compare les chemins de production")
+    def test_review_only_production_paths_identical_to_baseline(self):
+        base = os.environ["OPENTV_CANVAS_BASELINE"]
+        self.assertRegex(base, r"\A[0-9A-Za-z._/-]{1,80}\Z")
+        p = subprocess.run(["git", "-C", ROOT, "diff", "--name-only", base, "--", *PROTECTED],
+                           capture_output=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.decode().strip(), "")
 
 
 # --------------------------------------------------------------------------- vrai Chromium 1920×1080 (Playwright)
@@ -590,6 +887,11 @@ def playwright_dir():
     return p if p and os.path.isfile(os.path.join(p, "package.json")) else None
 
 
+def acorn_dir():
+    p = os.environ.get("OPENTV_TEST_ACORN")
+    return p if p and os.path.isfile(os.path.join(p, "package.json")) else None
+
+
 class TestLabServer(unittest.TestCase):
     def test_server_serves_only_lab_files(self):
         import urllib.request
@@ -615,6 +917,9 @@ class TestLabEndToEnd(unittest.TestCase):
         os.makedirs(shots, exist_ok=True)
         with serve_lab() as url:
             cfg = {"chromium": chromium, "url": url, "shots": shots}
+            acorn = acorn_dir()
+            if acorn:
+                cfg["acorn"] = acorn
             p = subprocess.run([NODE, os.path.join(PI4, "tests", "e2e_canvas_prototype.js"), playwright_dir(),
                                 json.dumps(cfg)], capture_output=True, timeout=240)
         self.assertEqual(p.returncode, 0, (p.stdout.decode()[-3000:], p.stderr.decode()[-3000:]))
@@ -628,6 +933,7 @@ class TestLabEndToEnd(unittest.TestCase):
             self.assertGreaterEqual(r["min_font_px"], 17, r)
             self.assertTrue(os.path.getsize(os.path.join(shots, v + ".png")) > 50000, v)
         self.assertEqual(res["failures"], [], res["failures"])
+        self.assertEqual(res["acorn"], "ok" if acorn_dir() else "absent")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,10 @@
    animations limitées à transform/opacity sur ≤ 4 couches, aucun filtre ; puis pause (panneau, feuille Réglages,
    lecture, configuration, hors-ligne, page cachée, dégradé), mouvement réduit/coupé, refus des scènes hostiles,
    aperçu qui revient seul, confirmation littérale, historique de cinq, retour arrière et défaut immuable.
-   Capture mist.png, cinema.png, canvas.png. Sortie : une ligne JSON {variants, failures}. */
+   Puis : horloge monotone (saut d'heure système ±1 jour), annuler-sur-humain/occupé (OK, lecture, chargement,
+   configuration, hors-ligne), aucune reconstruction des rangées sous un panneau, confirmation refusée si occupé,
+   séparation agent/propriétaire de l'API, largeur de rangée mesurée, requête mal encodée, détecteur réel de cadence.
+   Capture mist.png, cinema.png, canvas.png. Sortie : une ligne JSON {variants, failures, acorn}. */
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -15,9 +18,11 @@ const failures = [];
 const check = (cond, msg, extra) => { if (!cond) { failures.push(msg + (extra !== undefined ? " " + JSON.stringify(extra) : "")); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+let acornResult = "absent";
 if (cfg.acorn) {   // ES5 au niveau source (Acorn), en plus de la recherche de jetons du test Python
   const acorn = require(cfg.acorn);
   acorn.parse(fs.readFileSync(path.join(__dirname, "..", "prototypes", "canvas", "canvas.js"), "utf8"), { ecmaVersion: 5 });
+  acornResult = "ok";
 }
 
 // ---- mesures dans la page
@@ -109,7 +114,7 @@ function measure() {
   out.filters = filters;
   out.externalRequests = performance.getEntriesByType("resource").map((e) => e.name)
     .filter((n) => n.indexOf(location.origin + "/") !== 0);
-  out.snap = window.OTVCanvas.snapshot();
+  out.snap = window.OTVCanvas.lab.snapshot();
   out.cls = tv.className;
   return out;
 }
@@ -186,7 +191,7 @@ function animationRules(m, v) {
     // ---- comportement (variante recommandée)
     await page.goto(cfg.url);
     await page.waitForSelector("#tv[data-ready='1']");
-    const snap = () => page.evaluate(() => window.OTVCanvas.snapshot());
+    const snap = () => page.evaluate(() => window.OTVCanvas.lab.snapshot());
     const layers = () => page.evaluate(() => {
       const s = new Set();
       document.getAnimations().forEach((a) => { if (a.playState === "running" && a.constructor.name === "CSSAnimation") { s.add(a.effect.target); } });
@@ -215,7 +220,7 @@ function animationRules(m, v) {
     check(g.vis && s.panel === "card" && s.paused && s.pauseReasons.indexOf("panel") >= 0, "fiche : fond figé", s);
     check(g.pr + 40 <= g.ql + 0.5, "fiche jamais sur le QR", g);
     check(await layers() === 0, "fiche : aucune couche en cours");
-    let r = await page.evaluate(() => window.OTVCanvas.preview({ accent: "ember" }));
+    let r = await page.evaluate(() => window.OTVCanvas.agent.preview({ accent: "ember" }));
     check(!r.ok && r.error === "ui_busy", "aperçu refusé pendant un panneau", r);
     await page.keyboard.press("Escape");
     await sleep(200);
@@ -238,10 +243,10 @@ function animationRules(m, v) {
 
     // états qui figent le fond
     for (const st of ["playback", "setup", "offline", "degraded"]) {
-      await page.evaluate((x) => window.OTVCanvas.setState(x, true), st);
+      await page.evaluate((x) => window.OTVCanvas.lab.setState(x, true), st);
       s = await snap();
       check(s.paused && s.pauseReasons.indexOf(st) >= 0 && await layers() === 0, "figé : " + st, s.pauseReasons);
-      await page.evaluate((x) => window.OTVCanvas.setState(x, false), st);
+      await page.evaluate((x) => window.OTVCanvas.lab.setState(x, false), st);
       check(await waitLayers(base), "reprise après " + st);
     }
     await page.evaluate(() => {
@@ -272,10 +277,10 @@ function animationRules(m, v) {
                      { row_order: ["top"] }, { row_order: ["tonight", "<img src=x onerror=alert(1)>"] },
                      { schema_version: 2 }, { variant: "../../ui/tv" }, {}, null, "accent:ember"];
     for (const h of hostile) {
-      r = await page.evaluate((x) => window.OTVCanvas.preview(x), h);
+      r = await page.evaluate((x) => window.OTVCanvas.agent.preview(x), h);
       check(r && r.ok === false, "scène hostile refusée", h);
     }
-    r = await page.evaluate(() => window.OTVCanvas.validate({ schema_version: 1, variant: "canvas", wallpaper: "aurore",
+    r = await page.evaluate(() => window.OTVCanvas.lab.validate({ schema_version: 1, variant: "canvas", wallpaper: "aurore",
       motion: "full", accent: "ice", shade: "balanced", hero_focus: "title", row_order: ["tonight"], html: "<b>" }));
     check(!r.ok && r.error === "unknown_key", "clé inconnue refusée", r);
     s = await snap();
@@ -285,7 +290,7 @@ function animationRules(m, v) {
     check(!/evil|url|img|red/.test(cls), "aucune valeur hostile dans les classes", cls);
 
     // aperçu : visible, non publié, revient seul (horloge simulée)
-    r = await page.evaluate(() => window.OTVCanvas.preview({ accent: "ember", motion: "off" }, 5000));
+    r = await page.evaluate(() => window.OTVCanvas.agent.preview({ accent: "ember", motion: "off" }, 5000));
     check(r.ok, "aperçu accepté au repos", r);
     s = await snap();
     check(s.visible.accent === "ember" && s.published.accent === "ice" && s.previewLeftMs > 0, "aperçu non publié", s);
@@ -308,44 +313,44 @@ function animationRules(m, v) {
     check(await page.evaluate(() => document.getElementById("pv").hidden && /acc-ice/.test(document.getElementById("tv").className)),
           "rendu revenu à la scène publiée");
     check(await waitLayers(base), "animation reprise après l'aperçu");
-    r = await page.evaluate(() => window.OTVCanvas.confirm(true));
+    r = await page.evaluate(() => window.OTVCanvas.agent.confirm(true));
     check(!r.ok, "confirmation impossible après expiration", r);
 
     // confirmation littérale
-    await page.evaluate(() => window.OTVCanvas.preview({ accent: "ember" }, 20000));
+    await page.evaluate(() => window.OTVCanvas.agent.preview({ accent: "ember" }, 20000));
     for (const bad of [false, 1, "true", "yes", null]) {
-      r = await page.evaluate((x) => window.OTVCanvas.confirm(x), bad);
+      r = await page.evaluate((x) => window.OTVCanvas.agent.confirm(x), bad);
       check(!r.ok && r.error === "confirmation_required", "confirmation non littérale refusée", bad);
     }
-    r = await page.evaluate(() => window.OTVCanvas.confirm(true));
+    r = await page.evaluate(() => window.OTVCanvas.agent.confirm(true));
     s = await snap();
     check(r.ok && s.published.accent === "ember" && s.revision === 1 && s.history === 1, "publication confirmée", s);
 
     // historique de cinq + retour arrière exact + défaut immuable
     const seq = ["jade", "violet", "ice", "ember", "jade", "violet"];
     for (const a of seq) {
-      r = await page.evaluate((x) => window.OTVCanvas.preview({ accent: x }, 20000), a);
+      r = await page.evaluate((x) => window.OTVCanvas.agent.preview({ accent: x }, 20000), a);
       check(r.ok, "aperçu " + a, r);
-      await page.evaluate(() => window.OTVCanvas.confirm(true));
+      await page.evaluate(() => window.OTVCanvas.agent.confirm(true));
     }
     s = await snap();
     check(s.history === 5 && s.published.accent === "violet" && s.revision === 7, "historique borné à cinq", s);
-    await page.evaluate(() => window.OTVCanvas.undo());
+    await page.evaluate(() => window.OTVCanvas.owner.undo());
     s = await snap();
     check(s.published.accent === "jade", "retour arrière exact", s.published);
-    for (let i = 0; i < 4; i++) { await page.evaluate(() => window.OTVCanvas.undo()); }
+    for (let i = 0; i < 4; i++) { await page.evaluate(() => window.OTVCanvas.owner.undo()); }
     s = await snap();
     check(s.history === 0 && s.visible.variant === "canvas" && s.visible.accent === "ice", "historique épuisé ⇒ défaut", s);
-    r = await page.evaluate(() => window.OTVCanvas.undo());
+    r = await page.evaluate(() => window.OTVCanvas.owner.undo());
     check(!r.ok && r.error === "nothing_to_rollback", "rien à annuler", r);
-    await page.evaluate(() => window.OTVCanvas.select("cinema"));
-    await page.evaluate(() => window.OTVCanvas.reset());
+    await page.evaluate(() => window.OTVCanvas.owner.select("cinema"));
+    await page.evaluate(() => window.OTVCanvas.owner.reset());
     s = await snap();
     check(s.publishedCanon === before.publishedCanon && s.history === 0, "réinitialisation au défaut immuable", s);
 
     // navigation récente : un changement attend que la télécommande se taise
     await page.keyboard.press("ArrowRight");
-    r = await page.evaluate(() => window.OTVCanvas.preview({ accent: "jade" }));
+    r = await page.evaluate(() => window.OTVCanvas.agent.preview({ accent: "jade" }));
     check(!r.ok && r.error === "ui_busy" && r.key === "navigating", "aperçu différé pendant la navigation", r);
     await page.keyboard.press("ArrowLeft");
 
@@ -354,16 +359,224 @@ function animationRules(m, v) {
     await page.keyboard.press("ArrowRight");
     await quiet();
     const keep = await snap();
-    r = await page.evaluate(() => window.OTVCanvas.preview({ row_order: ["top", "tonight", "new"] }, 20000));
+    r = await page.evaluate(() => window.OTVCanvas.agent.preview({ row_order: ["top", "tonight", "new"] }, 20000));
     s = await snap();
     check(r.ok && s.row === keep.row && s.focus === keep.focus, "ordre des rangées : focus conservé", [keep.row, keep.focus, s.row, s.focus]);
-    await page.evaluate(() => window.OTVCanvas.cancel());
+    await page.evaluate(() => window.OTVCanvas.agent.cancel());
+
+    // ---- API : chemin agent séparé du propriétaire, objets gelés
+    const api = await page.evaluate(() => ({
+      top: Object.keys(window.OTVCanvas).sort(), agent: Object.keys(window.OTVCanvas.agent).sort(),
+      owner: Object.keys(window.OTVCanvas.owner).sort(), lab: Object.keys(window.OTVCanvas.lab).sort(),
+      frozen: [window.OTVCanvas, window.OTVCanvas.agent, window.OTVCanvas.owner, window.OTVCanvas.lab].every(Object.isFrozen) }));
+    check(JSON.stringify(api.top) === '["agent","lab","owner"]', "API : trois espaces seulement", api.top);
+    check(JSON.stringify(api.agent) === '["cancel","confirm","preview"]', "API agent : aperçu + confirmation seulement", api.agent);
+    check(JSON.stringify(api.owner) === '["patch","reset","select","undo"]', "API propriétaire étiquetée", api.owner);
+    check(api.frozen, "API gelée");
+    check(await page.evaluate(() => { try { window.OTVCanvas.agent.publish = function () {}; } catch (e) { /* strict */ }
+      return !("publish" in window.OTVCanvas.agent) && !("select" in window.OTVCanvas.agent) && !("undo" in window.OTVCanvas.agent); }),
+      "aucun contournement de l'aperçu par l'API agent");
+
+    const rowsMark = () => page.evaluate(() => { document.querySelectorAll("#rowsin .row").forEach((x) => { x.__probe = 1; }); });
+    const rowsIntact = () => page.evaluate(() => { const rs = document.querySelectorAll("#rowsin .row");
+      return rs.length > 0 && Array.prototype.every.call(rs, (x) => x.__probe === 1); });
+    const pageWall = () => page.evaluate(() => Date.now());
+    const jumpWall = async (ms) => { await page.clock.setSystemTime(new Date((await pageWall()) + ms)); };
+    const DAY = 86400000;
+    const DEFAULT_ROWS = '["tonight","new","top","watchlist"]';
+
+    // ---- I1 horloge monotone : un saut d'heure système ne prolonge ni ne tue un aperçu de 5 s
+    await quiet();
+    for (const step of [-DAY, DAY]) {
+      r = await page.evaluate(() => window.OTVCanvas.agent.preview({ accent: "jade" }, 5000));
+      check(r.ok, "aperçu 5 s (saut " + step + ")", r);
+      await jumpWall(step);
+      s = await snap();
+      check(s.visible.accent === "jade" && s.previewLeftMs > 4000 && s.previewLeftMs <= 5000,
+            "saut " + step + " : aperçu intact juste après le saut", [s.visible.accent, s.previewLeftMs]);
+      await page.clock.fastForward(2000);
+      s = await snap();
+      check(s.visible.accent === "jade" && s.previewLeftMs > 2000 && s.previewLeftMs <= 3100,
+            "saut " + step + " : aperçu encore actif à 2 s", [s.visible.accent, s.previewLeftMs]);
+      await page.clock.fastForward(3500);
+      await sleep(100);
+      s = await snap();
+      check(s.visible.accent === s.published.accent && s.previewLeftMs === 0 &&
+            await page.evaluate(() => document.getElementById("pv").hidden),
+            "saut " + step + " : aperçu revenu seul à 5 s, ni prolongé ni tué", [s.visible.accent, s.previewLeftMs]);
+    }
+    // recul de l'heure système après une touche : la navigation ne se verrouille pas ; avance : ne raccourcit rien
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowLeft");
+    await jumpWall(-DAY);
+    r = await page.evaluate(() => window.OTVCanvas.agent.preview({ accent: "jade" }));
+    check(!r.ok && r.key === "navigating", "recul : fenêtre de silence encore active", r);
+    await page.clock.fastForward(1600);
+    r = await page.evaluate(() => window.OTVCanvas.agent.preview({ accent: "jade" }, 5000));
+    check(r.ok, "recul après une touche : aucun verrou de navigation", r);
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowLeft");
+    await jumpWall(2 * DAY);
+    r = await page.evaluate(() => window.OTVCanvas.agent.preview({ accent: "jade" }));
+    check(!r.ok && r.key === "navigating", "avance : fenêtre de silence non raccourcie", r);
+    await page.clock.fastForward(1600);
+    await page.clock.setSystemTime(new Date("2026-10-30T20:50:00"));
+
+    // ---- I2 annuler-sur-humain : aperçu row_order → OK ⇒ annulé AVANT la fiche, même titre, aucune reconstruction
+    s = await snap();
+    const pubCanon = s.publishedCanon;
+    r = await page.evaluate(() => window.OTVCanvas.agent.preview({ row_order: ["top", "tonight", "new"] }, 20000));
+    s = await snap();
+    check(r.ok && JSON.stringify(s.rowsOrder) === '["top","tonight","new"]', "aperçu row_order affiché", s.rowsOrder);
+    const seen = s.focus;
+    await page.keyboard.press("Enter");
+    s = await snap();
+    check(s.previewLeftMs === 0 && s.visibleCanon === pubCanon && JSON.stringify(s.rowsOrder) === DEFAULT_ROWS,
+          "OK : aperçu annulé avant la fiche, rangées publiées", [s.previewLeftMs, s.rowsOrder]);
+    check(s.panel === "card" && await page.evaluate(() => document.getElementById("ptitle").textContent) === seen,
+          "OK : fiche ouverte sur le titre vu", [s.panel, seen]);
+    await rowsMark();
+    r = await page.evaluate(() => window.OTVCanvas.agent.confirm(true));
+    check(!r.ok && r.error === "ui_busy" && r.key === "panel", "confirmation refusée sous la fiche", r);
+    await page.clock.fastForward(25000);
+    await sleep(50);
+    s = await snap();
+    check(await rowsIntact() && s.panel === "card" && JSON.stringify(s.rowsOrder) === DEFAULT_ROWS && s.visibleCanon === pubCanon,
+          "échéance : aucune reconstruction des rangées sous la fiche", s.rowsOrder);
+    // fiche → Regarder → lecture : toujours aucune reconstruction, même titre
+    await page.keyboard.press("Enter");
+    s = await snap();
+    check(s.pauseReasons.indexOf("playback") >= 0 && await rowsIntact() &&
+          await page.evaluate(() => document.getElementById("playtitle").textContent) === seen,
+          "Regarder : lecture du même titre, rangées intactes", s.pauseReasons);
+    await page.keyboard.press("Escape");
+    await quiet();
+
+    // aperçu row_order → lecture / chargement / configuration / hors-ligne (transition directe)
+    for (const st of ["playback", "loading", "setup", "offline"]) {
+      r = await page.evaluate(() => window.OTVCanvas.agent.preview({ row_order: ["top", "tonight", "new"] }, 20000));
+      check(r.ok, "aperçu avant " + st, r);
+      await page.evaluate((x) => window.OTVCanvas.lab.setState(x, true), st);
+      s = await snap();
+      check(s.previewLeftMs === 0 && s.visibleCanon === pubCanon && JSON.stringify(s.rowsOrder) === DEFAULT_ROWS &&
+            s.pauseReasons.indexOf(st) >= 0, st + " : aperçu annulé avant la transition", [s.previewLeftMs, s.rowsOrder]);
+      await rowsMark();
+      r = await page.evaluate(() => window.OTVCanvas.agent.confirm(true));
+      check(!r.ok && r.error === "ui_busy" && r.key === st, st + " : confirmation refusée", r);
+      r = await page.evaluate(() => window.OTVCanvas.agent.preview({ accent: "jade" }));
+      check(!r.ok && r.error === "ui_busy", st + " : aperçu refusé", r);
+      await page.clock.fastForward(25000);
+      await sleep(50);
+      check(await rowsIntact() && await layers() === 0, st + " : aucune reconstruction ni animation pendant l'état");
+      await page.evaluate((x) => window.OTVCanvas.lab.setState(x, false), st);
+    }
+    // une touche de navigation annule l'aperçu puis agit si le titre au focus est inchangé
+    await quiet();
+    s = await snap();
+    const before2 = s.focus;
+    await page.evaluate(() => window.OTVCanvas.agent.preview({ accent: "violet" }, 20000));
+    await page.keyboard.press("ArrowRight");
+    s = await snap();
+    check(s.previewLeftMs === 0 && s.visible.accent === s.published.accent && s.focus !== before2,
+          "touche : aperçu annulé puis touche appliquée", [s.previewLeftMs, before2, s.focus]);
+    r = await page.evaluate(() => window.OTVCanvas.agent.confirm(true));
+    check(!r.ok && r.error === "ui_busy" && r.key === "navigating", "confirmation refusée pendant la navigation", r);
+    await page.keyboard.press("ArrowLeft");
+    await quiet();
+
+    // la touche n'agit jamais sur un titre que l'humain n'a pas vu : publié [tonight, watchlist], aperçu [top, tonight]
+    r = await page.evaluate(() => window.OTVCanvas.agent.preview({ row_order: ["tonight", "watchlist"] }, 20000));
+    r = await page.evaluate(() => window.OTVCanvas.agent.confirm(true));
+    check(r.ok, "publication [tonight, watchlist]", r);
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowRight");
+    await quiet();
+    const anchor = await snap();
+    check(anchor.row === "watchlist", "focus sur À voir plus tard", anchor.row);
+    await page.evaluate(() => window.OTVCanvas.agent.preview({ row_order: ["top", "tonight"] }, 5000));
+    s = await snap();
+    check(s.row === "top", "l'aperçu déplace le focus vers une rangée absente du publié", s.row);
+    await page.clock.fastForward(5500);
+    await sleep(50);
+    s = await snap();
+    check(s.row === "watchlist" && s.focus === anchor.focus, "échéance : focus rendu à la rangée d'origine", [s.row, s.focus]);
+    await quiet();
+    await page.evaluate(() => window.OTVCanvas.agent.preview({ row_order: ["top", "tonight"] }, 20000));
+    await page.keyboard.press("Enter");
+    s = await snap();
+    check(s.previewLeftMs === 0 && s.panel === null && s.row === "watchlist" && s.focus === anchor.focus,
+          "OK sur un titre disparu : la touche annule seulement (aucune fiche)", [s.panel, s.row, s.focus]);
+    // réinitialisation propriétaire pendant la configuration : rangées gelées jusqu'à la fin de l'état
+    await page.evaluate(() => window.OTVCanvas.lab.setState("setup", true));
+    await rowsMark();
+    await page.evaluate(() => window.OTVCanvas.owner.reset());
+    s = await snap();
+    check(await rowsIntact() && JSON.stringify(s.rowsOrder) === '["tonight","watchlist"]', "configuration : rangées non reconstruites", s.rowsOrder);
+    await page.evaluate(() => window.OTVCanvas.lab.setState("setup", false));
+    s = await snap();
+    check(JSON.stringify(s.rowsOrder) === DEFAULT_ROWS, "fin de configuration : rangées publiées appliquées", s.rowsOrder);
+    await quiet();
+
+    // ---- largeur de rangée mesurée (jamais 1322 codé en dur) : dernier titre aligné sur la boîte de contenu
+    const laneEnd = async (padRight) => {
+      await page.evaluate((pr) => document.querySelectorAll("#rowsin .lane").forEach((l) => { l.style.paddingRight = pr; }), padRight);
+      const at = await snap();
+      const delta = at.rowsOrder.indexOf("top") - at.rowsOrder.indexOf(at.row);
+      for (let i = 0; i < Math.abs(delta); i++) { await page.keyboard.press(delta > 0 ? "ArrowDown" : "ArrowUp"); }
+      check((await snap()).row === "top", "focus sur la rangée la plus longue");
+      for (let i = 0; i < 10; i++) { await page.keyboard.press("ArrowRight"); }
+      await sleep(450);
+      const g2 = await page.evaluate(() => {
+        const f = document.querySelector(".card.focused"), lane = f.parentNode.parentNode, lr = lane.getBoundingClientRect();
+        const cs = getComputedStyle(lane), fr = f.getBoundingClientRect(), dx = (fr.width - f.offsetWidth) / 2;
+        return { right: fr.right - dx, left: fr.left + dx, contentRight: lr.right - parseFloat(cs.paddingRight),
+                 contentLeft: lr.left + parseFloat(cs.paddingLeft) };
+      });
+      for (let i = 0; i < 10; i++) { await page.keyboard.press("ArrowLeft"); }
+      return g2;
+    };
+    for (const pr of ["", "238px"]) {
+      const g2 = await laneEnd(pr);
+      check(Math.abs(g2.right - g2.contentRight) <= 0.5 && g2.left >= g2.contentLeft - 0.5,
+            "dernier titre aligné sur la largeur mesurée (" + (pr || "défaut") + ")", g2);
+    }
+    await quiet();
 
     // amorçage hostile par l'adresse du laboratoire
     await page.goto(cfg.url + "?variant=" + encodeURIComponent("https://evil.example") + "&motion=" + encodeURIComponent("<b>"));
     await page.waitForSelector("#tv[data-ready='1']");
     s = await snap();
     check(s.bootError && s.publishedCanon === before.publishedCanon && s.revision === 0, "variante/mouvement hostiles ignorés", s);
+
+    // requête mal encodée : invalid_query, défaut, laboratoire utilisable, aucune erreur de page
+    for (const q of ["?variant=%E0%A4%A", "?motion=%", "?%=1", "?variant=mist&motion=%zz"]) {
+      await page.goto(cfg.url + q);
+      await page.waitForSelector("#tv[data-ready='1']");
+      s = await snap();
+      check(s.bootError === "invalid_query" && s.revision === 0 && s.publishedCanon === before.publishedCanon,
+            "requête mal encodée refusée : " + q, [s.bootError, s.revision]);
+      const f0 = s.focus;
+      await page.keyboard.press("ArrowRight");
+      s = await snap();
+      check(s.focus !== f0, "laboratoire utilisable après " + q, [f0, s.focus]);
+      await page.clock.fastForward(1600);
+      r = await page.evaluate(() => window.OTVCanvas.agent.preview({ accent: "jade" }));
+      check(r.ok, "aperçu possible après " + q, r);
+    }
+
+    // détecteur réel de cadence : cadence saine ⇒ animé ; images espacées de 100 ms ⇒ « degraded », fond statique
+    await page.goto(cfg.url);
+    await page.waitForSelector("#tv[data-ready='1']");
+    check(await waitLayers(base), "fond vivant avant la mesure de cadence");
+    await page.clock.pauseAt(new Date((await pageWall()) + 1000));
+    await page.clock.runFor(2000);
+    s = await snap();
+    check(s.pauseReasons.indexOf("degraded") < 0, "cadence de 16 ms : non dégradé", s.pauseReasons);
+    for (let i = 0; i < 70; i++) { await page.clock.fastForward(100); }
+    s = await snap();
+    check(s.pauseReasons.indexOf("degraded") >= 0 && s.paused, "images à 100 ms : dégradé", s.pauseReasons);
+    check(await waitLayers(0), "dégradé : aucune couche animée");
+    await page.clock.resume();
 
     check(errors.length === 0, "aucune erreur de page", errors);
     check(blocked.length === 0, "aucune requête hors laboratoire", blocked);
@@ -372,5 +585,6 @@ function animationRules(m, v) {
     await browser.close();
   }
   out.failures = failures;
+  out.acorn = acornResult;
   process.stdout.write(JSON.stringify(out) + "\n");
 })().catch((e) => { process.stderr.write(String(e && e.stack || e) + "\n"); process.exit(2); });
