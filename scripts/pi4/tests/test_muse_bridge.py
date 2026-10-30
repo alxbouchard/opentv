@@ -227,9 +227,9 @@ class TestNoDefaultCommands(unittest.TestCase):
                     self.assertRegex(ps["description"], r"de \d+ à \d+")
         # pilotage : identifiants stables et énumérations fermées seulement
         self.assertEqual(set(specs["opentv.present_title"]["required"]), {"id"})
-        self.assertEqual(set(specs["opentv.present_title"]["optional"]), {"text"})
+        self.assertEqual(set(specs["opentv.present_title"]["optional"]), {"text", "mode"})
         self.assertEqual(set(specs["opentv.play_title"]["required"]), {"id"})
-        self.assertEqual(specs["opentv.play_title"]["optional"], {})
+        self.assertEqual(set(specs["opentv.play_title"]["optional"]), {"mode"})   # new|rewatch, défaut new
         self.assertEqual((specs["opentv.close_player"]["required"], specs["opentv.close_player"]["optional"]), ({}, {}))
         self.assertEqual(set(specs["opentv.remote_control"]["required"]), {"key"})
         for k in ("up", "down", "left", "right", "ok", "back", "home"):
@@ -362,7 +362,7 @@ class TestThroughAgentPort(unittest.TestCase):
             self.assertEqual(r["payload"]["action"]["state"], "queued")
         self.assertEqual([c[1] for c in self.fx.ctx.control],
                          ["present_title", "present_title", "play_title", "close_player", "remote_control"])
-        self.assertEqual(self.fx.ctx.control[1][2], {"id": "films/106"})
+        self.assertEqual(self.fx.ctx.control[1][2], {"id": "films/106", "mode": "new"})   # null = omis ⇒ défaut
         self.assertTrue(all(c[0] == "muse-device" for c in self.fx.ctx.control))
         audited = [x["tool"] for x in self.fx.audit_records()]
         for t in ("feedback", "display_message", "present_title", "play_title", "close_player", "remote_control"):
@@ -702,7 +702,8 @@ class TestEndToEndFakeMuse(unittest.TestCase):
         self.assertTrue(inv["i8"]["ok"], inv["i8"])                      # proposition : action TV en file
         self.assertEqual(inv["i8"]["payload"]["action"]["state"], "queued")
         self.assertEqual(self.fx.ctx.control, [("muse-device", "present_title",
-                                                {"id": "films/106", "text": "Grand spectacle ce soir."})])
+                                                {"id": "films/106", "text": "Grand spectacle ce soir.",
+                                                 "mode": "new"})])
         self.assertEqual(results["registered_status"]["state"], "registered")
         self.assertEqual(results["end"], "unpaired")
         self.assertFalse(os.path.exists(os.path.join(self.st.dir, "pairing.json")))

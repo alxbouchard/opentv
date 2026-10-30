@@ -90,33 +90,41 @@ DESCRIPTIONS = {
     "opentv.status": "État d'OpenTV : nom, réseau (mode seulement), catalogue, profil « Pour toi », état de lecture "
                      "(idle, loading, playing, closing, closed, unavailable) et dernières actions TV (queued, claimed, "
                      "applied, failed, expired). Sans adresse ni secret.",
-    "opentv.search": "Cherche un titre dans le catalogue OpenTV accepté (paginé). Une requête ressemblant à une "
-                     "adresse est refusée.",
-    "opentv.recommend": "Recommandations « Pour toi » expliquées (goûts explicites d'Alex, notes IMDb/TMDb séparées, "
-                        "nouveautés), filtrées sur le catalogue accepté. Sers-t'en avec history et search pour CHOISIR "
-                        "toi-même un film à proposer, puis montre-le avec opentv.present_title et une phrase qui "
-                        "explique pourquoi.",
+    "opentv.search": "Cherche un titre précis dans le catalogue OpenTV accepté (paginé) ; chaque résultat porte "
+                     "state.seen. Pour recommander, utilise recommend. Une requête ressemblant à une adresse est "
+                     "refusée. " + tools.NO_REPEAT,
+    "opentv.recommend": "Source par défaut de toute recommandation : sélection « Pour toi » expliquée (goûts "
+                        "explicites d'Alex, notes IMDb/TMDb séparées, nouveautés), filtrée sur le catalogue accepté, "
+                        "sans les films déjà vus ni « Pas pour moi ». Choisis toi-même un film, puis montre-le avec "
+                        "opentv.present_title et une phrase qui explique pourquoi. " + tools.CALIBRATION_PROTOCOL,
     "opentv.catalogue_list": "Liste alphabétique paginée de TOUT le catalogue accepté (identifiant stable, titre, "
-                             "année, genres, notes séparées). Parcourir avec offset jusqu'à has_more=false en gardant "
-                             "generated_at : s'il change entre deux pages (rafraîchissement quotidien), recommencer à "
-                             "offset 0. Aucune URL.",
+                             "année, genres, notes séparées, marks : seen, opinion, watchlist, not_tonight). Parcourir "
+                             "avec offset jusqu'à has_more=false en gardant generated_at : s'il change entre deux "
+                             "pages (rafraîchissement quotidien), recommencer à offset 0. Aucune URL. Pour "
+                             "recommander, préfère recommend. " + tools.NO_REPEAT,
     "opentv.history": "Historique local « Pour toi » (changements, ouvertures, listes J'aime / Pas pour moi / Déjà vu "
                       "/ À voir plus tard / Pas ce soir), paginé.",
     "opentv.feedback": "Enregistre un goût explicite d'Alex sur un film (like, dislike, seen, unseen, watchlist, "
                        "unwatchlist, not-tonight, clear-not-tonight, clear-opinion), SEULEMENT quand Alex le dit. "
-                       "Idempotent. Ouvrir ou lancer un film n'est jamais « vu ».",
+                       "Idempotent. Ouvrir, proposer ou lancer un film n'est jamais « vu » ; « déjà vu » seul = seen, "
+                       "jamais dislike. Calibrage : voir opentv.recommend.",
     "opentv.display_message": "Affiche une courte bannière (texte seul, sans adresse) sur l'écran OpenTV ; au plus "
                               "une toutes les 5 secondes.",
     "opentv.present_title": "Propose un film à Alex sur la TV : sa fiche s'ouvre avec ta phrase (facultative, une "
-                            "ligne). Utilise l'identifiant stable vu dans recommend, search ou catalogue_list. "
+                            "ligne). Utilise l'identifiant stable d'un film de recommend de préférence (sinon search "
+                            "ou catalogue_list). mode=new par défaut : refusé already_seen si le film est marqué vu "
+                            "(marks.seen) ; mode=rewatch UNIQUEMENT si Alex demande explicitement de le revoir. "
                             "Résultat = action acceptée (queued) ; suis-la dans opentv.status (applied = la page TV "
                             "l'a affichée). Refusé pendant une lecture ou un réglage ; la TV l'écarte (human_active) "
-                            "si Alex vient de se servir de sa télécommande.",
+                            "si Alex vient de se servir de sa télécommande. Pas pendant un calibrage, sauf demande "
+                            "explicite.",
     "opentv.play_title": "Lance un film du catalogue accepté par le lecteur officiel d'OpenTV, UNIQUEMENT quand Alex "
                          "te demande explicitement de le regarder. Mêmes portes que le bouton « Regarder » ; refusé si "
                          "la lecture n'est pas disponible ou déjà en cours, ou tant qu'OpenTV revient sur la fiche du "
-                         "film précédent (player_returning). Résultat = lecture acceptée (loading) ; "
-                         "playing/closed se lisent dans opentv.status.",
+                         "film précédent (player_returning). mode=new par défaut : refusé already_seen si le film "
+                         "est marqué vu (marks.seen) ; mode=rewatch UNIQUEMENT si Alex demande explicitement de le "
+                         "revoir. Lancer n'est jamais « vu ». Pour choisir, préfère recommend. Résultat = lecture "
+                         "acceptée (loading) ; playing/closed se lisent dans opentv.status.",
     "opentv.close_player": "Ferme le lecteur en cours ; OpenTV revient sur la fiche du film.",
     "opentv.remote_control": "Une touche de navigation OpenTV (up, down, left, right, ok, back, home), débit borné. "
                              "Préfère present_title/play_title/close_player. La télécommande d'Alex reste prioritaire ; "

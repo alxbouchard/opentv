@@ -79,7 +79,13 @@ class ForYou:
         Le moteur canonique construit les objets publics (identifiant stable, titre, année, genres et notes séparées)
         et son scrubber enlève toute adresse imbriquée. Les chemins de fiche/affiche et les champs bruts ne sortent
         jamais. La pagination évite qu'un agent transforme l'Agent Port en export JSON sans borne.
+
+        Chaque élément porte ses marques publiques (`marks` : opinion, seen, watchlist, not_tonight), relues dans le
+        profil local AU MOMENT de l'appel (jamais la sélection TV figée), pour qu'un agent qui parcourt le catalogue
+        ne propose pas un film qu'Alex a déjà vu. Profil illisible (base verrouillée/corrompue) : `marks` = null et
+        `store` = "unavailable" — jamais un faux « pas vu ».
         """
+        profile = self.tv.call("profile")
         items, generated_at, _ = self.bridge_mod.load_catalogue_meta(self.catalogue_file, self.detail_re)
         rows = []
         for item in items:
@@ -88,13 +94,26 @@ class ForYou:
             if uid and title:
                 rows.append((self.engine.norm(title), uid, item))
         rows.sort(key=lambda x: (x[0], x[1]))
+        sel = rows[offset:offset + limit]
+        marks = self.public_marks(profile, [uid for _t, uid, _i in sel]) if profile is not None else {}
         page = []
-        for _title, uid, item in rows[offset:offset + limit]:
+        for _title, uid, item in sel:
             public = self.engine.public_item(item, uid, [], None)
             public["description"] = self.engine.clean_text(item.get("description"), 300)
+            public["marks"] = marks.get(uid)
             page.append(public)
         return self.scrub({"items": page, "offset": offset, "limit": limit, "total": len(rows),
-                           "has_more": offset + limit < len(rows), "generated_at": generated_at})
+                           "has_more": offset + limit < len(rows), "generated_at": generated_at,
+                           "store": "ok" if profile is not None else "unavailable"})
+
+    def public_marks(self, profile, uids):
+        """uid -> marques publiques bornées {opinion, seen, watchlist, not_tonight} (aucun horodatage ni champ brut)."""
+        out = {}
+        for uid, m in self.engine.marks_for(profile or {}, uids, self.clock()).items():
+            op = m.get("opinion")
+            out[uid] = {"opinion": op if op in ("like", "dislike") else None, "seen": bool(m.get("seen")),
+                        "watchlist": bool(m.get("watchlist")), "not_tonight": bool(m.get("not_tonight"))}
+        return out
 
     def tv_session(self):
         """Sélection figée pour l'écran TV (loopback) : rangées, affiches https, marques d'état."""
@@ -115,9 +134,13 @@ class ForYou:
             else None
         desc = " ".join(self.engine.clean_text(x.get("description")).split())[:400]   # = ui_data (_strip_urls)
         pub["description"] = desc or None
-        mark = session["nav"].marks.get(uid)
-        if mark is None:
-            mark = self.engine.marks_for(self.tv.call("profile") or {}, [uid], self.clock())[uid]
+        # marques relues dans le profil À CET INSTANT : un avis donné entre-temps par un agent (« déjà vu » dit à
+        # Muse) n'est pas dans la sélection figée de la TV ; repli sur celle-ci seulement si le profil est illisible
+        profile = self.tv.call("profile")
+        if profile is not None:
+            mark = self.public_marks(profile, [uid])[uid]
+        else:
+            mark = session["nav"].marks.get(uid) or dict(self.engine.EMPTY_MARK)
         pub["marks"] = dict(mark)
         return pub
 

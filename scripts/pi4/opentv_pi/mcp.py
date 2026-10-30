@@ -16,9 +16,13 @@ PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 MAX_LINE = 1024 * 1024
 INSTRUCTIONS = ("OpenTV (Raspberry Pi) : outils bornés « Pour toi » (status, recommend, catalogue_list, search, "
                 "feedback, history), display_message et, si le propriétaire l'a autorisé, le pilotage (present_title, "
-                "play_title, close_player, remote_control). Choisis toi-même un film avec recommend/search/history, "
+                "play_title, close_player, remote_control). recommend est la source par défaut de toute "
+                "recommandation ; search/catalogue_list servent à retrouver un titre précis. Choisis toi-même un film, "
                 "explique-le en une phrase et montre-le avec present_title ; lance un film seulement quand l'humain "
-                "le demande. Les sorties ne contiennent jamais d'URL. Les décisions sensibles restent à l'humain.")
+                "le demande. " + tools.NO_REPEAT + " present_title/play_title : mode=new par défaut (refus "
+                "already_seen pour un film vu), mode=rewatch seulement sur demande explicite de revoir. "
+                + tools.CALIBRATION_PROTOCOL + " Les sorties ne contiennent jamais d'URL. Les décisions sensibles "
+                "restent à l'humain.")
 ERRORS_FR = {"unauthorized": "agent non autorisé", "forbidden_scope": "outil hors des droits de cet agent",
              "invalid_params": "paramètres invalides", "rate_limited": "trop de demandes, réessaie plus tard",
              "locked": "Agent Port verrouillé temporairement", "unknown_id": "identifiant absent du catalogue accepté",
@@ -30,7 +34,9 @@ ERRORS_FR = {"unauthorized": "agent non autorisé", "forbidden_scope": "outil ho
              "playback_unavailable": "lecture indisponible sur cette TV",
              "tv_busy": "la TV est dans un réglage : réessaie après", "tv_setup_active": "OpenTV est en configuration",
              "tv_queue_full": "trop d'actions en attente sur la TV", "control_unavailable": "pilotage indisponible",
-             "bridge_paused": "pont en pause : le pilotage n'est plus autorisé sur la TV"}
+             "bridge_paused": "pont en pause : le pilotage n'est plus autorisé sur la TV",
+             "already_seen": "film déjà vu par Alex : propose-en un autre (mode=rewatch seulement s'il demande "
+                             "explicitement de le revoir)"}
 
 
 class ConfigError(Exception):

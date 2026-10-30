@@ -110,8 +110,10 @@ class TestToolsAndRates(unittest.TestCase):
             t = tools.TOOL_BY_NAME[name]
             self.assertEqual(t["scope"], "control")
             props = t["inputSchema"]["properties"]
-            self.assertLessEqual(set(props), {"id", "text", "key"}, name)
+            self.assertLessEqual(set(props), {"id", "text", "key", "mode"}, name)
             self.assertFalse(t["inputSchema"]["additionalProperties"])
+            if "mode" in props:   # enum strict new|rewatch (test_muse_calibration), jamais un booléen
+                self.assertEqual((props["mode"]["type"], props["mode"]["enum"]), ("string", ["new", "rewatch"]))
         ok = tools.validate_args("present_title", {"id": "films/106", "text": "Grand spectacle, très bien noté."})
         self.assertEqual(ok["id"], "films/106")
         for name, args in (("present_title", {"id": "films/106", "text": "voir films-mirror.net/x"}),

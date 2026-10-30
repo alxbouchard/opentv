@@ -562,7 +562,9 @@ Configuration MCP stdio de l'agent (même machine) :
 
 Protocole : JSON-RPC 2.0 ligne par ligne, `initialize` (2025-06-18, 2025-03-26, 2024-11-05), `ping`, `tools/list`
 (filtré par scopes, une page), `tools/call`. Outils : `status`, `recommend` (limit ≤ 20, offset ≤ 200),
-`catalogue_list` (tout le catalogue accepté, tri alphabétique, pages ≤ 50, offset ≤ 2000, aucune URL ni champ brut), `search`
+`catalogue_list` (tout le catalogue accepté, tri alphabétique, pages ≤ 50, offset ≤ 2000, aucune URL ni champ brut ;
+chaque élément porte `marks` {seen, opinion, watchlist, not_tonight} relues dans le profil local à l'appel, `null` +
+`store: unavailable` si le profil est illisible), `search`
 (titre, requête de type URL refusée), `feedback` (actions explicites : J'aime, Pas pour moi, Déjà vu, À voir plus
 tard, Pas ce soir et leurs retraits), `history`, `display_message` (≤ 140 caractères, sans adresse, 1 / 5 s).
 Toutes les sorties passent par le nettoyage du moteur « Pour toi » : **aucune URL**. Pas de shell, pas d'URL arbitraire,
@@ -576,8 +578,8 @@ Pilotage. Outils sémantiques typés, sans URL, chemin, touche brute de la TV, d
 
 | Outil | Paramètres | Effet autoritaire (jamais « pixels visibles ») | Débit par agent |
 |---|---|---|---|
-| `present_title` | `id` stable du catalogue accepté, `text` facultatif ≤ 140 sans adresse | action TV `present` mise en file (`queued`) | 1 / 3 s, 20 / 10 min |
-| `play_title` | `id` stable | `Playback.start` — mêmes portes que « Regarder » (source approuvée, promotion terrain, contrôleur prêt) ⇒ `loading` + action TV `play` | 1 / 10 s, 6 / 10 min |
+| `present_title` | `id` stable du catalogue accepté, `text` facultatif ≤ 140 sans adresse, `mode` facultatif `new`\|`rewatch` (défaut `new`) | action TV `present` mise en file (`queued`) | 1 / 3 s, 20 / 10 min |
+| `play_title` | `id` stable, `mode` facultatif `new`\|`rewatch` (défaut `new`) | `Playback.start` — mêmes portes que « Regarder » (source approuvée, promotion terrain, contrôleur prêt) ⇒ `loading` + action TV `play` | 1 / 10 s, 6 / 10 min |
 | `close_player` | — | lecteur en cours ⇒ `closing` (raison `agent`), sinon `closed:false` | 1 / 2 s |
 | `remote_control` | `key` ∈ up, down, left, right, ok, back, home | action TV `key` ; pendant une lecture seules back/home (ferment le lecteur) | 3 / s, 60 / min |
 
@@ -600,6 +602,14 @@ fiche ou la carte qu'Alex vient d'ouvrir reste. `close_player` est toujours perm
 explicite d'Alex, lecture déjà acceptée par les portes) affiche toujours l'écran de chargement honnête. Jamais les
 Réglages (`settings_forbidden`) ni « Regarder » par OK (`use_play_title`). La fiche proposée affiche « Proposé par
 Muse » et la phrase de l'assistant ; après une lecture, Retour revient sur cette même fiche.
+
+**Anti-répétition** : après résolution du titre et **avant** toute action TV ou `Playback.start`, `present_title` et
+`play_title` refusent `already_seen` un film qu'Alex a explicitement marqué « Déjà vu » (marques relues dans le
+profil local à l'instant, pas dans la sélection TV figée), sauf `mode: "rewatch"` — à n'utiliser que si Alex demande
+explicitement de revoir ce titre ; `rewatch` suit ensuite toutes les portes habituelles. Aucun outil ne démarque ni ne
+marque « vu » implicitement : proposer, lancer ou regarder longtemps un film n'est jamais « vu ». Les priorités
+(configuration, « Gérer les assistants », lecture en cours, retour) passent avant ce refus. Limite : si la base
+« Pour toi » est illisible, seules les marques de la sélection TV servent de repli.
 
 **Identité liée** : le pont Muse s'authentifie comme `muse-device`, mais tout ce que voit Alex porte le nom de
 l'agent propriétaire (`agents.canonical_agent` : « Proposé par Muse », « Message de Muse », jamais l'identifiant
@@ -644,18 +654,26 @@ pont enregistre sa propre description d'appareil, limitée à cette liste fermé
 | `opentv.status` | `status` | aucun paramètre (inclut l'état de lecture et des actions TV) |
 | `opentv.search` | `search` | `query` 1–80 caractères, jamais d'adresse ; `limit` ≤ 20 ; `offset` ≤ 200 |
 | `opentv.recommend` | `recommend` | `limit` ≤ 20 ; `offset` ≤ 200 |
-| `opentv.catalogue_list` | `catalogue_list` | pages `limit` ≤ 50, `offset` ≤ 2000 : tout le catalogue accepté, `has_more` |
+| `opentv.catalogue_list` | `catalogue_list` | pages `limit` ≤ 50, `offset` ≤ 2000 : tout le catalogue accepté, `has_more`, `marks` par film |
 | `opentv.history` | `history` | `list` (énumération), `limit` ≤ 50, `offset` ≤ 500 |
 | `opentv.feedback` | `feedback` | `id` stable, `action` (énumération « Pour toi ») |
 | `opentv.display_message` | `display_message` | `text` ≤ 140 sans adresse, `seconds` 5–60, 1 / 5 s |
-| `opentv.present_title` | `present_title` | `id` stable, `text` facultatif ≤ 140 sans adresse |
-| `opentv.play_title` | `play_title` | `id` stable — seulement quand Alex demande de regarder |
+| `opentv.present_title` | `present_title` | `id` stable, `text` facultatif ≤ 140 sans adresse, `mode` `new`\|`rewatch` (défaut `new`) |
+| `opentv.play_title` | `play_title` | `id` stable, `mode` `new`\|`rewatch` (défaut `new`) — seulement quand Alex demande de regarder |
 | `opentv.close_player` | `close_player` | aucun paramètre |
 | `opentv.remote_control` | `remote_control` | `key` (énumération de 7 touches) |
 
-Muse formule ses propositions lui-même : les descriptions l'invitent à choisir avec `recommend`, `search`, `history`
-et `catalogue_list`, à expliquer son choix en une phrase, puis à le montrer avec `present_title` (ou une bannière
-`display_message`) plutôt qu'à recopier des pages brutes.
+Muse formule ses propositions lui-même : les descriptions font de `recommend` la source par défaut de toute
+recommandation (`search`/`catalogue_list` servent à retrouver un titre et portent `state.seen`/`marks.seen`), à
+expliquer son choix en une phrase, puis à le montrer avec `present_title` (ou une bannière `display_message`) plutôt
+qu'à recopier des pages brutes, sans jamais reproposer un film vu sauf demande explicite de le revoir (`rewatch`).
+
+**Calibrage rapide** (15–20 films, aucun outil dédié : `recommend` limit ≤ 20 + `feedback`, protocole dans les
+descriptions Muse et les instructions MCP, `tools.CALIBRATION_PROTOCOL`) : un film à la fois, à voix haute, sans
+afficher la fiche sur la TV ni lancer le lecteur sauf demande explicite. « Vu et aimé » ⇒ `seen` puis `like` ;
+« Vu, mais bof » ⇒ `seen` puis `dislike` ; « Pas vu » ⇒ aucun avis ; « À voir » ⇒ `watchlist` ; puis le suivant.
+Une proposition « déjà vue » ⇒ `seen` seulement (jamais `dislike`), puis la suivante aussitôt. Muse ne prétend jamais
+connaître les historiques Netflix/Prime/etc. et ne déduit jamais « vu » d'une ouverture, d'un lancement ou d'une durée.
 
 Chaque appel est validé strictement (champs inconnus, types, bornes, adresses ⇒ `invalid_params`, sans aucun appel),
 puis délégué par le client MCP (`opentv_pi.mcp`) à l'**Agent Port** avec l'identité locale **dédiée**

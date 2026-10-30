@@ -1257,6 +1257,14 @@ class App:
         if item is None or tvitem is None:
             raise tools.ToolError("unknown_id")
         uid = a["id"]
+        # anti-répétition : un film qu'Alex a explicitement marqué « Déjà vu » (marques relues dans le profil à
+        # l'instant, tv_item) n'est ni proposé ni lancé en mode « new » (défaut) — refus AVANT toute action TV et
+        # avant Playback.start. « rewatch » (Alex demande explicitement de revoir) suit le chemin normal et toutes
+        # les portes ci-dessous ; aucune marque n'est jamais retirée ni ajoutée ici.
+        if name in ("present_title", "play_title") and a.get("mode", "new") != "rewatch" and \
+                (tvitem.get("marks") or {}).get("seen") is True:
+            self.log("agent_control", agent=agent, tool=name, ok=False, error="already_seen")
+            raise tools.ToolError("already_seen")
         if name == "present_title":
             if self.playback.active():
                 raise tools.ToolError("player_active")

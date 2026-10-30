@@ -9,6 +9,26 @@ HISTORY_LISTS = ("events", "opened", "liked", "disliked", "seen", "watchlist", "
 UID_PATTERN = r"^[a-z][a-z0-9-]{1,23}/[0-9]{1,12}$"
 NAV_KEYS = ("up", "down", "left", "right", "ok", "back", "home")   # = REMOTE_ACTIONS de tv.js (vérifié par les tests)
 ID_DESC = "Identifiant stable du catalogue accepté, ex. films/17397"
+# Mode d'une proposition/d'un lancement : « new » (défaut) refuse un film déjà marqué vu (already_seen) ; « rewatch »
+# seulement quand Alex demande explicitement de REVOIR ce titre. Chaîne énumérée (le validateur ne gère que
+# integer/string : jamais de booléen). Le mode ne démarque jamais rien.
+TITLE_MODES = ("new", "rewatch")
+MODE_PROP = {"type": "string", "enum": list(TITLE_MODES), "default": "new",
+             "description": "new pour un film pas encore vu ; rewatch seulement si Alex demande explicitement de le "
+                            "revoir"}
+# Protocole de calibrage rapide (aucun outil dédié : recommend + feedback). Partagé par les instructions MCP, la
+# description de recommend et les commandes Muse (tests : test_muse_calibration).
+CALIBRATION_PROTOCOL = (
+    "Calibrage rapide (quand Alex veut que tu apprennes ses goûts, 15 à 20 films) : appelle recommend (limit jusqu'à "
+    "20), puis pose UN film à la fois, à voix haute, sans afficher le film sur la TV et sans lancer le lecteur, sauf "
+    "demande explicite d'Alex. Réponses : « Vu et aimé » ⇒ feedback seen puis like ; « Vu, mais bof » ⇒ feedback "
+    "seen puis dislike ; « Pas vu » ⇒ aucun avis enregistré ; « À voir » ⇒ feedback watchlist. Après chaque réponse, "
+    "passe au film suivant sans reposer un titre déjà posé. Si Alex dit qu'une proposition est déjà vue : feedback "
+    "seen (jamais dislike pour « déjà vu » seul), puis propose aussitôt la suivante. Tu ne connais pas ses "
+    "historiques Netflix, Prime Video ou autres : ne prétends jamais les connaître. Ouvrir, proposer, lancer ou "
+    "regarder longtemps un film n'est jamais « vu » : seule la parole d'Alex compte.")
+NO_REPEAT = ("Ne propose jamais un film marqué vu (marks.seen, state.seen) sauf si Alex demande explicitement de le "
+             "revoir.")
 
 
 def _int(lo, hi, default, desc):
@@ -25,22 +45,29 @@ TOOLS = [
                     "(découverte), catalogue et profil « Pour toi ». Aucune adresse ni secret.",
      "inputSchema": _obj({})},
     {"name": "recommend", "scope": "read", "title": "Recommandations « Pour toi »",
-     "description": "Sélection personnelle expliquée (goûts explicites, notes, nouveautés), filtrée sur le catalogue "
-                    "accepté (paginée). Point de départ pour choisir TOI-MÊME un film à proposer à Alex.",
+     "description": "Source par défaut de toute recommandation : sélection personnelle expliquée (goûts explicites, "
+                    "notes, nouveautés), filtrée sur le catalogue accepté, sans les films déjà vus ni « Pas pour "
+                    "moi » (paginée). Point de départ pour choisir TOI-MÊME un film à proposer à Alex. "
+                    + CALIBRATION_PROTOCOL,
      "inputSchema": _obj({"limit": _int(1, 20, 5, "Nombre d'éléments"), "offset": _int(0, 200, 0, "Décalage")})},
     {"name": "catalogue_list", "scope": "read", "title": "Catalogue OpenTV complet",
      "description": "Liste alphabétique paginée de tout le catalogue accepté, sans URL ni champ interne. Parcourir "
-                    "avec offset jusqu'à has_more=false en gardant generated_at : s'il change, recommencer à 0.",
+                    "avec offset jusqu'à has_more=false en gardant generated_at : s'il change, recommencer à 0. "
+                    "Chaque élément porte marks (seen, opinion, watchlist, not_tonight) lus dans le profil local au "
+                    "moment de l'appel (null si le profil est indisponible). Pour recommander, préfère recommend. "
+                    + NO_REPEAT,
      "inputSchema": _obj({"limit": _int(1, 50, 20, "Nombre d'éléments"),
                           "offset": _int(0, 2000, 0, "Décalage")})},
     {"name": "search", "scope": "read", "title": "Chercher un titre",
-     "description": "Recherche par titre dans le catalogue accepté. Une requête qui ressemble à une URL est refusée.",
+     "description": "Recherche par titre dans le catalogue accepté. Une requête qui ressemble à une URL est refusée. "
+                    "Chaque résultat porte state (seen, opinion, watchlist, not_tonight). " + NO_REPEAT,
      "inputSchema": _obj({"query": {"type": "string", "minLength": 1, "maxLength": 80, "description": "Titre"},
                           "limit": _int(1, 20, 5, "Nombre d'éléments"), "offset": _int(0, 200, 0, "Décalage")},
                          ("query",))},
     {"name": "feedback", "scope": "feedback", "title": "Avis sur un titre",
      "description": "Enregistre un avis explicite (J'aime, Pas pour moi, Déjà vu, À voir plus tard, Pas ce soir) "
-                    "sur un identifiant du catalogue. Idempotent. Ouvrir un film n'est jamais « vu ».",
+                    "sur un identifiant du catalogue, SEULEMENT quand Alex le dit. Idempotent. Ouvrir, proposer ou "
+                    "lancer un film n'est jamais « vu » ; « déjà vu » seul = seen, jamais dislike.",
      "inputSchema": _obj({"id": {"type": "string", "pattern": UID_PATTERN, "description": ID_DESC},
                           "action": {"type": "string", "enum": list(FEEDBACK_ACTIONS), "description": "Avis"}},
                          ("id", "action"))},
@@ -61,19 +88,24 @@ TOOLS = [
      "description": "Montre sur la TV la fiche d'un film du catalogue accepté (identifiant stable de recommend, search "
                     "ou catalogue_list), avec une courte phrase d'explication facultative. Choisis toi-même le film "
                     "(goûts « Pour toi », historique, notes), explique ton choix en une phrase, puis appelle cet outil : "
-                    "Alex décide avec sa télécommande ou en te demandant de le lancer. Refusé pendant une lecture, "
-                    "pendant le retour qui la suit ou un réglage en cours. Résultat : action mise en file (queued) ; "
-                    "suivre son état avec status.",
+                    "Alex décide avec sa télécommande ou en te demandant de le lancer. Préfère un film de recommend. "
+                    "mode=new (défaut) : refusé already_seen si le film est marqué vu (marks.seen) ; mode=rewatch "
+                    "UNIQUEMENT si Alex demande explicitement de le revoir. Refusé pendant une lecture, pendant le "
+                    "retour qui la suit ou un réglage en cours. Résultat : action mise en file (queued) ; suivre son "
+                    "état avec status. Jamais pendant un calibrage, sauf demande explicite.",
      "inputSchema": _obj({"id": {"type": "string", "pattern": UID_PATTERN, "description": ID_DESC},
                           "text": {"type": "string", "minLength": 1, "maxLength": 140,
-                                   "description": "Pourquoi ce film, en une phrase"}}, ("id",))},
+                                   "description": "Pourquoi ce film, en une phrase"},
+                          "mode": MODE_PROP}, ("id",))},
     {"name": "play_title", "scope": "control", "title": "Lancer un film (à la demande d'Alex)",
      "description": "Lance un film du catalogue accepté par le lecteur officiel promu d'OpenTV, SEULEMENT quand Alex "
                     "demande explicitement de le regarder. Mêmes portes que le bouton « Regarder » (source approuvée, "
                     "promotion terrain, contrôleur) ; refusé si indisponible ou si une lecture est déjà en cours. "
+                    "mode=new (défaut) : refusé already_seen si le film est marqué vu (marks.seen) ; mode=rewatch "
+                    "UNIQUEMENT si Alex demande explicitement de le revoir. Lancer n'est jamais « vu ». "
                     "Résultat : lecture acceptée (loading), jamais « visible » ; suivre playback dans status.",
-     "inputSchema": _obj({"id": {"type": "string", "pattern": UID_PATTERN, "description": ID_DESC}},
-                         ("id",))},
+     "inputSchema": _obj({"id": {"type": "string", "pattern": UID_PATTERN, "description": ID_DESC},
+                          "mode": MODE_PROP}, ("id",))},
     {"name": "close_player", "scope": "control", "title": "Fermer le lecteur",
      "description": "Ferme le lecteur en cours et revient à OpenTV sur la fiche du film. Sans lecture en cours : "
                     "rien n'est fermé (closed=false).",
