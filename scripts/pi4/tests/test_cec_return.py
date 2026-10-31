@@ -2556,6 +2556,246 @@ class TestRecoveryLastMomentDrain(RBase):
         self.assertIn("fenêtre résiduelle", src)
 
 
+# --------------------------------------------------------------------------- revue finale de 4a1b48d (mutants)
+class TimedLog(list):
+    """Journal de test : chaque événement est copié avec l'instant simulé `_t` de son émission."""
+
+    def __init__(self, clock):
+        super().__init__()
+        self.clock = clock
+
+    def append(self, obj):
+        super().append(dict(obj, _t=self.clock.t))
+
+
+BUDGET_DOC = ("comptent dans le plafond de 60 tentatives/h, mais ni dans le délai anti-doublon de 5 s ni dans le "
+              "quota de 30 annonces/h")
+
+
+class TestFinalReviewBudgetsAndEnds(RBase):
+    """Mutants survivants des revues finales de 4a1b48d, tués ici sans changer le code de production :
+    1) une reprise `cancelled` qui consommerait le délai anti-doublon (le retour exact suivant serait reporté) ;
+    2) une reprise `cancelled` qui consommerait le quota de 30 annonces/h (`rate_limited` après 30 annulations) ;
+    3) une fin de moniteur vue par la relecture finale rendue `eof` brut au lieu du diagnostic stderr/code de sortie ;
+    4) la relecture préalable de la boucle principale retirée (verrou pris et adaptateur relu pour rien).
+    Contrat : `cancelled`, `busy`, refus et échecs comptent dans le plafond séparé MAX_ATTEMPTS_PER_HOUR (60/h), jamais
+    dans COOLDOWN_S ni dans MAX_PER_HOUR."""
+    ka_logs = TestKeepalive.ka_logs
+    states = TestKeepalive.states
+    t_announced = TestKeepalive.t_announced
+    run_case = TestRecoveryLastMomentDrain.run_case
+    assert_cancelled = TestRecoveryLastMomentDrain.assert_cancelled
+    HOLD_S, ARRIVE_S, SLOW_POWER_S = (TestRecoveryLastMomentDrain.HOLD_S, TestRecoveryLastMomentDrain.ARRIVE_S,
+                                      TestRecoveryLastMomentDrain.SLOW_POWER_S)
+    REDO_S = 2.0          # retour exact suivant : ROUTING_CHANGE 2 s après l'annulation (+ 0,05 s + calme 1,5 s)
+
+    # ----------------------------------------------------------------- (1) cancelled ≠ délai anti-doublon
+    @bounded()
+    def test_fast_exact_return_after_cancelled_is_announced_not_cooldown_deferred(self):
+        """YouTube rouvert pendant l'attente du verrou (`cancelled`), puis la TV revient : la reprise suivante part
+        ~3,5–4 s après l'annulation (< COOLDOWN_S), dès la fin du calme — jamais `cooldown_deferred`."""
+        for where in ("lock", "power"):
+            with self.subTest(where=where):
+                self.logs = TimedLog(self.clock)
+                tail = at(self.REDO_S, routing_change("0.0.0.0", "1.0.0.0")) + at(0.05, stream_path("1.0.0.0")) + \
+                    traffic(60)
+                res, _, _ = self.run_case(active_source("0.0.0.0"), where, tail=tail)
+                self.assertEqual(res, ("eof", True))
+                rec = self.recoveries()
+                self.assertEqual([(e["result"], e.get("reason")) for e in rec],
+                                 [("cancelled", "native_app"), ("announced", None)], rec)
+                t_cancel, t_retry = rec[0]["_t"], self.t_pq[1]           # 2e reprise = 2e question d'alimentation
+                self.assertGreaterEqual(t_retry - t_cancel, 3.5 - 1e-6)
+                self.assertLessEqual(t_retry - t_cancel, 4.0)
+                self.assertLess(t_retry - t_cancel, cecreturn.COOLDOWN_S)
+                t_sp = [t for t, line in self.src.delivered if line == stream_path("1.0.0.0")[0]][-1]
+                # aucun report après le calme (seule la relecture de l'adaptateur, 0,05 s simulés, précède la question)
+                self.assertLessEqual(t_retry - t_sp, cecreturn.SETTLE_S + 0.1)
+                self.assertEqual(self.rbus.opts(), ["--give-device-power-status"] + ANNOUNCE_SEQ)
+                self.assertEqual(self.states()[0], ("armed", None))
+
+    def test_cancelled_attempt_leaves_cooldown_and_announcement_quota_untouched(self):
+        mon = self.solo()
+        det = cecreturn.Detector("1.0.0.0", 0x10)
+        stops = ["native_app"]
+        mon._before_tx = lambda: stops.pop(0) if stops else None
+        self.assertEqual(mon._attempt("/dev/cec0", "1.0.0.0", det), "cancelled")
+        self.assertIsNone(mon.last_announced)                 # ni délai anti-doublon…
+        self.assertEqual(len(mon.announced), 0)               # … ni quota de 30 annonces/h
+        self.assertEqual(len(mon.attempts), 1)                # plafond séparé des tentatives (60/h) : compté
+        self.clock.t += 3.5
+        self.assertEqual(mon._attempt("/dev/cec0", "1.0.0.0", det), "announced")
+        self.assertIsNone(det.deadline())                     # jamais reportée
+        self.assertEqual([e["result"] for e in self.recoveries()], ["cancelled", "announced"])
+        self.assertIsNotNone(mon.last_announced)
+        self.assertEqual((len(mon.announced), len(mon.attempts)), (1, 2))
+        self.assertEqual(self.bus.opts(), ["--give-device-power-status"] + ANNOUNCE_SEQ)
+
+    # ----------------------------------------------------------------- (2) cancelled ≠ quota de 30 annonces/h
+    def test_thirty_or_thirty_one_cancelled_never_rate_limit_the_next_announcement(self):
+        for n in (cecreturn.MAX_PER_HOUR, cecreturn.MAX_PER_HOUR + 1):
+            with self.subTest(cancelled=n):
+                self.logs.clear()
+                bus = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+                mon = self.solo(bus=bus)
+                det = cecreturn.Detector("1.0.0.0", 0x10)
+                stops = ["native_app"] * n
+                mon._before_tx = lambda _s=stops: _s.pop(0) if _s else None
+                out = []
+                for _ in range(n + 1):
+                    out.append(mon._attempt("/dev/cec0", "1.0.0.0", det))
+                    self.clock.t += 1.0
+                self.assertEqual(out, ["cancelled"] * n + ["announced"], out)
+                self.assertNotIn("rate_limited", out)
+                self.assertNotIn("cooldown_deferred", out)
+                self.assertEqual(len(mon.announced), 1)
+                self.assertEqual(len(mon.attempts), n + 1)
+                self.assertEqual(bus.opts(), ["--give-device-power-status"] * n + ANNOUNCE_SEQ)
+
+    def test_cancelled_attempts_still_count_toward_the_separate_attempt_cap(self):
+        """Plafond de protection du bus : 60 tentatives/h, annulées comprises ; puis plus rien n'est émis jusqu'à ce
+        que la fenêtre glissante d'une heure se libère."""
+        mon = self.solo()
+        det = cecreturn.Detector("1.0.0.0", 0x10)
+        mon._before_tx = lambda: "native_app"
+        out = []
+        for _ in range(cecreturn.MAX_ATTEMPTS_PER_HOUR):
+            out.append(mon._attempt("/dev/cec0", "1.0.0.0", det))
+            self.clock.t += 1.0
+        self.assertEqual(out, ["cancelled"] * cecreturn.MAX_ATTEMPTS_PER_HOUR)
+        self.assertEqual(len(mon.announced), 0)
+        n_bus = len(self.bus.calls)
+        self.assertEqual(mon._attempt("/dev/cec0", "1.0.0.0", det), "rate_limited")
+        self.assertEqual(len(self.bus.calls), n_bus)                  # aucune question, aucune émission
+        self.clock.t += 3600.0
+        mon._before_tx = lambda: None
+        self.assertEqual(mon._attempt("/dev/cec0", "1.0.0.0", det), "announced")
+
+    @bounded()
+    def test_many_cancelled_exact_returns_in_one_monitor_still_announce_the_next_one(self):
+        """Bout en bout (un seul moniteur) : MAX_PER_HOUR + 1 retours exacts, chacun annulé par YouTube rouvert pendant
+        l'attente, puis un retour exact normal : exactement une annonce, jamais `rate_limited` ni `cooldown_deferred`."""
+        n = cecreturn.MAX_PER_HOUR + 1
+        script = at(0, state_event()) + returned()
+        for _ in range(n):
+            script += at(self.REDO_S, routing_change("0.0.0.0", "1.0.0.0")) + at(0.05, stream_path("1.0.0.0"))
+        src = FakeLines(self.clock, script + traffic(60))
+        mon = self.monitor([src])
+        orig, calls = mon.recover, []
+
+        def recover(dev, pa):
+            calls.append(self.clock.t)
+            if len(calls) <= n:          # ACTIVE_SOURCE 0.0.0.0 reçue pendant l'attente : relue au dernier moment
+                src.script = [(0.0, x) for x in active_source("0.0.0.0")] + src.script
+                src.due = self.clock.t
+            return orig(dev, pa)
+        mon.recover = recover
+        self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
+        res = [e["result"] for e in self.recoveries()]
+        self.assertEqual(res, ["cancelled"] * n + ["announced"], res)
+        self.assertLess(calls[-1] - calls[0], 3600.0)                 # même heure glissante
+        self.assertEqual(self.bus.opts(), ["--give-device-power-status"] * n + ANNOUNCE_SEQ)
+        self.assertEqual(self.states()[0], ("armed", None))
+
+    # ----------------------------------------------------------------- (3) fin vue par la relecture finale
+    @bounded()
+    def test_non_repeated_end_seen_by_the_final_drain_keeps_the_exact_end_reason(self):
+        """Fin du moniteur (EOF rendu UNE fois, comme PopenLines) vue par la relecture finale de la reprise ou du POLL :
+        watch() rend le diagnostic exact de PopenLines (stderr classé, sinon `exit_nonzero`), pas `eof` ; aucune lecture
+        de plus, aucun POLL, aucune annonce."""
+        cases = (("device_disconnected", 0, "device_disconnected"), ("device_disconnected", 1, "device_disconnected"),
+                 (None, 1, "exit_nonzero"), (None, 0, "eof"))
+
+        def once_end(err, status):
+            src = OnceEnd(self.clock, at(0, state_event()) + returned() + traffic(60), kind="eof")
+            src.error, src.exit_status, src.diags = err, status, 0
+            orig = src.diagnosis
+
+            def diagnosis(_o=orig, _s=src):
+                _s.diags += 1
+                return _o()
+            src.diagnosis = diagnosis
+            return src
+        for err, status, want in cases:
+            for where in ("lock", "power"):
+                with self.subTest(path="recovery", where=where, want=want, exit_status=status):
+                    src = once_end(err, status)
+                    res, t_frame, t0 = self.run_case([], where, src=src)
+                    self.assertEqual(res, (want, True))
+                    self.assertTrue(src.fired)
+                    self.assertEqual(src.after, 0, "lecture du moniteur poursuivie après sa fin")
+                    self.assertEqual(src.diags, 1)
+                    self.assert_cancelled("monitor_end", t_frame, t0, where)
+                    self.assertEqual(self.rbus.opts(), ["--give-device-power-status"])
+            with self.subTest(path="poll", want=want, exit_status=status):
+                self.logs.clear()
+                bus = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+                src = once_end(err, status)
+                mon = self.monitor([src], bus=bus)
+                orig_poll = mon.poll
+
+                def poll(dev, pa, mask, _o=orig_poll, _s=src):
+                    _s.arm()                  # vue par la relecture finale (après verrou + relecture adaptateur)
+                    return _o(dev, pa, mask)
+                mon.poll = poll
+                self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), (want, True))
+                self.assertEqual((src.fired, src.after, src.diags), (True, 0, 1))
+                self.assertEqual(bus.polls(), [])
+                self.assertEqual(bus.opts(), ANNOUNCE_SEQ)
+                self.assertEqual(self.states(), [("armed", None), ("disarmed", "monitor_end")])
+
+    # ----------------------------------------------------------------- (4) relecture préalable de la boucle
+    @bounded()
+    def test_stop_frame_buffered_before_a_due_poll_cancels_without_lock_or_adapter_read(self):
+        """Trame d'arrêt déjà dans le tampon à l'échéance du POLL : la boucle principale la lit d'abord (délai nul) et
+        désarme sans même prendre le verrou CEC ni relire l'adaptateur (économie + échec rapide) ; poll() jamais
+        appelé. La relecture finale de poll() reste la seconde barrière, pas la seule."""
+        for frame_lines, reason in ((active_source("0.0.0.0"), "native_app"),
+                                    (active_source("3.0.0.0", src=8), "other_source"),
+                                    (routing_change("0.0.0.0", "2.0.0.0"), "routed_away"),
+                                    (frame(0x36, "STANDBY"), "standby"),
+                                    (["", "1.0s: Event: Lost 3 messages"], "lost")):
+            with self.subTest(reason):
+                self.logs.clear()
+                bus = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+
+                def due(t, _b=bus):
+                    menu = [x for x, a in _b.at if "--menu-status" in a]
+                    return bool(menu) and t >= menu[0] + cecreturn.KEEPALIVE_INTERVAL_S
+                src = RaceLines(self.clock, at(0, state_event()) + returned() + at(120, power_poll()), frame_lines, due)
+                mon = self.monitor([src], bus=bus)
+                polls, locks = [], []
+                orig_poll, orig_lock = mon.poll, cecboot._lock
+                mon.poll = lambda *a, _o=orig_poll: polls.append(self.clock.t) or _o(*a)
+
+                def lock(state_dir, _o=orig_lock):
+                    locks.append(self.clock.t)
+                    return _o(state_dir)
+                with mock.patch.object(cecreturn.cecboot, "_lock", lock):
+                    self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
+                self.assertTrue(src.fired)
+                self.assertEqual([e["result"] for e in self.recoveries()], ["announced"])
+                t_ann = self.t_announced(bus)[0]
+                self.assertEqual(polls, [], reason)                                    # poll() jamais appelé
+                self.assertEqual([t for t in locks if t > t_ann], [], reason)          # verrou jamais repris
+                self.assertEqual(len(locks), 1)                                       # celui de la reprise seul
+                reads = [t for t, a in bus.at if a == ["cec-ctl", "-d", "/dev/cec0"] and t > t_ann]
+                self.assertEqual(reads, [], reason)                                   # adaptateur jamais relu
+                self.assertEqual(bus.polls(), [])
+                self.assertEqual(bus.opts(), ANNOUNCE_SEQ)
+                self.assertEqual(self.states(), [("armed", None), ("disarmed", reason)])
+
+    def test_docs_budget_split_between_attempt_cap_cooldown_and_quota(self):
+        for path in (os.path.join(PI4, "README.md"), os.path.join(PI4, "CEC_COMPATIBILITY.md"),
+                     os.path.join(ROOT, "AGENTS.md")):
+            with open(path, encoding="utf-8") as f:
+                flat = re.sub(r"\s+", " ", f.read())
+            self.assertIn(BUDGET_DOC, flat, path)
+            self.assertIn("`cancelled`", flat, path)
+        self.assertEqual((cecreturn.COOLDOWN_S, cecreturn.MAX_PER_HOUR, cecreturn.MAX_ATTEMPTS_PER_HOUR),
+                         (5.0, 30, 60))
+
+
 # --------------------------------------------------------------------------- CLI, configuration
 class TestCli(unittest.TestCase):
     def run_cli(self, *argv):

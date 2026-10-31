@@ -85,8 +85,9 @@ trame incohérente (octets bruts ≠ en-tête/adresses décodées), ligne inconn
 redémarrage du moniteur/service (état vide), touches déjà reçues ou autre annonce pendant le calme, **Samsung Home
 seul** (aucun message CEC). Allers-retours rapides : seule une annonce transmise consomme le délai anti-doublon (5 s)
 et le quota (30/h) ; un retour exact pendant ce délai est reporté à sa fin (touches ou autre annonce ⇒ annulé), jamais
-perdu ; `busy`, refus ou échec ne bloquent pas le retour suivant ; 60 tentatives/h au plus. Le témoin de l'annonce de
-démarrage n'est ni lu ni écrit. Opt-out : `OPENTV_CEC_RETURN_RECOVERY=0`.
+perdu ; `busy`, refus ou échec ne bloquent pas le retour suivant ; 60 tentatives/h au plus : `cancelled`, `busy`, refus
+et échecs comptent dans le plafond de 60 tentatives/h, mais ni dans le délai anti-doublon de 5 s ni dans le quota de
+30 annonces/h. Le témoin de l'annonce de démarrage n'est ni lu ni écrit. Opt-out : `OPENTV_CEC_RETURN_RECOVERY=0`.
 
 `"result":"announced"` prouve seulement la **transmission** acquittée de `<Active Source>`/`<Menu Status>`, pas que la
 TV renvoie les touches : la reprise reste un gate terrain (six touches visibles). Le moniteur n'est prêt

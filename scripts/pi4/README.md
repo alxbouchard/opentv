@@ -264,8 +264,10 @@ Télécommande — trois niveaux, dans cet ordre de priorité :
      pendant le délai de calme. Allers-retours rapides (YouTube ↔ OpenTV) : seule une annonce **transmise** consomme
      le délai anti-doublon de 5 s et le quota de 30 par heure ; un retour exact pendant ces 5 s est **reporté** à leur
      fin (touches ou autre annonce entre-temps ⇒ annulé), jamais perdu ; `busy`, refus ou échec ne bloquent pas le
-     retour suivant ; toutes tentatives confondues, au plus 60 par heure (borne du bus). Le témoin de l'annonce de
-     démarrage n'est ni lu ni écrit (`cec --activate` et l'annonce unique de démarrage sont inchangés). Journal :
+     retour suivant ; toutes tentatives confondues, au plus 60 par heure (borne du bus) : `cancelled`, `busy`, refus et
+     échecs comptent dans le plafond de 60 tentatives/h, mais ni dans le délai anti-doublon de 5 s ni dans le
+     quota de 30 annonces/h. Le témoin de l'annonce de démarrage n'est ni lu ni écrit (`cec --activate` et l'annonce
+     unique de démarrage sont inchangés). Journal :
      `journalctl -u opentv-cec-return` → `"event":"cec_return_ready"` (une fois par moniteur, seulement après
      l'événement initial du noyau avec l'adresse physique et le masque attendus ; rien n'est armé avant), puis
      `"event":"cec_return_recovery","result":"announced"` (ou `refused_tv_not_on`, `busy`, `failed`, `adapter_changed`,

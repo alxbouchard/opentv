@@ -336,7 +336,8 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   0), cec-ctl absent ou échecs génériques répétés avant « prêt » ⇒ sortie 78 non relancée (unité `failed`, health
   `cec_return_failed`). Changement d'état attendu (TV, HDMI, réclamation ; aussi événement initial discordant avant
   « prêt ») : jamais compté vers 78, redécouverte 2 s puis 5 s jusqu'au prochain « prêt » (jamais 30 s aveugles). `announced` = transmission, pas preuve de reprise des touches. Anti-doublon 5 s (report),
-  30 annonces/h ; busy/refus/échec ne consomment rien.
+  30 annonces/h ; `cancelled`, `busy`, refus et échecs comptent dans le plafond de 60 tentatives/h, mais ni dans le
+  délai anti-doublon de 5 s ni dans le quota de 30 annonces/h.
   Contrat et cas refusés : `scripts/pi4/CEC_COMPATIBILITY.md`, tests `scripts/pi4/tests/test_cec_return.py`.
   Vérifié hors matériel seulement.
 - **Maintien neutre POLL après la reprise Samsung (0.7.4)** : `announced` rétablit, mais la Samsung terrain cesse de
