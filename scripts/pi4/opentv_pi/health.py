@@ -15,6 +15,7 @@ UNITS_OPTIONAL = ("opentv-kiosk.service", "opentv-cec.timer", "opentv-cec-return
                   "opentv-catalogue-refresh.timer",
                   "opentv-catalogue-ratings.service", "opentv-catalogue-ratings-retry.timer",
                   "opentv-catalogue-ratings-retry.service")
+CEC_RETURN_UNIT = "opentv-cec-return.service"
 
 
 def sha256_file(path):
@@ -127,6 +128,11 @@ def run(cfg, root="/", runner=default_runner, check_http=True):
         warnings.append("ratings_enrichment_failed")
     if (rat.get("retry") or {}).get("state") == "retry_exhausted":
         warnings.append("ratings_retry_exhausted")
+    # reprise CEC après une application native : activée mais unité arrêtée/en échec (78 : refus du mode moniteur,
+    # cec-ctl absent, échecs répétés avant « prêt ») ⇒ avertissement, sans renverser « ok » (unité facultative)
+    if cfg.cec_bootstrap and cfg.cec_return_recovery and man.get("error") != "manifest_missing" and \
+            units.get(CEC_RETURN_UNIT) in ("failed", "inactive"):
+        warnings.append("cec_return_failed")
     if rat.get("exposed") or ("exposed" in rat and rat["exposed"] is None):
         # jeton présent mais une unité du compte tourne sans le masque de son dossier (ou invérifiable)
         warnings.append("ratings_credential_exposed")

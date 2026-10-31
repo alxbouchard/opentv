@@ -27,7 +27,7 @@ from unittest import mock
 
 from tests._common import PI4, ROOT
 from tests.test_install import INSTALL, UNINSTALL, sh, tree
-from tests.test_remote import BOOT_A, Base, Clock, FakeBus, make_root, tmpdir
+from tests.test_remote import BOOT_A, Base, FakeBus, make_root, tmpdir
 from opentv_pi import VERSION, cecboot, cecreturn, cli, config, health, ratings
 
 WAKE = ("--image-view-on", "--text-view-on", "--standby", "--set-power-state", "--user-control-pressed",
@@ -100,10 +100,12 @@ def captured(pa="1.0.0.0", youtube_s=600.0, own=None):
 
 
 class FakeLines:
-    """Sortie de `cec-ctl -m` simulée : lignes horodatées sur l'horloge partagée, puis fin (ou silence)."""
+    """Sortie de `cec-ctl -m` simulée : lignes horodatées sur l'horloge partagée, puis fin (ou silence) ; `error` /
+    `exit_status` : diagnostic de fin (stderr classé, code de sortie) comme PopenLines.diagnosis()."""
 
-    def __init__(self, clock, script, end="eof"):
+    def __init__(self, clock, script, end="eof", error=None, exit_status=0):
         self.clock, self.script, self.end = clock, list(script), end
+        self.error, self.exit_status = error, exit_status
         self.due = clock.t + (self.script[0][0] if self.script else 0.0)
         self.closed = False
         self.reads = 0
@@ -127,8 +129,18 @@ class FakeLines:
             self.due = self.clock.t + self.script[0][0]
         return "line", line
 
+    def diagnosis(self):
+        return {"error": self.error, "exit_status": self.exit_status}
+
     def close(self):
         self.closed = True
+
+
+def ready_first(script, pa="1.0.0.0", mask=0x0010):
+    """Préfixe l'événement initial attendu (moniteur prêt) sauf s'il est déjà là."""
+    if any("Initial Event" in line for _, line in script[:2]):
+        return list(script)
+    return at(0, state_event(pa, mask)) + list(script)
 
 
 class RecBus(FakeBus):
@@ -179,10 +191,12 @@ class RBase(Base):
         return cecreturn.Monitor(self.root, runner=bus or self.bus, spawn=spawn, mono=self.clock,
                                  sleep=self.sleep, log=self.logs.append, **kw)
 
-    def watch(self, script, dev="/dev/cec0", pa="1.0.0.0", mask=0x0010, mon=None, end="eof"):
-        self.src = FakeLines(self.clock, script, end)
+    def watch(self, script, dev="/dev/cec0", pa="1.0.0.0", mask=0x0010, mon=None, end="eof", ready=True):
+        """Un moniteur ; `ready` : l'événement initial attendu est préfixé. -> (moniteur, raison) ; self.ready."""
+        self.src = FakeLines(self.clock, ready_first(script, pa, mask) if ready else script, end)
         mon = mon or self.monitor([self.src])
-        return mon, mon.watch(dev, pa, mask)
+        why, self.ready = mon.watch(dev, pa, mask)
+        return mon, why
 
     def recoveries(self):
         return [e for e in self.logs if e.get("event") == "cec_return_recovery"]
@@ -199,7 +213,7 @@ class TestCapturedReturn(RBase):
         rec = self.recoveries()
         self.assertEqual(len(rec), 1, self.logs)
         self.assertEqual((rec[0]["result"], rec[0]["device"], rec[0]["physical_address"]),
-                         ("recovered", "/dev/cec0", "1.0.0.0"))
+                         ("announced", "/dev/cec0", "1.0.0.0"))
         self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)          # même annonce sûre que `cec --activate`
         self.assertEqual(self.bus.transmits(), [
             ["cec-ctl", "-d", "/dev/cec0", "-s", "-t", "0", "--give-device-power-status"],
@@ -218,12 +232,12 @@ class TestCapturedReturn(RBase):
                                   "/dev/cec1": {"pa": "2.1.0.0", "state": "ours"}})
         mon = self.monitor([captured("2.1.0.0")], bus=bus)
         self.assertEqual(mon.discover(), ("/dev/cec1", "2.1.0.0", 0x0010))
-        mon.watch("/dev/cec1", "2.1.0.0", 0x0010)
+        self.assertEqual(mon.watch("/dev/cec1", "2.1.0.0", 0x0010), ("eof", True))
         self.assertIn(["cec-ctl", "-d", "/dev/cec1", "-s", "--active-source", "phys-addr=2.1.0.0"], bus.transmits())
         # la séquence visant 1.0.0.0 n'appartient pas à une boîte en 2.1.0.0
         bus2 = RecBus(self.clock, {"/dev/cec1": {"pa": "2.1.0.0", "state": "ours"}})
         mon2 = self.monitor([captured("1.0.0.0", own="2.1.0.0")], bus=bus2)
-        self.assertEqual(mon2.watch("/dev/cec1", "2.1.0.0", 0x0010), "eof")
+        self.assertEqual(mon2.watch("/dev/cec1", "2.1.0.0", 0x0010), ("eof", True))
         self.assertEqual(bus2.transmits(), [])
         src = module_source()
         for literal in ("1.0.0.0", "/dev/cec0", "event3", "/dev/input"):
@@ -233,8 +247,8 @@ class TestCapturedReturn(RBase):
         """Service (ou cec-ctl) redémarré pendant YouTube : la première moitié n'a pas été vue — ambiguïté, rien."""
         mon = self.monitor([at(0, state_event()) + at(1, active_source()) + at(1, routing_change()),
                             at(0, state_event()) + at(0.05, stream_path()) + at(5, power_poll())])
-        self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), "eof")
-        self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), "eof")
+        self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
+        self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
         self.assertEqual(self.bus.transmits(), [])
         fresh = self.monitor([at(0, state_event()) + at(1, routing_change()) + at(0.05, stream_path())])
         fresh.watch("/dev/cec0", "1.0.0.0", 0x10)
@@ -252,6 +266,13 @@ NEG = {
     "other_source_active": lambda: at(0, active_source("3.0.0.0", src=8)) + at(60, routing_change()) +
     at(0.05, stream_path()),
     "other_source_between": lambda: at(0, active_source()) + at(30, active_source("3.0.0.0", src=8)) +
+    at(30, routing_change()) + at(0.05, stream_path()),
+    # la TV diffuse <Active Source> mais pas l'adresse racine 0.0.0.0 : ce n'est pas une application native
+    "tv_active_source_not_root": lambda: at(0, active_source("2.0.0.0")) + at(60, routing_change()) +
+    at(0.05, stream_path()),
+    "tv_active_source_our_pa": lambda: at(0, active_source("1.0.0.0")) + at(60, routing_change()) +
+    at(0.05, stream_path()),
+    "tv_non_root_active_source_after_native": lambda: at(0, active_source()) + at(30, active_source("3.0.0.0")) +
     at(30, routing_change()) + at(0.05, stream_path()),
     "no_prior_native_active_source": lambda: at(60, routing_change()) + at(0.05, stream_path()),
     "native_active_source_not_broadcast": lambda: at(0, active_source(dst=4)) + at(60, routing_change()) +
@@ -299,12 +320,14 @@ class TestNoTrigger(RBase):
                 self.bus.calls.clear()
                 self.logs.clear()
                 self.watch(at(0, state_event()) + script() + at(10, power_poll()))
+                self.assertTrue(self.ready, name)                       # moniteur prêt : refus par la séquence
                 self.assertEqual(self.bus.transmits(), [], name)
                 self.assertEqual(self.recoveries(), [], name)
 
     def test_oversize_or_unknown_output_ends_watch_without_emission(self):
-        mon = self.monitor([FakeLines(self.clock, at(0, active_source()) + at(60, routing_change()), end="oversize")])
-        self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), "oversize")
+        mon = self.monitor([FakeLines(self.clock, ready_first(at(0, active_source()) + at(60, routing_change())),
+                                      end="oversize")])
+        self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("oversize", True))
         self.assertEqual(self.bus.transmits(), [])
 
     def test_pending_recovery_is_dropped_when_monitor_dies_before_settle(self):
@@ -326,7 +349,7 @@ class TestNoTrigger(RBase):
             with self.subTest(ev[1]):
                 _, why = self.watch(at(0, active_source()) + at(1, ev) + at(60, routing_change()) +
                                     at(0.05, stream_path()))
-                self.assertEqual(why, "adapter_state_changed")
+                self.assertEqual((why, self.ready), ("adapter_state_changed", True))
                 self.assertEqual(self.bus.transmits(), [])
 
 
@@ -362,9 +385,29 @@ class TestRecoveryGates(RBase):
             self.assertEqual(self.bus.calls, [])
         finally:
             os.close(fd)
+        # attente réelle et bornée : sondage toutes les LOCK_POLL_S jusqu'à LOCK_WAIT_S, jamais au-delà
+        self.assertGreaterEqual(self.clock.t - t0, cecreturn.LOCK_WAIT_S - cecreturn.LOCK_POLL_S - 0.01)
+        self.assertTrue(self.sleeps and set(self.sleeps) == {cecreturn.LOCK_POLL_S}, self.sleeps)
         fd2 = cecboot._lock(self.state)                              # libre ensuite : la reprise passe
         os.close(fd2)
-        self.assertEqual(self.monitor().recover("/dev/cec0", "1.0.0.0")["result"], "recovered")
+        self.assertEqual(self.monitor().recover("/dev/cec0", "1.0.0.0")["result"], "announced")
+
+    def test_lock_released_during_bounded_wait_then_announces(self):
+        fd = [cecboot._lock(self.state)]
+        t0 = self.clock.t
+
+        def sleep(s):                                                 # le passage de la minuterie finit après ~3 s
+            self.sleep(s)
+            if fd[0] is not None and self.clock.t - t0 >= 3.0:
+                os.close(fd[0])
+                fd[0] = None
+        mon = self.monitor()
+        mon.sleep = sleep
+        res = mon.recover("/dev/cec0", "1.0.0.0")
+        self.assertEqual(res["result"], "announced")
+        self.assertIsNone(fd[0])
+        self.assertLess(self.clock.t - t0, cecreturn.LOCK_WAIT_S)
+        self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)
 
     def test_lock_released_after_recovery_so_timer_and_activate_coexist(self):
         self.monitor().recover("/dev/cec0", "1.0.0.0")
@@ -387,21 +430,95 @@ class TestRecoveryGates(RBase):
         self.assertIn(res["result"], ("adapter_changed", "budget_exceeded"))
         self.assertLessEqual(self.clock.t - t0, cecreturn.RECOVER_BUDGET_S + cecreturn.LOCK_WAIT_S)
 
-    def test_cooldown_and_hourly_cap(self):
-        two = captured(youtube_s=10) + captured(youtube_s=10)          # deux retours en < COOLDOWN_S
-        self.watch(two)
+    def test_rapid_back_and_forth_announces_every_exact_return(self):
+        """Usage normal : YouTube → OpenTV → YouTube → OpenTV … en quelques secondes ; chaque retour exact rend les
+        touches (aucune reprise perdue par un délai d'une minute)."""
+        script = at(0, state_event())
+        for _ in range(6):
+            script += at(3.0, active_source()) + at(4.0, routing_change()) + at(0.05, stream_path())
+        self.watch(script + at(10, power_poll()))
         res = [e["result"] for e in self.recoveries()]
-        self.assertEqual(res.count("recovered"), 1, res)
-        self.assertIn("cooldown", res)
+        self.assertEqual(res, ["announced"] * 6, res)
+        self.assertEqual(self.bus.opts().count("--active-source"), 6)
+        self.assertEqual(wake_args(self.bus), [])
+
+    def test_return_inside_anti_duplicate_cooldown_is_deferred_not_dropped(self):
+        first = at(0, state_event()) + at(5, active_source()) + at(60, routing_change()) + at(0.05, stream_path())
+        quick = at(2.0, active_source()) + at(0.3, routing_change()) + at(0.05, stream_path())   # ~2 s après l'annonce
+        self.watch(first + quick + at(10, power_poll()))
+        res = [e["result"] for e in self.recoveries()]
+        self.assertEqual([r for r in res if r == "announced"], ["announced", "announced"], res)
+        self.assertIn("cooldown_deferred", res)
+        t = [t for t, a in self.bus.at if "--active-source" in a]
+        self.assertGreaterEqual(t[1] - t[0], cecreturn.COOLDOWN_S - 0.01)
+        self.assertLessEqual(t[1] - t[0], cecreturn.COOLDOWN_S + 1.0)
+        # touches reçues pendant le report : plus rien à faire, la reprise reportée est annulée
         self.bus.calls.clear()
         self.logs.clear()
-        mon = self.monitor([FakeLines(self.clock, sum((captured(youtube_s=cecreturn.COOLDOWN_S + 5)
-                                                       for _ in range(cecreturn.MAX_PER_HOUR + 3)), []))])
-        mon.watch("/dev/cec0", "1.0.0.0", 0x10)
+        self.watch(first + quick + at(2.0, key()) + at(10, power_poll()))
+        self.assertEqual([e["result"] for e in self.recoveries()].count("announced"), 1)
+
+    def test_busy_refused_or_failed_never_suppress_next_exact_return(self):
+        """Seule une annonce réellement transmise consomme le délai et le quota ; busy / refus / échec non."""
+        seq = at(2.0, active_source()) + at(2.0, routing_change()) + at(0.05, stream_path())
+        for first in ("busy", "refused_tv_not_on", "failed"):
+            with self.subTest(first):
+                self.bus.calls.clear()
+                self.logs.clear()
+                bus = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+                held = [None]
+                if first == "busy":
+                    held[0] = cecboot._lock(self.state)
+                elif first == "refused_tv_not_on":
+                    bus.power = "standby"
+                else:
+                    bus.fail = {"--active-source"}
+                mon = self.monitor([FakeLines(self.clock, at(0, state_event()) + seq + seq + at(10, power_poll()))],
+                                   bus=bus)
+
+                orig = mon.recover
+
+                def recover(dev, pa, _orig=orig, _bus=bus):
+                    r = _orig(dev, pa)
+                    if held[0] is not None:                       # la minuterie libère le verrou ensuite
+                        os.close(held[0])
+                        held[0] = None
+                    _bus.power, _bus.fail = "on", set()             # la TV est allumée au retour suivant
+                    return r
+                mon.recover = recover
+                self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
+                res = [e["result"] for e in self.recoveries()]
+                self.assertEqual(res, [first, "announced"], res)
+
+    def test_hourly_cap_on_announcements_is_practical_and_bounded(self):
+        script = at(0, state_event())
+        for _ in range(cecreturn.MAX_PER_HOUR + 5):
+            script += at(cecreturn.COOLDOWN_S + 1, active_source()) + at(1.0, routing_change()) + \
+                at(0.05, stream_path())
+        # une heure plus tard (même moniteur), le quota est rendu
+        script += at(3600, active_source()) + at(1.0, routing_change()) + at(0.05, stream_path()) + \
+            at(10, power_poll())
+        self.watch(script)
         res = [e["result"] for e in self.recoveries()]
-        self.assertEqual(res.count("recovered"), cecreturn.MAX_PER_HOUR, res)
-        self.assertIn("rate_limited", res)
-        self.assertEqual(self.bus.opts().count("--active-source"), cecreturn.MAX_PER_HOUR)
+        self.assertGreaterEqual(cecreturn.MAX_PER_HOUR, 20)
+        self.assertLessEqual(cecreturn.MAX_PER_HOUR, 60)
+        self.assertLessEqual(cecreturn.COOLDOWN_S, 10)
+        self.assertEqual(res[:cecreturn.MAX_PER_HOUR], ["announced"] * cecreturn.MAX_PER_HOUR, res)
+        self.assertEqual(res[cecreturn.MAX_PER_HOUR:], ["rate_limited"] * 5 + ["announced"], res)
+        self.assertEqual(self.bus.opts().count("--active-source"), cecreturn.MAX_PER_HOUR + 1)
+
+    def test_all_attempts_have_a_flood_bound(self):
+        """Une séquence exacte répétée sans fin (TV « pas allumée ») reste bornée en question d'alimentation."""
+        self.bus.power = "standby"
+        script = at(0, state_event())
+        for _ in range(cecreturn.MAX_ATTEMPTS_PER_HOUR + 10):
+            script += at(2.0, active_source()) + at(1.0, routing_change()) + at(0.05, stream_path())
+        self.watch(script + at(10, power_poll()))
+        res = [e["result"] for e in self.recoveries()]
+        self.assertEqual(res.count("refused_tv_not_on"), cecreturn.MAX_ATTEMPTS_PER_HOUR, res)
+        self.assertEqual(res.count("rate_limited"), 10)
+        self.assertEqual(self.bus.opts(), ["--give-device-power-status"] * cecreturn.MAX_ATTEMPTS_PER_HOUR)
+        self.assertGreaterEqual(cecreturn.MAX_ATTEMPTS_PER_HOUR, cecreturn.MAX_PER_HOUR)
 
     def test_boot_marker_never_read_written_or_satisfied_by_recovery(self):
         st0 = cecboot.marker_stamp(self.state, BOOT_A)
@@ -454,36 +571,57 @@ class TestArgv(RBase):
 # --------------------------------------------------------------------------- surveillance : échec, redémarrage, bornes
 class TestServeLifecycle(RBase):
     def test_no_adapter_or_unready_adapter_never_spawns(self):
-        for ad in ({}, {"/dev/cec0": {"pa": "f.f.f.f", "state": "empty"}},
-                   {"/dev/cec0": {"pa": "1.0.0.0", "state": "foreign"}},
-                   {"/dev/cec0": {"pa": "1.0.0.0", "state": "empty"}}):
+        for devs, ad in (((), {}), (("cec0", "cec1"), {"/dev/cec0": {"pa": "f.f.f.f", "state": "empty"},
+                                                      "/dev/cec1": {"pa": "f.f.f.f", "state": "empty"}}),
+                         (("cec0",), {"/dev/cec0": {"pa": "1.0.0.0", "state": "foreign"}}),
+                         (("cec0",), {"/dev/cec0": {"pa": "1.0.0.0", "state": "empty"}})):
             with self.subTest(ad):
                 self.spawned.clear()
                 self.sleeps.clear()
                 bus = RecBus(self.clock, ad)
-                self.monitor([], bus=bus).serve(max_cycles=3)
+                mon = self.monitor([], bus=bus)
+                mon.root = make_root(self, devs=devs)
+                self.assertIsNone(mon.serve(max_cycles=5))            # attente légitime (TV éteinte…), pas un échec
                 self.assertEqual(self.spawned, [])
                 self.assertEqual(bus.transmits(), [])
-                self.assertEqual(self.sleeps, [cecreturn.DISCOVERY_RETRY_S] * 3)
+                self.assertEqual(self.sleeps, [cecreturn.DISCOVERY_RETRY_S] * 5)
 
-    def test_monitor_failures_restart_with_bounded_backoff(self):
+    def test_unexpected_post_ready_failures_restart_with_bounded_backoff(self):
         n = len(cecreturn.RESTART_BACKOFF_S) + 3
-        scripts = [OSError("cec-ctl absent")] + [[] for _ in range(n - 1)]   # échec de lancement puis fins immédiates
-        self.monitor(scripts).serve(max_cycles=n)
+        scripts = [at(0, state_event()) for _ in range(n)]              # prêt, puis fin inattendue (eof)
+        self.assertIsNone(self.monitor(scripts).serve(max_cycles=n))
         self.assertEqual(len(self.spawned), n)
         self.assertEqual(self.sleeps, [cecreturn.RESTART_BACKOFF_S[min(i, len(cecreturn.RESTART_BACKOFF_S) - 1)]
                                        for i in range(n)])
         self.assertTrue(all(s >= 5 for s in self.sleeps))
         self.assertLessEqual(max(self.sleeps), 300)
         self.assertEqual(self.bus.transmits(), [])
-        ends = [e["reason"] for e in self.logs if e.get("event") == "cec_return_watch_end"]
-        self.assertEqual(ends[0], "spawn_failed")
+        ready = [e for e in self.logs if e.get("event") == "cec_return_ready"]
+        self.assertEqual(len(ready), n)                                  # une fois par moniteur prêt
+        ends = [e for e in self.logs if e.get("event") == "cec_return_watch_end"]
+        self.assertEqual({(e["reason"], e["ready"]) for e in ends}, {("eof", True)})
 
     def test_long_healthy_watch_resets_backoff(self):
-        long_ok = [(cecreturn.HEALTHY_RUN_S + 1, "")]                   # liste : horloge prise au lancement
-        self.monitor([[], [], long_ok, []]).serve(max_cycles=4)
+        long_ok = at(0, state_event()) + [(cecreturn.HEALTHY_RUN_S + 1, "")]
+        ok = at(0, state_event())
+        self.monitor([ok, ok, long_ok, ok]).serve(max_cycles=4)
         b = cecreturn.RESTART_BACKOFF_S
         self.assertEqual(self.sleeps, [b[0], b[1], b[0], b[1]])
+
+    def test_expected_adapter_state_change_rediscovers_promptly_without_backoff(self):
+        """TV éteinte/rallumée, HDMI rebranché : changement d'état attendu ⇒ relecture rapide, jamais 300 s aveugles."""
+        change = at(0, state_event()) + at(1, state_event("f.f.f.f", 0x0000, initial=False))
+        n = 12
+        self.assertIsNone(self.monitor([change] * n).serve(max_cycles=n))
+        self.assertEqual(self.sleeps, [cecreturn.STATE_CHANGE_RETRY_S] * n)
+        self.assertLessEqual(cecreturn.STATE_CHANGE_RETRY_S, 5)
+        # une fin inattendue après plusieurs changements d'état repart du premier palier
+        self.sleeps.clear()
+        self.monitor([at(0, state_event()), change, at(0, state_event()), change,
+                      at(0, state_event())]).serve(max_cycles=5)
+        b = cecreturn.RESTART_BACKOFF_S
+        self.assertEqual(self.sleeps, [b[0], cecreturn.STATE_CHANGE_RETRY_S, b[0], cecreturn.STATE_CHANGE_RETRY_S,
+                                       b[0]])
 
     def test_monitor_is_closed_on_every_exit(self):
         srcs = [FakeLines(self.clock, captured()), FakeLines(self.clock, at(0, ["x" * 10]), end="oversize")]
@@ -523,6 +661,275 @@ class TestServeLifecycle(RBase):
         self.assertIsNotNone(hang.p.returncode)
         with self.assertRaises(OSError):
             cecreturn.PopenLines(["/nonexistent/cec-ctl", "-m"])
+
+
+# --------------------------------------------------------------------------- prêt / échec réel (faux vert interdit)
+REFUSAL = "Selecting monitor mode failed, you may have to run this as root.\n"
+
+
+def fake_cec_ctl(tc, body):
+    """Faux `cec-ctl` exécutable (Python) : `body` reçoit argv ; lancé par PopenLines comme le vrai."""
+    d = tmpdir(tc, "otvfakecec")
+    path = os.path.join(d, "cec-ctl")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("import os, sys, time\n" + body)
+    return path
+
+
+class TestReadiness(RBase):
+    def test_ready_only_after_matching_initial_state_and_logged_once(self):
+        mon, why = self.watch(at(0, state_event()) + at(1, power_poll()) + at(1, state_event(initial=True)))
+        self.assertEqual((why, self.ready), ("eof", True))
+        ready = [e for e in self.logs if e.get("event") == "cec_return_ready"]
+        self.assertEqual(ready, [{"event": "cec_return_ready", "device": "/dev/cec0", "physical_address": "1.0.0.0"}])
+
+    def test_wrong_or_missing_initial_state_is_never_ready(self):
+        cases = {"other_pa": at(0, state_event("2.0.0.0")), "other_mask": at(0, state_event(mask=0x0100)),
+                 "disconnected": at(0, state_event("f.f.f.f", 0x0000)),
+                 "not_initial": at(0, state_event(initial=False)),
+                 "frames_only": captured()[2:]}
+        for name, script in sorted(cases.items()):
+            with self.subTest(name):
+                self.logs.clear()
+                self.bus.calls.clear()
+                _, why = self.watch(script, ready=False)
+                self.assertFalse(self.ready, name)
+                self.assertNotIn("cec_return_ready", [e.get("event") for e in self.logs])
+                self.assertEqual(self.bus.transmits(), [], name)          # rien n'est armé avant « prêt »
+                self.assertIn(why, ("adapter_state_changed", "eof", "not_ready"), name)
+
+    def test_sequence_seen_before_ready_never_arms_recovery(self):
+        """Trames reçues avant l'événement initial (moniteur pas encore prêt) : jamais comptées dans la séquence."""
+        script = at(0, active_source()) + at(1, routing_change()) + at(0.05, stream_path()) + \
+            at(0.1, state_event()) + at(10, power_poll())
+        _, why = self.watch(script, ready=False)
+        self.assertEqual((why, self.ready), ("eof", True))
+        self.assertEqual(self.bus.transmits(), [])
+        self.assertEqual(self.recoveries(), [])
+
+    def test_silent_monitor_without_initial_state_times_out(self):
+        _, why = self.watch([], ready=False, end="silence")
+        self.assertEqual((why, self.ready), ("not_ready", False))
+        self.assertTrue(self.src.closed)
+
+    def test_detector_failure_cannot_leak_the_monitor(self):
+        """(d) Detector construit DANS le try/finally : une adresse invalide ferme quand même cec-ctl."""
+        src = FakeLines(self.clock, captured())
+        mon = self.monitor([src])
+        self.assertEqual(mon.watch("/dev/cec0", "zz", 0x10), ("invalid_startup", False))
+        self.assertTrue(src.closed)
+        self.assertEqual(self.bus.transmits(), [])
+
+
+class TestFatal(RBase):
+    def ends(self):
+        return [e for e in self.logs if e.get("event") in ("cec_return_watch_end", "cec_return_failed")]
+
+    def test_monitor_refusal_on_stderr_with_exit_zero_is_fatal_78(self):
+        src = FakeLines(self.clock, [], error="monitor_refused", exit_status=0)
+        mon = self.monitor([src])
+        self.assertEqual(mon.serve(max_cycles=50), cecreturn.EXIT_FATAL)
+        self.assertEqual(cecreturn.EXIT_FATAL, 78)
+        self.assertEqual(len(self.spawned), 1)                          # aucune boucle de relance interne
+        self.assertTrue(src.closed)
+        failed = [e for e in self.logs if e.get("event") == "cec_return_failed"]
+        self.assertEqual(failed, [{"event": "cec_return_failed", "reason": "monitor_refused", "exit": 78}])
+        self.assertNotIn("cec_return_ready", [e.get("event") for e in self.logs])
+        self.assertEqual(self.bus.transmits(), [])
+
+    def test_missing_cec_ctl_is_fatal(self):
+        for exc in (FileNotFoundError("cec-ctl"), PermissionError("cec-ctl")):
+            with self.subTest(type(exc).__name__):
+                self.logs.clear()
+                self.spawned.clear()
+                self.assertEqual(self.monitor([exc]).serve(max_cycles=50), 78)
+                self.assertEqual(len(self.spawned), 1)
+                self.assertEqual(self.ends()[-1]["reason"], "cec_ctl_missing")
+
+    def test_repeated_pre_ready_failures_are_fatal_not_endless_active(self):
+        for label, mk in (("eof", lambda: FakeLines(self.clock, [])),
+                          ("open_failed", lambda: FakeLines(self.clock, [], error="open_failed", exit_status=1)),
+                          ("exit_nonzero", lambda: FakeLines(self.clock, [], exit_status=1)),
+                          ("not_ready", lambda: FakeLines(self.clock, [], end="silence")),
+                          ("adapter_state_changed", lambda: FakeLines(self.clock, at(0, state_event("2.0.0.0")))),
+                          ("spawn_failed", lambda: OSError("EMFILE"))):
+            with self.subTest(label):
+                self.logs.clear()
+                self.spawned.clear()
+                self.sleeps.clear()
+                srcs = [mk() for _ in range(20)]
+                self.assertEqual(self.monitor(srcs).serve(max_cycles=50), 78)
+                self.assertEqual(len(self.spawned), cecreturn.PRE_READY_FAILURES_MAX)
+                self.assertEqual(self.sleeps, [cecreturn.PRE_READY_RETRY_S] * (cecreturn.PRE_READY_FAILURES_MAX - 1))
+                self.assertEqual(self.ends()[-1]["reason"], label)
+                self.assertTrue(all(s.closed for s in srcs[:len(self.spawned)] if isinstance(s, FakeLines)))
+
+    def test_unreadable_adapter_is_fatal_not_waiting_forever(self):
+        bus = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours", "unreadable": True},
+                                  "/dev/cec1": {"pa": "f.f.f.f", "state": "empty", "unreadable": True}})
+        self.assertEqual(self.monitor([], bus=bus).serve(max_cycles=50), 78)
+        self.assertEqual(self.spawned, [])
+        self.assertEqual(self.ends()[-1]["reason"], "adapter_unreadable")
+
+    def test_ready_monitor_resets_pre_ready_failure_count(self):
+        n = cecreturn.PRE_READY_FAILURES_MAX - 1
+        scripts = []
+        for _ in range(4):
+            scripts += [FakeLines(self.clock, []) for _ in range(n)] + [FakeLines(self.clock, at(0, state_event()))]
+        self.assertIsNone(self.monitor(scripts).serve(max_cycles=len(scripts)))
+        self.assertEqual(len(self.spawned), len(scripts))
+
+    def test_real_fake_cec_ctl_stderr_exit0_fails_service_and_never_logs_raw_text(self):
+        """Faux cec-ctl RÉEL : refus du mode moniteur sur stderr puis exit 0 ⇒ code 78, aucun texte brut journalisé."""
+        exe = fake_cec_ctl(self, "sys.stderr.write(%r + 'SECRET-raw-detail\\n'); sys.exit(0)\n" % REFUSAL)
+        mon = self.monitor([])
+        spawned = []
+
+        def spawn(argv):
+            spawned.append(argv)
+            self.assertLess(len(spawned), 10, "boucle de relance interne : jamais d'échec véridique")
+            return cecreturn.PopenLines([sys.executable, "-I", exe] + list(argv[1:]))
+        mon.spawn = spawn
+        mon.mono = time.monotonic
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = cecreturn.run(mon)
+        self.assertEqual(code, 78)
+        blob = json.dumps(self.logs) + out.getvalue()
+        self.assertIn("monitor_refused", blob)
+        for raw in ("SECRET", "Selecting", "root"):
+            self.assertNotIn(raw, blob)
+
+    def test_real_fake_cec_ctl_ready_then_exit_is_not_fatal(self):
+        exe = fake_cec_ctl(self, "print(); print('Initial Event: State Change: PA: 1.0.0.0, LA mask: 0x0010, "
+                                 "Conn Info: yes', flush=True); time.sleep(0.3)\n")
+        mon = self.monitor([])
+        mon.spawn = lambda argv: cecreturn.PopenLines([sys.executable, "-I", exe] + list(argv[1:]))
+        mon.mono = time.monotonic
+        self.assertIsNone(mon.serve(max_cycles=1))
+        self.assertIn("cec_return_ready", [e.get("event") for e in self.logs])
+        self.assertEqual(self.ends()[-1]["reason"], "eof")
+
+    def test_cli_propagates_fatal_exit(self):
+        d = tmpdir(self, "otvcecret")
+        env = os.path.join(d, "env")
+        open(env, "w").close()
+        real = cecreturn.Monitor
+        src = FakeLines(self.clock, [], error="monitor_refused")
+
+        def factory(root, state_dir):
+            return real(self.root, runner=self.bus, spawn=lambda argv: src, mono=self.clock, sleep=self.sleep,
+                        state_dir=state_dir, log=self.logs.append)
+        with mock.patch.object(os, "geteuid", lambda: 1000), mock.patch.object(cecreturn, "Monitor", factory), \
+                contextlib.redirect_stdout(io.StringIO()):
+            code = cli.main(["--env", env, "cec-return-monitor", "--state-dir", self.state])
+        self.assertEqual(code, 78)
+
+
+class TestPopenStderr(unittest.TestCase):
+    def drain(self, src, limit=10):
+        got, kind = [], None
+        deadline = time.monotonic() + limit
+        while time.monotonic() < deadline:
+            kind, line = src.readline(1.0)
+            if kind == "line":
+                got.append(line)
+            elif kind != "timeout":
+                break
+        return kind, got
+
+    def test_stderr_refusal_with_exit_zero_is_classified(self):
+        py = sys.executable
+        for text, rc, want in ((REFUSAL, 0, "monitor_refused"),
+                               ("Failed to open /dev/cec0: Permission denied\n", 1, "open_failed"),
+                               ("\nDevice was disconnected.\n", 0, "device_disconnected"),
+                               ("something else entirely\n", 0, "stderr_unclassified"),
+                               ("", 0, None), ("", 3, None)):
+            with self.subTest(want):
+                src = cecreturn.PopenLines([py, "-c", "import sys; sys.stderr.write(%r); sys.exit(%d)" % (text, rc)])
+                try:
+                    self.assertEqual(self.drain(src), ("eof", []))
+                    self.assertEqual(src.diagnosis(), {"error": want, "exit_status": rc})
+                finally:
+                    src.close()
+
+    def test_stderr_flood_cannot_deadlock_and_is_byte_bounded(self):
+        py = sys.executable
+        src = cecreturn.PopenLines([py, "-c", "import sys; sys.stderr.write('E' * 1000000); sys.stderr.flush(); "
+                                    "print('Received from TV to all (0 to 15): STANDBY (0x36)', flush=True)"])
+        try:
+            kind, got = self.drain(src, limit=15)
+            self.assertEqual((kind, got), ("eof", ["Received from TV to all (0 to 15): STANDBY (0x36)"]))
+            self.assertLessEqual(len(src.err), cecreturn.STDERR_MAX_BYTES)
+            self.assertEqual(src.diagnosis(), {"error": "stderr_unclassified", "exit_status": 0})
+        finally:
+            src.close()
+
+    def test_classification_is_line_and_byte_bounded(self):
+        c = cecreturn.classify_stderr
+        self.assertEqual(c(REFUSAL.encode()), "monitor_refused")
+        self.assertEqual(c(b"x" * (cecreturn.MAX_LINE_BYTES + 1) + REFUSAL.encode()), "stderr_unclassified")
+        self.assertEqual(c(b"noise\n" * cecreturn.STDERR_MAX_LINES + REFUSAL.encode()), "stderr_unclassified")
+        self.assertEqual(c(b"\xff\xfe" + REFUSAL.encode()), "monitor_refused")
+        self.assertIsNone(c(b"  \n\n"))
+        self.assertEqual(set(cecreturn.STDERR_CODES_ALL), {"monitor_refused", "open_failed", "device_disconnected",
+                                                           "stderr_unclassified"})
+
+    def test_grandchild_holding_pipes_is_killed_with_the_group(self):
+        py = sys.executable
+        src = cecreturn.PopenLines([py, "-c", "import subprocess, sys; "
+                                    "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+                                    "print(p.pid, flush=True); sys.stderr.write('Device was disconnected.\\n'); "
+                                    "sys.stderr.flush()"])
+        kind, line = src.readline(10.0)
+        self.assertEqual(kind, "line")
+        gpid = int(line)
+        t0 = time.monotonic()
+        diag = src.diagnosis()                               # le petit-enfant garde stderr : attente bornée
+        self.assertLessEqual(time.monotonic() - t0, cecreturn.FINISH_WAIT_S + 1.0)
+        self.assertEqual(diag, {"error": "device_disconnected", "exit_status": 0})
+        t0 = time.monotonic()
+        src.close()
+        self.assertLess(time.monotonic() - t0, 5)
+        deadline = time.monotonic() + 5
+        alive = True
+        while alive and time.monotonic() < deadline:
+            try:
+                os.kill(gpid, 0)
+                time.sleep(0.05)
+            except ProcessLookupError:
+                alive = False
+            except PermissionError:
+                alive = False
+        if alive:                                            # zombie pas encore récolté : vérifier l'état
+            st = subprocess.run(["ps", "-o", "stat=", "-p", str(gpid)], capture_output=True, text=True).stdout
+            self.assertTrue(st.strip() == "" or st.strip().startswith("Z"), st)
+        self.assertTrue(src.p.stdout.closed and src.p.stderr.closed)
+
+
+class TestHealthWarning(unittest.TestCase):
+    def run_health(self, state, env=None, manifest=None):
+        cfg = config.Config(env or {})
+
+        def runner(argv, timeout):
+            if argv[:2] == ["systemctl", "is-active"]:
+                return 0, (state if argv[2] == UNIT else "active") + "\n"
+            return 1, ""
+        with mock.patch.object(health, "verify_manifest", return_value=manifest or {"ok": True, "error": None}), \
+                mock.patch.object(health.netstate, "snapshot", return_value={"mode": "wifi"}), \
+                mock.patch.object(health.ratings, "health_view", return_value={}):
+            return health.run(cfg, runner=runner, check_http=False)
+
+    def test_failed_or_inactive_unit_warns_when_enabled(self):
+        for state in ("failed", "inactive"):
+            with self.subTest(state):
+                rep = self.run_health(state)
+                self.assertIn("cec_return_failed", rep["warnings"])
+                self.assertTrue(rep["ok"])                            # facultatif : avertit sans renverser « ok »
+        self.assertNotIn("cec_return_failed", self.run_health("active")["warnings"])
+        for env in ({"OPENTV_CEC_RETURN_RECOVERY": "0"}, {"OPENTV_CEC_BOOTSTRAP": "0"}):
+            self.assertNotIn("cec_return_failed", self.run_health("inactive", env)["warnings"])
+        self.assertNotIn("cec_return_failed",
+                         self.run_health("inactive", manifest={"ok": False, "error": "manifest_missing"})["warnings"])
 
 
 # --------------------------------------------------------------------------- CLI, configuration
@@ -599,6 +1006,8 @@ class TestUnit(unittest.TestCase):
         self.assertEqual((s["DevicePolicy"], s["ProtectSystem"], s["ProtectHome"]), ("closed", "strict", "yes"))
         self.assertEqual((s["RuntimeDirectory"], s["RuntimeDirectoryPreserve"]), ("opentv-cec", "yes"))
         self.assertEqual(s["Restart"], "on-failure")
+        # échec fatal (refus du mode moniteur, échecs répétés avant « prêt ») : état failed véridique, sans relance
+        self.assertEqual(s["RestartPreventExitStatus"].split(), [str(cecreturn.EXIT_FATAL)])
         self.assertGreaterEqual(int(s["RestartSec"]), 10)
         self.assertLessEqual(int(cp["Unit"]["StartLimitBurst"]), 10)
         self.assertIn("MemoryMax", s)
@@ -632,6 +1041,10 @@ class TestUnit(unittest.TestCase):
         self.assertEqual(health.verify_manifest(r)["mismatch"], [])
         self.assertRegex(out, r"systemctl enable [^\n]*%s" % re.escape(UNIT))
         self.assertRegex(out, r"systemctl restart [^\n]*%s" % re.escape(UNIT))
+        # mise à jour : un état failed (78) précédent est effacé AVANT le redémarrage
+        i_reset = out.index("systemctl reset-failed " + UNIT)
+        i_restart = re.search(r"systemctl restart [^\n]*%s" % re.escape(UNIT), out).start()
+        self.assertLess(i_reset, i_restart)
         p = sh([UNINSTALL, "--root", r])
         self.assertEqual(p.returncode, 0, p.stdout.decode() + p.stderr.decode())
         out = p.stdout.decode()
@@ -651,10 +1064,16 @@ class TestReleaseDocs(unittest.TestCase):
             with open(os.path.join(PI4, name), encoding="utf-8") as f:
                 text = f.read()
             for need in ("opentv-cec-return.service", "ROUTING_CHANGE", "SET_STREAM_PATH", "0.0.0.0",
-                         "OPENTV_CEC_RETURN_RECOVERY", "CAP_NET_ADMIN", "Samsung Home"):
+                         "OPENTV_CEC_RETURN_RECOVERY", "CAP_NET_ADMIN", "Samsung Home", "cec_return_ready",
+                         "cec_return_failed", "\"result\":\"announced\"", "transmission"):
                 self.assertTrue(need in text, (name, need))
+            self.assertNotIn("\"recovered\"", text)
         with open(os.path.join(PI4, "README.md"), encoding="utf-8") as f:
-            self.assertIn("0.7.3", f.read())
+            readme = f.read()
+        self.assertIn("0.7.3", readme)
+        gate = next(line for line in readme.splitlines() if line.startswith("| **Retour d'application native"))
+        for need in ("cec_return_ready", "\"ready\":false", "cec_return_failed", "NRestarts"):
+            self.assertIn(need, gate)
         with open(os.path.join(ROOT, "AGENTS.md"), encoding="utf-8") as f:
             self.assertIn("cecreturn", f.read())
 

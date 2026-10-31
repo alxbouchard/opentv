@@ -71,8 +71,17 @@ réseau privé) : OpenTV ne devient ni suiveur ni initiateur sur ce descripteur,
 Annulé ou jamais déclenché : autre source active, routage ailleurs, veille, ordre ou délai différent, doublon,
 trame incohérente (octets bruts ≠ en-tête/adresses décodées), ligne inconnue ou trop longue, perte de messages,
 redémarrage du moniteur/service (état vide), touches déjà reçues ou autre annonce pendant le calme, **Samsung Home
-seul** (aucun message CEC). Au plus une reprise par 60 s, 6 par heure. Le témoin de l'annonce de démarrage n'est ni lu
-ni écrit. Opt-out : `OPENTV_CEC_RETURN_RECOVERY=0`.
+seul** (aucun message CEC). Allers-retours rapides : seule une annonce transmise consomme le délai anti-doublon (5 s)
+et le quota (30/h) ; un retour exact pendant ce délai est reporté à sa fin (touches ou autre annonce ⇒ annulé), jamais
+perdu ; `busy`, refus ou échec ne bloquent pas le retour suivant ; 60 tentatives/h au plus. Le témoin de l'annonce de
+démarrage n'est ni lu ni écrit. Opt-out : `OPENTV_CEC_RETURN_RECOVERY=0`.
+
+`"result":"announced"` prouve seulement la **transmission** acquittée de `<Active Source>`/`<Menu Status>`, pas que la
+TV renvoie les touches : la reprise reste un gate terrain (six touches visibles). Le moniteur n'est prêt
+(`cec_return_ready`) qu'après l'événement initial du noyau portant l'adresse physique et le masque attendus ; rien
+n'est armé avant. Refus du mode moniteur (stderr de cec-ctl, même avec sortie 0), cec-ctl absent, adaptateur illisible
+ou 3 échecs consécutifs avant « prêt » ⇒ `cec_return_failed`, sortie 78 non relancée : unité `failed`,
+`opentv-pi health` avertit `cec_return_failed`. Le texte de cec-ctl n'est jamais journalisé (codes stables seulement).
 
 ### Lacunes connues
 
@@ -192,7 +201,8 @@ du périphérique.
    - confirmer que les touches reviennent à OpenTV sans boucle ni vol d'entrée ;
    - noter les messages `MENU_STATUS`, `ROUTING_*`, `ACTIVE_SOURCE` éventuels ;
    - ouvrir une application native (YouTube…) puis revenir sur OpenTV : noter la séquence exacte de la TV ; avec
-     `opentv-cec-return.service`, exiger soit la reprise (`"result":"recovered"`, six touches), soit l'absence
+     `opentv-cec-return.service`, exiger d'abord `cec_return_ready` au journal (aucune boucle avant « prêt »), puis soit
+     la reprise (`"result":"announced"` **et** six touches visibles), soit l'absence
      d'émission si la marque n'émet pas la séquence (consigner, repli téléphone).
 5. **Redémarrage et alimentation**
    - redémarrer le Pi, puis refaire les six touches sans `--activate` (une seule annonce de démarrage attendue :

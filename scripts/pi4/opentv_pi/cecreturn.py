@@ -23,7 +23,22 @@ Après SETTLE_S de calme (touches déjà reçues, autre annonce ou autre source 
 existant de /run/opentv-cec (attente bornée), relit l'adaptateur (le nôtre, même adresse, adresse logique obtenue)
 puis appelle `cecboot.announce` : la même séquence sûre que la réactivation explicite, refusée si la TV n'est pas
 allumée, jamais de commande de réveil ni d'alimentation (cecboot.NEVER_EMIT). Le témoin de l'annonce de démarrage n'est
-ni lu ni écrit. Délai minimal COOLDOWN_S entre deux reprises et au plus MAX_PER_HOUR par heure.
+ni lu ni écrit. Résultat `announced` = <Active Source> transmis et acquitté par le bus (preuve de TRANSMISSION, pas de
+la reprise effective des touches, qui reste un gate terrain).
+
+Bornes d'usage normal (allers-retours rapides YouTube ↔ OpenTV) : seule une annonce transmise consomme le délai
+anti-doublon COOLDOWN_S et le quota MAX_PER_HOUR ; un retour exact pendant ce délai est REPORTÉ à sa fin (jamais
+perdu ; touches ou autre annonce entre-temps ⇒ annulé). busy / refus / échec ne bloquent pas le retour suivant ; toutes
+les tentatives restent bornées par MAX_ATTEMPTS_PER_HOUR (protection du bus).
+
+Prêt et échec véridiques : un moniteur n'est « prêt » qu'après l'événement initial `Initial Event: State Change` du
+noyau avec l'adresse physique et le masque attendus (journal `cec_return_ready`, une fois par moniteur) ; rien n'est
+armé avant. La sortie d'erreur de cec-ctl est lue (bornée, jamais journalisée telle quelle) et classée en codes
+stables (STDERR_CODES_ALL). Refus du mode moniteur (cec-ctl l'écrit sur stderr puis sort avec 0), cec-ctl absent,
+adaptateur illisible ou PRE_READY_FAILURES_MAX échecs consécutifs avant « prêt » ⇒ sortie EXIT_FATAL (78,
+RestartPreventExitStatus) : l'unité passe `failed` au lieu de rester `active` sans surveiller. Un changement d'état
+attendu de l'adaptateur (TV éteinte, HDMI) relit vite (STATE_CHANGE_RETRY_S) ; seul un arrêt inattendu après « prêt »
+suit le palier RESTART_BACKOFF_S.
 """
 import collections
 import os
@@ -57,19 +72,34 @@ TV_ROOT_PA = b"\x00\x00"
 NATIVE_MAX_S = 12 * 3600.0          # application native ouverte (film YouTube compris) avant le retour
 ROUTE_TO_STREAM_MAX_S = 5.0         # capture : les deux messages du retour arrivent ensemble
 SETTLE_S = 1.5                      # calme après <Set Stream Path> avant l'annonce (reprise en quelques secondes)
-COOLDOWN_S = 60.0
-MAX_PER_HOUR = 6
+COOLDOWN_S = 5.0                    # anti-doublon après une annonce transmise (report, jamais abandon)
+MAX_PER_HOUR = 30                   # annonces transmises par heure glissante
+MAX_ATTEMPTS_PER_HOUR = 60          # toutes tentatives (busy, refus, échec compris) : borne d'inondation du bus
 LOCK_WAIT_S = 10.0
 LOCK_POLL_S = 0.5
 RECOVER_BUDGET_S = 30.0             # relecture + question d'alimentation + 2 émissions, chacune bornée
 DISCOVER_BUDGET_S = 25.0
 DISCOVERY_RETRY_S = 30.0            # adaptateur absent / pas encore déclaré par opentv-cec.timer : relecture seule
 IDLE_POLL_S = 30.0
-RESTART_BACKOFF_S = (5, 10, 30, 60, 120, 300)
+RESTART_BACKOFF_S = (5, 10, 30, 60, 120, 300)   # arrêts INATTENDUS après « prêt » seulement
 HEALTHY_RUN_S = 600.0               # un moniteur resté vivant aussi longtemps remet le délai de relance au minimum
+STATE_CHANGE_RETRY_S = 2.0          # changement d'état attendu de l'adaptateur : relecture rapide, sans palier
+READY_TIMEOUT_S = 10.0              # événement initial attendu au plus tard ainsi après le lancement
+PRE_READY_FAILURES_MAX = 3          # échecs consécutifs avant « prêt » (lancement, refus, fin, adaptateur illisible)
+PRE_READY_RETRY_S = 5.0
+EXIT_FATAL = 78                     # EX_CONFIG ; opentv-cec-return.service : RestartPreventExitStatus=78
+FINISH_WAIT_S = 2.0                 # fin de cec-ctl : attente bornée du code de sortie et de stderr
+STDERR_MAX_BYTES = 4096             # stderr conservé (le reste est lu et jeté : jamais de blocage du tube)
+STDERR_MAX_LINES = 16
 MAX_LINE_BYTES = 512
 MAX_FRAME_LINES = 16
 MONITOR_OPTS = ("-s", "-r", "-m")   # sans infos pilote, octets bruts, mode moniteur (passif)
+# stderr de cec-ctl -> codes stables (le texte lui-même n'est jamais journalisé)
+STDERR_CODES = (("monitor_refused", re.compile(r"Selecting monitor mode failed")),
+                ("open_failed", re.compile(r"Failed to open ")),
+                ("device_disconnected", re.compile(r"Device was disconnected")))
+STDERR_CODES_ALL = tuple(c for c, _ in STDERR_CODES) + ("stderr_unclassified",)
+FATAL_NOW = ("monitor_refused", "cec_ctl_missing")   # aucune relance ne peut corriger
 
 PA_TXT = r"[0-9a-f]\.[0-9a-f]\.[0-9a-f]\.[0-9a-f]"
 HEADER_RE = re.compile(r"(Received from|Transmitted by) [A-Za-z0-9 ]{1,40} to [A-Za-z0-9 ]{1,40} "
@@ -79,7 +109,7 @@ RAW_RE = re.compile(r"\tRaw:((?: 0x[0-9a-f]{2}){1,16}) \(.{1,16}\)")
 ARG_RE = re.compile(r"\t[a-z][a-z0-9-]{0,40}: .{0,120}")
 PA_ARG_RE = re.compile(r"\t(phys-addr|orig-phys-addr|new-phys-addr): (" + PA_TXT + r")")
 EVENT_PREFIX = r"(?:Initial |[0-9][0-9:.]{0,30}s?: )?"
-STATE_RE = re.compile(EVENT_PREFIX + r"Event: State Change: PA: (" + PA_TXT + r"), LA mask: 0x([0-9a-f]{4})"
+STATE_RE = re.compile(r"(Initial |[0-9][0-9:.]{0,30}s?: )?Event: State Change: PA: (" + PA_TXT + r"), LA mask: 0x([0-9a-f]{4})"
                       r"(?:, Conn Info: (?:yes|no))?")
 LOST_RE = re.compile(r"(?:" + EVENT_PREFIX + r"Event: Lost [0-9]{1,9} messages|\(warn: .{1,40} events were lost\))")
 # arguments d'adresse physique décodés par cec-ctl, recoupés avec les octets bruts
@@ -88,6 +118,16 @@ PA_ARGS = {ACTIVE_SOURCE: (("phys-addr", 2),), SET_STREAM_PATH: (("phys-addr", 2
            ROUTING_CHANGE: (("orig-phys-addr", 2), ("new-phys-addr", 4))}
 
 Frame = collections.namedtuple("Frame", "rx initiator dest opcode params")
+
+
+def classify_stderr(data):
+    """Octets stderr (déjà bornés) -> code stable ou None (rien). Seules les STDERR_MAX_LINES premières lignes, chacune
+    tronquée à MAX_LINE_BYTES, sont examinées ; le texte n'est jamais rendu."""
+    lines = [x[:MAX_LINE_BYTES].decode("utf-8", "replace") for x in bytes(data).split(b"\n")[:STDERR_MAX_LINES]]
+    for code, rx in STDERR_CODES:
+        if any(rx.search(line) for line in lines):
+            return code
+    return "stderr_unclassified" if any(line.strip() for line in lines) else None
 
 
 def pa_bytes(pa):
@@ -110,7 +150,7 @@ def monitor_argv(dev):
 
 # --------------------------------------------------------------------------- analyse de la sortie du moniteur
 class Parser:
-    """Lignes de `cec-ctl -s -r -m` -> éléments : ("frame", Frame) | ("state", pa, masque) | ("lost",) |
+    """Lignes de `cec-ctl -s -r -m` -> éléments : ("frame", Frame) | ("state", pa, masque, initial) | ("lost",) |
     ("invalid", raison). Une trame = en-tête, arguments indentés, puis la ligne `Raw:` qui la termine."""
 
     def __init__(self):
@@ -148,7 +188,7 @@ class Parser:
         out = self._open_partial()
         m = STATE_RE.fullmatch(line)
         if m:
-            return out + [("state", m.group(1), int(m.group(2), 16))]
+            return out + [("state", m.group(2), int(m.group(3), 16), m.group(1) == "Initial ")]
         if LOST_RE.fullmatch(line):
             return out + [("lost",)]
         return out + [("invalid", "unknown_line")]
@@ -192,6 +232,11 @@ class Detector:
     def deadline(self):
         return self.pending
 
+    def defer(self, until):
+        """Reprise due mais dans le délai anti-doublon : reportée (touches/autre annonce d'ici là ⇒ annulée)."""
+        self.pending = until
+        self.last = "deferred"
+
     def take(self, now):
         """Reprise due ? (consommée : une seule par séquence)."""
         if self.pending is not None and now >= self.pending:
@@ -232,15 +277,29 @@ class Detector:
 
 # --------------------------------------------------------------------------- sous-processus borné
 class PopenLines:
-    """`cec-ctl -m` en flux : lignes bornées (MAX_LINE_BYTES), groupe de processus tué à la fermeture."""
+    """`cec-ctl -m` en flux : lignes stdout bornées (MAX_LINE_BYTES) ; stderr lu en même temps (jamais de tube plein
+    qui bloquerait cec-ctl), conservé sur STDERR_MAX_BYTES au plus puis classé (classify_stderr) ; groupe de processus
+    tué à la fermeture."""
 
     def __init__(self, argv):
         self.p = subprocess.Popen(list(argv), shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                  stderr=subprocess.DEVNULL, env=SAFE_ENV, start_new_session=True, close_fds=True)
+                                  stderr=subprocess.PIPE, env=SAFE_ENV, start_new_session=True, close_fds=True)
         self.fd = self.p.stdout.fileno()
+        self.efd = self.p.stderr.fileno()
         self.buf = b""
+        self.err = bytearray()
         self.lines = collections.deque()
         self.eof = False
+        self.err_eof = False
+
+    def _read_err(self):
+        chunk = os.read(self.efd, 4096)
+        if not chunk:
+            self.err_eof = True
+            return
+        room = STDERR_MAX_BYTES - len(self.err)
+        if room > 0:
+            self.err += chunk[:room]                # au-delà : lu et jeté
 
     def readline(self, timeout):
         """-> ("line", texte) | ("timeout", None) | ("eof", None) | ("oversize", None)."""
@@ -248,19 +307,43 @@ class PopenLines:
             return "line", self.lines.popleft()
         if self.eof:
             return "eof", None
-        r, _, _ = select.select([self.fd], [], [], max(0.0, timeout))
-        if not r:
-            return "timeout", None
-        chunk = os.read(self.fd, 4096)
-        if not chunk:
-            self.eof = True
-            return "eof", None
-        self.buf += chunk
-        *done, self.buf = self.buf.split(b"\n")
-        if any(len(x) > MAX_LINE_BYTES for x in done) or len(self.buf) > MAX_LINE_BYTES:
-            return "oversize", None
-        self.lines.extend(x.decode("utf-8", "replace") for x in done)
-        return ("line", self.lines.popleft()) if self.lines else ("timeout", None)
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            fds = [self.fd] + ([] if self.err_eof else [self.efd])
+            r, _, _ = select.select(fds, [], [], max(0.0, deadline - time.monotonic()))
+            if self.efd in r:
+                self._read_err()
+            if self.fd in r:
+                chunk = os.read(self.fd, 4096)
+                if not chunk:
+                    self.eof = True
+                    return "eof", None
+                self.buf += chunk
+                *done, self.buf = self.buf.split(b"\n")
+                if any(len(x) > MAX_LINE_BYTES for x in done) or len(self.buf) > MAX_LINE_BYTES:
+                    return "oversize", None
+                self.lines.extend(x.decode("utf-8", "replace") for x in done)
+                if self.lines:
+                    return "line", self.lines.popleft()
+            if not r or time.monotonic() >= deadline:
+                return "timeout", None
+
+    def diagnosis(self, wait=FINISH_WAIT_S):
+        """Après la fin de stdout : stderr lu jusqu'à sa fin et code de sortie, attente bornée (un petit-enfant qui
+        garderait stderr ouvert ne bloque rien). -> {"error": code stable | None, "exit_status": int | None}."""
+        deadline = time.monotonic() + wait
+        while not self.err_eof:
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                break
+            r, _, _ = select.select([self.efd], [], [], rem)
+            if r:
+                self._read_err()
+        try:
+            rc = self.p.wait(max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            rc = None
+        return {"error": classify_stderr(self.err), "exit_status": rc}
 
     def close(self):
         if self.p.poll() is None:
@@ -274,10 +357,16 @@ class PopenLines:
                     break
                 except subprocess.TimeoutExpired:
                     continue
-        try:
-            self.p.stdout.close()
-        except OSError:
-            pass
+        else:
+            try:                                    # cec-ctl fini : un petit-enfant resté dans le groupe est tué
+                os.killpg(self.p.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        for f in (self.p.stdout, self.p.stderr):
+            try:
+                f.close()
+            except OSError:
+                pass
 
 
 # --------------------------------------------------------------------------- service
@@ -287,19 +376,26 @@ class Monitor:
         self.root, self.runner, self.spawn, self.mono, self.sleep = root, runner, spawn, mono, sleep
         self.state_dir = state_dir
         self.log = log or _log
-        self.last_attempt = None
-        self.attempts = collections.deque()
+        self.last_announced = None
+        self.announced = collections.deque()    # annonces transmises (quota MAX_PER_HOUR)
+        self.attempts = collections.deque()     # toutes tentatives (borne MAX_ATTEMPTS_PER_HOUR)
         self._why = None
 
     def discover(self):
         """Premier adaptateur vc4 branché (même choix que l'amorçage) s'il est déjà Playback « OpenTV » avec son
-        adresse logique -> (dev, adresse physique, masque) ; sinon None. Lecture seule."""
+        adresse logique -> (dev, adresse physique, masque) ; sinon None (raison dans self._why). Lecture seule.
+        `read_failed` : des adaptateurs existent mais AUCUN n'a pu être lu (cec-ctl absent, accès refusé)."""
         run = cecboot._Run(self.runner, self.mono, DISCOVER_BUDGET_S)
         why = "no_adapter"
+        devs, readable = [], 0
         try:
-            for dev in cecboot.list_devices(self.root):
+            devs = cecboot.list_devices(self.root)
+            for dev in devs:
                 info = run.read(dev)
-                if info is None or not cecboot.is_vc4(info) or not cecboot.connected(info):
+                if info is None:
+                    continue
+                readable += 1
+                if not cecboot.is_vc4(info) or not cecboot.connected(info):
                     continue
                 kind = cecboot.classify(info)
                 if kind != "ours":
@@ -310,6 +406,8 @@ class Monitor:
                     self._why = None
                     return dev, info["physical_address"], info["mask"]
                 break
+            if devs and not readable:
+                why = "read_failed"
         except cecboot.BudgetExceeded:
             why = "budget_exceeded"
         if why != self._why:
@@ -318,7 +416,8 @@ class Monitor:
         return None
 
     def recover(self, dev, pa):
-        """Même annonce sûre que `opentv-pi cec --activate`, sous le verrou existant ; aucun témoin touché."""
+        """Même annonce sûre que `opentv-pi cec --activate`, sous le verrou existant ; aucun témoin touché.
+        `announced` = transmission acquittée, pas une preuve que la TV renvoie les touches."""
         t0 = self.mono()
         lock = cecboot._lock(self.state_dir)
         while lock is None and self.mono() + LOCK_POLL_S <= t0 + LOCK_WAIT_S:
@@ -333,76 +432,131 @@ class Monitor:
                     not info.get("mask") or not cecboot.connected(info) or info["physical_address"] != pa:
                 return {"result": "adapter_changed"}
             ann, ok = cecboot.announce(run, dev, pa)
-            return dict(ann, result="recovered" if ok else ann["result"])
+            return dict(ann, result="announced" if ok else ann["result"])
         except cecboot.BudgetExceeded:
             return {"result": "budget_exceeded"}
         finally:
             os.close(lock)
 
-    def _attempt(self, dev, pa):
+    def _attempt(self, dev, pa, det):
         now = self.mono()
-        while self.attempts and now - self.attempts[0] >= 3600.0:
-            self.attempts.popleft()
+        for q in (self.attempts, self.announced):
+            while q and now - q[0] >= 3600.0:
+                q.popleft()
         base = {"event": "cec_return_recovery", "device": dev, "physical_address": pa}
-        if self.last_attempt is not None and now - self.last_attempt < COOLDOWN_S:
-            self.log(dict(base, result="cooldown"))
-            return
-        if len(self.attempts) >= MAX_PER_HOUR:
+        if len(self.announced) >= MAX_PER_HOUR or len(self.attempts) >= MAX_ATTEMPTS_PER_HOUR:
             self.log(dict(base, result="rate_limited"))
             return
-        self.last_attempt = now
+        if self.last_announced is not None and now - self.last_announced < COOLDOWN_S:
+            det.defer(self.last_announced + COOLDOWN_S)
+            self.log(dict(base, result="cooldown_deferred"))
+            return
         self.attempts.append(now)
         res = self.recover(dev, pa)
+        if res.get("result") == "announced":   # seule une annonce transmise consomme délai et quota
+            self.last_announced = self.mono()
+            self.announced.append(self.last_announced)
         self.log(dict(base, elapsed_s=round(self.mono() - now, 3), **res))
 
+    def _end(self, src, kind):
+        if kind != "eof":
+            return kind
+        diag = src.diagnosis()
+        if diag.get("error"):
+            return diag["error"]
+        return "exit_nonzero" if diag.get("exit_status") not in (0, None) else "eof"
+
     def watch(self, dev, pa, mask):
-        """Un moniteur, état vide au départ ; rend la raison de sa fin. Rien n'est émis hors de `_attempt`."""
+        """Un moniteur, état vide au départ -> (raison de sa fin, prêt). Rien n'est armé avant l'événement initial
+        attendu ; rien n'est émis hors de `_attempt`. cec-ctl est fermé sur toute sortie (Detector compris)."""
         try:
             src = self.spawn(monitor_argv(dev))
+        except (FileNotFoundError, PermissionError):
+            return "cec_ctl_missing", False
         except (OSError, ValueError):
-            return "spawn_failed"
-        det, parser = Detector(pa, mask), Parser()
+            return "spawn_failed", False
+        ready = False
         try:
+            det, parser = Detector(pa, mask), Parser()
+            ready_by = self.mono() + READY_TIMEOUT_S
             while True:
-                if det.take(self.mono()):
-                    self._attempt(dev, pa)
+                now = self.mono()
+                if ready and det.take(now):
+                    self._attempt(dev, pa, det)
                     continue
-                dl = det.deadline()
-                timeout = IDLE_POLL_S if dl is None else min(IDLE_POLL_S, max(0.0, dl - self.mono()))
+                if not ready:
+                    if now >= ready_by:
+                        return "not_ready", False
+                    timeout = ready_by - now
+                else:
+                    dl = det.deadline()
+                    timeout = IDLE_POLL_S if dl is None else min(IDLE_POLL_S, max(0.0, dl - now))
                 kind, line = src.readline(timeout)
                 if kind == "timeout":
                     continue
                 if kind != "line":
-                    return kind
+                    return self._end(src, kind), ready
                 for item in parser.feed(line):
-                    if item[0] == "frame":
+                    if item[0] == "state":
+                        if item[1:] == (pa, mask, True) and not ready:
+                            ready = True
+                            self.log({"event": "cec_return_ready", "device": dev, "physical_address": pa})
+                        elif not ready or item[1:3] != (pa, mask):
+                            return "adapter_state_changed", ready
+                    elif not ready:
+                        continue                            # avant « prêt » : rien n'arme la détection
+                    elif item[0] == "frame":
                         det.frame(item[1], self.mono())
-                    elif item[0] == "state":
-                        if item[1] != pa or item[2] != mask:
-                            return "adapter_state_changed"
                     else:
                         det.reset(item[0] if item[0] == "lost" else "invalid_" + item[1])
+        except ValueError:
+            return "invalid_startup", ready
         finally:
             src.close()
 
+    def _fatal(self, why, **extra):
+        self.log(dict({"event": "cec_return_failed", "reason": why, "exit": EXIT_FATAL}, **extra))
+        return EXIT_FATAL
+
     def serve(self, max_cycles=None):
-        cycles, backoff = 0, 0
+        """Boucle du service -> None (max_cycles atteint, tests) ou EXIT_FATAL (échec véridique, unité failed)."""
+        cycles, backoff, pre_ready = 0, 0, 0
         while max_cycles is None or cycles < max_cycles:
             cycles += 1
             found = self.discover()
             if found is None:
-                self.sleep(DISCOVERY_RETRY_S)
+                if self._why in ("read_failed", "budget_exceeded"):
+                    pre_ready += 1
+                    if pre_ready >= PRE_READY_FAILURES_MAX:
+                        return self._fatal("adapter_unreadable", failures=pre_ready)
+                    self.sleep(PRE_READY_RETRY_S)
+                else:
+                    self.sleep(DISCOVERY_RETRY_S)       # attente légitime : TV éteinte, adaptateur pas encore déclaré
                 continue
             dev, pa, mask = found
             self.log({"event": "cec_return_watch", "device": dev, "physical_address": pa})
             t0 = self.mono()
-            why = self.watch(dev, pa, mask)
-            if self.mono() - t0 >= HEALTHY_RUN_S:
-                backoff = 0
-            delay = RESTART_BACKOFF_S[min(backoff, len(RESTART_BACKOFF_S) - 1)]
-            backoff += 1
-            self.log({"event": "cec_return_watch_end", "reason": why, "retry_in_s": delay})
+            why, ready = self.watch(dev, pa, mask)
+            if why in FATAL_NOW:
+                return self._fatal(why)
+            if not ready:
+                pre_ready += 1
+                if pre_ready >= PRE_READY_FAILURES_MAX:
+                    self.log({"event": "cec_return_watch_end", "reason": why, "ready": False})
+                    return self._fatal(why, failures=pre_ready)
+                delay = PRE_READY_RETRY_S
+            else:
+                pre_ready = 0
+                if why == "adapter_state_changed":     # attendu (TV éteinte, HDMI) : relecture rapide, sans palier
+                    backoff, delay = 0, STATE_CHANGE_RETRY_S
+                else:
+                    if self.mono() - t0 >= HEALTHY_RUN_S:
+                        backoff = 0
+                    delay = RESTART_BACKOFF_S[min(backoff, len(RESTART_BACKOFF_S) - 1)]
+                    backoff += 1
+            self.log({"event": "cec_return_watch_end", "reason": why, "ready": ready, "retry_in_s": delay})
             self.sleep(delay)
+        return None
 
 
 def _log(obj):
@@ -412,12 +566,13 @@ def _log(obj):
 
 
 def run(monitor):
-    """Point d'entrée du service : SIGTERM termine proprement (le moniteur cec-ctl est fermé dans `watch`)."""
+    """Point d'entrée du service : SIGTERM termine proprement (le moniteur cec-ctl est fermé dans `watch`) ; échec
+    véridique -> EXIT_FATAL (78), que l'unité ne relance pas (RestartPreventExitStatus)."""
     def stop(*_):
         raise SystemExit(0)
     prev = signal.signal(signal.SIGTERM, stop)
     try:
-        monitor.serve()
+        code = monitor.serve()
     finally:
         signal.signal(signal.SIGTERM, prev)
-    return 0
+    return 0 if code is None else code
