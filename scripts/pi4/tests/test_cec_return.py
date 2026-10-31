@@ -970,6 +970,97 @@ class TestAdapterChurn(RBase):
         self.assertTrue(all(t > ready[-1]["_t"] for t, a in self.bus.at if "--active-source" in a))
         self.assertEqual(wake_args(self.bus), [])
 
+    # ----------------------------------------------------------------- revue finale (étape 2) : discriminants bloquants
+    def test_varied_mismatches_beyond_stuck_max_never_exit_78(self):
+        """(P1) L'identité d'une discordance inclut l'état OBSERVÉ (adresse physique, masque), pas seulement
+        l'adaptateur lu : plus de MISMATCH_STUCK_MAX discordances légitimes mais DIFFÉRENTES à la suite sur le même
+        adaptateur (l'état bouge vraiment) ne sont jamais `adapter_state_inconsistent`."""
+        states = [("f.f.f.f", 0x0000), ("1.0.0.0", 0x0000), ("2.0.0.0", 0x0010)]
+        churn = [states[i % len(states)] for i in range(cecreturn.MISMATCH_STUCK_MAX + 3)]
+        self.assertGreater(len(churn), cecreturn.MISMATCH_STUCK_MAX)
+        self.assertTrue(all(a != b for a, b in zip(churn, churn[1:])))   # jamais deux fois la même à la suite
+        scripts = [at(0, state_event(pa, m)) for pa, m in churn] + [captured()]
+        mon = self.track(self.monitor(scripts))
+        self.assertIsNone(mon.serve(max_cycles=len(scripts)))
+        self.assertEqual(len(self.spawned), len(scripts))
+        self.assertEqual(self.events("cec_return_failed"), [])
+        ends = [(e["reason"], e["ready"]) for e in self.events("cec_return_watch_end")]
+        self.assertEqual(ends[:len(churn)], [("adapter_state_changed", False)] * len(churn))
+        self.assertEqual(self.sleeps[:-1], [cecreturn.STATE_CHANGE_RETRY_S] * len(churn))
+        self.assertEqual([r["result"] for r in self.recoveries()], ["announced"])
+
+    def test_absent_adapter_resets_identical_mismatch_count(self):
+        """(P2) Une découverte sans adaptateur (HDMI débranché, TV éteinte) interrompt la série : la même discordance
+        avant puis après l'absence ne s'additionne pas vers MISMATCH_STUCK_MAX (jamais 78), l'attente reste
+        explicite (`rediscover`), puis prêt et retour annoncé."""
+        n = cecreturn.MISMATCH_STUCK_MAX - 1
+        self.assertGreaterEqual(2 * n, cecreturn.MISMATCH_STUCK_MAX)     # sans remise à zéro : 78 assuré
+        same = [at(0, state_event("2.0.0.0")) for _ in range(n)]
+        self.plan = {n: self.tv("f.f.f.f"), n + 1: self.tv("1.0.0.0")}   # une seule découverte vide entre les séries
+        scripts = same + same + [captured()]
+        mon = self.track(self.monitor(scripts))
+        self.assertIsNone(mon.serve(max_cycles=len(scripts) + 1))
+        self.assertEqual(len(self.spawned), len(scripts))
+        self.assertEqual(self.events("cec_return_failed"), [])
+        waiting = self.events("cec_return_waiting")
+        self.assertEqual([(e["reason"], e["rediscover"]) for e in waiting], [("no_adapter", True)])
+        self.assertEqual(self.sleeps[:-1], [cecreturn.STATE_CHANGE_RETRY_S] * (2 * n + 1))
+        self.assertEqual([r["result"] for r in self.recoveries()], ["announced"])
+        # témoin : la même série ininterrompue atteint bien l'incohérence véridique
+        self.logs.clear()
+        self.spawned.clear()
+        self.sleeps.clear()
+        self.plan = {}
+        self.assertEqual(self.monitor(same + same).serve(max_cycles=50), cecreturn.EXIT_FATAL)
+        self.assertEqual(len(self.spawned), cecreturn.MISMATCH_STUCK_MAX)
+        self.assertEqual(self.events("cec_return_failed")[-1]["reason"], "adapter_state_inconsistent")
+
+    def test_generic_pre_ready_failure_during_churn_keeps_short_rediscovery(self):
+        """(P3) Prêt → changement d'état attendu, puis fin générique du moniteur suivant avant « prêt » et adaptateur
+        absent : l'échec générique compte vers 78 mais n'efface pas l'état de redécouverte — attentes ≤ 5 s,
+        jamais DISCOVERY_RETRY_S (30 s), attente journalisée `rediscover: true`, puis reprise."""
+        change = at(0, state_event()) + at(1, state_event("f.f.f.f", 0x0000, initial=False))
+        absent = 6
+        self.plan = {2: self.tv("f.f.f.f"), 2 + absent: self.tv("1.0.0.0")}
+        mon = self.track(self.monitor([change, [], captured()]))
+        self.assertIsNone(mon.serve(max_cycles=3 + absent))
+        self.assertEqual(len(self.spawned), 3)
+        ends = [(e["reason"], e["ready"]) for e in self.events("cec_return_watch_end")]
+        self.assertEqual(ends[:2], [("adapter_state_changed", True), ("eof", False)])
+        waits = self.sleeps[:-1]                        # dernier : fin inattendue du moniteur prêt (palier normal)
+        self.assertEqual(len(waits), 2 + absent)
+        self.assertNotIn(cecreturn.DISCOVERY_RETRY_S, waits)
+        self.assertTrue(all(s <= cecreturn.REDISCOVER_SLOW_S for s in waits), waits)
+        self.assertEqual(waits[2:], [cecreturn.STATE_CHANGE_RETRY_S] * absent)
+        waiting = self.events("cec_return_waiting")
+        self.assertEqual([(e["reason"], e["rediscover"]) for e in waiting], [("no_adapter", True)])
+        self.assertEqual(self.events("cec_return_failed"), [])
+        self.assertEqual([r["result"] for r in self.recoveries()], ["announced"])
+
+    def test_ready_state_change_resets_generic_pre_ready_failures(self):
+        """(P4) Un moniteur « prêt » qui se termine par `adapter_state_changed` prouve que cec-ctl fonctionne : le
+        compteur d'échecs génériques repart de zéro. Il faut ensuite PRE_READY_FAILURES_MAX NOUVEAUX échecs (pas
+        moins) pour la sortie 78."""
+        k = cecreturn.PRE_READY_FAILURES_MAX
+        self.assertGreaterEqual(k, 2)
+        change = at(0, state_event()) + at(1, state_event("f.f.f.f", 0x0000, initial=False))
+        before, after = [[] for _ in range(k - 1)], [[] for _ in range(k - 1)]
+        scripts = before + [change] + after + [captured()]
+        self.assertIsNone(self.track(self.monitor(scripts)).serve(max_cycles=len(scripts)))
+        self.assertEqual(len(self.spawned), len(scripts))
+        self.assertEqual(self.events("cec_return_failed"), [])
+        self.assertEqual([r["result"] for r in self.recoveries()], ["announced"])
+        # exactement PRE_READY_FAILURES_MAX nouveaux échecs après la remise à zéro : 78 au k-ième, pas avant
+        self.logs.clear()
+        self.spawned.clear()
+        self.bus.calls.clear()
+        scripts = before + [change] + [[] for _ in range(k)] + [captured()]
+        self.assertEqual(self.track(self.monitor(scripts)).serve(max_cycles=50), cecreturn.EXIT_FATAL)
+        self.assertEqual(len(self.spawned), (k - 1) + 1 + k)
+        failed = self.events("cec_return_failed")
+        self.assertEqual([(e["reason"], e["failures"]) for e in failed], [("eof", k)])
+        self.assertEqual(self.bus.transmits(), [])
+
 
 class TestPopenStderr(unittest.TestCase):
     def drain(self, src, limit=10):
@@ -1144,8 +1235,21 @@ class TestUnit(unittest.TestCase):
         self.assertEqual(s["ExecStart"], "/usr/bin/python3 -I /opt/opentv/bin/opentv-pi cec-return-monitor")
         self.assertEqual((s["Type"], s["User"], s["Group"]), ("simple", "opentv", "opentv"))
         self.assertEqual(s["SupplementaryGroups"].split(), ["video"])            # jamais input : aucune touche lue
-        # mode moniteur du noyau (CAP_NET_ADMIN, passif) : seule capacité, confinée à un réseau privé
+        # mode moniteur du noyau (CAP_NET_ADMIN, passif) : seule capacité. Le noyau la vérifie dans l'espace de noms
+        # utilisateur initial (capable()) : PrivateNetwork ne la confine pas ; confinement réel = AF_UNIX seulement,
+        # filtre d'appels système, périphériques CEC seulement (le commentaire de l'unité doit le dire)
         self.assertEqual((s["CapabilityBoundingSet"], s["AmbientCapabilities"]), ("CAP_NET_ADMIN", "CAP_NET_ADMIN"))
+        lines = text.splitlines()
+        i = lines.index("CapabilityBoundingSet=CAP_NET_ADMIN")
+        j = i
+        while j > 0 and lines[j - 1].startswith("#"):
+            j -= 1
+        why = " ".join(line.lstrip("# ") for line in lines[j:i])
+        for need in ("CAP_NET_ADMIN", "espace de noms utilisateur initial", "PrivateNetwork ne la borne pas",
+                     "RestrictAddressFamilies", "SystemCallFilter", "DevicePolicy=closed", "DeviceAllow"):
+            self.assertIn(need, why)
+        self.assertNotIn("sans effet hors du reseau", why)
+        self.assertEqual(s["SystemCallFilter"], "@system-service")
         self.assertEqual((s["NoNewPrivileges"], s["PrivateNetwork"], s["RestrictAddressFamilies"]),
                          ("yes", "yes", "AF_UNIX"))
         self.assertEqual(sorted(re.findall(r"^DeviceAllow=(.+)$", text, re.M)), ["char-cec rw"])

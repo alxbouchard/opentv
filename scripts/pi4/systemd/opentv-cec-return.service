@@ -22,8 +22,9 @@ RestartSec=30
 # `cec_return_failed` (jamais `active` sans surveiller). Une installation fait `reset-failed` avant de la redemarrer.
 RestartPreventExitStatus=78
 TimeoutStopSec=10
-# mode moniteur CEC du noyau (passif, n'emet rien) : exige CAP_NET_ADMIN, seule capacite, sans effet hors du reseau
-# prive de l'unite (PrivateNetwork, AF_UNIX seulement)
+# mode moniteur CEC du noyau (passif, n'emet rien) : exige CAP_NET_ADMIN, seule capacite. Le noyau la verifie dans
+# l'espace de noms utilisateur initial (capable()) : PrivateNetwork ne la borne pas. Confinement reel : sockets AF_UNIX
+# seulement (RestrictAddressFamilies), SystemCallFilter=@system-service, DevicePolicy=closed + DeviceAllow CEC seul.
 CapabilityBoundingSet=CAP_NET_ADMIN
 AmbientCapabilities=CAP_NET_ADMIN
 # dossier et verrou partages avec opentv-cec.service / opentv-cec-announce.service (le temoin de demarrage n'y est ni
