@@ -339,6 +339,15 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   30 annonces/h ; busy/refus/échec ne consomment rien.
   Contrat et cas refusés : `scripts/pi4/CEC_COMPATIBILITY.md`, tests `scripts/pi4/tests/test_cec_return.py`.
   Vérifié hors matériel seulement.
+- **Maintien neutre POLL après la reprise Samsung (0.7.4)** : `announced` rétablit, mais la Samsung terrain cesse de
+  transmettre les touches après quelques secondes/minutes ; un POLL neutre vers la TV toutes les 15 s les maintient
+  (canari terrain confirmé par Alex). Dans `cecreturn.py` (même service, aucun mode suiveur) : armé en mémoire
+  seulement après une reprise `announced` de ce moniteur ; argv figé `cec-ctl -d <adaptateur> -s -t 0 -P`, sous le
+  verrou CEC, après relecture de l'adaptateur (même PA/masque) ; arrêté par toute `ACTIVE_SOURCE` reçue, routage ou
+  chemin vers une autre adresse, `STANDBY`, perte/trame invalide, état de l'adaptateur, fin du moniteur, POLL non
+  acquitté, verrou occupé. Jamais d'annonce, de réveil ni de question d'alimentation périodiques. Journal
+  `cec_return_keepalive` (armed/active horaire/disarmed). POLL acquitté = transport seulement : les six touches
+  restent la preuve. Opt-out `OPENTV_CEC_RETURN_KEEPALIVE=0`. Vérifié hors matériel seulement.
 
 ## 11. Limites connues (testées, ne pas reproposer sans élément nouveau)
 

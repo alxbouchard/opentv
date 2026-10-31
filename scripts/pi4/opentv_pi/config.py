@@ -43,6 +43,10 @@ DEFAULTS = {
     # <Active Source> 0.0.0.0, <Routing Change>, <Set Stream Path>), rejouer UNE fois l'annonce sûre (TV allumée
     # seulement) pour que la télécommande pilote de nouveau OpenTV (opentv-cec-return.service). 0 = jamais.
     "OPENTV_CEC_RETURN_RECOVERY": "1",
+    # 1 = après une reprise `announced` seulement : <Poll> neutre (1 octet, aucun opcode) vers la TV toutes les 15 s tant
+    # que notre adresse reste la source choisie — la Samsung terrain cesse sinon de transmettre les touches après
+    # quelques secondes/minutes. Jamais d'annonce, de réveil ni de question d'alimentation périodiques. 0 = jamais.
+    "OPENTV_CEC_RETURN_KEEPALIVE": "1",
     # télécommande sur téléphone (LAN, HTTP prototype) : ouverte seulement après la configuration, en ligne, sur
     # l'adresse LAN actuelle (jamais 0.0.0.0)
     "OPENTV_REMOTE_ENABLED": "1",
@@ -163,6 +167,7 @@ class Config:
         self.cec_keymap = _bool(e["OPENTV_CEC_KEYMAP"], "OPENTV_CEC_KEYMAP")
         self.cec_boot_announce = _bool(e["OPENTV_CEC_BOOT_ANNOUNCE"], "OPENTV_CEC_BOOT_ANNOUNCE")
         self.cec_return_recovery = _bool(e["OPENTV_CEC_RETURN_RECOVERY"], "OPENTV_CEC_RETURN_RECOVERY")
+        self.cec_return_keepalive = _bool(e["OPENTV_CEC_RETURN_KEEPALIVE"], "OPENTV_CEC_RETURN_KEEPALIVE")
         self.remote_enabled = _bool(e["OPENTV_REMOTE_ENABLED"], "OPENTV_REMOTE_ENABLED")
         self.remote_port = _port(e["OPENTV_REMOTE_PORT"], "OPENTV_REMOTE_PORT")
         self.remote_mdns = _bool(e["OPENTV_REMOTE_MDNS"], "OPENTV_REMOTE_MDNS")

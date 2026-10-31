@@ -405,7 +405,7 @@ def cmd_cec_return_monitor(a):
     cfg = config.Config.load(a.env)
     if not (cfg.cec_bootstrap and cfg.cec_return_recovery):
         return _line({"event": "cec_return", "ok": True, "result": "disabled"})
-    return cecreturn.run(cecreturn.Monitor(a.root, state_dir=a.state_dir))
+    return cecreturn.run(cecreturn.Monitor(a.root, state_dir=a.state_dir, keepalive=cfg.cec_return_keepalive))
 
 
 def _uids(*users):

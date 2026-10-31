@@ -89,6 +89,40 @@ explicite (`cec_return_waiting`, `"rediscover":true`), jamais « prêt », rien 
 suite sur le même adaptateur lu ⇒ `adapter_state_inconsistent`, sortie 78. Aucune reprise avant un **nouvel**
 événement initial conforme : une séquence vue avant lui, ou en cours de calme lors du changement d'état, n'émet rien.
 
+### Maintien neutre après la reprise (0.7.4)
+
+Terrain Samsung du 2026-10-31 : la séquence exacte est détectée, `"result":"announced"` (seulement une question
+d'alimentation, `ACTIVE_SOURCE`, `MENU_STATUS`) rend les touches… quelques secondes à minutes. L'activation manuelle est
+tout aussi temporaire. Un répondeur ponctuel ou permanent à `GIVE_DEVICE_POWER_STATUS`, puis une libération/réclamation
++ annonce : **réfutés**. Un `cec-follower` standard gardait le contrôle vivant ; la capture a montré que son seul
+apport utile était un `POLL` neutre vers la TV toutes les ~15 s. Canari `cec-ctl -d /dev/cec0 -s -t 0 -P` toutes les
+15 s, sans suiveur ni autre réponse : six touches > 5 min, **confirmé par Alex**. `POLL` (un octet, aucun opcode)
+n'annonce rien, ne réveille rien, ne change ni l'alimentation ni la source.
+
+Distinction : **`announced` rétablit le transfert des touches ; le POLL neutre le maintient** sur cette Samsung. Contrat
+(module `cecreturn`, même service, aucun mode suiveur) :
+
+- armé **seulement** après une reprise `announced` de ce moniteur (prêt conforme + séquence exacte), en mémoire : un
+  redémarrage du service ou du moniteur ne l'arme jamais ; `busy`, refus, échec, `adapter_changed` ou quota non plus ;
+- `POLL` vers l'adresse logique 0, 15 s après l'annonce puis toutes les 15 s exactement (jamais plus vite), sous le
+  verrou `/run/opentv-cec/lock` (attente ≤ 3 s), après relecture de l'adaptateur surveillé (le nôtre, même adresse
+  physique, même masque logique) ; argv figé `cec-ctl -d <adaptateur> -s -t 0 -P` (adaptateur découvert, jamais
+  `NEVER_EMIT`, annonce ni question d'alimentation) ; succès = sortie exacte d'un POLL acquitté par la TV depuis une de
+  nos adresses logiques ;
+- arrêt immédiat (`"event":"cec_return_keepalive","state":"disarmed"` + raison) : toute `ACTIVE_SOURCE` reçue
+  (TV/application native 0.0.0.0 → `native_app`, autre source → `other_source`), routage ou `SET_STREAM_PATH` vers une
+  autre adresse, `STANDBY`, `INACTIVE_SOURCE`, perte de messages, trame incohérente/ligne inconnue, événement d'état de
+  l'adaptateur, fin du moniteur, POLL non acquitté (`poll_nack`) ou en échec, verrou occupé, adaptateur/adresse
+  logique changés, reprise suivante non annoncée ;
+- continue tant que notre adresse reste choisie : Samsung Home (aucune trame), touches et trafic ordinaire ne
+  l'arrêtent pas et ne déclenchent **jamais** d'annonce ; jamais d'`ACTIVE_SOURCE`, de `MENU_STATUS` ni de question
+  d'alimentation périodiques ; une autre entrée HDMI n'est jamais reprise ; une TV éteinte n'est jamais réveillée ;
+- journal : `armed`, `active` (première sonde, puis une ligne par heure au plus), `disarmed` — jamais une ligne par
+  POLL ni de donnée brute du bus. Opt-out du maintien seul : `OPENTV_CEC_RETURN_KEEPALIVE=0`.
+
+Un POLL acquitté est une preuve de **transport** seulement, jamais de reprise des touches : les six touches visibles,
+immédiatement puis après une fenêtre de stabilité, restent la seule preuve (gate « Maintien après retour »).
+
 ### Lacunes connues
 
 - aucune action utilisateur « Afficher OpenTV » (téléphone appairé, future télécommande USB) ne déclenche encore la
@@ -181,7 +215,11 @@ sans intervention (3 fois), YouTube → autre entrée et Home Samsung sans émis
 - persistance après un nouveau redémarrage du Pi avec l'annonce unique de démarrage, puis après extinction/rallumage
   complet de la TV : **à refaire** avant de classer cette gamme comme plug-and-play sans réserve ;
 - retour YouTube natif → OpenTV : touches inertes **reproduites**, `cec --activate` **PASS** (Alex) ; reprise
-  automatique 0.7.3 (`opentv-cec-return.service`) : **à valider sur le Pi**.
+  automatique 0.7.3 (`opentv-cec-return.service`) : **à valider sur le Pi** ;
+- 2026-10-31 : reprise `announced` détectée et transmise, mais touches perdues après quelques secondes/minutes
+  (**reproduit**) ; canari POLL neutre 15 s seul : six touches > 5 min (**PASS**, Alex) ; maintien intégré 0.7.4
+  (`cec_return_keepalive`) : **à valider sur le Pi** (six touches immédiatement puis après 2, 5 et 10 min, trois
+  cycles YouTube ↔ OpenTV, Home, autre source, TV éteinte).
 
 Classe provisoire : **B — compatible après activation CEC terrain bornée**.
 

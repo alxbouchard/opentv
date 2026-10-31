@@ -143,16 +143,40 @@ def ready_first(script, pa="1.0.0.0", mask=0x0010):
     return at(0, state_event(pa, mask)) + list(script)
 
 
+# `cec-ctl -d <dev> -s -t 0 -P` (cec-ctl 1.22.1, sans -v) : acquitté par la TV = en-tête, POLL, ligne Sequence et
+# rien d'autre ; non acquitté = même sortie + statut (tx_status2s), code de sortie 0 dans les deux cas.
+POLL_OK = "\nTransmit from Playback Device 1 to TV (4 to 0):\nPOLL\n\tSequence: 117 Tx Timestamp: 8123.456s\n"
+POLL_NACK = POLL_OK + "\tTx, Not Acknowledged (1), Max Retries\n"
+POLL_ARGV_OPTS = ["-s", "-t", "0", "-P"]
+
+
 class RecBus(FakeBus):
-    """cec-ctl simulé + instant de chaque émission (pour mesurer le délai de reprise)."""
+    """cec-ctl simulé + instant de chaque émission (pour mesurer le délai de reprise) ; <Poll> (`-P`) répondu par
+    `poll_reply` (code, sortie) ou une fonction (argv) -> (code, sortie) ; `mask` facultatif par adaptateur."""
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.at = []
+        self.poll_reply = (0, POLL_OK)
+
+    def render(self, dev):
+        out = super().render(dev)
+        m = self.ad[dev].get("mask")
+        return out.replace("Logical Address Mask       : 0x0010", "Logical Address Mask       : " + m) if m else out
 
     def __call__(self, argv, timeout):
         self.at.append((self.clock.t, list(argv)))
+        if "-P" in argv:
+            self.calls.append((list(argv), timeout))
+            self.clock.t += 0.05
+            if argv[2] not in self.ad or self.ad[argv[2]].get("unreadable"):
+                return 1, "open failed"
+            r = self.poll_reply
+            return r(argv) if callable(r) else r
         return super().__call__(argv, timeout)
+
+    def polls(self):
+        return [t for t, a in self.at if "-P" in a]
 
 
 def module_source():
@@ -551,10 +575,13 @@ class TestArgv(RBase):
     def test_no_forbidden_option_on_any_path(self):
         self.watch(captured() + captured(youtube_s=cecreturn.COOLDOWN_S + 30))
         self.assertEqual(wake_args(self.bus), [])
+        self.assertTrue(self.bus.polls())                       # le maintien neutre a bien tourné entre les deux
         for argv, _ in self.bus.calls:
             opts = [o for o in argv if o.startswith("-")]
             self.assertTrue(set(opts) <= {"-d", "-s", "-t", "--give-device-power-status", "--active-source",
-                                          "--menu-status"}, argv)
+                                          "--menu-status", "-P"}, argv)
+            if "-P" in argv:                                    # <Poll> : argv exact, rien d'autre
+                self.assertEqual(argv, ["cec-ctl", "-d", "/dev/cec0"] + POLL_ARGV_OPTS)
         src = module_source()
         for opt in WAKE + ("--playback", "--clear", "--osd-name", "shell=True", "os.system", "/dev/input",
                            "evdev", "uinput", "EVIOC"):
@@ -819,9 +846,9 @@ class TestFatal(RBase):
         real = cecreturn.Monitor
         src = FakeLines(self.clock, [], error="monitor_refused")
 
-        def factory(root, state_dir):
+        def factory(root, state_dir, **kw):
             return real(self.root, runner=self.bus, spawn=lambda argv: src, mono=self.clock, sleep=self.sleep,
-                        state_dir=state_dir, log=self.logs.append)
+                        state_dir=state_dir, log=self.logs.append, **kw)
         with mock.patch.object(os, "geteuid", lambda: 1000), mock.patch.object(cecreturn, "Monitor", factory), \
                 contextlib.redirect_stdout(io.StringIO()):
             code = cli.main(["--env", env, "cec-return-monitor", "--state-dir", self.state])
@@ -1169,6 +1196,455 @@ class TestHealthWarning(unittest.TestCase):
                          self.run_health("inactive", manifest={"ok": False, "error": "manifest_missing"})["warnings"])
 
 
+# --------------------------------------------------------------------------- maintien neutre après la reprise (0.7.4)
+# Terrain (Samsung, 2026-10-31) : la séquence exacte est détectée, `announced` rend les touches… quelques secondes à
+# minutes seulement. Un répondeur <Report Power Status>, une libération/réclamation + annonce : sans effet. Un
+# `cec-follower` gardait la télécommande vivante ; la capture a isolé son seul apport utile : un <Poll> neutre vers la
+# TV toutes les ~15 s. Canari `cec-ctl -d /dev/cec0 -s -t 0 -P` toutes les 15 s, sans suiveur ni autre réponse :
+# six touches > 5 min (Alex). <Poll> n'annonce rien, ne réveille rien, ne change ni alimentation ni source.
+KA = "cec_return_keepalive"
+
+
+def own_poll(nack=False):
+    """Notre <Poll> tel que le moniteur `-s -r -m` le montre (statut imprimé seulement s'il n'est pas OK)."""
+    return ["Transmitted by Playback Device 1 to TV (4 to 0): POLL"] + \
+        (["\tTx, Not Acknowledged (1), Max Retries"] if nack else []) + [raw_line([0x40])]
+
+
+def tv_poll():
+    return ["Received from TV to Playback Device 1 (0 to 4): POLL", raw_line([0x04])]
+
+
+def returned(pa="1.0.0.0", youtube_s=60.0):
+    return at(5, active_source()) + at(youtube_s, routing_change("0.0.0.0", pa)) + at(0.05, stream_path(pa))
+
+
+def traffic(seconds, every=5.0, lines=None):
+    """Trafic ordinaire de la TV (question d'alimentation toutes les 5 s, comme la capture)."""
+    out = []
+    for _ in range(int(seconds // every)):
+        out += at(every, (lines or power_poll)())
+    return out
+
+
+class TestKeepalive(RBase):
+    def ka_logs(self):
+        return [e for e in self.logs if e.get("event") == KA]
+
+    def states(self):
+        return [(e["state"], e.get("reason")) for e in self.ka_logs()]
+
+    def t_announced(self, bus=None):
+        return [t for t, a in (bus or self.bus).at if "--menu-status" in a]
+
+    # ----------------------------------------------------------------- jamais armé sans retour exact annoncé
+    def test_no_poll_without_exact_sequence_and_announcement(self):
+        for name, script in sorted(NEG.items()):
+            with self.subTest(name):
+                self.bus.calls.clear()
+                self.bus.at.clear()
+                self.logs.clear()
+                self.watch(at(0, state_event()) + script() + traffic(300))
+                self.assertEqual(self.bus.polls(), [], name)
+                self.assertEqual(self.ka_logs(), [], name)
+        self.bus.at.clear()
+        self.watch(at(0, state_event()) + traffic(900, lines=key))     # touches seules, 15 min : rien
+        self.assertEqual(self.bus.polls(), [])
+        self.assertEqual(self.bus.calls, [])
+
+    def test_failed_refused_busy_or_changed_announcement_never_arms(self):
+        for label in ("refused_tv_not_on", "failed", "busy", "adapter_changed", "rate_limited"):
+            with self.subTest(label):
+                self.logs.clear()
+                bus = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+                held = None
+                if label == "refused_tv_not_on":
+                    bus.power = "standby"
+                elif label == "failed":
+                    bus.fail = {"--active-source"}
+                elif label == "busy":
+                    held = cecboot._lock(self.state)
+                elif label == "adapter_changed":
+                    bus.ad["/dev/cec0"]["state"] = "foreign"
+                mon = self.monitor([FakeLines(self.clock, at(0, state_event()) + returned() + traffic(300))],
+                                   bus=bus)
+                if label == "rate_limited":
+                    mon.announced.extend([self.clock.t] * cecreturn.MAX_PER_HOUR)
+                try:
+                    self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
+                finally:
+                    if held is not None:
+                        os.close(held)
+                self.assertEqual([e["result"] for e in self.recoveries()], [label])
+                self.assertEqual(bus.polls(), [], label)
+                self.assertEqual(self.ka_logs(), [], label)
+
+    def test_service_or_monitor_restart_never_arms(self):
+        """Retour exact coupé par un redémarrage : rien ; keepalive armé puis redémarrage : jamais réarmé ensuite."""
+        m1 = at(0, state_event()) + at(5, active_source()) + at(60, routing_change())
+        m2 = at(0, state_event()) + at(0.05, stream_path()) + traffic(300)
+        self.assertIsNone(self.monitor([m1, m2]).serve(max_cycles=2))
+        self.assertEqual(self.bus.polls(), [])
+        self.assertEqual(self.ka_logs(), [])
+        # armé (mémoire seulement) puis fin du moniteur : désarmé ; le moniteur suivant ne sonde jamais
+        self.logs.clear()
+        armed = at(0, state_event()) + returned() + traffic(60)
+        after = at(0, state_event()) + traffic(600)
+        self.assertIsNone(self.monitor([armed, after]).serve(max_cycles=2))
+        t_end = max(self.bus.polls())
+        self.assertEqual(self.states(), [("armed", None), ("active", None), ("disarmed", "monitor_end")])
+        restart = [e for e in self.logs if e.get("event") == "cec_return_watch_end"][0]
+        self.assertEqual(restart["reason"], "eof")
+        self.assertLess(t_end, self.t_announced()[0] + 61)           # aucune sonde pendant les 600 s suivantes
+        self.assertEqual([n for n in os.listdir(self.state) if n != "lock"], [])   # mémoire seulement
+
+    # ----------------------------------------------------------------- armé : cadence fixe 15 s, <Poll> seul
+    def test_exact_return_announced_arms_first_poll_at_15s_then_fixed_cadence(self):
+        self.watch(at(0, state_event()) + returned() + traffic(300) + traffic(120, every=7, lines=key))
+        self.assertEqual([e["result"] for e in self.recoveries()], ["announced"])
+        t_ann = self.t_announced()[0]
+        polls = self.bus.polls()
+        self.assertEqual(cecreturn.KEEPALIVE_INTERVAL_S, 15.0)
+        self.assertGreaterEqual(polls[0] - t_ann, cecreturn.KEEPALIVE_INTERVAL_S)       # jamais avant 15 s
+        self.assertLessEqual(polls[0] - t_ann, cecreturn.KEEPALIVE_INTERVAL_S + 0.5)
+        gaps = [b - a for a, b in zip(polls, polls[1:])]
+        self.assertTrue(all(cecreturn.KEEPALIVE_INTERVAL_S - 1e-6 <= g <= cecreturn.KEEPALIVE_INTERVAL_S + 0.5
+                            for g in gaps), gaps)
+        self.assertGreaterEqual(len(polls), 27)                         # ~420 s / 15 s, touches comprises
+        # rien d'autre que relecture + <Poll> après l'annonce : jamais d'<Active Source>/<Menu Status>/question
+        self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)
+        after = [a for t, a in self.bus.at if t > t_ann]
+        self.assertEqual(after, [["cec-ctl", "-d", "/dev/cec0"], ["cec-ctl", "-d", "/dev/cec0"] + POLL_ARGV_OPTS]
+                         * len(polls))
+        self.assertEqual(wake_args(self.bus), [])
+        # journal sobre : armé, actif (1re sonde), puis désarmé à la fin du moniteur — jamais une ligne par sonde
+        self.assertEqual(self.states(), [("armed", None), ("active", None), ("disarmed", "monitor_end")])
+        armed = self.ka_logs()[0]
+        self.assertEqual(armed, {"event": KA, "state": "armed", "device": "/dev/cec0", "physical_address": "1.0.0.0",
+                                 "interval_s": 15.0})
+        self.assertEqual(self.ka_logs()[-1]["polls"], len(polls))
+
+    def test_poll_argv_is_exact_dynamic_and_never_an_announcement(self):
+        self.assertEqual(cecreturn.poll_argv("/dev/cec3"), ["cec-ctl", "-d", "/dev/cec3"] + POLL_ARGV_OPTS)
+        for dev in ("/dev/cec", "/dev/cecx", "cec0", "/dev/../dev/cec0", "/dev/cec0;rm", None):
+            with self.assertRaises(ValueError):
+                cecreturn.poll_argv(dev)
+        argv = cecreturn.poll_argv("/dev/cec0")
+        for bad in cecboot.NEVER_EMIT + cecboot.ANNOUNCE_OPTS + ("--give-device-power-status", "-m", "-M",
+                                                                 "--follower", "--from", "-f", "-v"):
+            self.assertNotIn(bad, argv)
+        # garde explicite : toute dérive de l'argv (annonce, réveil, alimentation, autre cible) est refusée
+        for opts in (("-s", "-t", "0", "-P", "--active-source"), ("-s", "-t", "0", "--image-view-on"),
+                     ("-s", "-t", "0", "--give-device-power-status"), ("-s", "-t", "0", "--menu-status"),
+                     ("-s", "-t", "4", "-P"), ("-s", "-P"), ("-s", "-t", "0", "-P", "--wake"),
+                     ("-s", "-t", "0", "--standby")):
+            with self.subTest(opts), mock.patch.object(cecreturn, "POLL_OPTS", opts):
+                with self.assertRaises(ValueError):
+                    cecreturn.poll_argv("/dev/cec0")
+        # adaptateur et adresse dynamiques : relecture puis <Poll> sur l'adaptateur découvert
+        bus = RecBus(self.clock, {"/dev/cec0": {"pa": "f.f.f.f", "state": "empty"},
+                                  "/dev/cec1": {"pa": "2.1.0.0", "state": "ours"}})
+        mon = self.monitor([at(0, state_event("2.1.0.0")) + returned("2.1.0.0") + traffic(40)], bus=bus)
+        self.assertEqual(mon.discover(), ("/dev/cec1", "2.1.0.0", 0x0010))
+        self.assertEqual(mon.watch("/dev/cec1", "2.1.0.0", 0x0010), ("eof", True))
+        polls = [a for _, a in bus.at if "-P" in a]
+        self.assertEqual(polls, [["cec-ctl", "-d", "/dev/cec1"] + POLL_ARGV_OPTS] * 2)
+        i = next(i for i, (_, a) in enumerate(bus.at) if "-P" in a)
+        self.assertEqual(bus.at[i - 1][1], ["cec-ctl", "-d", "/dev/cec1"])     # relue juste avant chaque sonde
+
+    def test_poll_output_parser_is_exact_and_fail_closed(self):
+        p = cecreturn.poll_acked_by
+        self.assertEqual(p(POLL_OK), 4)
+        self.assertEqual(p(POLL_OK.replace("Playback Device 1", "Playback Device 2").replace("4 to 0", "8 to 0")), 8)
+        for bad in (POLL_NACK, "", None, "Timed out\n", "\nAdapter is unconfigured, please configure it first.\n",
+                    POLL_OK.replace("\tSequence: 117 Tx Timestamp: 8123.456s\n", ""),
+                    POLL_OK + "\tTx, Arbitration Lost (1), Error (1)\n", POLL_OK + "garbage\n",
+                    POLL_OK.replace("to TV (4 to 0)", "to Audio System (4 to 5)"),
+                    POLL_OK.replace("4 to 0", "0 to 0"), POLL_OK.replace("4 to 0", "15 to 0"),
+                    POLL_OK.replace("POLL", "ACTIVE_SOURCE (0x82):"), POLL_OK * 2,
+                    "CEC_TRANSMIT returned -1 (No such device)\n" + POLL_OK):
+            with self.subTest(bad):
+                self.assertIsNone(p(bad))
+
+    def test_poll_uses_the_existing_lock_and_waits_bounded(self):
+        held = [None]
+
+        def reply(argv):
+            fd = cecboot._lock(self.state)                          # pendant la sonde, le verrou CEC est tenu
+            self.assertIsNone(fd)
+            return 0, POLL_OK
+        self.bus.poll_reply = reply
+        mon = self.monitor([FakeLines(self.clock, at(0, state_event()) + returned() + traffic(40) + traffic(60))])
+        orig = mon.poll
+
+        def poll(dev, pa, mask, _orig=orig):
+            if len(self.bus.polls()) == 2 and held[0] is None:      # 3e sonde : minuterie/--activate en cours
+                held[0] = cecboot._lock(self.state)
+                self.sleeps.clear()
+                held.append(self.clock.t)
+            return _orig(dev, pa, mask)
+        mon.poll = poll
+        try:
+            self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
+        finally:
+            os.close(held[0])
+        self.assertEqual(len(self.bus.polls()), 2)                      # aucune sonde sans le verrou
+        self.assertEqual(self.states()[-1], ("disarmed", "lock_busy"))
+        self.assertTrue(self.sleeps and set(self.sleeps) == {cecreturn.LOCK_POLL_S}, self.sleeps)
+        self.assertLessEqual(sum(self.sleeps), cecreturn.KEEPALIVE_LOCK_WAIT_S)
+        self.assertLess(cecreturn.KEEPALIVE_LOCK_WAIT_S + cecreturn.KEEPALIVE_BUDGET_S,
+                        cecreturn.KEEPALIVE_INTERVAL_S)                 # une sonde finit avant la suivante
+        fd = cecboot._lock(self.state)                                  # libéré après chaque sonde
+        self.assertIsNotNone(fd)
+        os.close(fd)
+        self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)
+
+    def test_failed_or_unacknowledged_poll_disarms_immediately(self):
+        def hang(argv):
+            self.clock.t += cecboot.TX_TIMEOUT_S + cecboot.KILL_GRACE_S
+            return 124, ""
+        cases = {"poll_nack": (0, POLL_NACK), "poll_failed": (1, ""), "poll_failed_timeout": hang,
+                 "poll_failed_rc_with_ok_text": (1, POLL_OK),
+                 "poll_failed_empty": (0, ""), "poll_failed_garbage": (0, "Timed out\n"),
+                 "la_changed": (0, POLL_OK.replace("Playback Device 1", "Playback Device 2").replace("4 to 0",
+                                                                                                    "8 to 0"))}
+        for label, reply in sorted(cases.items()):
+            with self.subTest(label):
+                self.logs.clear()
+                self.bus.at.clear()
+                self.bus.calls.clear()
+                n = [0]
+
+                def r(argv, _reply=reply):
+                    n[0] += 1
+                    if n[0] == 1:
+                        return 0, POLL_OK
+                    return _reply(argv) if callable(_reply) else _reply
+                self.bus.poll_reply = r
+                self.watch(at(0, state_event()) + returned() + traffic(300))
+                self.assertEqual(len(self.bus.polls()), 2, label)       # la sonde en échec est la dernière
+                want = {"poll_nack": "poll_nack", "la_changed": "adapter_changed"}.get(label, "poll_failed")
+                self.assertEqual(self.states(), [("armed", None), ("active", None), ("disarmed", want)])
+                self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)            # aucune annonce de « secours »
+                self.assertEqual(wake_args(self.bus), [])
+
+    def test_adapter_or_logical_address_change_fails_closed_before_polling(self):
+        changes = {"pa": ("pa", "2.0.0.0"), "mask": ("mask", "0x0100"), "foreign": ("state", "foreign"),
+                   "empty": ("state", "empty"), "unplugged": ("pa", "f.f.f.f"), "unreadable": ("unreadable", True)}
+        for label, (k, v) in sorted(changes.items()):
+            with self.subTest(label):
+                self.logs.clear()
+                bus = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+
+                def r(argv, _bus=bus, _k=k, _v=v):
+                    _bus.ad["/dev/cec0"][_k] = _v                     # change juste après la 1re sonde
+                    return 0, POLL_OK
+                bus.poll_reply = r
+                mon = self.monitor([FakeLines(self.clock, at(0, state_event()) + returned() + traffic(300))],
+                                   bus=bus)
+                self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
+                self.assertEqual(len(bus.polls()), 1, label)
+                self.assertEqual(self.states()[-1], ("disarmed", "adapter_changed"))
+                self.assertEqual(bus.opts(), ANNOUNCE_SEQ)
+
+    # ----------------------------------------------------------------- arrêts : la TV ou une autre source reprend la main
+    def test_every_stop_condition_disarms_and_never_reclaims(self):
+        stops = {
+            "native_app": (active_source("0.0.0.0"), "native_app"),
+            "other_hdmi_source": (active_source("3.0.0.0", src=8), "other_source"),
+            "tv_other_active_source": (active_source("2.0.0.0"), "other_source"),
+            "foreign_claims_our_pa": (active_source("1.0.0.0", src=8), "other_source"),
+            "own_active_source_other_pa": (active_source("2.0.0.0", src=4, tx=True), "own_unexpected"),
+            "routing_away": (routing_change("1.0.0.0", "2.0.0.0"), "routed_away"),
+            "routing_information_away": (frame(0x81, "ROUTING_INFORMATION", [("phys-addr", "2.0.0.0")],
+                                               pa_bytes("2.0.0.0")), "routed_away"),
+            "stream_path_other": (stream_path("3.0.0.0"), "stream_path_away"),
+            "standby_broadcast": (frame(0x36, "STANDBY"), "standby"),
+            "standby_to_us": (frame(0x36, "STANDBY", dst=4), "standby"),
+            "inactive_source": (frame(0x9d, "INACTIVE_SOURCE", [("phys-addr", "3.0.0.0")], pa_bytes("3.0.0.0"),
+                                      src=8, dst=0), "inactive_source"),
+            "lost_messages": (["", "1.0s: Event: Lost 3 messages"], "lost"),
+            "garbage_line": (["\x1b[2Jbogus"], "invalid_unknown_line"),
+            "partial_frame": (stream_path()[:-1] + key()[:1], "invalid_partial_frame"),
+            "malformed_watched": (stream_path("2.0.0.0")[:2] + [raw_line([0x0f, 0x86, 0x10, 0x00])],
+                                  "invalid_argument_mismatch"),
+            "same_state_event": (state_event(initial=False), "adapter_state"),
+            "adapter_state_change": (state_event("f.f.f.f", 0x0000, initial=False), "adapter_state"),
+        }
+        for name, (lines, reason) in sorted(stops.items()):
+            with self.subTest(name):
+                self.logs.clear()
+                self.bus.at.clear()
+                self.bus.calls.clear()
+                self.watch(at(0, state_event()) + returned() + traffic(20) + at(1, lines) + traffic(600))
+                polls = self.bus.polls()
+                self.assertEqual(len(polls), 1, name)                    # 1re sonde à 15 s, plus rien ensuite
+                st = self.states()
+                self.assertEqual(st[:2], [("armed", None), ("active", None)], name)
+                self.assertEqual(st[2:], [("disarmed", reason)], name)
+                self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ, name)      # jamais de réclamation ni de réveil
+                self.assertEqual(wake_args(self.bus), [])
+
+    def test_own_and_tv_polls_and_ordinary_traffic_keep_it_armed(self):
+        parser = cecreturn.Parser()
+        items = [i for line in own_poll() + own_poll(nack=True) + tv_poll() for i in parser.feed(line)]
+        self.assertEqual([i[0] for i in items], ["frame"] * 3)
+        ka = cecreturn.Keepalive("1.0.0.0", 0x10)
+        for _, fr in items:
+            self.assertIsNone(ka.stop_reason(fr))
+        keep = [own_poll, tv_poll, power_poll, key, lambda: key(0x0d, "back"), lambda: routing_change("0.0.0.0"),
+                lambda: stream_path("1.0.0.0"), lambda: active_source("1.0.0.0", src=4, tx=True),
+                lambda: frame(0x81, "ROUTING_INFORMATION", [("phys-addr", "1.0.0.0")], pa_bytes("1.0.0.0")),
+                lambda: frame(0x89, "VENDOR_COMMAND_WITH_ID", [("vendor-id", "0x0000f0 (Samsung)")],
+                              [0x00, 0x00, 0xf0, 0x01], 0, 4)]
+        script = at(0, state_event()) + returned()
+        for i in range(60):
+            script += at(4, keep[i % len(keep)]())
+        self.watch(script)
+        self.assertEqual(self.states(), [("armed", None), ("active", None), ("disarmed", "monitor_end")])
+        self.assertGreaterEqual(len(self.bus.polls()), 15)
+        self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)
+
+    def test_samsung_home_or_silence_neither_announces_nor_disarms(self):
+        """Home Samsung n'émet aucune trame : le maintien continue, jamais d'annonce qui fermerait Home."""
+        self.watch(at(0, state_event()) + returned() + at(600, power_poll()))
+        polls = self.bus.polls()
+        self.assertGreaterEqual(len(polls), 39)
+        self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)
+        self.assertEqual(self.states(), [("armed", None), ("active", None), ("disarmed", "monitor_end")])
+
+    def test_user_keys_never_disarm_an_armed_keepalive(self):
+        self.watch(at(0, state_event()) + returned() + traffic(180, every=3, lines=key))
+        self.assertGreaterEqual(len(self.bus.polls()), 11)
+        self.assertEqual(self.states(), [("armed", None), ("active", None), ("disarmed", "monitor_end")])
+
+    def test_other_hdmi_source_is_never_reclaimed(self):
+        script = at(0, state_event()) + returned() + traffic(35) + at(1, active_source("3.0.0.0", src=8)) + \
+            at(0.2, routing_change("1.0.0.0", "3.0.0.0")) + traffic(1800)
+        self.watch(script)
+        self.assertEqual(len(self.bus.polls()), 2)
+        self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)
+        self.assertEqual([e["result"] for e in self.recoveries()], ["announced"])
+        self.assertEqual(self.states()[-1], ("disarmed", "other_source"))
+
+    def test_tv_standby_is_never_woken(self):
+        script = at(0, state_event()) + returned() + traffic(20) + at(1, frame(0x36, "STANDBY")) + \
+            at(2, state_event("f.f.f.f", 0x0000, initial=False))
+        self.watch(script)
+        self.assertEqual(len(self.bus.polls()), 1)
+        self.assertEqual(wake_args(self.bus), [])
+        self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)
+        self.assertEqual(self.states()[-1], ("disarmed", "standby"))
+
+    def test_no_periodic_announcement_over_an_hour_and_bounded_logs(self):
+        self.watch(at(0, state_event()) + returned() + traffic(7300, every=60))
+        polls = self.bus.polls()
+        self.assertGreaterEqual(len(polls), 480)
+        self.assertLessEqual(len(polls), 7300 / cecreturn.KEEPALIVE_INTERVAL_S + 1)
+        self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)                  # une seule annonce, jamais périodique
+        self.assertEqual([o for o in self.bus.opts() if o == "--give-device-power-status"], ANNOUNCE_SEQ[:1])
+        st = [s for s, _ in self.states()]
+        self.assertEqual(st, ["armed", "active", "active", "active", "disarmed"])   # 1re sonde puis 1/h
+        self.assertEqual(cecreturn.KEEPALIVE_STATUS_POLLS * cecreturn.KEEPALIVE_INTERVAL_S, 3600.0)
+        allowed = {"event", "state", "device", "physical_address", "interval_s", "polls", "reason"}
+        for e in self.ka_logs():
+            self.assertTrue(set(e) <= allowed, e)
+        self.assertNotIn("Raw", json.dumps(self.logs))
+
+    def test_next_exact_return_rearms_from_zero(self):
+        script = at(0, state_event()) + returned() + traffic(40) + returned(youtube_s=120) + traffic(40)
+        self.watch(script)
+        t1, t2 = self.t_announced()
+        polls = self.bus.polls()
+        first = [t for t in polls if t < t2]
+        self.assertGreaterEqual(first[0] - t1, cecreturn.KEEPALIVE_INTERVAL_S)
+        youtube = [t for t in polls if t1 + 41 < t < t2]
+        self.assertEqual(youtube, [])                                    # désarmé pendant l'application native
+        second = [t for t in polls if t > t2]
+        self.assertGreaterEqual(second[0] - t2, cecreturn.KEEPALIVE_INTERVAL_S)
+        self.assertEqual([s for s, _ in self.states()], ["armed", "active", "disarmed", "armed", "active",
+                                                          "disarmed"])
+        self.assertEqual(self.states()[2], ("disarmed", "native_app"))
+
+    def test_refused_return_after_an_earlier_keepalive_stays_disarmed(self):
+        mon = self.monitor([FakeLines(self.clock, at(0, state_event()) + returned() + traffic(40) +
+                                      returned(youtube_s=30) + traffic(300))])
+        orig, n = mon.recover, [0]
+
+        def recover(dev, pa, _orig=orig):
+            n[0] += 1
+            if n[0] == 2:
+                self.bus.power = "standby"                               # TV éteinte entre-temps
+            return _orig(dev, pa)
+        mon.recover = recover
+        self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
+        self.assertEqual([e["result"] for e in self.recoveries()], ["announced", "refused_tv_not_on"])
+        t2 = [t for t, a in self.bus.at if "--give-device-power-status" in a][1]
+        self.assertEqual([t for t in self.bus.polls() if t > t2], [])
+        self.assertEqual(wake_args(self.bus), [])
+
+    def test_any_non_announced_attempt_disarms_an_armed_keepalive(self):
+        """Défense en profondeur : même si une tentative non annoncée survenait pendant le maintien (busy, refus,
+        échec, report, quota…), le maintien est désarmé, jamais prolongé."""
+        for result in ("busy", "refused_tv_not_on", "failed", "adapter_changed", "budget_exceeded",
+                       "cooldown_deferred", "rate_limited"):
+            with self.subTest(result):
+                self.logs.clear()
+                mon = self.monitor()
+                ka = cecreturn.Keepalive("1.0.0.0", 0x10)
+                mon._ka_after_attempt(ka, "announced", "/dev/cec0", "1.0.0.0")
+                self.assertTrue(ka.armed)
+                mon._ka_after_attempt(ka, result, "/dev/cec0", "1.0.0.0")
+                self.assertFalse(ka.armed)
+                self.assertEqual(self.states(), [("armed", None), ("disarmed", "announce_" + result)])
+
+    def test_opt_out_never_polls(self):
+        mon = self.monitor([FakeLines(self.clock, at(0, state_event()) + returned() + traffic(300))],
+                           keepalive=False)
+        self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
+        self.assertEqual([e["result"] for e in self.recoveries()], ["announced"])
+        self.assertEqual(self.bus.polls(), [])
+        self.assertEqual(self.ka_logs(), [])
+
+    def test_field_trace_replay_keeps_forwarding_transport_alive(self):
+        """Rejoue la séquence terrain du 2026-10-31 : retour exact, `announced`, puis > 5 min de trafic Samsung
+        ordinaire (question d'alimentation toutes les 5 s, touches), nos <Poll> vus par le moniteur."""
+        s = at(0, state_event()) + at(1, key()) + at(5, active_source("0.0.0.0"))
+        for _ in range(24):                                              # 2 min de YouTube
+            s += at(5, power_poll())
+        s += at(5, routing_change("0.0.0.0", "1.0.0.0")) + at(0.05, stream_path("1.0.0.0"))
+        for i in range(80):                                              # 6 min 40 après le retour
+            s += at(5, power_poll())
+            if i % 3 == 2:
+                s += at(0.1, own_poll())
+            if i % 4 == 1:
+                s += at(0.3, key((0x01, 0x02, 0x03, 0x04, 0x00, 0x0d)[i % 6], "k"))
+        self.watch(s)
+        self.assertEqual([e["result"] for e in self.recoveries()], ["announced"])
+        polls = self.bus.polls()
+        self.assertGreaterEqual(len(polls), 25)
+        gaps = [b - a for a, b in zip(polls, polls[1:])]
+        self.assertTrue(all(15 - 1e-6 <= g <= 15.5 for g in gaps), gaps)
+        self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)
+        self.assertEqual(self.states(), [("armed", None), ("active", None), ("disarmed", "monitor_end")])
+
+    def test_detector_semantics_and_monitor_responsiveness_unchanged(self):
+        """Pendant le maintien, une nouvelle séquence exacte est toujours détectée et annoncée en quelques secondes."""
+        script = at(0, state_event()) + returned() + traffic(100) + returned(youtube_s=20) + traffic(10)
+        self.watch(script)
+        t_stream = [t for t, line in self.src.delivered if line == stream_path()[0]][-1]
+        t_as = [t for t, a in self.bus.at if "--active-source" in a][-1]
+        self.assertLessEqual(t_as - t_stream, 5.0)
+        self.assertEqual([e["result"] for e in self.recoveries()], ["announced", "announced"])
+
+    def test_module_contract_text(self):
+        src = module_source()
+        for need in ("KEEPALIVE_INTERVAL_S", "poll_argv", "cecboot._lock", "NEVER_EMIT"):
+            self.assertIn(need, src)
+        for forbidden in ("follower", "--wait-for-msgs"):
+            self.assertNotIn(forbidden, re.sub(r"(?m)#.*$|\"\"\"[\s\S]*?\"\"\"", "", src), forbidden)
+
+
 # --------------------------------------------------------------------------- CLI, configuration
 class TestCli(unittest.TestCase):
     def run_cli(self, *argv):
@@ -1181,8 +1657,15 @@ class TestCli(unittest.TestCase):
         self.assertFalse(config.Config({"OPENTV_CEC_RETURN_RECOVERY": "0"}).cec_return_recovery)
         with self.assertRaises(ValueError):
             config.Config({"OPENTV_CEC_RETURN_RECOVERY": "oui"})
+        # maintien neutre (0.7.4) : actif par défaut, opt-out indépendant
+        self.assertTrue(config.Config({}).cec_return_keepalive)
+        self.assertFalse(config.Config({"OPENTV_CEC_RETURN_KEEPALIVE": "0"}).cec_return_keepalive)
+        with self.assertRaises(ValueError):
+            config.Config({"OPENTV_CEC_RETURN_KEEPALIVE": "oui"})
         with open(os.path.join(PI4, "opentv-pi.env.example"), encoding="utf-8") as f:
-            self.assertIn("#OPENTV_CEC_RETURN_RECOVERY=1", f.read())
+            text = f.read()
+        self.assertIn("#OPENTV_CEC_RETURN_RECOVERY=1", text)
+        self.assertIn("#OPENTV_CEC_RETURN_KEEPALIVE=1", text)
 
     def test_root_refused_and_disabled_exit_cleanly(self):
         d = tmpdir(self, "otvcecret")
@@ -1205,10 +1688,16 @@ class TestCli(unittest.TestCase):
         seen = {}
 
         def serve(me, max_cycles=None):
-            seen.update(root=me.root, state_dir=me.state_dir)
+            seen.update(root=me.root, state_dir=me.state_dir, keepalive=me.keepalive)
         with mock.patch.object(os, "geteuid", lambda: 1000), mock.patch.object(cecreturn.Monitor, "serve", serve):
             code, _ = self.run_cli("--env", env, "cec-return-monitor", "--root", d, "--state-dir", d)
-        self.assertEqual((code, seen), (0, {"root": d, "state_dir": d}))
+        self.assertEqual((code, seen), (0, {"root": d, "state_dir": d, "keepalive": True}))
+        with open(env, "w") as f:                                   # opt-out du maintien seul : reprise conservée
+            f.write("OPENTV_CEC_RETURN_KEEPALIVE=0\n")
+        with mock.patch.object(os, "geteuid", lambda: 1000), mock.patch.object(cecreturn.Monitor, "serve", serve):
+            code, _ = self.run_cli("--env", env, "cec-return-monitor", "--root", d, "--state-dir", d)
+        self.assertEqual((code, seen["keepalive"]), (0, False))
+        self.assertIs(cecreturn.Monitor(d).keepalive, True)          # défaut du module : actif
 
     def test_manual_activate_path_unchanged(self):
         self.assertEqual(cli.CEC_ANNOUNCE_UNIT, "opentv-cec-announce.service")
@@ -1309,7 +1798,7 @@ class TestUnit(unittest.TestCase):
 # --------------------------------------------------------------------------- version et documentation
 class TestReleaseDocs(unittest.TestCase):
     def test_version_and_docs(self):
-        self.assertEqual(VERSION, "0.7.3")
+        self.assertEqual(VERSION, "0.7.4")
         for name in ("README.md", "CEC_COMPATIBILITY.md"):
             with open(os.path.join(PI4, name), encoding="utf-8") as f:
                 text = f.read()
@@ -1322,14 +1811,20 @@ class TestReleaseDocs(unittest.TestCase):
             for need in ("\"rediscover\":true", "adapter_state_inconsistent", "30 s"):
                 self.assertTrue(need in text, (name, need))
             self.assertNotIn("relecture en 2 s ;", text)
+            # 0.7.4 : `announced` rétablit, le <Poll> neutre maintient ; transport seulement, touches = seule preuve
+            for need in ("cec_return_keepalive", "OPENTV_CEC_RETURN_KEEPALIVE", "POLL", "15 s", "-s -t 0 -P",
+                         "maintien", "transport", "six touches"):
+                self.assertTrue(need in text, (name, need))
         with open(os.path.join(PI4, "README.md"), encoding="utf-8") as f:
             readme = f.read()
-        self.assertIn("0.7.3", readme)
+        self.assertIn("0.7.4", readme)
         gate = next(line for line in readme.splitlines() if line.startswith("| **Retour d'application native"))
         for need in ("cec_return_ready", "\"ready\":false", "cec_return_failed", "NRestarts"):
             self.assertIn(need, gate)
         with open(os.path.join(ROOT, "AGENTS.md"), encoding="utf-8") as f:
-            self.assertIn("cecreturn", f.read())
+            agents = f.read()
+        for need in ("cecreturn", "0.7.4", "POLL", "cec_return_keepalive", "transport"):
+            self.assertIn(need, agents)
 
 
 if __name__ == "__main__":

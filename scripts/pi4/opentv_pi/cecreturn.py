@@ -48,6 +48,27 @@ actif en attente explicite (`cec_return_waiting`, `rediscover: true`), sans jama
 ce soit. Une discordance ne blanchit pas les échecs génériques (compteur ni incrémenté ni remis à zéro) ; la MÊME
 discordance sur le même adaptateur lu MISMATCH_STUCK_MAX fois de suite n'est plus un état qui bouge ⇒ 78
 (`adapter_state_inconsistent`). Seul un arrêt inattendu après « prêt » suit le palier RESTART_BACKOFF_S.
+
+Maintien neutre après la reprise (0.7.4, Keepalive) — terrain Samsung du 2026-10-31 : `announced` rend bien les
+touches, mais la TV cesse de les transmettre après quelques secondes à minutes (même après `cec --activate`). Ni un
+répondeur <Report Power Status>, ni libération/réclamation + annonce n'y changent rien ; un `cec-follower` complet
+gardait la télécommande vivante, et la capture a isolé son seul apport utile : un <Poll> neutre vers la TV toutes les
+~15 s (canari `cec-ctl -d <dev> -s -t 0 -P` seul, six touches > 5 min, confirmé par Alex). <Poll> est un message d'un
+octet SANS opcode : il n'annonce rien, ne réveille rien, ne change ni l'alimentation ni la source.
+Armé APRÈS ET SEULEMENT APRÈS une reprise `announced` de CE moniteur (prêt conforme, séquence exacte), en mémoire
+seulement : un redémarrage du service ou du moniteur ne l'arme jamais. Premier <Poll> KEEPALIVE_INTERVAL_S (15 s) après
+l'annonce, puis toutes les 15 s exactement (jamais plus vite), chacun sous le verrou CEC existant (attente bornée),
+après relecture de l'adaptateur surveillé (le nôtre, même adresse physique, même masque logique) ; argv exact
+`cec-ctl -d <dev> -s -t 0 -P` (poll_argv : ni NEVER_EMIT, ni annonce, ni question d'alimentation). Succès = sortie
+exacte d'un <Poll> acquitté par la TV depuis une de nos adresses logiques (poll_acked_by) : preuve de TRANSPORT, jamais
+de reprise des touches. Désarmé immédiatement (journal `cec_return_keepalive` « disarmed » + raison stable) : toute
+<Active Source> reçue (application native 0.0.0.0, autre source, autre appareil), la nôtre vers une autre adresse,
+routage/<Set Stream Path>/<Routing Information> vers une autre adresse, <Standby>, <Inactive Source>, perte de messages,
+trame incohérente ou ligne inconnue, tout événement d'état de l'adaptateur, fin du moniteur, <Poll> non acquitté ou en
+échec, verrou occupé, adaptateur/adresse logique changés, reprise suivante non annoncée. Samsung Home (aucune trame),
+les touches et le trafic ordinaire ne le désarment pas et ne déclenchent jamais d'annonce. Journal : armé, première
+sonde réussie puis une ligne par heure au plus, désarmé — jamais une ligne par sonde ni de donnée brute du bus.
+Opt-out : OPENTV_CEC_RETURN_KEEPALIVE=0 (la reprise reste active).
 """
 import collections
 import os
@@ -106,6 +127,16 @@ STDERR_MAX_LINES = 16
 MAX_LINE_BYTES = 512
 MAX_FRAME_LINES = 16
 MONITOR_OPTS = ("-s", "-r", "-m")   # sans infos pilote, octets bruts, mode moniteur (passif)
+# -- maintien neutre (Keepalive) : <Poll> (1 octet, aucun opcode) vers la TV, adresse logique 0
+POLL_OPTS = ("-s", "-t", "0", "-P")
+POLL_EXACT = ["-s", "-t", "0", "-P"]   # garde : l'argv du maintien est figé (toute dérive est refusée)
+POWER_QUERY = "--give-device-power-status"
+KEEPALIVE_INTERVAL_S = 15.0         # cadence fixe prouvée par le canari terrain (jamais plus rapide)
+KEEPALIVE_LOCK_WAIT_S = 3.0         # verrou CEC partagé : attente bornée, sinon désarmé (lock_busy)
+KEEPALIVE_BUDGET_S = 10.0           # relecture + <Poll>, chacun borné ; attente + budget < intervalle
+KEEPALIVE_STATUS_POLLS = 240        # une ligne « active » à la 1re sonde puis toutes les 240 sondes (1 h)
+POLL_TX_RE = re.compile(r"Transmit from [A-Za-z0-9 ]{1,40} to TV \(([0-9]{1,2}) to 0\):")
+POLL_SEQ_RE = re.compile(r"\tSequence: [0-9]{1,10} Tx Timestamp: [0-9]{1,12}\.[0-9]{3}s")
 # stderr de cec-ctl -> codes stables (le texte lui-même n'est jamais journalisé)
 STDERR_CODES = (("monitor_refused", re.compile(r"Selecting monitor mode failed")),
                 ("open_failed", re.compile(r"Failed to open ")),
@@ -158,6 +189,30 @@ def monitor_argv(dev):
     if any(o in cecboot.NEVER_EMIT for o in argv):
         raise ValueError("cec_wake_or_power_command_forbidden")
     return argv
+
+
+def poll_argv(dev):
+    """argv fixe du maintien neutre : <Poll> vers la TV seulement, sur l'adaptateur découvert (/dev/cecN validé).
+    Jamais de réveil/alimentation (NEVER_EMIT), d'annonce (ANNOUNCE_OPTS) ni de question d'alimentation."""
+    if not isinstance(dev, str) or not dev.startswith("/dev/") or not DEV_RE.fullmatch(dev[5:]):
+        raise ValueError("bad_cec_device")
+    argv = ["cec-ctl", "-d", dev] + list(POLL_OPTS)
+    bad = set(cecboot.NEVER_EMIT) | set(cecboot.ANNOUNCE_OPTS) | {POWER_QUERY}
+    if any(o in bad for o in argv) or argv[3:] != POLL_EXACT:
+        raise ValueError("cec_keepalive_not_a_poll")
+    return argv
+
+
+def poll_acked_by(out):
+    """Sortie de `cec-ctl -s -t 0 -P` -> adresse logique émettrice si c'est EXACTEMENT un <Poll> acquitté par la TV
+    (en-tête, POLL, ligne Sequence, rien d'autre : cec-ctl n'imprime un statut que s'il n'est pas OK) ; None sinon
+    (non acquitté, erreur, adaptateur non configuré, texte inconnu : échec fermé). Transport seulement."""
+    lines = [x for x in (out or "").split("\n") if x.strip()]
+    if len(lines) != 3 or lines[1] != "POLL" or not POLL_SEQ_RE.fullmatch(lines[2]):
+        return None
+    m = POLL_TX_RE.fullmatch(lines[0])
+    la = int(m.group(1)) if m else None
+    return la if la is not None and 0 < la < BROADCAST else None
 
 
 # --------------------------------------------------------------------------- analyse de la sortie du moniteur
@@ -287,6 +342,56 @@ class Detector:
             self.reset("sequence_broken")
 
 
+# --------------------------------------------------------------------------- maintien neutre après la reprise
+class Keepalive:
+    """État du maintien (mémoire d'UN moniteur, horloge fournie) : armé par une reprise `announced` seulement ;
+    `stop_reason` dit si une trame rend la main à la TV ou à une autre source (désarmement), sans rien émettre."""
+
+    def __init__(self, pa, la_mask):
+        self.pa = pa_bytes(pa)
+        self.la_mask = la_mask
+        self.next_due = None
+        self.polls = 0
+
+    @property
+    def armed(self):
+        return self.next_due is not None
+
+    def arm(self, now):
+        """-> True si le maintien vient d'être armé. Premier <Poll> KEEPALIVE_INTERVAL_S plus tard, jamais avant."""
+        new = not self.armed
+        if new:
+            self.polls = 0
+        self.next_due = now + KEEPALIVE_INTERVAL_S
+        return new
+
+    def disarm(self):
+        self.next_due = None
+
+    def due(self, now):
+        return self.armed and now >= self.next_due
+
+    def stop_reason(self, fr):
+        """Trame (déjà validée par Parser) -> raison stable de désarmement, ou None (trafic ordinaire : touches,
+        questions d'alimentation, <Poll>, messages fournisseur, routage/chemin vers NOTRE adresse, notre annonce)."""
+        op = fr.opcode
+        if op not in WATCHED_LEN:
+            return None
+        if not fr.rx:                       # nos propres émissions : seule notre <Active Source> vers nous est neutre
+            return None if op == ACTIVE_SOURCE and fr.params == self.pa else "own_unexpected"
+        if op == ACTIVE_SOURCE:
+            return "native_app" if fr.initiator == TV and fr.params == TV_ROOT_PA else "other_source"
+        if op == ROUTING_CHANGE:
+            return None if fr.params[2:] == self.pa else "routed_away"
+        if op == ROUTING_INFORMATION:
+            return None if fr.params == self.pa else "routed_away"
+        if op == SET_STREAM_PATH:
+            return None if fr.params == self.pa else "stream_path_away"
+        if op == STANDBY:
+            return "standby"
+        return "inactive_source"
+
+
 # --------------------------------------------------------------------------- sous-processus borné
 class PopenLines:
     """`cec-ctl -m` en flux : lignes stdout bornées (MAX_LINE_BYTES) ; stderr lu en même temps (jamais de tube plein
@@ -384,9 +489,10 @@ class PopenLines:
 # --------------------------------------------------------------------------- service
 class Monitor:
     def __init__(self, root="/", runner=default_runner, spawn=PopenLines, mono=time.monotonic, sleep=time.sleep,
-                 state_dir=cecboot.STATE_DIR, log=None):
+                 state_dir=cecboot.STATE_DIR, log=None, keepalive=True):
         self.root, self.runner, self.spawn, self.mono, self.sleep = root, runner, spawn, mono, sleep
         self.state_dir = state_dir
+        self.keepalive = bool(keepalive)        # OPENTV_CEC_RETURN_KEEPALIVE (opt-out du maintien seul)
         self.log = log or _log
         self.last_announced = None
         self.announced = collections.deque()    # annonces transmises (quota MAX_PER_HOUR)
@@ -452,6 +558,63 @@ class Monitor:
         finally:
             os.close(lock)
 
+    def poll(self, dev, pa, mask):
+        """Une sonde du maintien : verrou CEC existant (attente bornée), relecture de l'adaptateur surveillé (le nôtre,
+        même adresse physique, même masque logique), puis <Poll> vers la TV. -> "ok" ou raison stable de
+        désarmement. "ok" = <Poll> acquitté depuis une de nos adresses logiques : transport, pas preuve de touches."""
+        t0 = self.mono()
+        lock = cecboot._lock(self.state_dir)
+        while lock is None and self.mono() + LOCK_POLL_S <= t0 + KEEPALIVE_LOCK_WAIT_S:
+            self.sleep(LOCK_POLL_S)
+            lock = cecboot._lock(self.state_dir)
+        if lock is None:
+            return "lock_busy"
+        run = cecboot._Run(self.runner, self.mono, KEEPALIVE_BUDGET_S)
+        try:
+            info = run.read(dev)
+            if info is None or not cecboot.is_vc4(info) or cecboot.classify(info) != "ours" or \
+                    not cecboot.connected(info) or info["physical_address"] != pa or info.get("mask") != mask:
+                return "adapter_changed"
+            rc, out = run(poll_argv(dev), cecboot.TX_TIMEOUT_S)
+            la = poll_acked_by(out) if rc == 0 else None
+            if la is None:
+                return "poll_nack" if rc == 0 and "Not Acknowledged" in (out or "") else "poll_failed"
+            if not (mask >> la) & 1:            # émis depuis une adresse logique qui n'est plus la nôtre
+                return "adapter_changed"
+            return "ok"
+        except cecboot.BudgetExceeded:
+            return "budget_exceeded"
+        except ValueError:
+            return "poll_refused"
+        finally:
+            os.close(lock)
+
+    def _ka_stop(self, ka, why):
+        if ka is not None and ka.armed:
+            ka.disarm()
+            self.log({"event": "cec_return_keepalive", "state": "disarmed", "reason": why, "polls": ka.polls})
+
+    def _ka_after_attempt(self, ka, result, dev, pa):
+        """Seule une reprise `announced` arme le maintien ; tout autre résultat le laisse (ou le met) désarmé."""
+        if result != "announced":
+            self._ka_stop(ka, "announce_" + str(result))
+        elif self.keepalive and ka.arm(self.mono()):
+            self.log({"event": "cec_return_keepalive", "state": "armed", "device": dev, "physical_address": pa,
+                      "interval_s": KEEPALIVE_INTERVAL_S})
+
+    def _ka_poll(self, ka, dev, pa, mask):
+        t0 = self.mono()
+        res = self.poll(dev, pa, mask)
+        if res != "ok":
+            self._ka_stop(ka, res)
+            return
+        ka.polls += 1
+        now = self.mono()
+        nxt = t0 + KEEPALIVE_INTERVAL_S         # cadence fixe ; jamais de rattrapage plus rapide
+        ka.next_due = nxt if nxt > now else now + KEEPALIVE_INTERVAL_S
+        if ka.polls == 1 or ka.polls % KEEPALIVE_STATUS_POLLS == 0:
+            self.log({"event": "cec_return_keepalive", "state": "active", "polls": ka.polls})
+
     def _attempt(self, dev, pa, det):
         now = self.mono()
         for q in (self.attempts, self.announced):
@@ -460,17 +623,18 @@ class Monitor:
         base = {"event": "cec_return_recovery", "device": dev, "physical_address": pa}
         if len(self.announced) >= MAX_PER_HOUR or len(self.attempts) >= MAX_ATTEMPTS_PER_HOUR:
             self.log(dict(base, result="rate_limited"))
-            return
+            return "rate_limited"
         if self.last_announced is not None and now - self.last_announced < COOLDOWN_S:
             det.defer(self.last_announced + COOLDOWN_S)
             self.log(dict(base, result="cooldown_deferred"))
-            return
+            return "cooldown_deferred"
         self.attempts.append(now)
         res = self.recover(dev, pa)
         if res.get("result") == "announced":   # seule une annonce transmise consomme délai et quota
             self.last_announced = self.mono()
             self.announced.append(self.last_announced)
         self.log(dict(base, elapsed_s=round(self.mono() - now, 3), **res))
+        return res.get("result")
 
     def _end(self, src, kind):
         if kind != "eof":
@@ -482,7 +646,8 @@ class Monitor:
 
     def watch(self, dev, pa, mask):
         """Un moniteur, état vide au départ -> (raison de sa fin, prêt). Rien n'est armé avant l'événement initial
-        attendu ; rien n'est émis hors de `_attempt`. cec-ctl est fermé sur toute sortie (Detector compris)."""
+        attendu ; rien n'est émis hors de `_attempt` (reprise) et de `_ka_poll` (<Poll> du maintien, armé seulement
+        par une reprise `announced` de CE moniteur). cec-ctl est fermé et le maintien désarmé sur toute sortie."""
         try:
             src = self.spawn(monitor_argv(dev))
         except (FileNotFoundError, PermissionError):
@@ -491,21 +656,25 @@ class Monitor:
             return "spawn_failed", False
         ready = False
         self.last_state = None
+        ka = None
         try:
-            det, parser = Detector(pa, mask), Parser()
+            det, parser, ka = Detector(pa, mask), Parser(), Keepalive(pa, mask)
             ready_by = self.mono() + READY_TIMEOUT_S
             while True:
                 now = self.mono()
                 if ready and det.take(now):
-                    self._attempt(dev, pa, det)
+                    self._ka_after_attempt(ka, self._attempt(dev, pa, det), dev, pa)
+                    continue
+                if ready and ka.due(now):
+                    self._ka_poll(ka, dev, pa, mask)
                     continue
                 if not ready:
                     if now >= ready_by:
                         return "not_ready", False
                     timeout = ready_by - now
                 else:
-                    dl = det.deadline()
-                    timeout = IDLE_POLL_S if dl is None else min(IDLE_POLL_S, max(0.0, dl - now))
+                    dls = [d for d in (det.deadline(), ka.next_due) if d is not None]
+                    timeout = min([IDLE_POLL_S] + [max(0.0, d - now) for d in dls])
                 kind, line = src.readline(timeout)
                 if kind == "timeout":
                     continue
@@ -518,18 +687,28 @@ class Monitor:
                             self.log({"event": "cec_return_ready", "device": dev, "physical_address": pa})
                         elif item[1:3] != (pa, mask):          # état réel différent : changement attendu (TV, HDMI…)
                             self.last_state = item[1:3]
+                            self._ka_stop(ka, "adapter_state")
                             return "adapter_state_changed", ready
                         elif not ready:                         # même état sans événement INITIAL : sortie malformée
                             return "no_initial_state", False
+                        else:                                   # même état, après « prêt » : réclamation rejouée ?
+                            self._ka_stop(ka, "adapter_state")
                     elif not ready:
                         continue                            # avant « prêt » : rien n'arme la détection
                     elif item[0] == "frame":
                         det.frame(item[1], self.mono())
+                        if ka.armed:
+                            stop = ka.stop_reason(item[1])
+                            if stop:
+                                self._ka_stop(ka, stop)
                     else:
-                        det.reset(item[0] if item[0] == "lost" else "invalid_" + item[1])
+                        why = item[0] if item[0] == "lost" else "invalid_" + item[1]
+                        det.reset(why)
+                        self._ka_stop(ka, why)
         except ValueError:
             return "invalid_startup", ready
         finally:
+            self._ka_stop(ka, "monitor_end")
             src.close()
 
     def _fatal(self, why, **extra):
