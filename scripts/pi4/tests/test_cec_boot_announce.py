@@ -26,7 +26,8 @@ import unittest
 from unittest import mock
 
 from tests._common import PI4
-from tests.test_remote import ACTIVE_SOURCE_TX, BOOT_A, BOOT_B, Base, FakeBus, make_root, tmpdir, unit
+from tests.test_remote import (ACTIVE_SOURCE_TX, BOOT_A, BOOT_B, MENU_STATUS_TX, Base, FakeBus, make_root, tmpdir,
+                               unit)
 from opentv_pi import cecboot, cli, config, nethelper
 
 EMITS = ("--image-view-on", "--active-source", "--menu-status", "--give-device-power-status")
@@ -209,6 +210,105 @@ class TestMarkerAfterSuccessOnly(BootBase):
                 self.assertEqual(self.marker()["done"], {"/dev/cec0": "1.0.0.0"})
                 man = self.boot(r, bus, force_announce=True)
                 self.assertEqual((man["ok"], man["announce"]["result"]), (True, "done"))
+
+    # ------------------------------------------------------------- revue Stage-2 de 67dbddc : masque sur CHAQUE chemin
+    # Une sortie rc 0 « exacte » mais émise depuis une adresse logique qui n'est pas dans le masque lu sur l'adaptateur
+    # (autre périphérique, réclamation qui a bougé) n'est pas NOTRE annonce. Chaque chemin (minuterie de démarrage,
+    # `cec --activate`/--force-announce) doit passer info["mask"] : un test par chemin, sinon retirer le masque d'un
+    # seul appel survit à la mutation.
+    def _foreign(self, la=8, name="Playback Device 2"):
+        return ACTIVE_SOURCE_TX.format(pa="1.0.0.0").replace("Playback Device 1", name).replace(
+            "(4 to 15)", "(%d to 15)" % la)
+
+    def test_boot_announce_from_foreign_logical_address_is_announce_failed(self):
+        for la, name in ((8, "Playback Device 2"), (11, "Playback Device 3"), (5, "Audio System")):
+            with self.subTest(la=la):
+                self.state = tmpdir(self, "otvcecst")
+                r = make_root(self)
+                bus = FakeBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})   # masque 0x0010 (LA 4)
+                bus.tx_out["--active-source"] = self._foreign(la, name)
+                res = self.tick(r, bus)
+                self.assertEqual((res["ok"], res["result"]), (False, "announce_failed"), res)
+                self.assertNotEqual(res["result"], "ready")
+                self.assertEqual((res["announce"]["result"], res["announce"]["tx"]), ("failed", "foreign_la"))
+                self.assertEqual(res["announce"]["steps"], {"active_source": False})
+                self.assertNotIn("--menu-status", bus.opts())
+                self.assertIsNone(self.marker())                                    # aucun témoin
+                self.assertNotIn("Playback Device", json.dumps(res))                # jamais le texte brut
+                del bus.tx_out["--active-source"]                                   # sortie exacte depuis LA 4
+                res = self.tick(r, bus)
+                self.assertEqual((res["ok"], res["result"], res["announce"]["result"]), (True, "ready", "boot_done"))
+                self.assertEqual(self.marker()["done"], {"/dev/cec0": "1.0.0.0"})
+
+    def test_manual_activate_from_foreign_logical_address_is_announce_failed(self):
+        self.state = tmpdir(self, "otvcecst")
+        r = make_root(self)
+        bus = FakeBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+        cecboot.save_announced(self.state, BOOT_A, {"/dev/cec0": "1.0.0.0"})        # témoin du boot déjà là
+        _, before = cecboot.marker_stamp(self.state, BOOT_A)
+        bus.tx_out["--active-source"] = self._foreign()
+        man = self.boot(r, bus, force_announce=True)                                # `opentv-pi cec --activate`
+        self.assertEqual((man["ok"], man["result"]), (False, "announce_failed"), man)
+        self.assertEqual((man["announce"]["result"], man["announce"]["tx"]), ("failed", "foreign_la"))
+        self.assertNotIn("--menu-status", bus.opts())
+        self.assertEqual(cecboot.marker_stamp(self.state, BOOT_A)[1], before)       # témoin jamais réécrit
+        del bus.tx_out["--active-source"]
+        man = self.boot(r, bus, force_announce=True)
+        self.assertEqual((man["ok"], man["result"], man["announce"]["result"]), (True, "ready", "done"))
+        self.assertNotEqual(cecboot.marker_stamp(self.state, BOOT_A)[1], before)    # réécrit par l'annonce prouvée
+
+    def test_mask_is_read_from_the_adapter_on_both_paths(self):
+        """Adaptateur réclamé en LA 8 (masque 0x0100) : la sortie exacte depuis LA 8 est NOTRE annonce (succès),
+        celle depuis LA 4 ne l'est plus — le masque vient de l'adaptateur relu, jamais d'une constante."""
+        for force in (False, True):
+            with self.subTest(force_announce=force):
+                self.state = tmpdir(self, "otvcecst")
+                r = make_root(self)
+                bus = FakeBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+                orig = bus.render
+                bus.render = lambda dev, _o=orig: _o(dev).replace("Logical Address Mask       : 0x0010",
+                                                                  "Logical Address Mask       : 0x0100")
+                res = self.boot(r, bus, force_announce=force, boot_announce=True)   # sortie LA 4 : étrangère
+                self.assertEqual((res["ok"], res["result"], res["announce"]["tx"]),
+                                 (False, "announce_failed", "foreign_la"))
+                self.assertIsNone(self.marker())
+                bus.tx_out["--active-source"] = self._foreign(8)
+                bus.tx_out["--menu-status"] = MENU_STATUS_TX.replace("Playback Device 1", "Playback Device 2") \
+                    .replace("(4 to 0)", "(8 to 0)")
+                res = self.boot(r, bus, force_announce=force, boot_announce=True)
+                self.assertEqual((res["ok"], res["result"]), (True, "ready"), res)
+                self.assertEqual(res["announce"]["steps"], {"active_source": True, "menu_status": True})
+                self.assertEqual(self.marker()["done"], {"/dev/cec0": "1.0.0.0"})
+
+    def test_cli_activate_end_to_end_foreign_logical_address_is_not_ok(self):
+        """`opentv-pi cec --activate` → unité → `cec-bootstrap --force-announce` → sortie rc 0 depuis une LA étrangère :
+        jamais « ok », aucun témoin écrit ; sortie exacte depuis notre LA : ok."""
+        r = make_root(self)
+        st = os.path.join(r, cecboot.STATE_DIR.lstrip("/"))
+        os.makedirs(st)
+        p = os.path.join(r, "proc", "sys", "kernel", "random")
+        os.makedirs(p)
+        with open(os.path.join(p, "boot_id"), "w") as f:
+            f.write(BOOT_A + "\n")
+        bus = FakeBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+        bus.tx_out["--active-source"] = self._foreign()
+
+        def systemd(argv, timeout):
+            if argv[:2] == ["systemctl", "start"]:
+                res = cecboot.bootstrap(r, runner=bus, mono=self.clock, keymap_io=self.km, state_dir=st,
+                                        force_announce=True, proc_root=os.path.join(r, "proc"))
+                return (0 if res["ok"] else 1), ""
+            return bus(argv, timeout)
+        for want in (False, True):
+            with mock.patch.object(nethelper, "default_runner", systemd), \
+                    mock.patch.object(os, "geteuid", lambda: 0), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                code = cli.main(["cec", "--root", r, "--activate"])
+            rep = json.loads(out.getvalue())
+            self.assertEqual((code, rep["activation"]["ok"]), (0, True) if want else (1, False), rep)
+            self.assertEqual(os.path.exists(os.path.join(st, cecboot.STATE_FILE)), want)
+            bus.tx_out.pop("--active-source", None)
+        self.assertEqual(wake_args(bus), [])
 
     def test_budget_exceeded_mid_announce_writes_no_marker(self):
         r = make_root(self)

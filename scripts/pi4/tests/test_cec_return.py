@@ -1953,6 +1953,286 @@ class RaceLines(FakeLines):
         return kind, line
 
 
+# --------------------------------------------------------------------------- revue Stage-2 de 67dbddc (bloquant 1)
+class TestStage2LastMomentDrain(RBase):
+    """Course du maintien pendant la contention : watch() vidait la file AVANT l'échéance, puis Monitor.poll() pouvait
+    attendre le verrou (≤ 3 s) et relire l'adaptateur (≤ budget) puis émettre sans relire le moniteur. Une trame d'arrêt
+    arrivée pendant cette attente laissait partir un POLL. Exigé : relecture non bloquante des lignes déjà reçues APRÈS
+    le verrou et la relecture de l'adaptateur, juste avant l'émission ; mêmes Parser/Keepalive ; désarmé ⇒ aucun POLL.
+
+    Sonde déterministe : à l'échéance, une autre passe CEC tient le verrou HOLD_S ; la trame arrive ARRIVE_S plus tard
+    (pendant l'attente) ou pendant une relecture lente de l'adaptateur."""
+    ka_logs = TestKeepalive.ka_logs
+    states = TestKeepalive.states
+    t_announced = TestKeepalive.t_announced
+    HOLD_S, ARRIVE_S = 2.0, 0.5
+
+    def run_case(self, lines, where="lock", tail=None, end_stream=False, partial_line=False):
+        """-> (moniteur, résultat de watch, instant d'arrivée de la trame). `where` : « lock » (verrou tenu HOLD_S,
+        trame à +ARRIVE_S) ou « read » (relecture de l'adaptateur de 4 s, trame à +1 s)."""
+        self.logs.clear()
+        bus = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+        self.rbus = bus
+        src = FakeLines(self.clock, at(0, state_event()) + returned() + (tail if tail is not None else traffic(60)))
+        self.src = src
+        slow = {"on": False}
+
+        def runner(argv, timeout):
+            if slow["on"] and argv == ["cec-ctl", "-d", "/dev/cec0"]:
+                slow["on"] = False
+                self.clock.t += 4.0                                     # relecture lente (≤ budget)
+            return bus(argv, timeout)
+        mon = self.monitor([src], bus=runner)
+        orig, held, inj = mon.poll, {}, {}
+
+        def poll(dev, pa, mask):
+            if "t" not in inj:
+                inj["t"] = self.clock.t + (self.ARRIVE_S if where == "lock" else 1.0)
+                if where == "lock":
+                    held["fd"], held["t"] = cecboot._lock(self.state), self.clock.t
+                else:
+                    slow["on"] = True
+                if partial_line:
+                    src.partial = lambda: True                          # octets sans fin de ligne déjà reçus
+                if end_stream:
+                    src.script = []                                     # fin du moniteur pendant l'attente
+                else:
+                    src.script = [(0.0, x) for x in lines] + src.script
+                    src.due = inj["t"]
+            return orig(dev, pa, mask)
+
+        def sleep(s):
+            self.sleep(s)
+            if held.get("fd") is not None and self.clock.t - held["t"] >= self.HOLD_S:
+                os.close(held["fd"])
+                held["fd"] = None
+        mon.poll, mon.sleep = poll, sleep
+        try:
+            res = mon.watch("/dev/cec0", "1.0.0.0", 0x10)
+        finally:
+            if held.get("fd") is not None:
+                os.close(held["fd"])
+        self.assertIn("t", inj)
+        return mon, res, inj["t"]
+
+    STOPS = {
+        "native_app": (active_source("0.0.0.0"), "native_app"),
+        "other_source": (active_source("3.0.0.0", src=8), "other_source"),
+        "foreign_claims_our_pa": (active_source("1.0.0.0", src=8), "other_source"),
+        "standby": (frame(0x36, "STANDBY"), "standby"),
+        "routed_away": (routing_change("1.0.0.0", "2.0.0.0"), "routed_away"),
+        "stream_path_away": (stream_path("3.0.0.0"), "stream_path_away"),
+        "inactive_source": (frame(0x9d, "INACTIVE_SOURCE", [("phys-addr", "3.0.0.0")], pa_bytes("3.0.0.0"),
+                                  src=8, dst=0), "inactive_source"),
+        "lost": (["", "1.0s: Event: Lost 3 messages"], "lost"),
+        "garbage": (["\x1b[2Jbogus"], "invalid_unknown_line"),
+        "malformed": (stream_path("2.0.0.0")[:2] + [raw_line([0x0f, 0x86, 0x10, 0x00])], "invalid_argument_mismatch"),
+        "same_state_event": (state_event(initial=False), "adapter_state"),
+        "after_neutral_traffic": (power_poll() + key() + active_source("0.0.0.0"), "native_app"),
+    }
+
+    @bounded()
+    def test_stop_frame_arriving_during_lock_wait_or_adapter_read_prevents_the_poll(self):
+        for where in ("lock", "read"):
+            for name, (lines, reason) in sorted(self.STOPS.items()):
+                with self.subTest(where=where, case=name):
+                    mon, res, t_frame = self.run_case(lines, where)
+                    bus = self.rbus
+                    self.assertEqual(res, ("eof", True), name)
+                    self.assertEqual([e["result"] for e in self.recoveries()], ["announced"])
+                    self.assertEqual(bus.polls(), [], "POLL émis malgré %s déjà reçu (%s)" % (name, where))
+                    self.assertEqual(self.states(), [("armed", None), ("disarmed", reason)], name)
+                    # le verrou a bien été pris et l'adaptateur relu AVANT la relecture finale du moniteur
+                    t_ann = self.t_announced(bus)[0]
+                    reads = [t for t, a in bus.at if a == ["cec-ctl", "-d", "/dev/cec0"] and t > t_ann]
+                    self.assertEqual(len(reads), 1, name)
+                    self.assertGreaterEqual(self.clock.t, t_frame)
+                    self.assertEqual(bus.opts(), ANNOUNCE_SEQ)              # jamais de reprise ni de réveil
+                    self.assertEqual(wake_args(bus), [])
+                    fd = cecboot._lock(self.state)                          # verrou libéré malgré l'annulation
+                    self.assertIsNotNone(fd)
+                    os.close(fd)
+
+    @bounded()
+    def test_adapter_state_change_or_monitor_end_during_wait_ends_without_poll(self):
+        for where in ("lock", "read"):
+            with self.subTest(where=where, case="state_changed"):
+                _, res, _ = self.run_case(state_event("f.f.f.f", 0x0000, initial=False), where)
+                self.assertEqual(res, ("adapter_state_changed", True))
+                self.assertEqual(self.rbus.polls(), [])
+                self.assertEqual(self.states(), [("armed", None), ("disarmed", "adapter_state")])
+            with self.subTest(where=where, case="eof"):
+                _, res, _ = self.run_case([], where, end_stream=True)
+                self.assertEqual(res, ("eof", True))
+                self.assertEqual(self.rbus.polls(), [])
+                self.assertEqual(self.states(), [("armed", None), ("disarmed", "monitor_end")])
+
+    @bounded()
+    def test_neutral_traffic_during_wait_keeps_the_poll_and_cadence(self):
+        """Touches, questions d'alimentation, POLL de la TV/nôtres, routage vers NOUS lus au dernier moment : le POLL
+        part (même contention), jamais d'annonce, cadence ≥ 15 s depuis la fin de chaque POLL."""
+        neutral = power_poll() + key() + tv_poll() + own_poll() + routing_change("0.0.0.0", "1.0.0.0") + \
+            stream_path("1.0.0.0") + active_source("1.0.0.0", src=4, tx=True)
+        for where in ("lock", "read"):
+            with self.subTest(where=where):
+                _, res, t_frame = self.run_case(neutral, where, tail=traffic(120))
+                bus = self.rbus
+                self.assertEqual(res, ("eof", True))
+                spans = bus.poll_spans
+                self.assertGreaterEqual(len(spans), 6)
+                self.assertGreaterEqual(spans[0][0], t_frame)               # émis après la lecture des lignes
+                gaps = [b[0] - a[1] for a, b in zip(spans, spans[1:])]
+                self.assertTrue(all(g >= cecreturn.KEEPALIVE_INTERVAL_S - 1e-9 for g in gaps), gaps)
+                self.assertEqual(self.states(), [("armed", None), ("active", None), ("disarmed", "monitor_end")])
+                self.assertEqual(bus.opts(), ANNOUNCE_SEQ)
+                delivered = [line for _, line in self.src.delivered]
+                self.assertEqual(delivered.count(power_poll()[0]), 1 + 120 // 5)   # chaque ligne lue une fois
+
+    @bounded()
+    def test_frame_still_incomplete_at_the_last_moment_cancels_the_poll(self):
+        """En-tête d'une trame lu, `Raw:` pas encore : son contenu (peut-être une ACTIVE_SOURCE) est inconnu ⇒ pas
+        d'émission (échec fermé) ; jamais d'attente bloquante pour la compléter."""
+        for label, lines, partial_line in (("header_without_raw", active_source("0.0.0.0")[:2], False),
+                                           ("line_without_newline", [], True)):
+            with self.subTest(label):
+                _, res, _ = self.run_case(lines, "lock", partial_line=partial_line)
+                self.assertEqual(res, ("eof", True))
+                self.assertEqual(self.rbus.polls(), [])
+                self.assertEqual(self.states(), [("armed", None), ("disarmed", "frame_pending")])
+
+    def test_popen_lines_reports_a_line_still_being_written(self):
+        code = "import sys,time;sys.stdout.write('a\\nRecei');sys.stdout.flush();time.sleep(30)"
+        src = cecreturn.PopenLines([sys.executable, "-I", "-c", code])
+        try:
+            self.assertEqual(src.readline(10.0), ("line", "a"))
+            self.assertEqual(src.readline(0.0), ("timeout", None))
+            self.assertTrue(src.partial())
+        finally:
+            src.close()
+        src = cecreturn.PopenLines([sys.executable, "-I", "-c", code.replace("Recei", "")])
+        try:
+            self.assertEqual(src.readline(10.0), ("line", "a"))
+            self.assertEqual(src.readline(0.0), ("timeout", None))
+            self.assertFalse(src.partial())
+        finally:
+            src.close()
+
+    @bounded()
+    def test_last_moment_drain_is_bounded_and_fails_closed(self):
+        flood = []
+        for _ in range(cecreturn.PRE_TX_DRAIN_MAX // 2 + 1):
+            flood += power_poll()                                      # 2 lignes par trame ordinaire
+        _, res, _ = self.run_case(flood + active_source("0.0.0.0"), "lock")
+        self.assertEqual(res, ("eof", True))
+        self.assertEqual(self.rbus.polls(), [])
+        self.assertEqual(self.states(), [("armed", None), ("disarmed", "drain_overflow")])
+        self.assertGreaterEqual(cecreturn.PRE_TX_DRAIN_MAX, 1024)
+
+    def test_last_moment_hook_reads_only_without_waiting(self):
+        """La relecture finale n'appelle readline qu'avec un délai nul (jamais bloquante ni boucle d'attente)."""
+        timeouts = []
+        src = FakeLines(self.clock, at(0, state_event()) + returned() + traffic(40))
+        orig = src.readline
+
+        def readline(timeout):
+            timeouts.append((len(self.bus.polls()), timeout))
+            return orig(timeout)
+        src.readline = readline
+        mon = self.monitor([src])
+        orig_poll = mon.poll
+
+        def poll(dev, pa, mask):
+            timeouts.append(("poll", None))
+            return orig_poll(dev, pa, mask)
+        mon.poll = poll
+        self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
+        i = timeouts.index(("poll", None))
+        between = [t for n, t in timeouts[i + 1:] if n == 0]           # lectures entre l'appel et l'émission
+        self.assertTrue(between, timeouts[i:i + 3])
+        self.assertEqual(set(between), {0.0})
+        # moniteur fini : sa relecture finale n'est plus jamais appelée (aucune lecture d'un moniteur fermé)
+        n = len(timeouts)
+        self.assertEqual(orig_poll("/dev/cec0", "1.0.0.0", 0x10), "ok")
+        self.assertEqual(len(timeouts), n)
+
+    # ----------------------------------------------------------------- preuve terrain du 2026-10-31 ~16:08
+    # Production 0.7.3 + canari POLL manuel : POLL acquittés toutes les 15 s (séquences 711–718), adaptateur sain
+    # (ours, PA 1.0.0.0, masque 0x10), mais la télécommande ne pilotait plus OpenTV ; aucun retour exact depuis
+    # 14:37:48. `cec --activate` (annonce sûre) a rétabli immédiatement. POLL acquitté = transport seulement : il
+    # maintient un renvoi existant, il ne restaure jamais un renvoi déjà perdu.
+    @bounded()
+    def test_acked_polls_before_any_announcement_never_arm_or_count_as_recovery(self):
+        """POLL acquittés visibles sur le bus (canari manuel, autre processus, POLL de la TV) sans retour exact
+        annoncé : jamais d'armement, jamais de POLL du service, jamais d'annonce ni de « reprise » ; même après un
+        redémarrage du moniteur ou du service au milieu du flux de POLL."""
+        canary = []
+        for _ in range(40):                                             # 10 min de POLL ACK toutes les 15 s
+            canary += at(15, own_poll()) + at(0.2, tv_poll()) + at(0.1, power_poll())
+        nack_canary = at(15, own_poll(nack=True)) + at(15, own_poll())
+        for label, scripts in (("single_monitor", [at(0, state_event()) + canary]),
+                               ("monitor_restart", [at(0, state_event()) + canary[:30],
+                                                    at(0, state_event()) + canary[30:]]),
+                               ("nack_then_ack", [at(0, state_event()) + nack_canary + canary[:12]])):
+            with self.subTest(label):
+                self.logs.clear()
+                bus = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+                self.assertIsNone(self.monitor(scripts, bus=bus).serve(max_cycles=len(scripts)))
+                self.assertEqual(bus.polls(), [], label)                     # le service ne sonde jamais
+                self.assertEqual(self.ka_logs(), [], label)                   # jamais armé
+                self.assertEqual(self.recoveries(), [], label)                # jamais une « reprise »
+                self.assertEqual(bus.opts(), [], label)                       # aucune annonce, aucun réveil
+
+    @bounded()
+    def test_lost_forwarding_is_restored_only_by_the_exact_return_announcement(self):
+        """Renvoi déjà perdu malgré des POLL ACK : seule la séquence exacte de la TV déclenche l'annonce unique ;
+        le maintien n'est armé qu'APRÈS cette annonce acquittée, jamais par les POLL qui la précèdent."""
+        pre = []
+        for _ in range(8):
+            pre += at(15, own_poll())                                    # POLL ACK, télécommande inerte
+        self.watch(at(0, state_event()) + pre + returned() + traffic(40))
+        rec = self.recoveries()
+        self.assertEqual([e["result"] for e in rec], ["announced"])
+        t_ann = self.t_announced()[0]
+        self.assertEqual([t for t in self.bus.polls() if t <= t_ann], [])   # aucun POLL du service avant
+        self.assertEqual(self.states()[0], ("armed", None))
+        t_armed = [t for t, a in self.bus.at if "--active-source" in a][0]
+        self.assertGreater(min(self.bus.polls()), t_armed + cecreturn.KEEPALIVE_INTERVAL_S - 1e-6)
+        self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)                  # une seule annonce, jamais périodique
+        # annonce NON acquittée après la même séquence : ni armement ni POLL, malgré les POLL ACK antérieurs
+        self.logs.clear()
+        bus = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+        bus.tx_out["--active-source"] = AS_BAD["nack"]
+        mon = self.monitor([FakeLines(self.clock, at(0, state_event()) + pre + returned() + traffic(120))], bus=bus)
+        self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
+        self.assertEqual([e["result"] for e in self.recoveries()], ["failed"])
+        self.assertEqual((bus.polls(), self.ka_logs()), ([], []))
+        self.assertEqual(bus.opts(), ["--give-device-power-status", "--active-source"])
+
+    def test_docs_record_poll_is_transport_only_field_evidence(self):
+        for name in ("README.md", "CEC_COMPATIBILITY.md"):
+            with open(os.path.join(PI4, name), encoding="utf-8") as f:
+                flat = re.sub(r"\s+", " ", f.read())
+            for need in ("2026-10-31 ~16:08", "711–718", "ne restaure pas un renvoi déjà perdu",
+                         "jamais d'annonce périodique"):
+                self.assertTrue(need in flat, (name, need))
+        with open(os.path.join(ROOT, "AGENTS.md"), encoding="utf-8") as f:
+            self.assertIn("ne restaure pas un renvoi déjà perdu", re.sub(r"\s+", " ", f.read()))
+
+    def test_docs_last_moment_drain_and_opt_out_restart(self):
+        for name in ("README.md", "CEC_COMPATIBILITY.md"):
+            with open(os.path.join(PI4, name), encoding="utf-8") as f:
+                flat = re.sub(r"\s+", " ", f.read())
+            for need in ("juste avant l'émission", "après l'attente du verrou et la relecture de l'adaptateur",
+                         "frame_pending", "drain_overflow",
+                         "systemctl restart opentv-cec-return.service"):
+                self.assertTrue(need in flat, (name, need))
+        with open(os.path.join(PI4, "opentv-pi.env.example"), encoding="utf-8") as f:
+            env = re.sub(r"\s+", " ", f.read().replace("#", " ")).lower()
+        self.assertIn("systemctl restart opentv-cec-return.service", env)
+        self.assertIn("lu au démarrage du service", env)
+        self.assertIn("juste avant l'émission", module_source())
+
+
 # --------------------------------------------------------------------------- CLI, configuration
 class TestCli(unittest.TestCase):
     def run_cli(self, *argv):

@@ -112,7 +112,11 @@ Distinction : **`announced` rétablit le transfert des touches ; le POLL neutre 
   `POLL` réellement émis (**jamais deux POLL à moins de 15 s sur le bus**, même quand l'attente du verrou
   `/run/opentv-cec/lock` — ≤ 3 s — retarde une sonde) ; avant chaque `POLL` dû, les lignes déjà reçues du moniteur
   sont lues sans attendre (une `ACTIVE_SOURCE` déjà arrivée désarme avant toute émission) ; relecture de l'adaptateur
-  surveillé (le nôtre : vc4, Playback « OpenTV », même adresse physique, même masque logique) ; argv figé `cec-ctl -d <adaptateur> -s -t 0 -P` (adaptateur découvert, jamais
+  surveillé (le nôtre : vc4, Playback « OpenTV », même adresse physique, même masque logique) ; puis, juste avant
+  l'émission — après l'attente du verrou et la relecture de l'adaptateur, verrou tenu —, nouvelle lecture non
+  bloquante des lignes déjà reçues, mêmes règles d'arrêt : une trame d'arrêt arrivée pendant ces attentes annule ce
+  `POLL` et désarme ; trame encore incomplète ⇒ `frame_pending`, plus de 4096 lignes ⇒ `drain_overflow` (annulé,
+  désarmé) ; course résiduelle limitée au lancement de cec-ctl lui-même ; argv figé `cec-ctl -d <adaptateur> -s -t 0 -P` (adaptateur découvert, jamais
   `NEVER_EMIT`, annonce ni question d'alimentation) ; succès = sortie exacte d'un POLL acquitté par la TV depuis une de
   nos adresses logiques ;
 - arrêt immédiat (`"event":"cec_return_keepalive","state":"disarmed"` + raison) : toute `ACTIVE_SOURCE` reçue
@@ -124,10 +128,19 @@ Distinction : **`announced` rétablit le transfert des touches ; le POLL neutre 
   l'arrêtent pas et ne déclenchent **jamais** d'annonce (pendant Home, le `POLL` neutre est la seule émission) ; jamais d'`ACTIVE_SOURCE`, de `MENU_STATUS` ni de question
   d'alimentation périodiques ; une autre entrée HDMI n'est jamais reprise ; une TV éteinte n'est jamais réveillée ;
 - journal : `armed`, `active` (première sonde, puis une ligne par heure au plus), `disarmed` — jamais une ligne par
-  POLL ni de donnée brute du bus. Opt-out du maintien seul : `OPENTV_CEC_RETURN_KEEPALIVE=0`.
+  POLL ni de donnée brute du bus. Opt-out du maintien seul : `OPENTV_CEC_RETURN_KEEPALIVE=0`, lu au démarrage du
+  service seulement — l'appliquer par `sudo systemctl restart opentv-cec-return.service`.
 
 Un POLL acquitté est une preuve de **transport** seulement, jamais de reprise des touches : les six touches visibles,
 immédiatement puis après une fenêtre de stabilité, restent la seule preuve (gate « Maintien après retour »).
+
+Preuve terrain (2026-10-31 ~16:08, production 0.7.3 + canari POLL manuel) : POLL acquittés toutes les 15 s (séquences
+711–718), adaptateur sain (le nôtre, PA 1.0.0.0, masque 0x10), mais la télécommande ne pilotait plus OpenTV et aucun
+retour exact n'était survenu depuis 14:37:48 ; `sudo /opt/opentv/bin/opentv-pi cec --activate` (annonce sûre) a
+rétabli immédiatement. Un POLL acquitté maintient un renvoi des touches existant mais ne restaure pas un renvoi déjà
+perdu : des POLL vus sur le bus avant une reprise `announced` n'arment jamais le maintien et ne valent jamais reprise
+; la seule restauration automatique reste l'annonce unique déclenchée par la séquence exacte de la TV (sinon `cec
+--activate`), jamais d'annonce périodique.
 
 ### Lacunes connues
 

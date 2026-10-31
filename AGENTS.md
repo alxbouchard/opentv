@@ -346,12 +346,18 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   (`cecboot.tx_acked_status`, stdout+stderr fusionnés ; cec-ctl sort avec 0 même sur `Tx, Error`/NACK) ; argv figé
   `cec-ctl -d <adaptateur> -s -t 0 -P`, sous le verrou CEC, après relecture de l'adaptateur (vc4, Playback
   « OpenTV », même PA/masque) ; échéance depuis la fin du POLL émis (jamais deux POLL à moins de 15 s, contention
-  du verrou comprise), lignes moniteur déjà reçues lues avant chaque POLL ; pendant Samsung Home le POLL continue
+  du verrou comprise), lignes moniteur déjà reçues lues avant chaque POLL puis de nouveau juste avant l'émission
+  (après l'attente du verrou et la relecture de l'adaptateur : trame d'arrêt pendant l'attente ⇒ aucun POLL ;
+  `frame_pending`/`drain_overflow` échec fermé) ; pendant Samsung Home le POLL continue
   (aucune annonce/reprise) ; arrêté par toute `ACTIVE_SOURCE` reçue, routage ou
   chemin vers une autre adresse, `STANDBY`, perte/trame invalide, état de l'adaptateur, fin du moniteur, POLL non
   acquitté, verrou occupé. Jamais d'annonce, de réveil ni de question d'alimentation périodiques. Journal
   `cec_return_keepalive` (armed/active horaire/disarmed). POLL acquitté = transport seulement : les six touches
-  restent la preuve. Opt-out `OPENTV_CEC_RETURN_KEEPALIVE=0`. Vérifié hors matériel seulement.
+  restent la preuve. Opt-out `OPENTV_CEC_RETURN_KEEPALIVE=0` (lu au démarrage : `systemctl restart
+  opentv-cec-return.service`). Masque de l'adaptateur sur les trois annonces (démarrage, `--activate`, reprise),
+  chacune testée avec une LA étrangère. Terrain 2026-10-31 ~16:08 : POLL ACK (séq. 711–718) mais touches perdues,
+  `cec --activate` les rétablit — un POLL ACK ne restaure pas un renvoi déjà perdu ; seul `announced` (séquence
+  exacte) arme ; jamais d'annonce périodique. Vérifié hors matériel seulement.
 
 ## 11. Limites connues (testées, ne pas reproposer sans élément nouveau)
 
