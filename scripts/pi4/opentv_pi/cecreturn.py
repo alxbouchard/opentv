@@ -25,6 +25,14 @@ puis appelle `cecboot.announce` : la même séquence sûre que la réactivation 
 allumée, jamais de commande de réveil ni d'alimentation (cecboot.NEVER_EMIT). Le témoin de l'annonce de démarrage n'est
 ni lu ni écrit. Résultat `announced` = <Active Source> transmis et acquitté par le bus (preuve de TRANSMISSION, pas de
 la reprise effective des touches, qui reste un gate terrain).
+Relecture finale de la reprise : après le verrou et la question d'alimentation (TV vue allumée), juste avant
+l'<Active Source> de la reprise, les lignes déjà reçues par le moniteur sont relues sans attendre (mêmes
+Parser/Detector/Keepalive que le maintien) ; application native rouverte, autre source, <Standby>, routage ailleurs,
+perte, trame invalide, événement d'état, trame incomplète, fin du moniteur ou débordement arrivés pendant ces attentes
+⇒ `cancelled` (+ raison) : rien d'autre émis, maintien non armé, ni délai ni quota consommés. Exigée sur ce chemin
+(absente ⇒ `drain_unavailable`) ; le démarrage et `cec --activate` n'ont pas de moniteur et restent inchangés.
+Limite assumée, fenêtre résiduelle : une trame émise pendant le lancement même du cec-ctl de l'annonce, ou pas encore
+écrite par le moniteur, peut encore la précéder — aucune lecture CEC ne la ferme.
 
 Bornes d'usage normal (allers-retours rapides YouTube ↔ OpenTV) : seule une annonce transmise consomme le délai
 anti-doublon COOLDOWN_S et le quota MAX_PER_HOUR ; un retour exact pendant ce délai est REPORTÉ à sa fin (jamais
@@ -557,7 +565,13 @@ class Monitor:
 
     def recover(self, dev, pa):
         """Même annonce sûre que `opentv-pi cec --activate`, sous le verrou existant ; aucun témoin touché.
-        `announced` = transmission acquittée, pas une preuve que la TV renvoie les touches."""
+        `announced` = transmission acquittée, pas une preuve que la TV renvoie les touches. Relecture finale du
+        moniteur (`_before_tx`, posée par watch) EXIGÉE : passée à cecboot.announce, appelée après le verrou, la
+        relecture de l'adaptateur et la question d'alimentation, juste avant l'<Active Source> de la reprise ; trame
+        d'arrêt/incomplète, fin du moniteur ou débordement ⇒ `cancelled`. Absente ⇒ `drain_unavailable`, rien émis."""
+        drain = self._before_tx
+        if drain is None:
+            return {"result": "drain_unavailable"}
         t0 = self.mono()
         lock = cecboot._lock(self.state_dir)
         while lock is None and self.mono() + LOCK_POLL_S <= t0 + LOCK_WAIT_S:
@@ -573,7 +587,7 @@ class Monitor:
                 return {"result": "adapter_changed"}
             # `announced` exige la sortie exacte d'un <Active Source> transmis depuis une de nos adresses logiques
             # (cecboot.tx_acked_status) : code 0 + statut `Tx, Error`/NACK ou texte parasite = `failed`, jamais armé.
-            ann, ok = cecboot.announce(run, dev, pa, info["mask"])
+            ann, ok = cecboot.announce(run, dev, pa, info["mask"], before_tx=drain)
             return dict(ann, result="announced" if ok else ann["result"])
         except cecboot.BudgetExceeded:
             return {"result": "budget_exceeded"}
@@ -601,7 +615,8 @@ class Monitor:
                 return "adapter_changed"
             argv = poll_argv(dev)
             # juste avant l'émission (verrou tenu, adaptateur relu) : lignes du moniteur arrivées pendant l'attente
-            stop = self._before_tx() if self._before_tx is not None else None
+            drain = self._before_tx                 # absente (appel hors de watch) ⇒ jamais d'émission
+            stop = drain() if drain is not None else "drain_unavailable"
             if stop:
                 return stop
             rc, out = run(argv, cecboot.TX_TIMEOUT_S)
@@ -686,11 +701,12 @@ class Monitor:
         ready = False
         self.last_state = None
         ka = None
-        end = None          # fin constatée par la relecture finale (dans poll) : rendue par la boucle ensuite
+        end = None          # fin constatée par la relecture finale (poll/reprise) : rendue par la boucle ensuite
+        halt = None         # dernière raison d'arrêt vue (trame, perte, invalide, état), armé ou non
 
         def handle(item):
             """Un élément du Parser -> None, ou (raison, prêt) si ce moniteur doit finir."""
-            nonlocal ready
+            nonlocal ready, halt
             if item[0] == "state":
                 if item[1:] == (pa, mask, True) and not ready:
                     ready = True
@@ -702,26 +718,31 @@ class Monitor:
                 elif not ready:                         # même état sans événement INITIAL : sortie malformée
                     return "no_initial_state", False
                 else:                                   # même état, après « prêt » : réclamation rejouée ?
+                    halt = "adapter_state"
                     self._ka_stop(ka, "adapter_state")
             elif not ready:
                 pass                                    # avant « prêt » : rien n'arme la détection
             elif item[0] == "frame":
                 det.frame(item[1], self.mono())
-                if ka.armed:
-                    stop = ka.stop_reason(item[1])
-                    if stop:
-                        self._ka_stop(ka, stop)
+                stop = ka.stop_reason(item[1])
+                if stop:
+                    halt = stop
+                    self._ka_stop(ka, stop)
             else:
                 why = item[0] if item[0] == "lost" else "invalid_" + item[1]
                 det.reset(why)
+                halt = why
                 self._ka_stop(ka, why)
             return None
 
         def before_tx():
-            """Juste avant l'émission d'un <Poll> (verrou tenu, adaptateur relu) : lit SANS attendre (délai nul) les
-            lignes déjà reçues pendant l'attente du verrou et la relecture, mêmes Parser/Detector/Keepalive. -> None
-            (émission permise) ou raison stable (émission annulée, maintien désarmé)."""
-            nonlocal end
+            """Juste avant l'émission d'un <Poll> (verrou tenu, adaptateur relu) ou de l'<Active Source> de la reprise
+            (verrou tenu, adaptateur relu, TV vue allumée) : lit SANS attendre (délai nul) les lignes déjà reçues
+            pendant ces attentes, mêmes Parser/Detector/Keepalive. -> None (émission permise) ou raison stable
+            (émission annulée, maintien désarmé) : toute trame d'arrêt (Keepalive.stop_reason, armé ou non), perte,
+            ligne invalide, événement d'état, fin du moniteur, trame incomplète ou débordement."""
+            nonlocal end, halt
+            halt = None
             for _ in range(PRE_TX_DRAIN_MAX):
                 kind, line = src.readline(0.0)
                 if kind == "timeout":
@@ -736,8 +757,8 @@ class Monitor:
                         end = ("watch", fin)
                         self._ka_stop(ka, "adapter_state")
                         return "adapter_state"
-                if not ka.armed:
-                    return "disarmed"
+                if halt is not None:
+                    return halt
             else:
                 self._ka_stop(ka, "drain_overflow")
                 return "drain_overflow"
@@ -747,6 +768,11 @@ class Monitor:
                 return "frame_pending"
             return None
 
+        def finished():
+            """Fin constatée par la relecture finale : rendue AUSSITÔT (une fin de flux n'est pas forcément collante :
+            PopenLines rend `oversize` une seule fois ; continuer lirait un moniteur aveugle)."""
+            return (self._end(src, end[1]), ready) if end[0] == "stream" else end[1]
+
         try:
             det, parser, ka = Detector(pa, mask), Parser(), Keepalive(pa, mask)
             self._before_tx = before_tx
@@ -755,6 +781,8 @@ class Monitor:
                 now = self.mono()
                 if ready and det.take(now):
                     self._ka_after_attempt(ka, self._attempt(dev, pa, det), dev, pa)
+                    if end is not None:
+                        return finished()
                     continue
                 # <Poll> dû : d'abord vider, SANS attendre, toute ligne déjà reçue du moniteur (une <Active Source>,
                 # un routage ailleurs ou <Standby> déjà dans le tampon désarme AVANT toute émission) ; le <Poll> ne
@@ -775,7 +803,7 @@ class Monitor:
                     if drain and ka.due(self.mono()):
                         self._ka_poll(ka, dev, pa, mask)
                         if end is not None:
-                            return (self._end(src, end[1]), ready) if end[0] == "stream" else end[1]
+                            return finished()
                     continue
                 if kind != "line":
                     return self._end(src, kind), ready

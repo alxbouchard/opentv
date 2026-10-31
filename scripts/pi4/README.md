@@ -245,6 +245,18 @@ Télécommande — trois niveaux, dans cet ordre de priorité :
      `busy`), relecture de l'adaptateur (configuration OpenTV, même adresse), question d'alimentation, puis
      `<Active Source>` + `<Menu Status>` seulement si la TV répond « allumée » — jamais `<Image View On>`,
      `<Text View On>` ni réveil. Adaptateur et adresse découverts dynamiquement (aucune constante `1.0.0.0`/`cec0`).
+     Relecture finale de la reprise (0.7.4) : après le verrou et la question d'alimentation (TV vue allumée), juste
+     avant l'`ACTIVE_SOURCE` de la reprise, toutes les lignes déjà reçues par le moniteur sont relues sans attendre (mêmes
+     règles d'arrêt que le maintien ci-dessous) : une `ACTIVE_SOURCE` (application native rouverte, autre source), un
+     `STANDBY`, un routage ailleurs, une perte, une trame invalide ou un événement d'état arrivés pendant ces attentes
+     annulent la reprise (`"result":"cancelled"` + `reason`) — rien d'autre n'est émis, le maintien n'est pas armé, ni le
+     délai anti-doublon ni le quota ne sont consommés (un vrai retour ultérieur est repris normalement) ; trame encore
+     incomplète (`frame_pending`), fin du moniteur (`monitor_end`, fin rendue aussitôt) ou plus de 4096 lignes
+     (`drain_overflow`) ⇒ annulée aussi. Sans relecture installée par le moniteur (appel hors du service), reprise et
+     `POLL` refusent (`drain_unavailable`). `cec --activate` et l'annonce de démarrage, sans moniteur, sont inchangés.
+     Limite honnête, fenêtre résiduelle : une trame émise par la TV pendant le lancement même du cec-ctl de l'annonce
+     (quelques dizaines de ms), ou pas encore écrite par le moniteur, peut encore la précéder ; aucune lecture CEC ne la
+     ferme (gate terrain : YouTube rouvert aussitôt après un retour, sans vol de source).
      **Rien n'est émis** pour : une autre source (autre `ACTIVE_SOURCE`, routage vers une autre adresse),
      Samsung Home seul (aucun message CEC), un ordre ou un délai différent, une séquence incomplète, une sortie `cec-ctl`
      incohérente/coupée/trop longue, une perte de messages annoncée par le noyau, un redémarrage du moniteur ou du
@@ -257,7 +269,7 @@ Télécommande — trois niveaux, dans cet ordre de priorité :
      `journalctl -u opentv-cec-return` → `"event":"cec_return_ready"` (une fois par moniteur, seulement après
      l'événement initial du noyau avec l'adresse physique et le masque attendus ; rien n'est armé avant), puis
      `"event":"cec_return_recovery","result":"announced"` (ou `refused_tv_not_on`, `busy`, `failed`, `adapter_changed`,
-     `cooldown_deferred`, `rate_limited`), jamais la sortie brute du bus ni de cec-ctl. **`announced` prouve la
+     `cooldown_deferred`, `rate_limited`, `cancelled`, `drain_unavailable`), jamais la sortie brute du bus ni de cec-ctl. **`announced` prouve la
      transmission acquittée de `<Active Source>`, pas la reprise des touches** : celle-ci reste un gate terrain.
      cec-ctl 1.22.1 sortant avec 0 même quand le message n'est pas transmis, `announced` (comme `boot_done` et
      `cec --activate`) exige la sortie exacte fusionnée stdout+stderr d'un `ACTIVE_SOURCE` transmis depuis notre adresse

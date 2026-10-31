@@ -253,6 +253,13 @@ class RBase(Base):
         return cecreturn.Monitor(self.root, runner=bus or self.bus, spawn=spawn, mono=self.clock,
                                  sleep=self.sleep, log=self.logs.append, **kw)
 
+    def solo(self, **kw):
+        """Moniteur appelé hors de watch() (tests unitaires de recover/poll) : relecture finale neutre installée à la
+        main (watch() l'installe en production ; sans elle, recover/poll refusent : `drain_unavailable`)."""
+        mon = self.monitor(**kw)
+        mon._before_tx = lambda: None
+        return mon
+
     def watch(self, script, dev="/dev/cec0", pa="1.0.0.0", mask=0x0010, mon=None, end="eof", ready=True):
         """Un moniteur ; `ready` : l'événement initial attendu est préfixé. -> (moniteur, raison) ; self.ready."""
         self.src = FakeLines(self.clock, ready_first(script, pa, mask) if ready else script, end)
@@ -422,7 +429,7 @@ class TestRecoveryGates(RBase):
             with self.subTest(power):
                 self.bus.calls.clear()
                 self.bus.power = power
-                res = self.monitor().recover("/dev/cec0", "1.0.0.0")
+                res = self.solo().recover("/dev/cec0", "1.0.0.0")
                 self.assertEqual(res["result"], "refused_tv_not_on")
                 self.assertEqual(self.bus.opts(), ["--give-device-power-status"])
                 self.assertEqual(wake_args(self.bus), [])
@@ -431,7 +438,7 @@ class TestRecoveryGates(RBase):
         for state, pa in (("foreign", "1.0.0.0"), ("empty", "1.0.0.0"), ("ours", "2.0.0.0"), ("ours", "f.f.f.f")):
             with self.subTest((state, pa)):
                 bus = RecBus(self.clock, {"/dev/cec0": {"pa": pa, "state": state}})
-                res = self.monitor(bus=bus).recover("/dev/cec0", "1.0.0.0")
+                res = self.solo(bus=bus).recover("/dev/cec0", "1.0.0.0")
                 self.assertEqual(res["result"], "adapter_changed")
                 self.assertEqual(bus.transmits(), [])
                 if state == "foreign":
@@ -441,7 +448,7 @@ class TestRecoveryGates(RBase):
         fd = cecboot._lock(self.state)
         try:
             t0 = self.clock.t
-            res = self.monitor().recover("/dev/cec0", "1.0.0.0")
+            res = self.solo().recover("/dev/cec0", "1.0.0.0")
             self.assertEqual(res["result"], "busy")
             self.assertLessEqual(self.clock.t - t0, cecreturn.LOCK_WAIT_S + 0.01)
             self.assertEqual(self.bus.calls, [])
@@ -452,7 +459,7 @@ class TestRecoveryGates(RBase):
         self.assertTrue(self.sleeps and set(self.sleeps) == {cecreturn.LOCK_POLL_S}, self.sleeps)
         fd2 = cecboot._lock(self.state)                              # libre ensuite : la reprise passe
         os.close(fd2)
-        self.assertEqual(self.monitor().recover("/dev/cec0", "1.0.0.0")["result"], "announced")
+        self.assertEqual(self.solo().recover("/dev/cec0", "1.0.0.0")["result"], "announced")
 
     def test_lock_released_during_bounded_wait_then_announces(self):
         fd = [cecboot._lock(self.state)]
@@ -463,7 +470,7 @@ class TestRecoveryGates(RBase):
             if fd[0] is not None and self.clock.t - t0 >= 3.0:
                 os.close(fd[0])
                 fd[0] = None
-        mon = self.monitor()
+        mon = self.solo()
         mon.sleep = sleep
         res = mon.recover("/dev/cec0", "1.0.0.0")
         self.assertEqual(res["result"], "announced")
@@ -472,14 +479,14 @@ class TestRecoveryGates(RBase):
         self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)
 
     def test_lock_released_after_recovery_so_timer_and_activate_coexist(self):
-        self.monitor().recover("/dev/cec0", "1.0.0.0")
+        self.solo().recover("/dev/cec0", "1.0.0.0")
         fd = cecboot._lock(self.state)
         self.assertIsNotNone(fd)
         os.close(fd)
 
     def test_failed_active_source_reports_failure_and_no_menu_status(self):
         bus = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}}, fail={"--active-source"})
-        res = self.monitor(bus=bus).recover("/dev/cec0", "1.0.0.0")
+        res = self.solo(bus=bus).recover("/dev/cec0", "1.0.0.0")
         self.assertEqual(res["result"], "failed")
         self.assertNotIn("--menu-status", bus.opts())
 
@@ -488,7 +495,7 @@ class TestRecoveryGates(RBase):
             self.clock.t += timeout + cecboot.KILL_GRACE_S
             return 124, ""
         t0 = self.clock.t
-        res = self.monitor(bus=hang).recover("/dev/cec0", "1.0.0.0")
+        res = self.solo(bus=hang).recover("/dev/cec0", "1.0.0.0")
         self.assertIn(res["result"], ("adapter_changed", "budget_exceeded"))
         self.assertLessEqual(self.clock.t - t0, cecreturn.RECOVER_BUDGET_S + cecreturn.LOCK_WAIT_S)
 
@@ -1712,6 +1719,7 @@ AS_BAD = {
     "unregistered_la": AS_OK.replace("Playback Device 1", "Unregistered").replace("(4 to 15)", "(15 to 15)"),
     "other_opcode": AS_OK.replace("ACTIVE_SOURCE (0x82):", "INACTIVE_SOURCE (0x9d):"),
     "oversize": AS_OK + "\t" + "x" * 5000 + "\n",
+    "sequence_malformed": AS_OK.replace("Tx Timestamp: 7752.318s", "Tx Timestamp: pending"),
 }
 
 
@@ -1838,7 +1846,8 @@ class TestStage1Review(RBase):
         self.assertEqual(st(124, "", body, cecboot.BROADCAST, 0x10), "timeout")
         self.assertEqual(st(0, AS_BAD["foreign_la"], body, cecboot.BROADCAST, 0x10), "foreign_la")
         self.assertEqual(st(0, AS_BAD["foreign_la"], body, cecboot.BROADCAST, 0x100), "acked")
-        for label in ("stderr_merged_before", "garbage_suffix", "other_pa", "empty", "oversize", "twice"):
+        for label in ("stderr_merged_before", "garbage_suffix", "other_pa", "empty", "oversize", "twice",
+                      "sequence_malformed"):
             self.assertEqual(st(0, AS_BAD[label], body, cecboot.BROADCAST, 0x10), "unverified", label)
         # le parseur du POLL est le même (aucune divergence de format)
         self.assertEqual(cecreturn.poll_acked_by(POLL_OK), 4)
@@ -1847,7 +1856,7 @@ class TestStage1Review(RBase):
 
     def test_recover_direct_result_is_truthful(self):
         self.bus.tx_out["--active-source"] = AS_BAD["tx_error"]
-        res = self.monitor().recover("/dev/cec0", "1.0.0.0")
+        res = self.solo().recover("/dev/cec0", "1.0.0.0")
         self.assertEqual((res["result"], res["tx"], res["steps"]), ("failed", "tx_error", {"active_source": False}))
         self.assertNotIn("--menu-status", self.bus.opts())
 
@@ -2150,10 +2159,11 @@ class TestStage2LastMomentDrain(RBase):
         between = [t for n, t in timeouts[i + 1:] if n == 0]           # lectures entre l'appel et l'émission
         self.assertTrue(between, timeouts[i:i + 3])
         self.assertEqual(set(between), {0.0})
-        # moniteur fini : sa relecture finale n'est plus jamais appelée (aucune lecture d'un moniteur fermé)
-        n = len(timeouts)
-        self.assertEqual(orig_poll("/dev/cec0", "1.0.0.0", 0x10), "ok")
-        self.assertEqual(len(timeouts), n)
+        # moniteur fini : sa relecture finale n'est plus jamais appelée (aucune lecture d'un moniteur fermé) et,
+        # sans elle, aucun POLL ne part (échec fermé, verrou rendu)
+        n, polls = len(timeouts), len(self.bus.polls())
+        self.assertEqual(orig_poll("/dev/cec0", "1.0.0.0", 0x10), "drain_unavailable")
+        self.assertEqual((len(timeouts), len(self.bus.polls())), (n, polls))
 
     # ----------------------------------------------------------------- preuve terrain du 2026-10-31 ~16:08
     # Production 0.7.3 + canari POLL manuel : POLL acquittés toutes les 15 s (séquences 711–718), adaptateur sain
@@ -2231,6 +2241,319 @@ class TestStage2LastMomentDrain(RBase):
         self.assertIn("systemctl restart opentv-cec-return.service", env)
         self.assertIn("lu au démarrage du service", env)
         self.assertIn("juste avant l'émission", module_source())
+
+
+class OnceEnd(FakeLines):
+    """Fin de flux NON collante, comme PopenLines : `oversize` n'est rendu qu'UNE fois (ligne trop longue), puis la
+    lecture continuerait (lignes ordinaires, puis EOF). `arm()` : la prochaine lecture rend cette fin ; `after` compte
+    les lectures demandées ensuite (un moniteur aveugle qui continue à lire)."""
+
+    def __init__(self, clock, script, kind="oversize"):
+        super().__init__(clock, script)
+        self.kind, self.armed, self.fired, self.after = kind, False, False, 0
+
+    def arm(self):
+        self.armed = True
+
+    def readline(self, timeout):
+        if self.fired:
+            self.after += 1
+        if self.armed:
+            self.armed, self.fired = False, True
+            return self.kind, None
+        return super().readline(timeout)
+
+
+# --------------------------------------------------------------------------- revue Stage-2 de c7e1de1 (suivi)
+class TestStage2FollowUp(RBase):
+    """M34 : une fin de flux non collante vue par la relecture finale du maintien doit finir watch() À L'INSTANT (sinon
+    le moniteur continue, aveugle). Durcissement : poll() sans relecture finale installée n'émet jamais."""
+    ka_logs = TestKeepalive.ka_logs
+    states = TestKeepalive.states
+
+    @bounded()
+    def test_non_sticky_stream_end_in_the_last_moment_drain_ends_watch_at_once(self):
+        src = OnceEnd(self.clock, at(0, state_event()) + returned() + traffic(120))
+        mon = self.monitor([src])
+        orig = mon.poll
+
+        def poll(dev, pa, mask):
+            src.arm()                         # la relecture finale (après verrou + relecture adaptateur) la verra
+            return orig(dev, pa, mask)
+        mon.poll = poll
+        self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("oversize", True))
+        self.assertTrue(src.fired)
+        self.assertEqual(src.after, 0, "lecture du moniteur poursuivie après sa fin")
+        self.assertEqual(self.bus.polls(), [])
+        self.assertEqual(self.states(), [("armed", None), ("disarmed", "monitor_end")])
+        self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)
+        self.assertTrue(src.closed)
+
+    def test_poll_without_installed_drain_never_transmits(self):
+        mon = self.monitor()
+        self.assertIsNone(mon._before_tx)                     # hors de watch() : aucune relecture finale
+        self.assertEqual(mon.poll("/dev/cec0", "1.0.0.0", 0x10), "drain_unavailable")
+        self.assertEqual(self.bus.polls(), [])
+        self.assertEqual(self.bus.transmits(), [])
+        fd = cecboot._lock(self.state)                        # verrou rendu malgré le refus
+        self.assertIsNotNone(fd)
+        os.close(fd)
+        self.assertEqual(self.solo().poll("/dev/cec0", "1.0.0.0", 0x10), "ok")   # relecture installée : émis
+        self.assertEqual(len(self.bus.polls()), 1)
+
+
+class TestRecoveryLastMomentDrain(RBase):
+    """Course de la reprise unique (revue Stage-1 de c7e1de1) : recover() pouvait attendre le verrou (≤ 10 s) et la
+    question d'alimentation (≤ 5 s) puis émettre <Active Source> alors que la TV était repartie (application native
+    0.0.0.0, veille, autre source, routage ailleurs…) pendant l'attente — vol de la source. Exigé : relecture non
+    bloquante du moniteur (mêmes Parser/Detector/Keepalive) APRÈS le verrou, la relecture de l'adaptateur ET la
+    question d'alimentation, juste avant <Active Source> ; trame d'arrêt, trame incomplète, fin ou débordement ⇒
+    reprise annulée (`cancelled`), rien d'autre émis, jamais armé. Boot et `cec --activate` restent sans moniteur."""
+    ka_logs = TestKeepalive.ka_logs
+    states = TestKeepalive.states
+    STOPS = TestStage2LastMomentDrain.STOPS
+    HOLD_S, ARRIVE_S, SLOW_POWER_S = 4.0, 1.0, 3.0
+
+    def run_case(self, lines, where="lock", tail=None, end_stream=False, partial_line=False, src=None):
+        """-> (résultat de watch, instant d'arrivée de la trame, instant du début de recover). `where` : « lock »
+        (verrou tenu HOLD_S, trame à +ARRIVE_S) ou « power » (question d'alimentation de SLOW_POWER_S, trame à +1 s,
+        donc après le début de la question)."""
+        self.logs.clear()
+        self.t_pq = []
+        bus = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+        self.rbus = bus
+        src = src or FakeLines(self.clock, at(0, state_event()) + returned() +
+                               (tail if tail is not None else traffic(60)))
+        self.src = src
+        slow = {"on": False}
+
+        def runner(argv, timeout):
+            if "--give-device-power-status" in argv:
+                self.t_pq.append(self.clock.t)                         # début de la question d'alimentation
+            if slow["on"] and "--give-device-power-status" in argv:
+                slow["on"] = False
+                self.clock.t += self.SLOW_POWER_S                    # réponse lente (≤ TX_TIMEOUT_S)
+            return bus(argv, timeout)
+        mon = self.monitor([src], bus=runner)
+        orig, held, inj = mon.recover, {}, {}
+
+        def recover(dev, pa):
+            if "t" not in inj:
+                inj["t0"] = self.clock.t
+                inj["t"] = self.clock.t + (self.ARRIVE_S if where == "lock" else 1.0)
+                inj["drain"] = mon._before_tx
+                if where == "lock":
+                    held["fd"], held["t"] = cecboot._lock(self.state), self.clock.t
+                else:
+                    slow["on"] = True
+                if partial_line:
+                    src.partial = lambda: True
+                if isinstance(src, OnceEnd):
+                    src.script = [(0.0, x) for x in lines] + src.script
+                    src.due = inj["t"]
+                    src.arm()
+                elif end_stream:
+                    src.script = []
+                else:
+                    src.script = [(0.0, x) for x in lines] + src.script
+                    src.due = inj["t"]
+            return orig(dev, pa)
+
+        def sleep(s):
+            self.sleep(s)
+            if held.get("fd") is not None and self.clock.t - held["t"] >= self.HOLD_S:
+                os.close(held["fd"])
+                held["fd"] = None
+        mon.recover, mon.sleep = recover, sleep
+        try:
+            res = mon.watch("/dev/cec0", "1.0.0.0", 0x10)
+        finally:
+            if held.get("fd") is not None:
+                os.close(held["fd"])
+        self.assertIn("t", inj)
+        self.assertIsNotNone(inj["drain"])                            # installée par watch() avant toute reprise
+        return res, inj["t"], inj["t0"]
+
+    def assert_cancelled(self, reason, t_frame, t0, where):
+        bus = self.rbus
+        rec = self.recoveries()
+        self.assertEqual([(e["result"], e.get("reason")) for e in rec[:1]], [("cancelled", reason)])
+        self.assertEqual(bus.opts()[:1], ["--give-device-power-status"])      # question posée APRÈS le verrou…
+        self.assertNotIn("--active-source", bus.opts())                       # … jamais d'annonce ensuite
+        self.assertNotIn("--menu-status", bus.opts())
+        self.assertEqual(wake_args(bus), [])
+        self.assertEqual(bus.polls(), [])
+        self.assertEqual(self.ka_logs(), [])                                  # jamais armé
+        t_pq = self.t_pq[0]
+        if where == "lock":
+            self.assertGreaterEqual(t_pq, t0 + self.HOLD_S - 1e-9)            # verrou attendu avant la question
+        else:
+            self.assertLess(t_pq, t_frame)                                    # trame arrivée PENDANT la question
+        fd = cecboot._lock(self.state)                                        # verrou rendu malgré l'annulation
+        self.assertIsNotNone(fd)
+        os.close(fd)
+
+    @bounded()
+    def test_stop_frame_during_lock_wait_or_power_query_cancels_the_announcement(self):
+        for where in ("lock", "power"):
+            for name, (lines, reason) in sorted(self.STOPS.items()):
+                with self.subTest(where=where, case=name):
+                    res, t_frame, t0 = self.run_case(lines, where)
+                    self.assertEqual(res, ("eof", True), name)
+                    self.assert_cancelled(reason, t_frame, t0, where)
+                    self.assertEqual(len(self.recoveries()), 1, name)
+                    self.assertGreaterEqual(self.clock.t, t_frame)
+
+    @bounded()
+    def test_first_stop_frame_wins_and_the_rest_is_left_to_the_monitor_loop(self):
+        """La relecture finale s'arrête à la PREMIÈRE trame d'arrêt (raison véridique) ; la suite reste au moniteur."""
+        for where in ("lock", "power"):
+            with self.subTest(where=where):
+                lines = active_source("0.0.0.0") + frame(0x36, "STANDBY") + power_poll()
+                res, t_frame, t0 = self.run_case(lines, where)
+                self.assertEqual(res, ("eof", True))
+                self.assert_cancelled("native_app", t_frame, t0, where)
+                self.assertIn(frame(0x36, "STANDBY")[0], [line for _, line in self.src.delivered])
+
+    @bounded()
+    def test_adapter_state_change_or_stream_end_during_wait_cancels_and_ends_watch(self):
+        for where in ("lock", "power"):
+            with self.subTest(where=where, case="state_changed"):
+                res, t_frame, t0 = self.run_case(state_event("f.f.f.f", 0x0000, initial=False), where)
+                self.assertEqual(res, ("adapter_state_changed", True))
+                self.assert_cancelled("adapter_state", t_frame, t0, where)
+            with self.subTest(where=where, case="eof"):
+                res, t_frame, t0 = self.run_case([], where, end_stream=True)
+                self.assertEqual(res, ("eof", True))
+                self.assert_cancelled("monitor_end", t_frame, t0, where)
+            with self.subTest(where=where, case="oversize_once"):
+                src = OnceEnd(self.clock, at(0, state_event()) + returned() + traffic(60))
+                res, t_frame, t0 = self.run_case(power_poll(), where, src=src)
+                self.assertEqual(res, ("oversize", True))                    # rendu tout de suite, jamais perdu
+                self.assertEqual(src.after, 0, "lecture du moniteur poursuivie après sa fin")
+                self.assert_cancelled("monitor_end", t_frame, t0, where)
+
+    @bounded()
+    def test_incomplete_frame_or_flood_at_the_last_moment_cancels(self):
+        flood = []
+        for _ in range(cecreturn.PRE_TX_DRAIN_MAX // 2 + 1):
+            flood += power_poll()
+        for where in ("lock", "power"):
+            for label, lines, partial_line, reason in (
+                    ("header_without_raw", active_source("0.0.0.0")[:2], False, "frame_pending"),
+                    ("line_without_newline", [], True, "frame_pending"),
+                    ("flood", flood + active_source("0.0.0.0"), False, "drain_overflow")):
+                with self.subTest(where=where, case=label):
+                    res, t_frame, t0 = self.run_case(lines, where, partial_line=partial_line)
+                    self.assertEqual(res, ("eof", True))
+                    self.assert_cancelled(reason, t_frame, t0, where)
+
+    @bounded()
+    def test_neutral_traffic_during_wait_keeps_the_single_announcement(self):
+        neutral = power_poll() + key() + tv_poll() + own_poll() + routing_change("0.0.0.0", "1.0.0.0") + \
+            stream_path("1.0.0.0") + active_source("1.0.0.0", src=4, tx=True)
+        for where in ("lock", "power"):
+            with self.subTest(where=where):
+                res, t_frame, t0 = self.run_case(neutral, where, tail=traffic(60))
+                bus = self.rbus
+                self.assertEqual(res, ("eof", True))
+                self.assertEqual([e["result"] for e in self.recoveries()], ["announced"])
+                self.assertEqual(bus.opts(), ANNOUNCE_SEQ)                  # une seule annonce, jamais de réveil
+                t_as = next(t for t, a in bus.at if "--active-source" in a)
+                self.assertGreaterEqual(t_as, t_frame)                       # lignes lues avant l'annonce
+                self.assertEqual(self.states()[0], ("armed", None))
+                self.assertTrue(bus.polls())
+                self.assertGreaterEqual(min(bus.polls()), t_as + cecreturn.KEEPALIVE_INTERVAL_S)
+
+    @bounded()
+    def test_cancelled_recovery_never_suppresses_the_next_exact_return(self):
+        """YouTube rouvert pendant l'attente (annulé), puis vrai retour : la reprise suivante passe normalement."""
+        tail = at(30, routing_change("0.0.0.0", "1.0.0.0")) + at(0.05, stream_path("1.0.0.0")) + traffic(60)
+        res, _, _ = self.run_case(active_source("0.0.0.0"), "lock", tail=tail)
+        self.assertEqual(res, ("eof", True))
+        self.assertEqual([e["result"] for e in self.recoveries()], ["cancelled", "announced"])
+        self.assertEqual(self.rbus.opts(), ["--give-device-power-status"] + ANNOUNCE_SEQ)
+        self.assertEqual(self.states()[0], ("armed", None))
+
+    def test_recovery_requires_the_monitor_drain(self):
+        mon = self.monitor()
+        self.assertIsNone(mon._before_tx)
+        self.assertEqual(mon.recover("/dev/cec0", "1.0.0.0"), {"result": "drain_unavailable"})
+        self.assertEqual(self.bus.calls, [])                                  # ni relecture, ni question, ni annonce
+        fd = cecboot._lock(self.state)
+        self.assertIsNotNone(fd)
+        os.close(fd)
+        # la relecture passée à l'annonce est exactement celle installée par watch() (jamais None sur ce chemin)
+        seen = []
+        orig = cecboot.announce
+
+        def spy(*a, **kw):
+            seen.append(kw.get("before_tx"))
+            return orig(*a, **kw)
+        with mock.patch.object(cecreturn.cecboot, "announce", spy):
+            mon = self.monitor([FakeLines(self.clock, at(0, state_event()) + returned() + traffic(20))])
+            drains = []
+            orig_rec = mon.recover
+
+            def recover(dev, pa):
+                drains.append(mon._before_tx)
+                return orig_rec(dev, pa)
+            mon.recover = recover
+            self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
+        self.assertEqual(len(seen), 1)
+        self.assertIsNotNone(seen[0])
+        self.assertIs(seen[0], drains[0])
+
+    def test_announce_hook_runs_after_power_query_and_is_optional_for_boot_and_activate(self):
+        order = []
+
+        def run(argv, want):
+            order.append(next((o for o in ("--give-device-power-status", "--active-source", "--menu-status")
+                               if o in argv), "read"))
+            return self.bus(argv, want)
+        for stop in ("native_app", "frame_pending", "monitor_end"):
+            with self.subTest(stop=stop):
+                order.clear()
+                ann, ok = cecboot.announce(run, "/dev/cec0", "1.0.0.0", 0x10,
+                                           before_tx=lambda _s=stop: order.append("drain") or _s)
+                self.assertFalse(ok)
+                self.assertEqual(ann, {"result": "cancelled", "tv_power": "on", "reason": stop})
+                self.assertEqual(order, ["--give-device-power-status", "drain"])
+        order.clear()
+        ann, ok = cecboot.announce(run, "/dev/cec0", "1.0.0.0", 0x10, before_tx=lambda: order.append("drain"))
+        self.assertTrue(ok)
+        self.assertEqual(order, ["--give-device-power-status", "drain", "--active-source", "--menu-status"])
+        self.bus.power = "standby"                                            # TV pas allumée : rien d'autre
+        order.clear()
+        ann, ok = cecboot.announce(run, "/dev/cec0", "1.0.0.0", 0x10, before_tx=lambda: order.append("drain"))
+        self.assertEqual((ann["result"], ok, order), ("refused_tv_not_on", False, ["--give-device-power-status"]))
+        self.bus.power = "on"
+        order.clear()
+        ann, ok = cecboot.announce(run, "/dev/cec0", "1.0.0.0", 0x10)        # boot / --activate : sans moniteur
+        self.assertTrue(ok)
+        self.assertEqual(order, ["--give-device-power-status", "--active-source", "--menu-status"])
+        # `cec --activate` (bootstrap --force-announce) : inchangé, aucune relecture de moniteur exigée
+        self.bus.calls.clear()
+        res = self.boot(self.root, self.bus, force_announce=True)
+        self.assertEqual(res["result"], "ready")
+        self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)
+
+    def test_docs_recovery_last_moment_drain_and_home_keepalive(self):
+        for name in ("README.md", "CEC_COMPATIBILITY.md"):
+            with open(os.path.join(PI4, name), encoding="utf-8") as f:
+                flat = re.sub(r"\s+", " ", f.read())
+            for need in ("juste avant l'`ACTIVE_SOURCE` de la reprise", "après le verrou et la question d'alimentation",
+                         "\"result\":\"cancelled\"", "drain_unavailable", "fenêtre résiduelle"):
+                self.assertTrue(need in flat, (name, need))
+        with open(os.path.join(PI4, "CEC_COMPATIBILITY.md"), encoding="utf-8") as f:
+            flat = re.sub(r"\s+", " ", f.read())
+        self.assertNotIn("Ne pas ajouter de keepalive ou de réannonce périodique", flat)
+        for need in ("POLL neutre", "autorisé seulement après", "annonce, réannonce ou reprise périodique",
+                     "≥ 3 min"):
+            self.assertTrue(need in flat, need)
+        src = re.sub(r"\s+", " ", module_source())
+        self.assertIn("juste avant l'<Active Source> de la reprise", src)
+        self.assertIn("fenêtre résiduelle", src)
 
 
 # --------------------------------------------------------------------------- CLI, configuration

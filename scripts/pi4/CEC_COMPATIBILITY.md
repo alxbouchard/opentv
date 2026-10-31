@@ -68,6 +68,18 @@ logique 0 :
 Puis 1,5 s de calme, verrou partagé `/run/opentv-cec/lock`, relecture de l'adaptateur, et annonce seulement si la TV
 répond « allumée ». Observation par `cec-ctl -s -r -m` (mode moniteur passif du noyau, `CAP_NET_ADMIN` seule dans un
 réseau privé) : OpenTV ne devient ni suiveur ni initiateur sur ce descripteur, ne lit ni ne produit aucune touche.
+Relecture finale de la reprise (0.7.4) : après le verrou et la question d'alimentation (TV vue allumée), juste
+avant l'`ACTIVE_SOURCE` de la reprise, toutes les lignes déjà reçues par le moniteur sont relues sans attendre (mêmes
+règles d'arrêt que le maintien ci-dessous) : une `ACTIVE_SOURCE` (application native rouverte, autre source), un
+`STANDBY`, un routage ailleurs, une perte, une trame invalide ou un événement d'état arrivés pendant ces attentes
+annulent la reprise (`"result":"cancelled"` + `reason`) — rien d'autre n'est émis, le maintien n'est pas armé, ni le
+délai anti-doublon ni le quota ne sont consommés (un vrai retour ultérieur est repris normalement) ; trame encore
+incomplète (`frame_pending`), fin du moniteur (`monitor_end`, fin rendue aussitôt) ou plus de 4096 lignes
+(`drain_overflow`) ⇒ annulée aussi. Sans relecture installée par le moniteur (appel hors du service), reprise et
+`POLL` refusent (`drain_unavailable`). `cec --activate` et l'annonce de démarrage, sans moniteur, sont inchangés.
+Limite honnête, fenêtre résiduelle : une trame émise par la TV pendant le lancement même du cec-ctl de l'annonce
+(quelques dizaines de ms), ou pas encore écrite par le moniteur, peut encore la précéder ; aucune lecture CEC ne la
+ferme (gate terrain : YouTube rouvert aussitôt après un retour, sans vol de source).
 Annulé ou jamais déclenché : autre source active, routage ailleurs, veille, ordre ou délai différent, doublon,
 trame incohérente (octets bruts ≠ en-tête/adresses décodées), ligne inconnue ou trop longue, perte de messages,
 redémarrage du moniteur/service (état vide), touches déjà reçues ou autre annonce pendant le calme, **Samsung Home
@@ -197,8 +209,13 @@ Comportement visuel confirmé par Alex :
 Le HDMI OpenTV reste affiché sous la surcouche Samsung. Pendant l'ouverture et la fermeture de Home, `/dev/cec0` n'a
 reçu ni `MENU_STATUS`, ni `ROUTING_CHANGE`, ni autre événement permettant au Pi de détecter la surcouche. Une annonce
 manuelle `ACTIVE_SOURCE` a rétabli immédiatement le routage des touches lors du diagnostic, puis le cycle Home/Retour a
-fonctionné normalement. **Ne pas ajouter de keepalive ou de réannonce périodique** : cela fermerait le menu Samsung et
-pourrait interrompre les applications natives.
+fonctionné normalement. **Aucune annonce, réannonce ou reprise périodique** (ni `ACTIVE_SOURCE`, ni `MENU_STATUS`, ni
+réveil, ni libération/réclamation) : cela fermerait le menu Samsung et pourrait interrompre les applications natives.
+Seule émission répétée admise, distincte : le POLL neutre 0.7.4 (un octet sans opcode, au moins 15 s d'écart),
+autorisé seulement après une reprise `announced` de la séquence exacte de retour d'application native (jamais au
+démarrage, après un redémarrage du service, sur Home seul ni par minuterie), arrêté dès qu'une application native,
+une autre source, un routage ailleurs ou la veille apparaît. Qu'il laisse Home ouvert reste une gate Pi : Home
+Samsung ouvert ≥ 3 min pendant le maintien, sans fermeture ni retour forcé sur OpenTV.
 
 ### Régression après redémarrage du Pi (2026-10-27)
 

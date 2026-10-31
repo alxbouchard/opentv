@@ -411,7 +411,7 @@ def tx_acked_status(rc, out, body, dest, mask=None):
     return "unverified"
 
 
-def announce(run, dev, pa, mask=None):
+def announce(run, dev, pa, mask=None, before_tx=None):
     """Annonce unique du démarrage (minuterie, boot_gate ouvert) ou réactivation explicite (--force-announce, via
     `opentv-pi cec --activate`) : même séquence dans les deux cas. TV allumée ⇒ <Active Source>, <Menu Status>
     (ANNOUNCE_OPTS) ; jamais <Image View On> ni commande de réveil/alimentation : la TV est déjà allumée, et une TV
@@ -419,10 +419,16 @@ def announce(run, dev, pa, mask=None):
     inconnu ⇒ refus sans autre émission. <Active Source> n'est réussie que si sa sortie exacte prouve la transmission
     (tx_acked_status == « acked », depuis une adresse de `mask` si fourni) : un code 0 avec statut `Tx, Error`/NACK
     ou texte parasite est un échec (`tx` = code stable), sans <Menu Status>. <Menu Status> reste émis après une
-    annonce réussie et n'en conditionne pas le succès (étape journalisée). -> (résultat, ok)."""
+    annonce réussie et n'en conditionne pas le succès (étape journalisée).
+    `before_tx` (reprise de cecreturn seulement ; None pour le démarrage et `cec --activate`, sans moniteur) : appelé
+    APRÈS la question d'alimentation, juste avant <Active Source> ; une raison non vide ⇒ annulé, rien d'autre émis
+    (`cancelled`). -> (résultat, ok)."""
     pwr = power_state(run, dev)
     if pwr != "on":
         return {"result": "refused_tv_not_on", "tv_power": pwr}, False
+    stop = before_tx() if before_tx is not None else None
+    if stop:
+        return {"result": "cancelled", "tv_power": pwr, "reason": stop}, False
     steps = {}
     rc, out = run(["cec-ctl", "-d", dev, "-s", "--active-source", "phys-addr=" + pa], TX_TIMEOUT_S)
     tx = tx_acked_status(rc, out, active_source_body(pa), BROADCAST, mask)
