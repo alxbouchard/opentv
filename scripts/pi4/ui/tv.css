@@ -340,26 +340,30 @@ footer { flex: 0 0 auto; display: flex; align-items: center; gap: 36px; padding-
    bord du cadre et la brume large, sans bord visible, est plumée par des dégradés locaux (aucun filtre, flou ni masque).
    l2 = faisceau large (pivote autour de sa source hors champ), l3 = halo diffus de la projection, l1 = reflet de
    balayage (« Vivant » seulement) ; #cvglow = halo de l'affiche au focus, comme ailleurs. */
-.cv-wp-affiche .cv-base { background: linear-gradient(90deg, #07080c 0%, #0a0b12 40%, #0c0d14 100%); }
+.cv-wp-affiche .cv-base {
+  background: radial-gradient(ellipse 80% 75% at 105% -5%, rgba(255, 230, 190, .18) 0%,
+      rgba(255, 228, 186, .07) 45%, rgba(255, 226, 182, 0) 75%),
+    linear-gradient(90deg, #07080c 0%, #0a0b12 40%, #0c0d14 100%); }
 .cv-wp-affiche .cv-l1, .cv-wp-affiche .cv-l2, .cv-wp-affiche .cv-l3 { display: block; }
 .cv-wp-affiche .cv-l1 { left: -20%; top: -10%; width: 50%; height: 130%; opacity: 0;
-  background: linear-gradient(100deg, rgba(255, 240, 216, 0) 0%, rgba(255, 240, 216, .02) 28%,
-    rgba(255, 240, 216, .05) 50%, rgba(255, 240, 216, .02) 72%, rgba(255, 240, 216, 0) 100%); }
-.cv-wp-affiche .cv-l2 { left: -500px; top: -700px; width: 2700px; height: 1200px; opacity: .92;
+  background: linear-gradient(100deg, rgba(255, 240, 216, 0) 0%, rgba(255, 240, 216, .12) 28%,
+    rgba(255, 240, 216, .32) 50%, rgba(255, 240, 216, .12) 72%, rgba(255, 240, 216, 0) 100%); }
+.cv-wp-affiche .cv-l2 { left: -500px; top: -700px; width: 2700px; height: 1200px; opacity: .98;
   transform-origin: 100% 50%; transform: rotate(-24deg);
-  background: radial-gradient(ellipse 100% 22% at 100% 50%, rgba(255, 238, 212, .18) 0%, rgba(255, 236, 208, .1) 32%,
-      rgba(255, 234, 204, .035) 66%, rgba(255, 234, 204, 0) 100%),
-    radial-gradient(ellipse 100% 50% at 100% 50%, rgba(255, 232, 200, .13) 0%, rgba(255, 232, 200, .065) 30%,
-      rgba(255, 230, 196, .02) 62%, rgba(255, 230, 196, 0) 100%); }
-.cv-wp-affiche .cv-l3 { left: 300px; top: -200px; width: 1900px; height: 1200px; opacity: .9;
-  background: radial-gradient(ellipse 50% 50% at 62% 40%, rgba(255, 236, 206, .11) 0%, rgba(255, 236, 206, .052) 40%,
-      rgba(255, 236, 206, .016) 72%, rgba(255, 236, 206, 0) 100%),
-    radial-gradient(ellipse 30% 26% at 100% 12%, rgba(255, 240, 214, .07) 0%, rgba(255, 240, 214, .025) 55%,
+  background: radial-gradient(ellipse 100% 22% at 100% 50%, rgba(255, 238, 212, .55) 0%, rgba(255, 236, 208, .3) 32%,
+      rgba(255, 234, 204, .1) 66%, rgba(255, 234, 204, 0) 100%),
+    radial-gradient(ellipse 100% 50% at 100% 50%, rgba(255, 232, 200, .36) 0%, rgba(255, 232, 200, .18) 30%,
+      rgba(255, 230, 196, .06) 62%, rgba(255, 230, 196, 0) 100%); }
+.cv-wp-affiche .cv-l3 { left: 300px; top: -200px; width: 1900px; height: 1200px; opacity: .94;
+  background: radial-gradient(ellipse 50% 50% at 62% 40%, rgba(255, 236, 206, .28) 0%, rgba(255, 236, 206, .14) 40%,
+      rgba(255, 236, 206, .04) 72%, rgba(255, 236, 206, 0) 100%),
+    radial-gradient(ellipse 30% 26% at 100% 12%, rgba(255, 240, 214, .18) 0%, rgba(255, 240, 214, .07) 55%,
       rgba(255, 240, 214, 0) 100%); }
 .cv-wp-affiche #cvglow { left: 520px; width: 1400px; height: 1080px; opacity: .95; }
 
 /* héros : titre (défaut), affiche (halo plus présent, texte plus étroit), calme (halo discret, sans description) */
 .cv-hero-artwork #cvglow { opacity: .95; }
+.cv-wp-affiche.cv-hero-artwork #cvglow { opacity: .15; }
 .cv-hero-artwork .htext { width: 940px; }
 .cv-hero-calm #cvglow { opacity: .3; }
 .cv-hero-calm .hdesc { display: none; }
@@ -379,31 +383,33 @@ footer { flex: 0 0 auto; display: flex; align-items: center; gap: 36px; padding-
 @keyframes cvFogB { from { transform: translate3d(7%, 0, 0); opacity: .7; } to { transform: translate3d(-8%, 2%, 0); opacity: 1; } }
 @keyframes cvShaft { from { opacity: .45; } to { opacity: 1; } }
 @keyframes cvSweep { from { transform: translate3d(0, 0, 0); opacity: 0; } to { transform: translate3d(320%, 0, 0); opacity: 1; } }
-/* Cinéma : « calm » = dérive et respiration très lentes ; « alive » = balayage doux du faisceau et cadence de film
-   évoquée par de rares creux d'opacité brefs et minimes (jamais un stroboscope : ≤ 4 %, quelques fois par cycle) */
-@keyframes cvBeamCalm { from { transform: rotate(-24deg); opacity: .86; } to { transform: rotate(-23deg); opacity: .96; } }
-@keyframes cvBeam { from { transform: rotate(-25deg); opacity: .8; } to { transform: rotate(-21deg); opacity: 1; } }
+/* Cinéma : « calm » = large projection perceptible (cycle 16 s) ; « alive » = même lumière deux fois plus mobile
+   (cycle 8 s, angle plus ample), toujours continue et sans coupure ni stroboscope. */
+@keyframes cvBeamCalm { from { transform: rotate(-34deg); opacity: .3; } to { transform: rotate(-14deg); opacity: 1; } }
+@keyframes cvBeamAlive { from { transform: rotate(-42deg); opacity: .2; } to { transform: rotate(-6deg); opacity: 1; } }
 @keyframes cvHaze { from { transform: translate3d(0, 0, 0) scale(1); opacity: .8; }
   to { transform: translate3d(-2%, 1%, 0) scale(1.03); opacity: .96; } }
-@keyframes cvFilm { 0% { opacity: .86; } 17% { opacity: .95; } 17.3% { opacity: .92; } 17.6% { opacity: .95; }
-  41% { opacity: .9; } 63% { opacity: .98; } 63.3% { opacity: .95; } 63.6% { opacity: .98; } 82% { opacity: .92; }
-  100% { opacity: .86; } }
+@keyframes cvFilmCalm { 0% { opacity: .35; } 25% { opacity: .9; } 50% { opacity: .55; }
+  75% { opacity: 1; } 100% { opacity: .35; } }
+@keyframes cvFilmAlive { 0% { opacity: .22; } 25% { opacity: 1; } 50% { opacity: .42; }
+  75% { opacity: .92; } 100% { opacity: .22; } }
 @keyframes cvBloom { from { transform: translate3d(0, 0, 0) scale(1); } to { transform: translate3d(-3%, 2%, 0) scale(1.06); } }
 .cv-anim.cv-wp-aurore .cv-l1 { animation: cvRibA 64s ease-in-out infinite alternate; }
 .cv-anim.cv-wp-aurore .cv-l2 { animation: cvRibB 88s ease-in-out infinite alternate; }
 .cv-anim.cv-wp-aurore .cv-l3, .cv-anim.cv-wp-brume .cv-l2 { animation: cvFogB 112s ease-in-out infinite alternate; }
 .cv-anim.cv-wp-brume .cv-l1 { animation: cvFogA 84s ease-in-out infinite alternate; }
 .cv-anim.cv-wp-brume .cv-l3 { animation: cvShaft 26s ease-in-out infinite alternate; }
-.cv-anim.cv-m-alive.cv-wp-affiche .cv-l1 { animation: cvSweep 30s ease-in-out infinite alternate; }
+.cv-anim.cv-m-alive.cv-wp-affiche .cv-l1 { animation: cvSweep 4s ease-in-out infinite alternate; }
 .cv-anim.cv-m-alive #cvglow { animation: cvBloom 52s ease-in-out infinite alternate; }
 .cv-anim.cv-m-calm .cv-l1 { animation-duration: 104s; }
 .cv-anim.cv-m-calm .cv-l2 { animation-duration: 140s; }
 .cv-anim.cv-m-calm .cv-l3 { animation-duration: 160s; }
 .cv-anim.cv-m-calm.cv-wp-brume .cv-l3 { animation-duration: 44s; }
-.cv-anim.cv-m-calm.cv-wp-affiche .cv-l2 { animation: cvBeamCalm 140s ease-in-out infinite alternate; }
-.cv-anim.cv-m-calm.cv-wp-affiche .cv-l3 { animation: cvHaze 160s ease-in-out infinite alternate; }
-.cv-anim.cv-m-alive.cv-wp-affiche .cv-l2 { animation: cvBeam 46s ease-in-out infinite alternate; }
-.cv-anim.cv-m-alive.cv-wp-affiche .cv-l3 { animation: cvFilm 24s linear infinite; }
+.cv-anim.cv-m-calm.cv-wp-affiche .cv-l1 { animation: cvSweep 8s ease-in-out infinite alternate; }
+.cv-anim.cv-m-calm.cv-wp-affiche .cv-l2 { animation: cvBeamCalm 8s ease-in-out infinite alternate; }
+.cv-anim.cv-m-calm.cv-wp-affiche .cv-l3 { animation: cvFilmCalm 16s ease-in-out infinite; }
+.cv-anim.cv-m-alive.cv-wp-affiche .cv-l2 { animation: cvBeamAlive 4s ease-in-out infinite alternate; }
+.cv-anim.cv-m-alive.cv-wp-affiche .cv-l3 { animation: cvFilmAlive 8s ease-in-out infinite; }
 .cv-paused #cvwall > div { animation-play-state: paused; }
 .cv-static #cvwall > div { animation: none; }
 /* fond fixe (mouvement coupé, « réduire les animations », cadence dégradée) : le halo change sans fondu enchaîné */

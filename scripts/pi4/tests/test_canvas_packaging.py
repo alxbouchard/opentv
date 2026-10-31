@@ -453,7 +453,7 @@ class TestDocumentation(unittest.TestCase):
         for route in ("event", "ui", "confirm", "cancel", "rollback", "reset", "apply"):
             self.assertIn("/api/tv/canvas/%s" % route, text, route)
         for need in ("Gates terrain", "get_throttled", "hvs_underrun", "playback promote --field-validated",
-                     CANVAS_DIR, "InaccessiblePaths", "REQUIRED", "0.7.1"):
+                     CANVAS_DIR, "InaccessiblePaths", "REQUIRED", "0.7.2"):
             self.assertIn(need, text, need)
         agents_md = read(os.path.join(ROOT, "AGENTS.md"))
         self.assertIn("docs/opentv-canvas.md", agents_md)
@@ -556,9 +556,9 @@ class TestStoreUnavailableMessage(unittest.TestCase):
 
 
 class TestVersion(unittest.TestCase):
-    def test_canvas_release_is_0_7_1(self):
-        self.assertEqual(VERSION, "0.7.1")
-        self.assertIn("0.7.1", read(HANDOFF))
+    def test_canvas_release_is_0_7_2(self):
+        self.assertEqual(VERSION, "0.7.2")
+        self.assertIn("0.7.2", read(HANDOFF))
 
 
 if __name__ == "__main__":

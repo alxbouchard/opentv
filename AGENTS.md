@@ -323,7 +323,7 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   non-retour), `uninstall.sh [--purge [--forget-wifi]]`,
   `opentv-pi health|preflight [--stage hardware]|cec|agent|setup reset`. Détails : `scripts/pi4/README.md`,
   plan : `docs/plans/2026-10-26-opentv-pi4.md`.
-- **OpenTV Canvas (0.7.1)** : ambiance animée de l'accueil, schéma fermé v1, confirmation du propriétaire sur la TV,
+- **OpenTV Canvas (0.7.2)** : ambiance animée de l'accueil, schéma fermé v1, confirmation du propriétaire sur la TV,
   permission facultative `canvas` des assistants, état `/var/lib/opentv/canvas` réservé à `opentv.service`.
   Passation (modules, routes, outils, paquet, gates terrain) : `docs/opentv-canvas.md` ; plans
   `docs/plans/2026-10-30-opentv-canvas-phase1.md` et `-phase2.md`. Vérifié hors matériel seulement.

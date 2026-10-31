@@ -1,10 +1,10 @@
-# OpenTV Canvas — passation d'architecture (Raspberry Pi 4, 0.7.1)
+# OpenTV Canvas — passation d'architecture (Raspberry Pi 4, 0.7.2)
 
 Document de reprise pour les agents de développement. Mode d'emploi utilisateur, budget et contrôles terrain :
 `scripts/pi4/README.md` §6 quinquies et §9. Plans : `docs/plans/2026-10-30-opentv-canvas-phase1.md` (prototypes) et
 `docs/plans/2026-10-30-opentv-canvas-phase2.md` (intégration produit, tâches 1–6).
 
-État à la livraison 0.7.1 : tâches 1 à 5 implémentées et vérifiées **hors matériel** (Python 3.11 et 3.13,
+État à la livraison 0.7.2 : tâches 1 à 5 implémentées et vérifiées **hors matériel** (Python 3.11 et 3.13,
 Playwright/Acorn réels, racines d'installation temporaires). Tâche 6 (revues, push, installation sur la Pi,
 canari de performance, nouvelle promotion de « Regarder », photo d'Alex) reste à faire : rien n'est déployé.
 
@@ -100,7 +100,7 @@ aperçu, feuille) sans chemin ni raison d'occupation.
   `--purge` efface `/var/lib/opentv` (`rm -rf`, aucun lien suivi).
 - Promotion de « Regarder » : `promotion.REQUIRED` exige `ui/canvas.js` et chaque module Canvas dans le manifeste ;
   l'empreinte de livraison est le SHA-256 du manifeste complet après vérification de chaque fichier. Toute livraison
-  ou modification d'un fichier Canvas (ou le passage à 0.7.1) rend la promotion `stale` jusqu'au canari HDMI réel puis
+  ou modification d'un fichier Canvas (ou le passage à 0.7.2) rend la promotion `stale` jusqu'au canari HDMI réel puis
   `sudo /opt/opentv/bin/opentv-pi playback promote --field-validated`.
 
 ## 7. Tests

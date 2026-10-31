@@ -176,9 +176,10 @@ class TestCanvasCssStatic(unittest.TestCase):
         self.assertTrue(layers, "aucune couche animée")
         self.assertLessEqual(layers, ANIMATED)
         self.assertLessEqual(len(layers), 4)
-        for sel, decl in css_rules(canvas_css()):   # durées : lentes (ambiance), jamais une boucle rapide
+        for sel, decl in css_rules(canvas_css()):   # ambiance lente, sauf projection Cinéma explicitement visible
             for d in re.findall(r"animation(?:-duration)?\s*:[^;]*?([\d.]+)s", decl):
-                self.assertGreaterEqual(float(d), 20, (sel, decl))
+                floor = 4 if "cv-wp-affiche" in sel and "cv-m-" in sel else 20
+                self.assertGreaterEqual(float(d), floor, (sel, decl))
         self.assertIn("prefers-reduced-motion", canvas_css())
         self.assertRegex(canvas_css(), r"\.cv-paused #cvwall > div \{ animation-play-state: paused; \}")
         self.assertRegex(canvas_css(), r"\.cv-static #cvwall > div \{ animation: none; \}")
@@ -204,7 +205,7 @@ class TestCanvasCssStatic(unittest.TestCase):
 class TestCinemaProjectionStatic(unittest.TestCase):
     """Cinéma (wallpaper « affiche ») : lumière de projection diffuse seulement — aucun projecteur, appareil,
     silhouette, texte ni ressource ; dégradés locaux plumés (aucun filtre/flou/masque) ; couches fixes existantes ;
-    « calm » très lent, « alive » balayage doux + cadence de film évoquée par de rares creux d'opacité minimes."""
+    « calm » visible à distance, « alive » deux fois plus mobile, tous deux continus sans stroboscope."""
     WALL = {"cv-base", "cv-l", "cv-l1", "cv-l2", "cv-l3", "cvglow"}
     PROPS = {"left", "top", "width", "height", "opacity", "background", "transform", "transform-origin", "display",
              "animation", "animation-duration"}
@@ -268,7 +269,7 @@ class TestCinemaProjectionStatic(unittest.TestCase):
                 for r, g, b, a in cols:                                                # ivoire chaud, toujours diffus
                     r, g, b, a = int(r), int(g), int(b), float(a)
                     self.assertTrue(r >= 240 and r >= g >= b and r - b >= 30, (part, r, g, b))
-                    self.assertLessEqual(a, 0.2, part)
+                    self.assertLessEqual(a, 0.6, part)
                 for grad in re.findall(r"radial-gradient\(([^()]*(?:\([^()]*\)[^()]*)*)\)", decl):
                     alphas = [float(x) for x in re.findall(r"rgba\([^)]*,\s*([\d.]+)\)", grad)]
                     self.assertEqual(alphas[-1], 0, (part, grad))                       # plumé jusqu'à zéro
@@ -290,29 +291,34 @@ class TestCinemaProjectionStatic(unittest.TestCase):
 
     def test_motion_modes_and_film_cadence_never_strobe(self):
         calm, alive = self.anim_names("calm"), self.anim_names("alive")
-        self.assertEqual(set(calm) - {"cvglow"}, {"cv-l2", "cv-l3"}, calm)              # calme : dérive + respiration
-        self.assertEqual(set(alive), {"cv-l1", "cv-l2", "cv-l3"}, alive)               # + balayage (+ halo global)
-        for layer, (name, dur) in list(calm.items()) + list(alive.items()):
-            self.assertGreaterEqual(dur, 20, (layer, name))
-        for layer in ("cv-l2", "cv-l3"):
-            self.assertGreaterEqual(calm[layer][1], 120, layer)                        # très lent
+        self.assertEqual(set(calm), {"cv-l1", "cv-l2", "cv-l3"}, calm)
+        self.assertEqual(set(alive), {"cv-l1", "cv-l2", "cv-l3"}, alive)
+        for layer in ("cv-l1", "cv-l2", "cv-l3"):
+            self.assertGreaterEqual(calm[layer][1], 8, (layer, calm[layer]))
+            self.assertEqual(calm[layer][1], alive[layer][1] * 2, (layer, calm[layer], alive[layer]))
         rot = lambda d: [float(x) for x in re.findall(r"rotate\((-?[\d.]+)deg\)", d)]
-        for name, cap in ((calm["cv-l2"][0], 2), (alive["cv-l2"][0], 6)):              # balayage doux
+        spans = []
+        for motion in (calm, alive):
+            name = motion["cv-l2"][0]
             r = [x for _, d in self.keyframes(name) for x in rot(d)]
-            self.assertTrue(r and max(r) - min(r) <= cap, (name, r))
-        film = self.keyframes(alive["cv-l3"][0])
-        ops = [(o, float(re.search(r"opacity\s*:\s*([\d.]+)", d).group(1))) for o, d in film]
-        self.assertEqual(len(ops), len(film), "cadence : opacité seulement")
-        for _, d in film:
-            self.assertEqual(set(re.findall(r"([\w-]+)\s*:", d)), {"opacity"})
-        vals = [v for _, v in ops]
-        self.assertLessEqual(max(vals) - min(vals), 0.15, vals)
-        self.assertGreaterEqual(min(vals), 0.8, vals)
-        brief = [(a, b) for a, b in zip(ops, ops[1:]) if b[0] - a[0] < 1.0]
-        self.assertTrue(2 <= len(brief) <= 8, brief)                                    # quelques creux rares
-        for a, b in brief:
-            self.assertLessEqual(abs(a[1] - b[1]), 0.05, (a, b))                        # jamais un flash
-        self.assertLessEqual(sum(b[0] - a[0] for a, b in brief), 3.0, brief)          # ≤ 3 % du cycle
+            self.assertEqual(len(r), 2, (name, r))
+            spans.append(max(r) - min(r))
+        self.assertGreaterEqual(spans[0], 15, spans)                                    # perceptible à distance
+        self.assertGreater(spans[1], spans[0], spans)                                  # vivant : angle plus ample
+        for motion in (calm, alive):
+            film = self.keyframes(motion["cv-l3"][0])
+            ops = []
+            for o, d in film:
+                match = re.search(r"opacity\s*:\s*([\d.]+)", d)
+                if match is None:
+                    self.fail((o, d))
+                ops.append((o, float(match.group(1))))
+            self.assertEqual(len(ops), len(film), "respiration : opacité seulement")
+            self.assertEqual([o for o, _ in ops], [0, 25, 50, 75, 100])                # aucun creux bref
+            for _, d in film:
+                self.assertEqual(set(re.findall(r"([\w-]+)\s*:", d)), {"opacity"})
+            vals = [v for _, v in ops]
+            self.assertGreaterEqual(max(vals) - min(vals), 0.6, vals)                   # visible, mais interpolé
 
 
 class TestTvHtmlStatic(unittest.TestCase):
@@ -987,7 +993,7 @@ class TestCanvasUiBrowser(unittest.TestCase):
         """Captures réelles 1920×1080 (projection-off|calm|alive[-light].png) : lumière ivoire chaude, large et
         plumée, point chaud hors champ (aucun appareil), jamais au-dessus du héros/des cartes/de la coque."""
         x = self.r("projection")
-        for mo, mode, n in (("off", "static", 0), ("calm", "run", 2), ("alive", "run", 4)):
+        for mo, mode, n in (("off", "static", 0), ("calm", "run", 3), ("alive", "run", 4)):
             r = x[mo]
             self.assertEqual((r["mode"], r["running"]), (mode, n), mo)
             self.assertEqual(r["behind"], [], mo)                                       # toujours derrière
@@ -997,26 +1003,23 @@ class TestCanvasUiBrowser(unittest.TestCase):
                 self.assertEqual(layer["text"].strip(), "", (mo, layer))
                 self.assertEqual(layer["kids"], 2 if layer["cls"] == "cvglow" else 0, (mo, layer))
             px = r["px"]
-            self.assertLessEqual(px["rawMax"], 90, (mo, px))                            # jamais une source éclatante
-            self.assertLessEqual(px["maxStep"], 5, (mo, px))                            # aucun bord ni silhouette
-            self.assertGreaterEqual(px["maxDelta"], 25, (mo, px))                       # lumière visible
-            self.assertGreaterEqual(px["meanDelta"], 5, (mo, px))
-            self.assertGreaterEqual(px["litFrac"], 0.35, (mo, px))                      # large et diffuse
-            self.assertGreaterEqual(px["warmth"], 2, (mo, px))                          # ivoire chaud
+            self.assertLessEqual(px["rawMax"], 180, (mo, px))                           # aucune source blanche éclatante
+            self.assertLessEqual(px["maxStep"], 9, (mo, px))                            # aucun bord ni silhouette
+            self.assertGreaterEqual(px["maxDelta"], 50, (mo, px))                       # visible à distance
+            self.assertGreaterEqual(px["meanDelta"], 15, (mo, px))
+            self.assertGreaterEqual(px["litFrac"], 0.5, (mo, px))                       # large et diffuse
+            self.assertGreaterEqual(px["warmth"], 4, (mo, px))                          # ivoire chaud
             ax, ay = px["maxAt"]
-            self.assertTrue(ax >= 1920 - 48 or ay <= 48, (mo, px["maxAt"]))             # point chaud au bord : hors champ
+            self.assertTrue(ax >= 960 and ay <= 600, (mo, px["maxAt"]))                  # projection ancrée en haut à droite
         self.assertEqual(x["off"]["moved"], 0)                                          # « Coupé » : fixe
         self.assertGreater(x["calm"]["moved"], 0.2)
         self.assertGreater(x["alive"]["moved"], x["calm"]["moved"])                     # « Vivant » plus présent
-        c = x["calm"]["cadence"]
-        self.assertEqual(c["dips"], 0, c)                                               # calme : respiration sans creux
-        self.assertLessEqual(c["maxStep"], 0.005, c)
-        a = x["alive"]["cadence"]
-        self.assertEqual(a["samples"], round(a["duration"] * 24 / 1000) + 1, a)          # échantillonné à 24 i/s
-        self.assertLessEqual(a["maxStep"], 0.05, a)                                     # jamais un stroboscope
-        self.assertTrue(1 <= a["dips"] <= 3, a)                                         # rares creux de cadence
-        self.assertLessEqual(a["dipFrac"], 0.03, a)
-        self.assertLessEqual(a["max"] - a["min"], 0.15, a)
+        c, a = x["calm"]["cadence"], x["alive"]["cadence"]
+        for cadence in (c, a):
+            self.assertEqual(cadence["samples"], round(cadence["duration"] * 24 / 1000) + 1, cadence)
+            self.assertLessEqual(cadence["maxStep"], 0.03, cadence)                      # variation continue à 24 i/s
+            self.assertGreaterEqual(cadence["max"] - cadence["min"], 0.6, cadence)
+        self.assertLess(a["duration"], c["duration"])                                  # vivant deux fois plus mobile
         self.assertEqual((x["reduced"]["mode"], x["reduced"]["total"]), ("static", 0))
         self.assertEqual(x["reducedVsOff"], 0)                                          # repli fixe = « Coupé »
 

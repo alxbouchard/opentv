@@ -1102,7 +1102,7 @@ recherche de nouveau les notes manquantes.
 
 This product uses the TMDB API but is not endorsed or certified by TMDB.
 
-## 6 quinquies. OpenTV Canvas : ambiance animée de l'accueil (0.7.1)
+## 6 quinquies. OpenTV Canvas : ambiance animée de l'accueil (0.7.2)
 
 L'accueil garde la coque OpenTV v23 (navigation, Réglages, QR, feuilles, lecteur, hors-ligne, configuration :
 **jamais** modifiables par une ambiance). Seule la couche « Canvas » change : fond animé, couleur d'accent, voile,
@@ -1135,9 +1135,9 @@ reçue.
 **Cinéma (fond « Affiche »).** Une lumière de projection diffuse, ivoire chaud, entre par le haut à droite depuis
 l'extérieur du cadre : aucun projecteur, appareil, objectif ni silhouette, seulement un faisceau large et un halo
 plumés par des dégradés locaux (aucun filtre, flou, masque ni ressource), toujours sous le voile, le héros, les cartes
-et la coque. « Coupé » : lumière fixe ; « Calme » : dérive et respiration très lentes (2 couches) ; « Vivant » :
-balayage doux du faisceau et cadence de film évoquée par de rares creux d'opacité minimes (≤ 4 %, jamais un
-stroboscope), 4 couches au plus.
+et la coque. « Coupé » : lumière fixe ; « Calme » : faisceau large perceptible à distance, cycle continu de 16 s ;
+« Vivant » : angle plus ample et mouvement deux fois plus rapide, cycle continu de 8 s. Les deux respirent sans
+coupure ni stroboscope, avec 4 couches au plus.
 
 **Mouvement sûr.** Au plus quatre couches continues, transform/opacity seulement (aucun flou, filtre, vidéo ni
 worker), aucune ressource distante. Ambiance **figée** pendant un panneau, la feuille de confirmation, le
@@ -1161,7 +1161,7 @@ Secours administrateur : `sudo systemctl stop opentv` puis `sudo rm -f /var/lib/
 écrit (le kiosque passe par `/api/tv/canvas/*`), toutes les autres unités le masquent (`InaccessiblePaths=`). Une
 mise à jour et un retour arrière d'installation ne touchent jamais son contenu ; `uninstall.sh` le conserve, `--purge`
 l'efface (sans suivre de lien). Tout fichier Canvas livré entre dans l'empreinte de la promotion de « Regarder » :
-après une installation 0.7.1, `opentv-pi playback status` est `stale` jusqu'au canari HDMI puis
+après une installation 0.7.2, `opentv-pi playback status` est `stale` jusqu'au canari HDMI puis
 `sudo /opt/opentv/bin/opentv-pi playback promote --field-validated`.
 
 **Budget de performance (porte terrain, à mesurer sur la Pi).** Référence = même accueil en mouvement « Coupé »,
@@ -1172,7 +1172,7 @@ Chromium + Cage ≤ référence + 15 % d'un cœur (relevés de 60 s), RSS ≤ r�
 du lecteur. « Vivant » doit tenir le même budget, sinon il reste un choix du propriétaire et le défaut reste
 « Calme ». Hors budget : ambiance d'origine en « Coupé » et rapport, jamais un réglage silencieux.
 
-**Contrôles terrain exacts (Pi réelle, après `install.sh` 0.7.1 et redémarrage).**
+**Contrôles terrain exacts (Pi réelle, après `install.sh` 0.7.2 et redémarrage).**
 1. `ls -ld /var/lib/opentv/canvas` = `drwx------ opentv opentv` ; `sudo systemd-analyze verify` des unités livrées ;
    `systemd-analyze security opentv opentv-catalogue-refresh opentv-player` relus.
 2. Masques réels : pour `opentv-catalogue-refresh`, `opentv-cec`, `opentv-player`, `opentv-net-helper` (pendant un
@@ -1300,7 +1300,7 @@ sauvegardes OpenTV, jamais un paquet.
   liste du site donne-t-elle bien tout le catalogue accepté (196 éléments au dernier relevé) ? Sinon chaque passage
   sera refusé (`count_drop`) jusqu'à ce que la source fournisse une liste complète.
 
-- **OpenTV Canvas (0.7.1) : vérifié hors matériel seulement** (Python 3.11/3.13, Chromium headless réel, racines
+- **OpenTV Canvas (0.7.2) : vérifié hors matériel seulement** (Python 3.11/3.13, Chromium headless réel, racines
   d'installation temporaires). Cadence, CPU/RSS, température, `get_throttled`, `hvs_underrun`, masques réels des
   unités (`mountinfo`), création tmpfiles du dossier sur Bookworm et rendu à distance de canapé restent la porte
   terrain « Ambiance (Canvas) » (§6 quinquies, §9).
