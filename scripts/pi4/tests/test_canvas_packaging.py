@@ -556,8 +556,9 @@ class TestStoreUnavailableMessage(unittest.TestCase):
 
 
 class TestVersion(unittest.TestCase):
-    def test_canvas_release_is_0_7_2(self):
-        self.assertEqual(VERSION, "0.7.2")
+    def test_canvas_shipped_in_0_7_2_and_still_present(self):
+        # Canvas livré en 0.7.2 ; la version exacte courante (0.7.3, reprise CEC) est vérifiée par test_cec_return
+        self.assertGreaterEqual(tuple(int(x) for x in VERSION.split(".")), (0, 7, 2))
         self.assertIn("0.7.2", read(HANDOFF))
 
 

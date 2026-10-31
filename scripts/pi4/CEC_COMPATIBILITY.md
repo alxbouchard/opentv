@@ -55,12 +55,34 @@ ni un redémarrage de service, ni une TV rallumée plus tard ne provoquent de ch
 pendant toute la fenêtre n'est jamais réveillée ; elle ne recevra pas d'annonce automatique pour ce démarrage
 (récupération : téléphone appairé, ou `opentv-pi cec --activate`).
 
+### Reprise après une application native de la TV (0.7.3)
+
+Seule autre annonce automatique, assurée par `opentv-cec-return.service` (module `cecreturn`) : la **même** séquence
+sûre que ci-dessus, rejouée **une fois** quand la TV émet elle-même, dans l'ordre et en diffusion depuis l'adresse
+logique 0 :
+
+1. `ACTIVE_SOURCE` phys-addr 0.0.0.0 (la TV passe sur une application native), au plus 12 h avant l'étape 2 ;
+2. `ROUTING_CHANGE` 0.0.0.0 → adresse physique **lue** de l'adaptateur OpenTV ;
+3. `SET_STREAM_PATH` vers cette même adresse, au plus 5 s après l'étape 2.
+
+Puis 1,5 s de calme, verrou partagé `/run/opentv-cec/lock`, relecture de l'adaptateur, et annonce seulement si la TV
+répond « allumée ». Observation par `cec-ctl -s -r -m` (mode moniteur passif du noyau, `CAP_NET_ADMIN` seule dans un
+réseau privé) : OpenTV ne devient ni suiveur ni initiateur sur ce descripteur, ne lit ni ne produit aucune touche.
+Annulé ou jamais déclenché : autre source active, routage ailleurs, veille, ordre ou délai différent, doublon,
+trame incohérente (octets bruts ≠ en-tête/adresses décodées), ligne inconnue ou trop longue, perte de messages,
+redémarrage du moniteur/service (état vide), touches déjà reçues ou autre annonce pendant le calme, **Samsung Home
+seul** (aucun message CEC). Au plus une reprise par 60 s, 6 par heure. Le témoin de l'annonce de démarrage n'est ni lu
+ni écrit. Opt-out : `OPENTV_CEC_RETURN_RECOVERY=0`.
+
 ### Lacunes connues
 
 - aucune action utilisateur « Afficher OpenTV » (téléphone appairé, future télécommande USB) ne déclenche encore la
   réactivation bornée sans terminal ;
-- OpenTV ne répond pas encore à `<Request Active Source>` / `<Set Stream Path>` émis par la TV : choisir l'entrée HDMI
-  OpenTV au menu de la TV ne rétablit donc pas forcément les touches.
+- OpenTV ne répond pas encore à `<Request Active Source>` ni à un `<Set Stream Path>` isolé émis par la TV (hors de la
+  séquence exacte de retour d'application native ci-dessus) : choisir l'entrée HDMI OpenTV au menu de la TV ne
+  rétablit donc pas forcément les touches ;
+- la reprise après application native n'est prouvée que sur la séquence Samsung capturée ; une autre marque qui ne
+  l'émet pas exactement ne déclenche rien (repli : téléphone, `cec --activate`).
 
 Ne jamais modifier un compte TV, un menu de service ou un réglage usine pour faire passer la gate.
 
@@ -118,6 +140,22 @@ rétabli. Cause : la minuterie ne faisait plus aucune annonce. Correctif : une s
 (voir « Contrat OpenTV »), couverte par `tests/test_cec_boot_announce.py`. **À revalider sur le Pi** : redémarrage,
 six touches sans intervention, puis cycle Home Samsung (≥ 3 min ouvert) sans retour forcé sur OpenTV.
 
+### Retour depuis YouTube natif (2026-10-30)
+
+Capture `cec-ctl -m` sur le Pi réel (LA 4 Playback « OpenTV », PA 1.0.0.0, Select → Entrée) :
+
+1. avant YouTube : TV → Playback Device 1 `USER_CONTROL_PRESSED/RELEASED` (down/up), devenus événements Linux ;
+2. entrée dans YouTube natif : la TV diffuse `ACTIVE_SOURCE` phys-addr 0.0.0.0 ;
+3. sortie (21:49:35) : la TV diffuse `ROUTING_CHANGE` 0.0.0.0 → 1.0.0.0, puis `SET_STREAM_PATH` 1.0.0.0, puis
+   `GIVE_DEVICE_POWER_STATUS` toutes les 5 s ; plus aucun `USER_CONTROL` ni événement Linux : OpenTV visible, touches
+   inertes.
+
+`sudo opentv-pi cec --activate` (question d'alimentation, `ACTIVE_SOURCE`, `MENU_STATUS` ; sans libération ni nouvelle
+réclamation d'adresse logique) a rétabli la télécommande, **confirmé physiquement par Alex**. Correctif 0.7.3 :
+reprise automatique décrite au « Contrat OpenTV », couverte par `tests/test_cec_return.py` (séquence capturée rejouée).
+**À valider sur le Pi** : moniteur accepté sous `CAP_NET_ADMIN` dans le bac à sable, YouTube → Retour → six touches
+sans intervention (3 fois), YouTube → autre entrée et Home Samsung sans émission, aucun réveil.
+
 ### Verdict Samsung actuel
 
 - six touches : **PASS** ;
@@ -126,7 +164,9 @@ six touches sans intervention, puis cycle Home Samsung (≥ 3 min ouvert) sans r
 - aucune prise d'entrée automatique sous l'ancien contrat sans annonce : **PASS** ; aucune réannonce après l'annonce
   unique de démarrage : **à revalider** ;
 - persistance après un nouveau redémarrage du Pi avec l'annonce unique de démarrage, puis après extinction/rallumage
-  complet de la TV : **à refaire** avant de classer cette gamme comme plug-and-play sans réserve.
+  complet de la TV : **à refaire** avant de classer cette gamme comme plug-and-play sans réserve ;
+- retour YouTube natif → OpenTV : touches inertes **reproduites**, `cec --activate` **PASS** (Alex) ; reprise
+  automatique 0.7.3 (`opentv-cec-return.service`) : **à valider sur le Pi**.
 
 Classe provisoire : **B — compatible après activation CEC terrain bornée**.
 
@@ -150,7 +190,10 @@ du périphérique.
 4. **Menu de la TV**
    - Home → naviguer dans le menu → Home ou Retour pour fermer ;
    - confirmer que les touches reviennent à OpenTV sans boucle ni vol d'entrée ;
-   - noter les messages `MENU_STATUS`, `ROUTING_*`, `ACTIVE_SOURCE` éventuels.
+   - noter les messages `MENU_STATUS`, `ROUTING_*`, `ACTIVE_SOURCE` éventuels ;
+   - ouvrir une application native (YouTube…) puis revenir sur OpenTV : noter la séquence exacte de la TV ; avec
+     `opentv-cec-return.service`, exiger soit la reprise (`"result":"recovered"`, six touches), soit l'absence
+     d'émission si la marque n'émet pas la séquence (consigner, repli téléphone).
 5. **Redémarrage et alimentation**
    - redémarrer le Pi, puis refaire les six touches sans `--activate` (une seule annonce de démarrage attendue :
      `journalctl -b -u opentv-cec` → un `boot_done`, puis aucune émission) ;
@@ -170,7 +213,7 @@ Commandes de preuve, sans URL ni secret :
 sudo cec-ctl -d /dev/cec0 -m --monitor-time 120 --wall-clock
 cat /proc/bus/input/devices
 sudo /opt/opentv/bin/opentv-pi cec
-journalctl -b -u opentv-cec.service -u opentv-cec-announce.service --no-pager
+journalctl -b -u opentv-cec.service -u opentv-cec-announce.service -u opentv-cec-return.service --no-pager
 ```
 
 ## Matrice multimarque

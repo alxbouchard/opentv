@@ -183,6 +183,7 @@ Services :
 | `opentv-player.service` | contrôleur du lecteur « Regarder » (`playerd`, compte `opentv-kiosk`, groupes effectifs `opentv-kiosk video render` — **jamais `input`**) ; Chromium séparé, CDP par tube seulement ; activé par l'installation mais **sans capacité de lecture** tant que la source n'est pas approuvée et la lecture promue sur le terrain (§6 bis) |
 | `opentv-player-keys.service` | aide des touches de fermeture (compte `opentv-keys`, seul détenteur de `input` côté lecture, `DeviceAllow=char-input r`, sans réseau `PrivateNetwork=yes`, sans capacité, `ProtectSystem=strict`) : lit evdev seulement pendant une séance abonnée, n'envoie que `back/exit/home/devtools` au contrôleur par `/run/opentv-player-keys/keys.sock` (SO_PEERCRED vérifié dans les deux sens) |
 | `opentv-cec.timer` / `.service` | amorçage HDMI-CEC (20 s après le démarrage puis toutes les 30 s) : oneshot `opentv` (groupes `video`, `input`), sans capacité ni réseau, `DeviceAllow` CEC + entrée seulement, budget 40 s (`TimeoutStartSec=60`). Déclare Playback « OpenTV », remappe la touche OK, laisse une nouvelle adresse logique se stabiliser jusqu’au passage suivant, puis fait **une seule annonce `<Active Source>` par démarrage** de la boîte (fenêtre de 240 s après le boot, TV allumée seulement) : jamais de réveil de la TV, jamais de réannonce. Détails : §« Télécommandes » et `CEC_COMPATIBILITY.md`. |
+| `opentv-cec-return.service` | reprise de la télécommande après le retour de la TV depuis une application native (0.7.3) : service `opentv` long (groupe `video` seulement, jamais `input`), `CAP_NET_ADMIN` seule pour le mode moniteur CEC passif, réseau privé, `DeviceAllow` CEC seulement, mémoire/tâches bornées, relances bornées. Rejoue l’annonce sûre une fois seulement sur la séquence exacte de la TV ; jamais périodique ni de réveil. Détails : §« Télécommandes » et `CEC_COMPATIBILITY.md`. |
 
 Fichiers système dédiés (manifeste, sauvegarde d'un éventuel fichier existant, retirés/restaurés par `uninstall.sh`) :
 `/etc/systemd/logind.conf.d/opentv-kiosk.conf` (touches Power, Reboot, Suspend, Hibernate **ignorées** par logind :
@@ -231,16 +232,39 @@ Télécommande — trois niveaux, dans cet ordre de priorité :
      cec-bootstrap --release` (efface seulement « OpenTV », rétablit `KEY_OK`).
    - Les six gestes Samsung et l'aller-retour Home Samsung → OpenTV sont prouvés. Le protocole multimarque, les codes
      observés et les gates de reboot/alimentation sont dans [CEC_COMPATIBILITY.md](CEC_COMPATIBILITY.md).
+   - **Retour depuis une application native Samsung (YouTube…) — reprise automatique (0.7.3,
+     `opentv-cec-return.service`)**. Capture réelle : en ouvrant YouTube, la TV diffuse `ACTIVE_SOURCE` 0.0.0.0 ; en
+     le quittant, elle diffuse `ROUTING_CHANGE` 0.0.0.0 → adresse de la boîte puis `SET_STREAM_PATH` vers cette
+     adresse ; OpenTV redevient visible mais **plus aucune touche** n'arrive. `sudo opentv-pi cec --activate` (sans
+     libération ni nouvelle réclamation de l'adresse logique) a rétabli la télécommande, confirmé par Alex. Depuis
+     0.7.3, un moniteur CEC **passif** (`cec-ctl -d <adaptateur> -s -r -m`, mode moniteur du noyau : capacité
+     `CAP_NET_ADMIN` seule, réseau privé, groupe `video` seulement, aucune touche lue, consommée ni produite) rejoue
+     cette même annonce **une fois** quand la TV émet elle-même, dans l'ordre : `ACTIVE_SOURCE` 0.0.0.0 (application
+     native, ≤ 12 h avant), `ROUTING_CHANGE` 0.0.0.0 → l'adresse physique lue de l'adaptateur, puis `SET_STREAM_PATH`
+     vers cette adresse (≤ 5 s après). Après 1,5 s de calme : verrou `/run/opentv-cec/lock` (attente ≤ 10 s, sinon
+     `busy`), relecture de l'adaptateur (configuration OpenTV, même adresse), question d'alimentation, puis
+     `<Active Source>` + `<Menu Status>` seulement si la TV répond « allumée » — jamais `<Image View On>`,
+     `<Text View On>` ni réveil. Adaptateur et adresse découverts dynamiquement (aucune constante `1.0.0.0`/`cec0`).
+     **Rien n'est émis** pour : une autre source (autre `ACTIVE_SOURCE`, routage vers une autre adresse),
+     Samsung Home seul (aucun message CEC), un ordre ou un délai différent, une séquence incomplète, une sortie `cec-ctl`
+     incohérente/coupée/trop longue, une perte de messages annoncée par le noyau, un redémarrage du moniteur ou du
+     service (état vide : une séquence à moitié vue ne déclenche rien), des touches déjà reçues ou une autre annonce
+     pendant le délai de calme. Au plus une reprise par 60 s et 6 par heure. Le témoin de l'annonce de démarrage
+     n'est ni lu ni écrit (`cec --activate` et l'annonce unique de démarrage sont inchangés). Journal :
+     `journalctl -u opentv-cec-return` → `"event":"cec_return_recovery","result":"recovered"` (ou `refused_tv_not_on`,
+     `busy`, `adapter_changed`, `cooldown`, `rate_limited`), jamais la sortie brute du bus. Relances bornées
+     (5 s → 300 s, puis `StartLimitBurst=5`/10 min). Désactiver : `OPENTV_CEC_RETURN_RECOVERY=0`.
    - **Récupération si la télécommande de la TV est inerte** (TV allumée après la fenêtre de démarrage, HDMI
      rebranché, retour depuis une autre source…) : beaucoup de TV, dont la Samsung terrain, n'envoient les touches
      qu'à la **source active** déclarée par OpenTV. **Choisir l'entrée HDMI OpenTV ne suffit donc pas forcément** :
-     OpenTV ne répond pas encore aux demandes de la TV. Dans l'ordre :
+     hors du retour d'application native ci-dessus, OpenTV ne répond pas encore aux demandes de la TV. Dans l'ordre :
      1. **utilisateur** : la télécommande téléphone appairée (QR de la colonne de droite) pilote OpenTV sans CEC ;
      2. **administrateur / terrain** : `sudo /opt/opentv/bin/opentv-pi cec --activate` (TV déjà allumée).
    - **Lacunes connues (évolutions futures, non implémentées)** : (a) aucune action utilisateur « Afficher OpenTV »
      (téléphone appairé, future télécommande USB) ne déclenche encore cette réactivation bornée sans terminal ;
-     (b) OpenTV ne répond pas à `<Request Active Source>` / `<Set Stream Path>` quand la TV les émet. Tant que les six
-     touches ne sont pas prouvées sur la TV, le téléphone reste le repli.
+     (b) OpenTV ne répond pas à `<Request Active Source>`, ni à un `<Set Stream Path>` isolé (sans la séquence exacte
+     de retour d'application native décrite ci-dessus). Tant que les six touches ne sont pas prouvées sur la TV, le
+     téléphone reste le repli.
 2. **Téléphone (repli immédiat)** — sans terminal, sans adresse, jeton ni code à copier. À la fin de la configuration
    (Ethernet/Wi-Fi gardé), la page « C'est prêt » du téléphone propose « Utiliser ce téléphone comme télécommande » (un
    toucher, puis « Oui ») ; après un nouveau Wi-Fi choisi depuis le Wi-Fi temporaire « OpenTV-… », la page explique
@@ -1073,7 +1097,8 @@ Jamais dans Git, le manifeste, un `EnvironmentFile=`, argv, un journal ni une so
   « autres », fichier régulier à un seul lien, root:opentv, 0640 au plus avec lecture groupe ; parent root non
   inscriptible. Sinon `credential_unsafe` (raison dans `credential_why`) et aucune requête. Absent ⇒ `skipped`.
 - **Dépôt** (root, sans écho, format validé) : refusé si le groupe n'est pas privé, ou si une unité du compte
-  `opentv` en cours d'exécution (`opentv`, `opentv-cec`, `opentv-cec-announce`, `opentv-catalogue-refresh`) n'a pas
+  `opentv` en cours d'exécution (`opentv`, `opentv-cec`, `opentv-cec-announce`, `opentv-catalogue-refresh`,
+  `opentv-cec-return`) n'a pas
   le masque dans son espace de montage (`/proc/<pid>/mountinfo`) : `credential_exposed` + unités à redémarrer, rien
   écrit. Écriture atomique dans le dossier vérifié. `opentv-pi health` (root) avertit `ratings_credential_exposed`
   dans le même cas. `install.sh` ne crée, ne lit ni ne retire jamais le jeton ; `uninstall.sh` le garde (dossier
@@ -1300,6 +1325,12 @@ sauvegardes OpenTV, jamais un paquet.
   liste du site donne-t-elle bien tout le catalogue accepté (196 éléments au dernier relevé) ? Sinon chaque passage
   sera refusé (`count_drop`) jusqu'à ce que la source fournisse une liste complète.
 
+- **Reprise CEC après une application native (0.7.3) : vérifiée hors matériel seulement** (Python 3.11/3.13,
+  séquence capturée rejouée, faux bus, racines d'installation temporaires). À prouver sur la Pi : `cec-ctl -m`
+  accepté sous `CAP_NET_ADMIN` ambiant dans le bac à sable de `opentv-cec-return.service` (`systemd-analyze security`
+  relu), YouTube → Retour → six touches sans intervention, autre source/Home sans émission (gate « Retour
+  d'application native », §9).
+
 - **OpenTV Canvas (0.7.2) : vérifié hors matériel seulement** (Python 3.11/3.13, Chromium headless réel, racines
   d'installation temporaires). Cadence, CPU/RSS, température, `get_throttled`, `hvs_underrun`, masques réels des
   unités (`mountinfo`), création tmpfiles du dossier sur Bookworm et rendu à distance de canapé restent la porte
@@ -1314,6 +1345,7 @@ sauvegardes OpenTV, jamais un paquet.
 | **UI visible** | photo/vidéo de la TV : tableau de bord 1920×1080 net (`wlr-randr` ou `/sys/class/drm/card*-HDMI-A-1/modes`), « Pour toi » navigable au clavier, message d'agent affiché ; `kill` de Chromium ⇒ retour automatique du kiosque ; `systemctl restart opentv` ⇒ « Reconnexion… » puis rechargement automatique et données de retour ; mode 1920×1080 effectif après redémarrage de la boîte |
 | **CEC** | `sudo /opt/opentv/bin/opentv-pi cec` liste `/dev/cec0` avec une adresse physique ≠ `f.f.f.f` TV allumée ; `journalctl -b -u opentv-cec` : un seul `"boot_done"` puis seulement `"already_this_boot"`/`"boot_window_passed"` ; `cec-ctl -d /dev/cec0` : OSD `'OpenTV'`, masque ≠ `0x0000` ; après **redémarrage** : idem sans intervention, `announced_this_boot: true` ; TV en veille pendant toute la fenêtre de démarrage, puis allumée : **la TV ne se rallume pas et ne change pas d'entrée** à cause d'OpenTV (`cec-ctl -d /dev/cec0 -m` : aucune `IMAGE_VIEW_ON`/`ACTIVE_SOURCE` émise par OpenTV) |
 | **Télécommande CEC** | après le démarrage (annonce automatique, sans `--activate`), TV allumée pendant la fenêtre : Haut, Bas, Gauche, Droite, OK (ouvre le panneau), Retour (le ferme) ; puis **après `sudo reboot`**, sans intervention, de nouveau les six touches ; Home Samsung ouvert pendant ≥ 3 min puis fermé : aucun retour forcé sur OpenTV, contrôle rendu à OpenTV ; `sudo systemctl restart opentv opentv-cec` pendant Home : menu Samsung intact ; touche Power de la TV : la boîte reste allumée ; un ensemble partiel = critère CEC échoué (repli téléphone) ; réactivation explicite seulement par `sudo /opt/opentv/bin/opentv-pi cec --activate` (TV allumée, jamais de réveil ni `IMAGE_VIEW_ON` au moniteur ; `activation.ok: true` seulement si l'annonce a été transmise ce démarrage) |
+| **Retour d'application native (0.7.3)** | `systemctl is-active opentv-cec-return` actif, `NRestarts=0` ; `journalctl -u opentv-cec-return` : `cec_return_watch` avec l'adaptateur/adresse lus, aucun `spawn_failed` en boucle ; moniteur parallèle `sudo cec-ctl -d <adaptateur> -m --wall-clock` : ouvrir YouTube natif (TV : `ACTIVE_SOURCE` 0.0.0.0), regarder ≥ 1 min, quitter vers OpenTV (TV : `ROUTING_CHANGE` puis `SET_STREAM_PATH`) ⇒ en ≤ 5 s OpenTV émet `GIVE_DEVICE_POWER_STATUS`, `ACTIVE_SOURCE`, `MENU_STATUS` (jamais `IMAGE_VIEW_ON`/`TEXT_VIEW_ON`), journal `"result":"recovered"`, puis Haut/Bas/Gauche/Droite/OK/Retour visibles sur OpenTV sans terminal ; répéter 3 fois (>60 s d'écart) ; YouTube → autre entrée HDMI : aucune émission d'OpenTV ; Home Samsung ouvert/fermé : aucune émission ; `systemctl restart opentv-cec-return` pendant YouTube puis retour : aucune émission (récupération : `cec --activate`) ; TV éteinte depuis YouTube : aucun réveil ; vidéo d'Alex |
 | **Télécommande téléphone** | iPhone et Android sur le même Wi-Fi : QR de la colonne de droite → « Oui, utiliser ce téléphone » → les 7 touches agissent en < 0,5 s ; l'URL ouverte est `<nom>.local:8082` (sinon noter le repli) ; ancien QR refusé ; « Oublier les téléphones » (Réglages) ⇒ le pavé demande de rescanner ; `systemctl restart opentv` puis `sudo reboot` (heure avant NTP) ⇒ téléphone toujours appairé ; nouvelle adresse DHCP ⇒ téléphone toujours appairé ; `ss -ltn` : `:8082` lié à l'adresse LAN (jamais `0.0.0.0`), absent pendant « Reconfigurer » ; ajout à l'écran d'accueil iOS fonctionnel ; aucun jeton dans `journalctl -u opentv` |
 | **Télécommande USB** | télécommande 2,4 GHz branchée : flèches, OK, Retour, Accueil sur l'écran OpenTV ; Accueil/BrowserBack ne quittent jamais `/tv` ; écran QR : aucune touche n'agit ; **touche Power : la boîte reste allumée** (après redémarrage) ; clavier : F12/Ctrl+Maj+I, Ctrl+P, Ctrl+S, Ctrl+Alt+F2 sans effet |
 | **Décodage** | H.264 local 1080p60 pendant 30 min : `/dev/video10` ouvert à chaque sonde, horloge H.264 ≈ 500 MHz, maximum 0,372 % d'images perdues, température maximale 41,3 °C, `hvs_underrun=0`, `get_throttled=0x0` ; kiosque restauré et résidus supprimés. 4K/HEVC/VP9/AV1 Chromium hors cible. |

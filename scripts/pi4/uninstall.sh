@@ -517,7 +517,8 @@ done
 # plus rien ne peut (re)lancer le point d'accès : service, helper et garde arrêtés
 host systemctl disable --now opentv-player.service opentv-player-keys.service opentv-kiosk.service opentv.service \
   opentv-net-helper.path opentv-net-helper.service opentv-ap-guard.timer opentv-ap-guard.service opentv-cec.timer \
-  opentv-cec.service opentv-cec-announce.service opentv-splash.service opentv-catalogue-refresh.timer \
+  opentv-cec.service opentv-cec-announce.service opentv-cec-return.service opentv-splash.service \
+  opentv-catalogue-refresh.timer \
   opentv-catalogue-refresh.service opentv-catalogue-ratings.service opentv-catalogue-ratings-retry.timer \
   opentv-catalogue-ratings-retry.service opentv-plymouth-failsafe.timer \
   opentv-plymouth-failsafe.service opentv-plymouth-deactivate.service opentv-plymouth-quit.service \

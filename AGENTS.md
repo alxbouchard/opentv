@@ -327,6 +327,13 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   permission facultative `canvas` des assistants, état `/var/lib/opentv/canvas` réservé à `opentv.service`.
   Passation (modules, routes, outils, paquet, gates terrain) : `docs/opentv-canvas.md` ; plans
   `docs/plans/2026-10-30-opentv-canvas-phase1.md` et `-phase2.md`. Vérifié hors matériel seulement.
+- **Reprise CEC après une application native Samsung (0.7.3)** : `opentv_pi/cecreturn.py` +
+  `opentv-cec-return.service` (moniteur `cec-ctl -m` passif, `CAP_NET_ADMIN` seule, réseau privé, groupe `video`
+  seulement). Sur la séquence exacte émise par la TV (`ACTIVE_SOURCE` 0.0.0.0, puis `ROUTING_CHANGE` → adresse lue de
+  la boîte, puis `SET_STREAM_PATH` vers elle), rejoue une fois `cecboot.announce` (TV allumée, `<Active Source>` +
+  `<Menu Status>`, jamais de réveil) sous le verrou CEC existant ; témoin de démarrage et `cec --activate` inchangés.
+  Contrat et cas refusés : `scripts/pi4/CEC_COMPATIBILITY.md`, tests `scripts/pi4/tests/test_cec_return.py`.
+  Vérifié hors matériel seulement.
 
 ## 11. Limites connues (testées, ne pas reproposer sans élément nouveau)
 

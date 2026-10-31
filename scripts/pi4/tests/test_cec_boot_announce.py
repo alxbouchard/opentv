@@ -332,10 +332,12 @@ class TestNoFocusStealAfterSamsungHome(BootBase):
                             uses.setdefault(mod, set()).add((fdef.name, f.id))
         self.assertNotIn("app", imports)                                      # service principal : jamais cecboot
         self.assertNotIn("app", uses)
-        self.assertEqual(imports, {"cec": {"cecboot"}, "cli": {"cecboot"}})   # aucun `from .cecboot import announce`
+        # cecreturn (opentv-cec-return.service) : seule autre annonce automatique, rejouée par `Monitor.recover`
+        # uniquement après la séquence exacte de retour d'une application native (tests/test_cec_return.py)
+        self.assertEqual(imports, {"cec": {"cecboot"}, "cli": {"cecboot"}, "cecreturn": {"cecboot"}})
         self.assertEqual({a for _, a in uses["cec"]}, {"parse_info", "classify"})   # lecture seule
         callers = {(m, fn) for m, s in uses.items() for fn, a in s if a in ("bootstrap", "announce")}
-        self.assertEqual(callers, {("cli", "cmd_cec_bootstrap"), ("cecboot", "bootstrap")})
+        self.assertEqual(callers, {("cli", "cmd_cec_bootstrap"), ("cecboot", "bootstrap"), ("cecreturn", "recover")})
         self.assertEqual({a for fn, a in uses["cecboot"] if fn == "bootstrap" and a == "announce"}, {"announce"})
 
 

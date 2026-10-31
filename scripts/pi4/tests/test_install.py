@@ -25,6 +25,7 @@ SHELL_SCRIPTS = (INSTALL, UNINSTALL, PREPARE, os.path.join(PI4, "bin", "opentv-k
                  os.path.join(PI4, "system", "opentv-plymouth-handoff"))
 UNITS = ("opentv.service", "opentv-kiosk.service", "opentv-net-helper.service", "opentv-net-helper.path",
          "opentv-ap-guard.service", "opentv-ap-guard.timer", "opentv-cec.service", "opentv-cec.timer",
+         "opentv-cec-return.service",
          "opentv-splash.service", "opentv-player.service", "opentv-player-keys.service",
          "opentv-catalogue-refresh.service", "opentv-catalogue-refresh.timer", "opentv-catalogue-ratings.service",
          "opentv-catalogue-ratings-retry.service", "opentv-catalogue-ratings-retry.timer",

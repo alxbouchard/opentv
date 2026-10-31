@@ -70,7 +70,7 @@ RETRY_TIMER = "opentv-catalogue-ratings-retry.timer"
 # unités du compte du service (User=opentv) autres que les notes : le dossier du jeton doit y être masqué (test :
 # égal à l'ensemble dérivé de systemd/*.service). Les autres comptes n'ont pas le groupe opentv (dossier 0750).
 MASKED_UNITS = ("opentv.service", "opentv-cec.service", "opentv-cec-announce.service",
-                "opentv-catalogue-refresh.service")
+                "opentv-catalogue-refresh.service", "opentv-cec-return.service")
 MOUNTINFO_CAP = 4 * 1024 * 1024
 # reprise : seulement après un échec transitoire du DERNIER passage ; délai croissant depuis sa fin, puis abandon
 # (l'échec reste rapporté) jusqu'au passage quotidien suivant. Minuterie horaire : au plus une tentative par heure.

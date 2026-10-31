@@ -1,5 +1,5 @@
 """opentv-pi : serve | preflight | health | net-helper | ap-guard | agent issue|list|revoke | setup reset | cec |
-cec-bootstrap | catalogue status|refresh|rollback|resume|ratings|ratings-retry|ratings-credential |
+cec-bootstrap | cec-return-monitor | catalogue status|refresh|rollback|resume|ratings|ratings-retry|ratings-credential |
 muse status|pair|unpair|prepare-bluetooth|restore-bluetooth | muse-setup-helper |
 manifest verify."""
 import argparse
@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 
-from . import VERSION, agents, apguard, cec, cecboot, config, fsutil, health, nethelper, preflight
+from . import VERSION, agents, apguard, cec, cecboot, cecreturn, config, fsutil, health, nethelper, preflight
 
 # Boucle du service : un tick (au pire netstate.NMCLI_TIMEOUT_S + IP_TIMEOUT_S, CEC en thread) puis cette attente.
 # Le test de budget vérifie que (tick + attente) × 2 ≤ WatchdogSec de opentv.service.
@@ -396,6 +396,18 @@ def cmd_cec_bootstrap(a):
     return _line(dict(res, event="cec_bootstrap"), code)
 
 
+def cmd_cec_return_monitor(a):
+    """(opentv-cec-return.service, compte opentv) reprise de la télécommande après une application native Samsung :
+    moniteur CEC passif ; annonce sûre une fois, seulement après la séquence exacte émise par la TV vers nous."""
+    if os.geteuid() == 0:   # root n'écrit jamais dans /run/opentv-cec et n'a pas le bac à sable de l'unité
+        return _line({"event": "cec_return", "ok": False, "error": "run_via_systemd",
+                      "note": "sudo systemctl start opentv-cec-return.service"}, 2)
+    cfg = config.Config.load(a.env)
+    if not (cfg.cec_bootstrap and cfg.cec_return_recovery):
+        return _line({"event": "cec_return", "ok": True, "result": "disabled"})
+    return cecreturn.run(cecreturn.Monitor(a.root, state_dir=a.state_dir))
+
+
 def _uids(*users):
     import pwd
     out = {0}
@@ -729,6 +741,11 @@ def build_parser():
                          "ignore le témoin de démarrage ; TV déjà allumée seulement : <Active Source> + <Menu Status>, "
                          "jamais <Image View On> ni réveil — la TV passe sur l'entrée OpenTV")
     cb.add_argument("--release", action="store_true", help="(root) retour arrière : efface la configuration OpenTV")
+    cr = sub.add_parser("cec-return-monitor", help="(opentv-cec-return.service) reprise de la télécommande après le "
+                                                   "retour de la TV depuis une application native : moniteur passif, "
+                                                   "annonce sûre seulement après la séquence exacte de la TV")
+    cr.add_argument("--root", default="/")
+    cr.add_argument("--state-dir", default=cecboot.STATE_DIR)
     pd = sub.add_parser("player-daemon", help="(opentv-kiosk) contrôleur du lecteur « Regarder » (systemd)")
     pd.add_argument("--env", default=config.ENV_FILE)
     pk = sub.add_parser("player-keys", help="(opentv-keys) aide des touches de fermeture du lecteur (systemd)")
@@ -786,5 +803,6 @@ def main(argv):
     return {"serve": cmd_serve, "player-daemon": cmd_player_daemon, "player-keys": cmd_player_keys,
             "playback": cmd_playback, "preflight": cmd_preflight, "health": cmd_health, "net-helper": cmd_net_helper,
             "ap-guard": cmd_ap_guard, "agent": cmd_agent, "setup": cmd_setup, "cec": cmd_cec,
-            "cec-bootstrap": cmd_cec_bootstrap, "catalogue": cmd_catalogue, "manifest": cmd_manifest,
+            "cec-bootstrap": cmd_cec_bootstrap, "cec-return-monitor": cmd_cec_return_monitor,
+            "catalogue": cmd_catalogue, "manifest": cmd_manifest,
             "muse": cmd_muse, "muse-setup-helper": cmd_muse_setup_helper}[a.cmd](a)

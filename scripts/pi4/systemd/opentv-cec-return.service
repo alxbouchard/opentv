@@ -1,0 +1,60 @@
+[Unit]
+Description=OpenTV Pi - reprise HDMI-CEC apres une application native de la TV (moniteur passif ; annonce sure seulement sur la sequence exacte de la TV, jamais de reveil)
+Documentation=file:///opt/opentv/README.md
+After=systemd-udevd.service opentv-kiosk.service
+# relances bornees : au-dela, l'unite reste en echec (journal) ; la telecommande telephone et
+# `opentv-pi cec --activate` restent disponibles
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=opentv
+Group=opentv
+# video : /dev/cecN (root:video). Jamais le groupe des peripheriques de touches : aucune touche lue ni produite.
+SupplementaryGroups=video
+ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-pi cec-return-monitor
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=10
+# mode moniteur CEC du noyau (passif, n'emet rien) : exige CAP_NET_ADMIN, seule capacite, sans effet hors du reseau
+# prive de l'unite (PrivateNetwork, AF_UNIX seulement)
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+# dossier et verrou partages avec opentv-cec.service / opentv-cec-announce.service (le temoin de demarrage n'y est ni
+# lu ni ecrit par cette unite)
+RuntimeDirectory=opentv-cec
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+# dossier du jeton TMDb (root:opentv 0750, cree par tmpfiles avant toute unite) : lu seulement par les unites des
+# notes. Le DOSSIER est masque (un remplacement atomique du fichier ne peut pas le demasquer).
+InaccessiblePaths=-/etc/opentv/tmdb
+# ambiance OpenTV Canvas (scene + historique) : reservee a opentv.service (dossier toujours present : tmpfiles)
+InaccessiblePaths=-/var/lib/opentv/canvas
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+DevicePolicy=closed
+DeviceAllow=char-cec rw
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+MemoryMax=64M
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target

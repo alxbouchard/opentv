@@ -190,7 +190,8 @@ add "$REPO/scripts/nanopi/opentv_bridge.py" /opt/opentv/lib/foryou/opentv_bridge
 add "$REPO/scripts/nanopi/opentv_tmdb.py" /opt/opentv/lib/foryou/opentv_tmdb.py 644      # notes TMDb (tel quel)
 for u in opentv.service opentv-kiosk.service opentv-net-helper.service opentv-net-helper.path \
          opentv-ap-guard.service opentv-ap-guard.timer opentv-cec.service opentv-cec.timer \
-         opentv-cec-announce.service opentv-splash.service opentv-player.service opentv-player-keys.service \
+         opentv-cec-announce.service opentv-cec-return.service opentv-splash.service opentv-player.service \
+         opentv-player-keys.service \
          opentv-catalogue-refresh.service opentv-catalogue-refresh.timer opentv-catalogue-ratings.service \
          opentv-catalogue-ratings-retry.service opentv-catalogue-ratings-retry.timer \
          opentv-plymouth-deactivate.service opentv-plymouth-quit.service opentv-plymouth-failsafe.service \
@@ -982,6 +983,8 @@ if [ "$ENABLE" = 1 ]; then
   # opentv-ap-guard.timer : garde root du Wi-Fi temporaire, indépendante du service Python
   # opentv-cec.timer : déclaration Playback « OpenTV » + remappage OK + UNE annonce de source active par démarrage
   # (fenêtre bornée, TV allumée seulement ; jamais de réveil ni de réannonce). Réactivation : opentv-pi cec --activate
+  # opentv-cec-return.service : moniteur CEC passif ; rejoue cette annonce sûre une fois seulement quand la TV revient
+  # d'une application native vers la boîte (séquence exacte émise par la TV ; jamais périodique, jamais de réveil)
   # opentv-splash.service : écran OpenTV sur tty1 au démarrage (sysinit), jamais redémarré ici (Cage possède tty1) ;
   # il n'écrit rien quand Plymouth affiche déjà l'image OpenTV (repli seulement)
   # opentv-player.service + opentv-player-keys.service : contrôleur du lecteur « Regarder » et aide des touches.
@@ -1001,11 +1004,11 @@ if [ "$ENABLE" = 1 ]; then
   # ne fait rien sans job du service, et le service n'en dépose qu'après « Autoriser et connecter » confirmé sur la TV
   # (aucun pilotage accordé par l'installation). opentv-muse-setup.service n'a pas de section [Install].
   post systemctl enable opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
-    opentv-cec.timer opentv-splash.service opentv-player-keys.service opentv-player.service \
+    opentv-cec.timer opentv-cec-return.service opentv-splash.service opentv-player-keys.service opentv-player.service \
     opentv-catalogue-refresh.timer opentv-catalogue-ratings-retry.timer opentv-plymouth-failsafe.timer \
     opentv-muse-setup.path
   post systemctl restart opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
-    opentv-cec.timer opentv-player-keys.service opentv-player.service opentv-catalogue-refresh.timer \
+    opentv-cec.timer opentv-cec-return.service opentv-player-keys.service opentv-player.service opentv-catalogue-refresh.timer \
     opentv-catalogue-ratings-retry.timer opentv-muse-setup.path
 fi
 # ---------------------------------------------------------------- pont Muse : jamais activé par l'installation

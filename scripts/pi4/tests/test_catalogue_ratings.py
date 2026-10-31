@@ -735,7 +735,7 @@ class TestCredential(Base):
         with self.assertRaises(ratings.Exposed) as cm:
             self.deposit(TOKEN, runner, proc)
         self.assertEqual(cm.exception.units, ["opentv.service", "opentv-cec-announce.service",
-                                              "opentv-catalogue-refresh.service"])
+                                              "opentv-catalogue-refresh.service", "opentv-cec-return.service"])
         self.assertFalse(os.path.lexists(self.tok))                           # rien écrit
         self.assertEqual([n for n in os.listdir(self.tdir)], [])
         # unités arrêtées (MainPID 0) : démarreront avec le masque, le dossier existant déjà

@@ -11,7 +11,8 @@ from .nethelper import default_runner
 MANIFEST = "/opt/opentv/MANIFEST.sha256"
 LINE_RE = re.compile(r"([0-9a-f]{64})  (/[^\n]+)")
 UNITS_REQUIRED = ("opentv.service", "opentv-net-helper.path", "opentv-ap-guard.timer")
-UNITS_OPTIONAL = ("opentv-kiosk.service", "opentv-cec.timer", "opentv-catalogue-refresh.timer",
+UNITS_OPTIONAL = ("opentv-kiosk.service", "opentv-cec.timer", "opentv-cec-return.service",
+                  "opentv-catalogue-refresh.timer",
                   "opentv-catalogue-ratings.service", "opentv-catalogue-ratings-retry.timer",
                   "opentv-catalogue-ratings-retry.service")
 
