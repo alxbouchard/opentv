@@ -16,8 +16,9 @@ SupplementaryGroups=video
 ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-pi cec-return-monitor
 Restart=on-failure
 RestartSec=30
-# 78 = echec veridique (refus du mode moniteur par cec-ctl, cec-ctl absent, adaptateur illisible, echecs repetes avant
-# l'evenement initial attendu) : jamais relance, l'unite reste `failed` et `opentv-pi health` avertit
+# 78 = echec veridique (refus du mode moniteur par cec-ctl, cec-ctl absent, adaptateur illisible, echecs generiques
+# repetes avant l'evenement initial attendu, meme discordance d'etat persistante ; un changement d'etat attendu de
+# l'adaptateur n'y compte jamais) : jamais relance, l'unite reste `failed` et `opentv-pi health` avertit
 # `cec_return_failed` (jamais `active` sans surveiller). Une installation fait `reset-failed` avant de la redemarrer.
 RestartPreventExitStatus=78
 TimeoutStopSec=10

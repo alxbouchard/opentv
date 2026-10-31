@@ -333,8 +333,9 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   la boîte, puis `SET_STREAM_PATH` vers elle), rejoue une fois `cecboot.announce` (TV allumée, `<Active Source>` +
   `<Menu Status>`, jamais de réveil) sous le verrou CEC existant ; témoin de démarrage et `cec --activate` inchangés.
   Prêt seulement après l'événement initial attendu (`cec_return_ready`) ; refus du mode moniteur (stderr, même sortie
-  0), cec-ctl absent ou échecs répétés avant « prêt » ⇒ sortie 78 non relancée (unité `failed`, health
-  `cec_return_failed`). `announced` = transmission, pas preuve de reprise des touches. Anti-doublon 5 s (report),
+  0), cec-ctl absent ou échecs génériques répétés avant « prêt » ⇒ sortie 78 non relancée (unité `failed`, health
+  `cec_return_failed`). Changement d'état attendu (TV, HDMI, réclamation ; aussi événement initial discordant avant
+  « prêt ») : jamais compté vers 78, redécouverte 2 s puis 5 s jusqu'au prochain « prêt » (jamais 30 s aveugles). `announced` = transmission, pas preuve de reprise des touches. Anti-doublon 5 s (report),
   30 annonces/h ; busy/refus/échec ne consomment rien.
   Contrat et cas refusés : `scripts/pi4/CEC_COMPATIBILITY.md`, tests `scripts/pi4/tests/test_cec_return.py`.
   Vérifié hors matériel seulement.

@@ -696,7 +696,9 @@ class TestReadiness(RBase):
                 self.assertFalse(self.ready, name)
                 self.assertNotIn("cec_return_ready", [e.get("event") for e in self.logs])
                 self.assertEqual(self.bus.transmits(), [], name)          # rien n'est armé avant « prêt »
-                self.assertIn(why, ("adapter_state_changed", "eof", "not_ready"), name)
+                self.assertIn(why, ("adapter_state_changed", "no_initial_state", "eof", "not_ready"), name)
+                if name == "not_initial":                    # même PA/masque sans événement initial : malformé
+                    self.assertEqual(why, "no_initial_state")
 
     def test_sequence_seen_before_ready_never_arms_recovery(self):
         """Trames reçues avant l'événement initial (moniteur pas encore prêt) : jamais comptées dans la séquence."""
@@ -751,7 +753,8 @@ class TestFatal(RBase):
                           ("open_failed", lambda: FakeLines(self.clock, [], error="open_failed", exit_status=1)),
                           ("exit_nonzero", lambda: FakeLines(self.clock, [], exit_status=1)),
                           ("not_ready", lambda: FakeLines(self.clock, [], end="silence")),
-                          ("adapter_state_changed", lambda: FakeLines(self.clock, at(0, state_event("2.0.0.0")))),
+                          # PA/masque attendus mais sans événement INITIAL : malformé, pas un changement d'état
+                          ("no_initial_state", lambda: FakeLines(self.clock, at(0, state_event(initial=False)))),
                           ("spawn_failed", lambda: OSError("EMFILE"))):
             with self.subTest(label):
                 self.logs.clear()
@@ -823,6 +826,149 @@ class TestFatal(RBase):
                 contextlib.redirect_stdout(io.StringIO()):
             code = cli.main(["--env", env, "cec-return-monitor", "--state-dir", self.state])
         self.assertEqual(code, 78)
+
+
+# --------------------------------------------------------------------------- changement d'état attendu : ni angle mort ni 78
+class TestAdapterChurn(RBase):
+    """Revue (étape 1) : après un changement d'état attendu de l'adaptateur (TV éteinte, HDMI, réclamation en cours),
+    une découverte vide ne doit jamais retomber sur l'attente aveugle de DISCOVERY_RETRY_S, et un événement initial
+    discordant avant « prêt » (état qui bouge) ne compte jamais vers la sortie 78. Les vrais échecs restent 78 et
+    aucune reprise n'est possible avant un NOUVEL événement initial conforme."""
+
+    def setUp(self):
+        super().setUp()
+        self.plan = {}                                  # n-ième sommeil -> changement de l'adaptateur simulé
+        self.found_at = []                              # instants de chaque découverte (vide ou non)
+
+    def sleep(self, s):
+        super().sleep(s)
+        f = self.plan.get(len(self.sleeps))
+        if f:
+            f()
+
+    def tv(self, pa):
+        return lambda: self.bus.ad["/dev/cec0"].__setitem__("pa", pa)
+
+    def track(self, mon):
+        real = mon.discover
+
+        def discover():
+            self.found_at.append(self.clock.t)
+            return real()
+        mon.discover = discover
+        mon.log = lambda e: self.logs.append(dict(e, _t=self.clock.t))
+        return mon
+
+    def events(self, name):
+        return [e for e in self.logs if e.get("event") == name]
+
+    def test_ready_state_change_then_absent_adapter_polls_short_until_ready_again(self):
+        """(1) prêt → adapter_state_changed → découverte vide plusieurs fois : sommeils courts seulement (2 s puis
+        5 s, jamais 30 s), puis reprise « prêt » et retour YouTube exact annoncé."""
+        off = at(0, state_event()) + at(1, state_event("f.f.f.f", 0x0000, initial=False))
+        absent = 40                                     # lectures vides successives, au-delà de la fenêtre rapide
+        self.plan = {1: self.tv("f.f.f.f"), 1 + absent: self.tv("1.0.0.0")}
+        mon = self.track(self.monitor([off, captured()]))
+        self.assertIsNone(mon.serve(max_cycles=absent + 2))
+        self.assertEqual(len(self.spawned), 2)          # aucun moniteur pendant l'absence
+        waits = self.sleeps[:-1]                        # dernier : fin inattendue du 2e moniteur (palier normal)
+        self.assertEqual(len(waits), absent + 1)
+        self.assertNotIn(cecreturn.DISCOVERY_RETRY_S, waits)
+        self.assertTrue(all(2 <= s <= 5 for s in waits), waits)
+        self.assertEqual(set(waits), {cecreturn.STATE_CHANGE_RETRY_S, cecreturn.REDISCOVER_SLOW_S})
+        self.assertEqual(waits, sorted(waits))          # rapide d'abord, puis basse fréquence (bornée, ≤ 5 s)
+        fast = sum(s for s in waits if s == cecreturn.STATE_CHANGE_RETRY_S)
+        self.assertGreaterEqual(fast, cecreturn.REDISCOVER_FAST_WINDOW_S - cecreturn.STATE_CHANGE_RETRY_S)
+        gaps = [b - a for a, b in zip(self.found_at[1:], self.found_at[2:])]
+        self.assertLessEqual(max(gaps), cecreturn.REDISCOVER_SLOW_S + 1, gaps)   # jamais d'angle mort de 30 s
+        # attente explicite et véridique : jamais « prêt » pendant l'absence
+        waiting = self.events("cec_return_waiting")
+        self.assertEqual([(e["reason"], e["rediscover"]) for e in waiting], [("no_adapter", True)])
+        ready = self.events("cec_return_ready")
+        self.assertEqual(len(ready), 2)
+        self.assertGreater(ready[1]["_t"], self.found_at[-1])
+        rec = self.recoveries()
+        self.assertEqual([r["result"] for r in rec], ["announced"])
+        self.assertTrue(all(t > ready[1]["_t"] for t, a in self.bus.at if "--active-source" in a))
+        self.assertEqual(wake_args(self.bus), [])
+
+    def test_pre_ready_initial_state_mismatches_never_exit_78_and_rediscover_promptly(self):
+        """(2) événements initiaux discordants répétés avant « prêt » (réclamation/HDMI qui rebondit) : jamais 78,
+        relecture rapide à chaque fois, puis prêt et reprise."""
+        churn = [("f.f.f.f", 0x0000), ("1.0.0.0", 0x0000), ("2.0.0.0", 0x0010), ("1.0.0.0", 0x0100)] * 2
+        self.assertGreater(len(churn), cecreturn.PRE_READY_FAILURES_MAX)
+        scripts = [at(0, state_event(pa, m)) + at(30, power_poll()) for pa, m in churn] + [captured()]
+        mon = self.track(self.monitor(scripts))
+        self.assertIsNone(mon.serve(max_cycles=len(scripts)))
+        self.assertEqual(len(self.spawned), len(scripts))
+        self.assertEqual(self.events("cec_return_failed"), [])
+        self.assertEqual(self.sleeps[:-1], [cecreturn.STATE_CHANGE_RETRY_S] * len(churn))
+        ends = [(e["reason"], e["ready"]) for e in self.events("cec_return_watch_end")]
+        self.assertEqual(ends[:len(churn)], [("adapter_state_changed", False)] * len(churn))
+        self.assertEqual(len(self.events("cec_return_ready")), 1)
+        self.assertEqual([r["result"] for r in self.recoveries()], ["announced"])
+
+    def test_pre_ready_mismatch_then_absent_adapter_keeps_short_polling(self):
+        """Discordance avant « prêt » puis adaptateur absent (HDMI débranché) : toujours ≤ 5 s, jamais 30 s ni 78."""
+        self.plan = {1: self.tv("f.f.f.f"), 6: self.tv("1.0.0.0")}
+        mon = self.track(self.monitor([at(0, state_event("1.0.0.0", 0x0000)), captured()]))
+        self.assertIsNone(mon.serve(max_cycles=7))
+        self.assertEqual(self.sleeps[:-1], [cecreturn.STATE_CHANGE_RETRY_S] * 6)
+        self.assertEqual(self.events("cec_return_failed"), [])
+        self.assertEqual([r["result"] for r in self.recoveries()], ["announced"])
+
+    def test_true_failures_still_exit_78_despite_churn(self):
+        """(3) refus du moniteur, cec-ctl absent, fins génériques répétées avant « prêt » : toujours 78 ; une
+        discordance intercalée ne blanchit pas les échecs génériques ; discordance identique persistante = incohérence."""
+        change = at(0, state_event()) + at(1, state_event("f.f.f.f", 0x0000, initial=False))
+        mismatch = at(0, state_event("1.0.0.0", 0x0000))
+        for label, scripts, reason in (
+                ("refusal", [change, mismatch, FakeLines(self.clock, [], error="monitor_refused")], "monitor_refused"),
+                ("missing", [change, mismatch, FileNotFoundError("cec-ctl")], "cec_ctl_missing"),
+                ("eof_x3", [[], [], []], "eof"),
+                ("eof_interleaved", [[], mismatch, [], mismatch, []], "eof")):
+            with self.subTest(label):
+                self.logs.clear()
+                self.spawned.clear()
+                self.assertEqual(self.monitor(scripts).serve(max_cycles=50), cecreturn.EXIT_FATAL)
+                self.assertEqual(len(self.spawned), len(scripts))
+                self.assertEqual(self.events("cec_return_failed")[-1]["reason"], reason)
+                self.assertEqual(self.bus.transmits(), [])
+        # même discordance, même adaptateur lu, encore et encore : jamais un état qui bouge -> échec véridique borné
+        self.logs.clear()
+        self.spawned.clear()
+        self.sleeps.clear()
+        self.assertGreater(cecreturn.MISMATCH_STUCK_MAX, cecreturn.PRE_READY_FAILURES_MAX)
+        stuck = [at(0, state_event("2.0.0.0")) for _ in range(50)]
+        self.assertEqual(self.monitor(stuck).serve(max_cycles=200), cecreturn.EXIT_FATAL)
+        self.assertEqual(len(self.spawned), cecreturn.MISMATCH_STUCK_MAX)
+        self.assertEqual(self.sleeps, [cecreturn.STATE_CHANGE_RETRY_S] * (cecreturn.MISMATCH_STUCK_MAX - 1))
+        self.assertEqual(self.events("cec_return_failed")[-1]["reason"], "adapter_state_inconsistent")
+
+    def test_no_recovery_before_a_new_matching_ready_event(self):
+        """(4) retour détecté puis changement d'état pendant le calme, séquence complète vue avant l'événement initial
+        d'un nouveau moniteur, fin de séquence avant « prêt » : rien n'est émis. Seul un retour exact APRÈS le nouvel
+        événement initial conforme est annoncé (jamais une séquence vue avant lui, même suivie du calme exigé)."""
+        m1 = at(0, state_event()) + at(5, active_source()) + at(60, routing_change()) + at(0.05, stream_path()) + \
+            at(0.5, state_event("f.f.f.f", 0x0000, initial=False))
+        m2 = at(0, active_source()) + at(1, routing_change()) + at(0.05, stream_path()) + \
+            at(0.1, state_event("1.0.0.0", 0x0000))
+        m3 = at(0, active_source()) + at(1, routing_change()) + at(0.05, stream_path()) + at(0.1, state_event()) + \
+            at(5, power_poll()) + at(5, power_poll())                      # calme bien au-delà de SETTLE_S
+        self.assertIsNone(self.track(self.monitor([m1, m2, m3])).serve(max_cycles=3))
+        self.assertEqual(self.bus.transmits(), [])
+        self.assertEqual(self.recoveries(), [])
+        self.assertEqual(len(self.events("cec_return_ready")), 2)          # m1 et m3 seulement
+        # même début, puis un retour exact complet après le nouvel événement initial conforme : une seule annonce
+        self.logs.clear()
+        self.spawned.clear()
+        m4 = m3 + at(5, active_source()) + at(30, routing_change()) + at(0.05, stream_path()) + at(10, power_poll())
+        self.assertIsNone(self.track(self.monitor([m1, m2, m4])).serve(max_cycles=3))
+        ready = self.events("cec_return_ready")
+        self.assertEqual(len(ready), 2)
+        self.assertEqual([r["result"] for r in self.recoveries()], ["announced"])
+        self.assertTrue(all(t > ready[-1]["_t"] for t, a in self.bus.at if "--active-source" in a))
+        self.assertEqual(wake_args(self.bus), [])
 
 
 class TestPopenStderr(unittest.TestCase):
@@ -1068,6 +1214,10 @@ class TestReleaseDocs(unittest.TestCase):
                          "cec_return_failed", "\"result\":\"announced\"", "transmission"):
                 self.assertTrue(need in text, (name, need))
             self.assertNotIn("\"recovered\"", text)
+            # redécouverte bornée après un changement d'état attendu (plus de relecture unique de 2 s puis 30 s)
+            for need in ("\"rediscover\":true", "adapter_state_inconsistent", "30 s"):
+                self.assertTrue(need in text, (name, need))
+            self.assertNotIn("relecture en 2 s ;", text)
         with open(os.path.join(PI4, "README.md"), encoding="utf-8") as f:
             readme = f.read()
         self.assertIn("0.7.3", readme)

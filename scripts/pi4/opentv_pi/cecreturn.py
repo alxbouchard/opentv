@@ -35,10 +35,19 @@ Prêt et échec véridiques : un moniteur n'est « prêt » qu'après l'événem
 noyau avec l'adresse physique et le masque attendus (journal `cec_return_ready`, une fois par moniteur) ; rien n'est
 armé avant. La sortie d'erreur de cec-ctl est lue (bornée, jamais journalisée telle quelle) et classée en codes
 stables (STDERR_CODES_ALL). Refus du mode moniteur (cec-ctl l'écrit sur stderr puis sort avec 0), cec-ctl absent,
-adaptateur illisible ou PRE_READY_FAILURES_MAX échecs consécutifs avant « prêt » ⇒ sortie EXIT_FATAL (78,
-RestartPreventExitStatus) : l'unité passe `failed` au lieu de rester `active` sans surveiller. Un changement d'état
-attendu de l'adaptateur (TV éteinte, HDMI) relit vite (STATE_CHANGE_RETRY_S) ; seul un arrêt inattendu après « prêt »
-suit le palier RESTART_BACKOFF_S.
+adaptateur illisible ou PRE_READY_FAILURES_MAX échecs génériques consécutifs avant « prêt » (fin, sortie non nulle,
+silence, état attendu sans événement INITIAL) ⇒ sortie EXIT_FATAL (78, RestartPreventExitStatus) : l'unité passe
+`failed` au lieu de rester `active` sans surveiller.
+
+Changement d'état attendu de l'adaptateur (TV éteinte/rallumée, HDMI rebranché, réclamation en cours) — après
+« prêt », ou événement initial dont l'adresse physique/le masque diffèrent de l'adaptateur lu avant « prêt » (l'état
+bouge) : jamais compté vers la sortie 78 ; la découverte est relue toutes les STATE_CHANGE_RETRY_S (2 s) pendant
+REDISCOVER_FAST_WINDOW_S, puis toutes les REDISCOVER_SLOW_S (5 s), tant qu'aucun moniteur n'est de nouveau « prêt »
+(jamais l'attente aveugle DISCOVERY_RETRY_S, réservée au démarrage du service). Adaptateur absent : le service reste
+actif en attente explicite (`cec_return_waiting`, `rediscover: true`), sans jamais se dire « prêt » ni armer quoi que
+ce soit. Une discordance ne blanchit pas les échecs génériques (compteur ni incrémenté ni remis à zéro) ; la MÊME
+discordance sur le même adaptateur lu MISMATCH_STUCK_MAX fois de suite n'est plus un état qui bouge ⇒ 78
+(`adapter_state_inconsistent`). Seul un arrêt inattendu après « prêt » suit le palier RESTART_BACKOFF_S.
 """
 import collections
 import os
@@ -84,8 +93,11 @@ IDLE_POLL_S = 30.0
 RESTART_BACKOFF_S = (5, 10, 30, 60, 120, 300)   # arrêts INATTENDUS après « prêt » seulement
 HEALTHY_RUN_S = 600.0               # un moniteur resté vivant aussi longtemps remet le délai de relance au minimum
 STATE_CHANGE_RETRY_S = 2.0          # changement d'état attendu de l'adaptateur : relecture rapide, sans palier
+REDISCOVER_FAST_WINDOW_S = 60.0     # … toutes les 2 s pendant cette fenêtre après le changement d'état
+REDISCOVER_SLOW_S = 5.0             # … puis toutes les 5 s jusqu'au prochain « prêt » (attente explicite, jamais 30 s)
+MISMATCH_STUCK_MAX = 10             # même discordance, même adaptateur lu, à la suite : incohérence (pas un état qui bouge)
 READY_TIMEOUT_S = 10.0              # événement initial attendu au plus tard ainsi après le lancement
-PRE_READY_FAILURES_MAX = 3          # échecs consécutifs avant « prêt » (lancement, refus, fin, adaptateur illisible)
+PRE_READY_FAILURES_MAX = 3          # échecs génériques consécutifs avant « prêt » (lancement, refus, fin, illisible)
 PRE_READY_RETRY_S = 5.0
 EXIT_FATAL = 78                     # EX_CONFIG ; opentv-cec-return.service : RestartPreventExitStatus=78
 FINISH_WAIT_S = 2.0                 # fin de cec-ctl : attente bornée du code de sortie et de stderr
@@ -380,6 +392,8 @@ class Monitor:
         self.announced = collections.deque()    # annonces transmises (quota MAX_PER_HOUR)
         self.attempts = collections.deque()     # toutes tentatives (borne MAX_ATTEMPTS_PER_HOUR)
         self._why = None
+        self._churn = False                     # relecture après un changement d'état attendu (journal véridique)
+        self.last_state = None                  # (adresse physique, masque) discordants vus par le dernier moniteur
 
     def discover(self):
         """Premier adaptateur vc4 branché (même choix que l'amorçage) s'il est déjà Playback « OpenTV » avec son
@@ -411,7 +425,7 @@ class Monitor:
         except cecboot.BudgetExceeded:
             why = "budget_exceeded"
         if why != self._why:
-            self.log({"event": "cec_return_waiting", "reason": why})
+            self.log({"event": "cec_return_waiting", "reason": why, "rediscover": self._churn})
         self._why = why
         return None
 
@@ -476,6 +490,7 @@ class Monitor:
         except (OSError, ValueError):
             return "spawn_failed", False
         ready = False
+        self.last_state = None
         try:
             det, parser = Detector(pa, mask), Parser()
             ready_by = self.mono() + READY_TIMEOUT_S
@@ -501,8 +516,11 @@ class Monitor:
                         if item[1:] == (pa, mask, True) and not ready:
                             ready = True
                             self.log({"event": "cec_return_ready", "device": dev, "physical_address": pa})
-                        elif not ready or item[1:3] != (pa, mask):
+                        elif item[1:3] != (pa, mask):          # état réel différent : changement attendu (TV, HDMI…)
+                            self.last_state = item[1:3]
                             return "adapter_state_changed", ready
+                        elif not ready:                         # même état sans événement INITIAL : sortie malformée
+                            return "no_initial_state", False
                     elif not ready:
                         continue                            # avant « prêt » : rien n'arme la détection
                     elif item[0] == "frame":
@@ -518,20 +536,36 @@ class Monitor:
         self.log(dict({"event": "cec_return_failed", "reason": why, "exit": EXIT_FATAL}, **extra))
         return EXIT_FATAL
 
+    def _rediscover_delay(self, since):
+        """Après un changement d'état attendu : 2 s pendant REDISCOVER_FAST_WINDOW_S, puis 5 s, jusqu'au « prêt »."""
+        return STATE_CHANGE_RETRY_S if self.mono() - since < REDISCOVER_FAST_WINDOW_S else REDISCOVER_SLOW_S
+
     def serve(self, max_cycles=None):
-        """Boucle du service -> None (max_cycles atteint, tests) ou EXIT_FATAL (échec véridique, unité failed)."""
+        """Boucle du service -> None (max_cycles atteint, tests) ou EXIT_FATAL (échec véridique, unité failed).
+
+        `churn` (instant du dernier changement d'état attendu, None sinon) : tant qu'aucun moniteur n'est de nouveau
+        « prêt », toute attente est courte (≤ REDISCOVER_SLOW_S) — jamais l'attente aveugle DISCOVERY_RETRY_S. Une
+        discordance d'état avant « prêt » (événement initial ≠ adaptateur lu : l'état bouge) relit vite et ne compte
+        PAS dans `pre_ready` ; elle ne remet pas non plus ce compteur à zéro (une discordance intercalée ne blanchit
+        pas des échecs génériques). La même discordance sur le même adaptateur lu MISMATCH_STUCK_MAX fois de suite
+        n'est plus un état qui bouge : échec véridique `adapter_state_inconsistent`."""
         cycles, backoff, pre_ready = 0, 0, 0
+        churn, stuck, last_mismatch = None, 0, None
         while max_cycles is None or cycles < max_cycles:
             cycles += 1
+            self._churn = churn is not None
             found = self.discover()
             if found is None:
+                stuck, last_mismatch = 0, None
                 if self._why in ("read_failed", "budget_exceeded"):
                     pre_ready += 1
                     if pre_ready >= PRE_READY_FAILURES_MAX:
                         return self._fatal("adapter_unreadable", failures=pre_ready)
                     self.sleep(PRE_READY_RETRY_S)
+                elif churn is not None:
+                    self.sleep(self._rediscover_delay(churn))   # TV éteinte / HDMI : attente explicite, courte
                 else:
-                    self.sleep(DISCOVERY_RETRY_S)       # attente légitime : TV éteinte, adaptateur pas encore déclaré
+                    self.sleep(DISCOVERY_RETRY_S)       # attente légitime : adaptateur pas encore déclaré au démarrage
                 continue
             dev, pa, mask = found
             self.log({"event": "cec_return_watch", "device": dev, "physical_address": pa})
@@ -539,21 +573,32 @@ class Monitor:
             why, ready = self.watch(dev, pa, mask)
             if why in FATAL_NOW:
                 return self._fatal(why)
-            if not ready:
+            if why == "adapter_state_changed":         # attendu (TV éteinte, HDMI, réclamation) : relecture rapide
+                if ready or churn is None:
+                    churn = self.mono()
+                if ready:
+                    pre_ready, backoff, stuck, last_mismatch = 0, 0, 0, None
+                else:
+                    seen = (found, self.last_state)
+                    stuck = stuck + 1 if seen == last_mismatch else 1
+                    last_mismatch = seen
+                    if stuck >= MISMATCH_STUCK_MAX:
+                        self.log({"event": "cec_return_watch_end", "reason": why, "ready": False})
+                        return self._fatal("adapter_state_inconsistent", failures=stuck)
+                delay = self._rediscover_delay(churn)
+            elif not ready:
+                stuck, last_mismatch = 0, None
                 pre_ready += 1
                 if pre_ready >= PRE_READY_FAILURES_MAX:
                     self.log({"event": "cec_return_watch_end", "reason": why, "ready": False})
                     return self._fatal(why, failures=pre_ready)
                 delay = PRE_READY_RETRY_S
             else:
-                pre_ready = 0
-                if why == "adapter_state_changed":     # attendu (TV éteinte, HDMI) : relecture rapide, sans palier
-                    backoff, delay = 0, STATE_CHANGE_RETRY_S
-                else:
-                    if self.mono() - t0 >= HEALTHY_RUN_S:
-                        backoff = 0
-                    delay = RESTART_BACKOFF_S[min(backoff, len(RESTART_BACKOFF_S) - 1)]
-                    backoff += 1
+                churn, stuck, last_mismatch, pre_ready = None, 0, None, 0
+                if self.mono() - t0 >= HEALTHY_RUN_S:
+                    backoff = 0
+                delay = RESTART_BACKOFF_S[min(backoff, len(RESTART_BACKOFF_S) - 1)]
+                backoff += 1
             self.log({"event": "cec_return_watch_end", "reason": why, "ready": ready, "retry_in_s": delay})
             self.sleep(delay)
         return None

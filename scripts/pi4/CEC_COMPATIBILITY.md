@@ -80,8 +80,14 @@ démarrage n'est ni lu ni écrit. Opt-out : `OPENTV_CEC_RETURN_RECOVERY=0`.
 TV renvoie les touches : la reprise reste un gate terrain (six touches visibles). Le moniteur n'est prêt
 (`cec_return_ready`) qu'après l'événement initial du noyau portant l'adresse physique et le masque attendus ; rien
 n'est armé avant. Refus du mode moniteur (stderr de cec-ctl, même avec sortie 0), cec-ctl absent, adaptateur illisible
-ou 3 échecs consécutifs avant « prêt » ⇒ `cec_return_failed`, sortie 78 non relancée : unité `failed`,
+ou 3 échecs génériques consécutifs avant « prêt » ⇒ `cec_return_failed`, sortie 78 non relancée : unité `failed`,
 `opentv-pi health` avertit `cec_return_failed`. Le texte de cec-ctl n'est jamais journalisé (codes stables seulement).
+Changement d'état attendu de l'adaptateur (TV éteinte/rallumée, HDMI, réclamation en cours ; aussi un événement
+initial discordant avant « prêt ») : jamais compté vers la sortie 78, découverte relue toutes les 2 s pendant 60 s
+puis toutes les 5 s jusqu'au prochain `cec_return_ready` — jamais d'angle mort de 30 s ; adaptateur absent ⇒ attente
+explicite (`cec_return_waiting`, `"rediscover":true`), jamais « prêt », rien d'armé. La même discordance 10 fois de
+suite sur le même adaptateur lu ⇒ `adapter_state_inconsistent`, sortie 78. Aucune reprise avant un **nouvel**
+événement initial conforme : une séquence vue avant lui, ou en cours de calme lors du changement d'état, n'émet rien.
 
 ### Lacunes connues
 
