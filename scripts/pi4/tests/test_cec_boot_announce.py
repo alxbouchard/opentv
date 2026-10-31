@@ -26,7 +26,7 @@ import unittest
 from unittest import mock
 
 from tests._common import PI4
-from tests.test_remote import BOOT_A, BOOT_B, Base, FakeBus, make_root, tmpdir, unit
+from tests.test_remote import ACTIVE_SOURCE_TX, BOOT_A, BOOT_B, Base, FakeBus, make_root, tmpdir, unit
 from opentv_pi import cecboot, cli, config, nethelper
 
 EMITS = ("--image-view-on", "--active-source", "--menu-status", "--give-device-power-status")
@@ -179,6 +179,36 @@ class TestMarkerAfterSuccessOnly(BootBase):
         res = self.tick(r, bus)
         self.assertEqual((res["ok"], res["announce"]["result"]), (True, "boot_done"))
         self.assertEqual(self.marker(), {"v": 1, "boot_id": BOOT_A, "done": {"/dev/cec0": "1.0.0.0"}})
+
+    def test_rc0_tx_error_or_nack_is_not_an_announcement_boot_or_manual(self):
+        """cec-ctl 1.22.1 sort avec 0 même si <Active Source> n'est pas transmis : la sortie exacte (fusion
+        stdout/stderr) décide. Statut Tx d'erreur/NACK ou texte parasite ⇒ ni témoin, ni succès, ni Menu Status."""
+        ok = ACTIVE_SOURCE_TX.format(pa="1.0.0.0")
+        for label, out in (("tx_error", ok + "\tTx, Error (1), Max Retries\n"),
+                           ("nack", ok + "\tTx, Not Acknowledged (1), Max Retries\n"),
+                           ("stderr", "CEC_TRANSMIT returned -1 (No such device)\n"), ("empty", "")):
+            with self.subTest(label):
+                self.state = tmpdir(self, "otvcecst")
+                r = make_root(self)
+                bus = FakeBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+                bus.tx_out["--active-source"] = out
+                res = self.tick(r, bus)                                         # annonce unique du démarrage
+                self.assertEqual((res["ok"], res["result"]), (False, "announce_failed"), label)
+                self.assertEqual(res["announce"]["result"], "failed")
+                self.assertNotEqual(res["announce"]["tx"], "acked")
+                self.assertNotIn("--menu-status", bus.opts())
+                self.assertIsNone(self.marker())
+                man = self.boot(r, bus, force_announce=True)                    # `opentv-pi cec --activate`
+                self.assertEqual((man["ok"], man["result"]), (False, "announce_failed"), label)
+                self.assertIsNone(self.marker())
+                self.assertNotIn("Tx,", json.dumps([res, man]))                 # codes stables, jamais le texte brut
+                del bus.tx_out["--active-source"]                               # sortie exacte acquittée : succès
+                res = self.tick(r, bus)
+                self.assertEqual((res["ok"], res["announce"]["result"]), (True, "boot_done"))
+                self.assertEqual(res["announce"]["steps"], {"active_source": True, "menu_status": True})
+                self.assertEqual(self.marker()["done"], {"/dev/cec0": "1.0.0.0"})
+                man = self.boot(r, bus, force_announce=True)
+                self.assertEqual((man["ok"], man["announce"]["result"]), (True, "done"))
 
     def test_budget_exceeded_mid_announce_writes_no_marker(self):
         r = make_root(self)

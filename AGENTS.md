@@ -342,8 +342,12 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
 - **Maintien neutre POLL après la reprise Samsung (0.7.4)** : `announced` rétablit, mais la Samsung terrain cesse de
   transmettre les touches après quelques secondes/minutes ; un POLL neutre vers la TV toutes les 15 s les maintient
   (canari terrain confirmé par Alex). Dans `cecreturn.py` (même service, aucun mode suiveur) : armé en mémoire
-  seulement après une reprise `announced` de ce moniteur ; argv figé `cec-ctl -d <adaptateur> -s -t 0 -P`, sous le
-  verrou CEC, après relecture de l'adaptateur (même PA/masque) ; arrêté par toute `ACTIVE_SOURCE` reçue, routage ou
+  seulement après une reprise `announced` de ce moniteur — sortie exacte d'un `ACTIVE_SOURCE` transmis
+  (`cecboot.tx_acked_status`, stdout+stderr fusionnés ; cec-ctl sort avec 0 même sur `Tx, Error`/NACK) ; argv figé
+  `cec-ctl -d <adaptateur> -s -t 0 -P`, sous le verrou CEC, après relecture de l'adaptateur (vc4, Playback
+  « OpenTV », même PA/masque) ; échéance depuis la fin du POLL émis (jamais deux POLL à moins de 15 s, contention
+  du verrou comprise), lignes moniteur déjà reçues lues avant chaque POLL ; pendant Samsung Home le POLL continue
+  (aucune annonce/reprise) ; arrêté par toute `ACTIVE_SOURCE` reçue, routage ou
   chemin vers une autre adresse, `STANDBY`, perte/trame invalide, état de l'adaptateur, fin du moniteur, POLL non
   acquitté, verrou occupé. Jamais d'annonce, de réveil ni de question d'alimentation périodiques. Journal
   `cec_return_keepalive` (armed/active horaire/disarmed). POLL acquitté = transport seulement : les six touches

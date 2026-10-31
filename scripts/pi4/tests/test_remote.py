@@ -72,6 +72,21 @@ GIVE_DEVICE_POWER_STATUS (0x8f)
 \tpwr-state: {state} (0x00)
 \tSequence: 49 Tx Timestamp: 7752.116s Rx Timestamp: 7752.204s
 """
+# émissions acquittées, sortie exacte de cec-ctl 1.22.1 (`-s`, sans -v) : en-tête, message décodé, ligne Sequence ;
+# un statut (`\tTx, Not Acknowledged (1), Max Retries`, `\tTx, Error (1), Max Retries`…) n'est imprimé que s'il n'est
+# pas OK, et le code de sortie reste 0 dans tous les cas.
+ACTIVE_SOURCE_TX = """
+Transmit from Playback Device 1 to all (4 to 15):
+ACTIVE_SOURCE (0x82):
+\tphys-addr: {pa}
+\tSequence: 51 Tx Timestamp: 7752.318s
+"""
+MENU_STATUS_TX = """
+Transmit from Playback Device 1 to TV (4 to 0):
+MENU_STATUS (0x8e):
+\tmenu-state: activated (0x00)
+\tSequence: 52 Tx Timestamp: 7752.371s
+"""
 BOOT_A = "11111111-2222-3333-4444-555555555555"
 BOOT_B = "99999999-2222-3333-4444-555555555555"
 TRANSMITS = ("--playback", "--image-view-on", "--active-source", "--menu-status", "--give-device-power-status",
@@ -92,6 +107,7 @@ class FakeBus:
     def __init__(self, clock, adapters, power="on", fail=()):
         self.clock, self.ad, self.power, self.fail = clock, adapters, power, set(fail)
         self.calls = []
+        self.tx_out = {}          # option -> sortie complète imposée (code 0), p. ex. statut Tx d'erreur
 
     def render(self, dev):
         a = self.ad[dev]
@@ -121,6 +137,13 @@ class FakeBus:
             self.ad[dev]["state"] = "empty"
         elif opt == "--give-device-power-status":
             return (0, POWER_TMPL.format(state=self.power)) if self.power != "silent" else (0, "Timed out\n")
+        if opt in self.tx_out:
+            out = self.tx_out[opt]
+            return 0, (out(argv) if callable(out) else out)
+        if opt == "--active-source":
+            return 0, ACTIVE_SOURCE_TX.format(pa=argv[-1].split("=", 1)[1])
+        if opt == "--menu-status":
+            return 0, MENU_STATUS_TX
         return 0, ""
 
     def transmits(self):

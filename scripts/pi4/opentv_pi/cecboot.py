@@ -83,6 +83,18 @@ PWR_RE = re.compile(r"pwr-state:\s*(on|standby|to-on|to-standby)\b")
 
 # -- annonce : seuls messages émis, dans cet ordre, une fois la TV vue allumée (jamais de réveil)
 ANNOUNCE_OPTS = ("--active-source", "--menu-status")
+# -- preuve de transmission : cec-ctl (1.22.1) sort avec 0 même quand le message n'est PAS transmis (NACK, erreur,
+#    arbitrage perdu…) ; seule la sortie exacte fusionnée stdout+stderr (default_runner) fait foi. Format sans -v :
+#    « Transmit from <nom> to <nom> (<LA> to <dest>): », le message décodé (opcode puis arguments indentés), puis
+#    « \tSequence: N Tx Timestamp: T.mmms » — et RIEN d'autre : un statut `\tTx, …` n'est imprimé que s'il n'est pas OK.
+TV_LA = 0
+BROADCAST = 15
+TX_OUT_MAX = 1024
+TX_HEAD_RE = re.compile(r"Transmit from [A-Za-z0-9 ]{1,40} to (TV|all) \(([0-9]{1,2}) to ([0-9]{1,2})\):")
+TX_SEQ_RE = re.compile(r"\tSequence: [0-9]{1,10} Tx Timestamp: [0-9]{1,12}\.[0-9]{3}s")
+TX_DEST_NAME = {TV_LA: "TV", BROADCAST: "all"}
+TX_CODES = ("acked", "nack", "tx_error", "unverified", "foreign_la", "exit_nonzero", "timeout")
+MENU_STATUS_BODY = ("MENU_STATUS (0x8e):", "\tmenu-state: activated (0x00)")
 # options cec-ctl qui réveillent/allument/éteignent la TV ou simulent une touche : jamais émises par OpenTV, sur aucun
 # chemin (démarrage, réactivation explicite, retour arrière). _Run refuse l'argv avant de lancer quoi que ce soit.
 NEVER_EMIT = ("--image-view-on", "--text-view-on", "--standby", "--user-control-pressed",
@@ -360,22 +372,65 @@ def power_state(run, dev):
     return m.group(1) if m else "unknown"
 
 
-def announce(run, dev, pa):
+def active_source_body(pa):
+    """Lignes décodées exactes de notre <Active Source> (adresse physique lue sur l'adaptateur, minuscules)."""
+    return ("ACTIVE_SOURCE (0x82):", "\tphys-addr: " + pa)
+
+
+def tx_acked(out, body, dest):
+    """Sortie de `cec-ctl -s … <message>` -> adresse logique émettrice (1..14) si c'est EXACTEMENT un message transmis
+    sans statut d'erreur : en-tête vers `dest` (0 = TV, 15 = diffusion), `body` à l'identique, ligne Sequence, rien
+    d'autre (lignes vides ignorées). None sinon (statut Tx, texte stderr fusionné, doublon, sortie trop longue…)."""
+    if not isinstance(out, str) or len(out) > TX_OUT_MAX:
+        return None
+    lines = [x for x in out.split("\n") if x.strip()]
+    if len(lines) != len(body) + 2 or tuple(lines[1:-1]) != tuple(body) or not TX_SEQ_RE.fullmatch(lines[-1]):
+        return None
+    m = TX_HEAD_RE.fullmatch(lines[0])
+    if not m or m.group(1) != TX_DEST_NAME.get(dest) or int(m.group(3)) != dest:
+        return None
+    la = int(m.group(2))
+    return la if 0 < la < BROADCAST else None
+
+
+def tx_acked_status(rc, out, body, dest, mask=None):
+    """-> code stable (TX_CODES) ; seul « acked » vaut transmission. `mask` : l'émetteur doit être une de nos adresses
+    logiques. Le texte de cec-ctl n'est jamais rendu."""
+    if rc == 124:
+        return "timeout"
+    if rc != 0:
+        return "exit_nonzero"
+    la = tx_acked(out, body, dest)
+    if la is not None:
+        return "acked" if mask is None or (mask >> la) & 1 else "foreign_la"
+    lines = (out or "")[:TX_OUT_MAX].split("\n") if isinstance(out, str) else []
+    if any(x.startswith("\tTx, ") and "Not Acknowledged" in x for x in lines):
+        return "nack"
+    if any(x.startswith(("\tTx, ", "\tRx, ")) for x in lines):
+        return "tx_error"
+    return "unverified"
+
+
+def announce(run, dev, pa, mask=None):
     """Annonce unique du démarrage (minuterie, boot_gate ouvert) ou réactivation explicite (--force-announce, via
     `opentv-pi cec --activate`) : même séquence dans les deux cas. TV allumée ⇒ <Active Source>, <Menu Status>
     (ANNOUNCE_OPTS) ; jamais <Image View On> ni commande de réveil/alimentation : la TV est déjà allumée, et une TV
     qui passerait en veille entre la question et l'annonce ne doit pas être rallumée. Veille, transition ou état
-    inconnu ⇒ refus sans autre émission. -> (résultat, ok)."""
+    inconnu ⇒ refus sans autre émission. <Active Source> n'est réussie que si sa sortie exacte prouve la transmission
+    (tx_acked_status == « acked », depuis une adresse de `mask` si fourni) : un code 0 avec statut `Tx, Error`/NACK
+    ou texte parasite est un échec (`tx` = code stable), sans <Menu Status>. <Menu Status> reste émis après une
+    annonce réussie et n'en conditionne pas le succès (étape journalisée). -> (résultat, ok)."""
     pwr = power_state(run, dev)
     if pwr != "on":
         return {"result": "refused_tv_not_on", "tv_power": pwr}, False
     steps = {}
-    steps["active_source"] = run(["cec-ctl", "-d", dev, "-s", "--active-source", "phys-addr=" + pa],
-                                 TX_TIMEOUT_S)[0] == 0
+    rc, out = run(["cec-ctl", "-d", dev, "-s", "--active-source", "phys-addr=" + pa], TX_TIMEOUT_S)
+    tx = tx_acked_status(rc, out, active_source_body(pa), BROADCAST, mask)
+    steps["active_source"] = tx == "acked"
     if not steps["active_source"]:
-        return {"result": "failed", "tv_power": pwr, "steps": steps}, False
-    steps["menu_status"] = run(["cec-ctl", "-d", dev, "-s", "-t", "0", "--menu-status", "menu-state=activated"],
-                               TX_TIMEOUT_S)[0] == 0
+        return {"result": "failed", "tv_power": pwr, "steps": steps, "tx": tx}, False
+    rc, out = run(["cec-ctl", "-d", dev, "-s", "-t", "0", "--menu-status", "menu-state=activated"], TX_TIMEOUT_S)
+    steps["menu_status"] = tx_acked_status(rc, out, MENU_STATUS_BODY, TV_LA, mask) == "acked"
     return {"result": "done", "tv_power": pwr, "steps": steps}, True
 
 
@@ -452,7 +507,7 @@ def bootstrap(root="/", runner=default_runner, mono=time.monotonic, keymap_io=No
             res["announce"] = {"result": "registration_settling"}
             return res
         if force_announce:       # geste explicite (opentv-pi cec --activate) : ignore le témoin de démarrage
-            ann, ok = announce(run, sel, pa)
+            ann, ok = announce(run, sel, pa, info["mask"])
             res["announce"] = ann
             if not ok:
                 res.update(ok=False, result="tv_not_on" if ann["result"] == "refused_tv_not_on" else "announce_failed")
@@ -468,7 +523,7 @@ def bootstrap(root="/", runner=default_runner, mono=time.monotonic, keymap_io=No
             if refused:          # déjà annoncé ce démarrage, hors fenêtre ou état inconnu : rien n'est émis
                 res["announce"] = {"result": refused}
                 return res
-            ann, ok = announce(run, sel, pa)
+            ann, ok = announce(run, sel, pa, info["mask"])
             res["announce"] = ann
             if not ok:           # aucun témoin : nouvel essai au prochain passage, tant que la fenêtre est ouverte
                 if ann["result"] != "refused_tv_not_on":   # TV en veille/inconnue : passage normal, jamais de réveil

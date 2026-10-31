@@ -103,10 +103,16 @@ Distinction : **`announced` rétablit le transfert des touches ; le POLL neutre 
 (module `cecreturn`, même service, aucun mode suiveur) :
 
 - armé **seulement** après une reprise `announced` de ce moniteur (prêt conforme + séquence exacte), en mémoire : un
-  redémarrage du service ou du moniteur ne l'arme jamais ; `busy`, refus, échec, `adapter_changed` ou quota non plus ;
-- `POLL` vers l'adresse logique 0, 15 s après l'annonce puis toutes les 15 s exactement (jamais plus vite), sous le
-  verrou `/run/opentv-cec/lock` (attente ≤ 3 s), après relecture de l'adaptateur surveillé (le nôtre, même adresse
-  physique, même masque logique) ; argv figé `cec-ctl -d <adaptateur> -s -t 0 -P` (adaptateur découvert, jamais
+  redémarrage du service ou du moniteur ne l'arme jamais ; `busy`, refus, échec, `adapter_changed` ou quota non plus.
+  cec-ctl 1.22.1 sort avec 0 même sans transmission : `announced` (comme l'annonce de démarrage et `cec --activate`)
+  exige la sortie exacte fusionnée stdout+stderr d'un `ACTIVE_SOURCE` transmis depuis notre adresse logique ; un
+  statut `Tx, Error`/`Not Acknowledged` ou un texte parasite ⇒ `failed` (code `tx` stable), ni `MENU_STATUS`, ni
+  témoin, ni maintien ;
+- `POLL` vers l'adresse logique 0, au moins 15 s après la fin de l'annonce puis au moins 15 s après la fin de chaque
+  `POLL` réellement émis (**jamais deux POLL à moins de 15 s sur le bus**, même quand l'attente du verrou
+  `/run/opentv-cec/lock` — ≤ 3 s — retarde une sonde) ; avant chaque `POLL` dû, les lignes déjà reçues du moniteur
+  sont lues sans attendre (une `ACTIVE_SOURCE` déjà arrivée désarme avant toute émission) ; relecture de l'adaptateur
+  surveillé (le nôtre : vc4, Playback « OpenTV », même adresse physique, même masque logique) ; argv figé `cec-ctl -d <adaptateur> -s -t 0 -P` (adaptateur découvert, jamais
   `NEVER_EMIT`, annonce ni question d'alimentation) ; succès = sortie exacte d'un POLL acquitté par la TV depuis une de
   nos adresses logiques ;
 - arrêt immédiat (`"event":"cec_return_keepalive","state":"disarmed"` + raison) : toute `ACTIVE_SOURCE` reçue
@@ -115,7 +121,7 @@ Distinction : **`announced` rétablit le transfert des touches ; le POLL neutre 
   l'adaptateur, fin du moniteur, POLL non acquitté (`poll_nack`) ou en échec, verrou occupé, adaptateur/adresse
   logique changés, reprise suivante non annoncée ;
 - continue tant que notre adresse reste choisie : Samsung Home (aucune trame), touches et trafic ordinaire ne
-  l'arrêtent pas et ne déclenchent **jamais** d'annonce ; jamais d'`ACTIVE_SOURCE`, de `MENU_STATUS` ni de question
+  l'arrêtent pas et ne déclenchent **jamais** d'annonce (pendant Home, le `POLL` neutre est la seule émission) ; jamais d'`ACTIVE_SOURCE`, de `MENU_STATUS` ni de question
   d'alimentation périodiques ; une autre entrée HDMI n'est jamais reprise ; une TV éteinte n'est jamais réveillée ;
 - journal : `armed`, `active` (première sonde, puis une ligne par heure au plus), `disarmed` — jamais une ligne par
   POLL ni de donnée brute du bus. Opt-out du maintien seul : `OPENTV_CEC_RETURN_KEEPALIVE=0`.
@@ -203,7 +209,8 @@ Capture `cec-ctl -m` sur le Pi réel (LA 4 Playback « OpenTV », PA 1.0.0.0, Se
 réclamation d'adresse logique) a rétabli la télécommande, **confirmé physiquement par Alex**. Correctif 0.7.3 :
 reprise automatique décrite au « Contrat OpenTV », couverte par `tests/test_cec_return.py` (séquence capturée rejouée).
 **À valider sur le Pi** : moniteur accepté sous `CAP_NET_ADMIN` dans le bac à sable, YouTube → Retour → six touches
-sans intervention (3 fois), YouTube → autre entrée et Home Samsung sans émission, aucun réveil.
+sans intervention (3 fois), YouTube → autre entrée sans émission, Home Samsung sans annonce ni reprise (seul le `POLL` neutre 0.7.4 continue s'il
+est armé), aucun réveil.
 
 ### Verdict Samsung actuel
 

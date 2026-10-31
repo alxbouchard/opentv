@@ -15,10 +15,12 @@ Samsung Home seul, ni à un redémarrage ; jamais de touche lue, consommée ou s
 """
 import configparser
 import contextlib
+import functools
 import io
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -27,7 +29,7 @@ from unittest import mock
 
 from tests._common import PI4, ROOT
 from tests.test_install import INSTALL, UNINSTALL, sh, tree
-from tests.test_remote import BOOT_A, Base, FakeBus, make_root, tmpdir
+from tests.test_remote import ACTIVE_SOURCE_TX, BOOT_A, MENU_STATUS_TX, OURS_TMPL, Base, FakeBus, make_root, tmpdir
 from opentv_pi import VERSION, cecboot, cecreturn, cli, config, health, ratings
 
 WAKE = ("--image-view-on", "--text-view-on", "--standby", "--set-power-state", "--user-control-pressed",
@@ -148,6 +150,32 @@ def ready_first(script, pa="1.0.0.0", mask=0x0010):
 POLL_OK = "\nTransmit from Playback Device 1 to TV (4 to 0):\nPOLL\n\tSequence: 117 Tx Timestamp: 8123.456s\n"
 POLL_NACK = POLL_OK + "\tTx, Not Acknowledged (1), Max Retries\n"
 POLL_ARGV_OPTS = ["-s", "-t", "0", "-P"]
+POLL_CAP = 2000                       # > 1 h de maintien (≈ 487 sondes) : au-delà, boucle de POLL non bornée
+
+
+@contextlib.contextmanager
+def fail_fast(seconds):
+    """Garde-fou réel (SIGALRM) : un mutant ou une régression qui boucle sans avancer l'horloge simulée échoue en
+    quelques secondes au lieu de pendre la suite."""
+    def boom(*_):
+        raise AssertionError("test bloqué > %.0f s : boucle de POLL/attente non bornée ?" % seconds)
+    prev = signal.signal(signal.SIGALRM, boom)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, prev)
+
+
+def bounded(seconds=60.0):
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(self, *a, **kw):
+            with fail_fast(seconds):
+                return fn(self, *a, **kw)
+        return wrapper
+    return deco
 
 
 class RecBus(FakeBus):
@@ -158,17 +186,27 @@ class RecBus(FakeBus):
         super().__init__(*a, **kw)
         self.at = []
         self.poll_reply = (0, POLL_OK)
+        self.poll_spans = []          # (début, fin) de chaque cec-ctl POLL : l'émission sur le bus est entre les deux
 
     def render(self, dev):
-        out = super().render(dev)
-        m = self.ad[dev].get("mask")
+        a = self.ad[dev]
+        if a["state"] == "ours" and ("osd" in a or "ptype" in a):    # même PA/masque, identité différente
+            out = OURS_TMPL.format(driver=a.get("driver", "vc4_hdmi"), adapter="vc4-hdmi-" + dev[-1], pa=a["pa"],
+                                   mask="0x0010", osd=a.get("osd", "OpenTV"), ptype=a.get("ptype", "Playback"))
+        else:
+            out = super().render(dev)
+        m = a.get("mask")
         return out.replace("Logical Address Mask       : 0x0010", "Logical Address Mask       : " + m) if m else out
 
     def __call__(self, argv, timeout):
         self.at.append((self.clock.t, list(argv)))
         if "-P" in argv:
+            # fail-fast : un mutant qui sonderait sans fin échoue au lieu de pendre
+            assert len(self.poll_spans) < POLL_CAP, "POLL non borné"
             self.calls.append((list(argv), timeout))
+            t0 = self.clock.t
             self.clock.t += 0.05
+            self.poll_spans.append((t0, self.clock.t))
             if argv[2] not in self.ad or self.ad[argv[2]].get("unreadable"):
                 return 1, "open failed"
             r = self.poll_reply
@@ -1366,6 +1404,7 @@ class TestKeepalive(RBase):
             with self.subTest(bad):
                 self.assertIsNone(p(bad))
 
+    @bounded()
     def test_poll_uses_the_existing_lock_and_waits_bounded(self):
         held = [None]
 
@@ -1399,6 +1438,7 @@ class TestKeepalive(RBase):
         os.close(fd)
         self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)
 
+    @bounded()
     def test_failed_or_unacknowledged_poll_disarms_immediately(self):
         def hang(argv):
             self.clock.t += cecboot.TX_TIMEOUT_S + cecboot.KILL_GRACE_S
@@ -1428,6 +1468,7 @@ class TestKeepalive(RBase):
                 self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)            # aucune annonce de « secours »
                 self.assertEqual(wake_args(self.bus), [])
 
+    @bounded()
     def test_adapter_or_logical_address_change_fails_closed_before_polling(self):
         changes = {"pa": ("pa", "2.0.0.0"), "mask": ("mask", "0x0100"), "foreign": ("state", "foreign"),
                    "empty": ("state", "empty"), "unplugged": ("pa", "f.f.f.f"), "unreadable": ("unreadable", True)}
@@ -1448,6 +1489,7 @@ class TestKeepalive(RBase):
                 self.assertEqual(bus.opts(), ANNOUNCE_SEQ)
 
     # ----------------------------------------------------------------- arrêts : la TV ou une autre source reprend la main
+    @bounded()
     def test_every_stop_condition_disarms_and_never_reclaims(self):
         stops = {
             "native_app": (active_source("0.0.0.0"), "native_app"),
@@ -1456,6 +1498,8 @@ class TestKeepalive(RBase):
             "foreign_claims_our_pa": (active_source("1.0.0.0", src=8), "other_source"),
             "own_active_source_other_pa": (active_source("2.0.0.0", src=4, tx=True), "own_unexpected"),
             "routing_away": (routing_change("1.0.0.0", "2.0.0.0"), "routed_away"),
+            "routing_tv_root_to_other": (routing_change("0.0.0.0", "2.0.0.0"), "routed_away"),
+            "routing_other_to_other": (routing_change("2.0.0.0", "3.0.0.0"), "routed_away"),
             "routing_information_away": (frame(0x81, "ROUTING_INFORMATION", [("phys-addr", "2.0.0.0")],
                                                pa_bytes("2.0.0.0")), "routed_away"),
             "stream_path_other": (stream_path("3.0.0.0"), "stream_path_away"),
@@ -1639,10 +1683,274 @@ class TestKeepalive(RBase):
 
     def test_module_contract_text(self):
         src = module_source()
-        for need in ("KEEPALIVE_INTERVAL_S", "poll_argv", "cecboot._lock", "NEVER_EMIT"):
+        for need in ("KEEPALIVE_INTERVAL_S", "poll_argv", "cecboot._lock", "NEVER_EMIT", "cecboot.tx_acked"):
             self.assertIn(need, src)
         for forbidden in ("follower", "--wait-for-msgs"):
             self.assertNotIn(forbidden, re.sub(r"(?m)#.*$|\"\"\"[\s\S]*?\"\"\"", "", src), forbidden)
+
+
+# --------------------------------------------------------------------------- revue Stage-1 de b5ce6ca (bloquants)
+AS_OK = ACTIVE_SOURCE_TX.format(pa="1.0.0.0")
+# rc 0 dans tous les cas (cec-ctl 1.22.1) ; sortie fusionnée stdout+stderr (default_runner : stderr=STDOUT)
+AS_BAD = {
+    "tx_error": AS_OK + "\tTx, Error (1), Max Retries\n",
+    "nack": AS_OK + "\tTx, Not Acknowledged (1), Max Retries\n",
+    "arbitration_lost": AS_OK + "\tTx, Arbitration Lost (1), Max Retries\n",
+    "low_drive": AS_OK + "\tTx, Low Drive (1), Max Retries\n",
+    "aborted": AS_OK + "\tTx, Aborted\n",
+    "timeout_status": AS_OK + "\tTx, Timeout\n",
+    "stderr_merged_before": "CEC_TRANSMIT returned -1 (No such device)\n" + AS_OK,
+    "stderr_merged_after": AS_OK + "Device was disconnected\n",
+    "unconfigured": "\nAdapter is unconfigured, please configure it first.\n",
+    "empty": "",
+    "garbage_suffix": AS_OK + "garbage\n",
+    "twice": AS_OK * 2,
+    "no_sequence": AS_OK.replace("\tSequence: 51 Tx Timestamp: 7752.318s\n", ""),
+    "other_pa": ACTIVE_SOURCE_TX.format(pa="2.0.0.0"),
+    "directed_not_broadcast": AS_OK.replace("to all (4 to 15)", "to TV (4 to 0)"),
+    "foreign_la": AS_OK.replace("Playback Device 1", "Playback Device 2").replace("(4 to 15)", "(8 to 15)"),
+    "unregistered_la": AS_OK.replace("Playback Device 1", "Unregistered").replace("(4 to 15)", "(15 to 15)"),
+    "other_opcode": AS_OK.replace("ACTIVE_SOURCE (0x82):", "INACTIVE_SOURCE (0x9d):"),
+    "oversize": AS_OK + "\t" + "x" * 5000 + "\n",
+}
+
+
+class TestStage1Review(RBase):
+    """Blocages de la revue Stage-1 de b5ce6ca : cadence réelle du bus sous contention, armement seulement sur une
+    annonce réellement transmise, relecture « le nôtre » complète, routage ailleurs réaliste, file déjà lue d'abord."""
+    ka_logs = TestKeepalive.ka_logs
+    states = TestKeepalive.states
+    t_announced = TestKeepalive.t_announced
+
+    def t_active_source_end(self, bus=None):
+        return [t + 0.05 for t, a in (bus or self.bus).at if "--active-source" in a]   # FakeBus : 0,05 s par appel
+
+    # ----------------------------------------------------------------- (1) cadence : depuis la fin du POLL émis
+    @bounded()
+    def test_transient_lock_contention_never_shortens_a_bus_interval(self):
+        """Régression b5ce6ca : l'échéance suivante partait de t0 (avant l'attente du verrou) ; une contention de 2 s
+        donnait des écarts réels [17, 13, 15]. Exigé : jamais < 15 s entre deux POLL sur le bus, 1er ≥ 15 s après
+        l'annonce, contention comprise (attente du verrou, relecture et POLL lui-même)."""
+        for hits in ((1,), (2,), (1, 2, 3), (2, 4), (3,)):
+            with self.subTest(hits=hits):
+                self.logs.clear()
+                bus = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+                mon = self.monitor([FakeLines(self.clock, at(0, state_event()) + returned() + traffic(150))],
+                                   bus=bus)
+                orig, n, held = mon.poll, [0], {}
+
+                def poll(dev, pa, mask, _orig=orig, _n=n, _held=held):
+                    _n[0] += 1
+                    if _n[0] in hits:                       # minuterie / --activate tient le verrou ~2 s
+                        _held["fd"], _held["t"] = cecboot._lock(self.state), self.clock.t
+                    return _orig(dev, pa, mask)
+
+                def sleep(s, _held=held):
+                    self.sleep(s)
+                    if _held.get("fd") is not None and self.clock.t - _held["t"] >= 2.0:
+                        os.close(_held["fd"])
+                        _held["fd"] = None
+                mon.poll, mon.sleep = poll, sleep
+                try:
+                    self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
+                finally:
+                    if held.get("fd") is not None:
+                        os.close(held["fd"])
+                spans = bus.poll_spans
+                self.assertGreaterEqual(len(spans), 8)
+                # pire cas : notre ACTIVE_SOURCE émise à la fin de son cec-ctl, le POLL au début du sien
+                self.assertGreaterEqual(spans[0][0] - self.t_active_source_end(bus)[0],
+                                        cecreturn.KEEPALIVE_INTERVAL_S)
+                gaps = [b[0] - a[1] for a, b in zip(spans, spans[1:])]   # début du suivant - fin du précédent
+                self.assertTrue(all(g >= cecreturn.KEEPALIVE_INTERVAL_S - 1e-9 for g in gaps), gaps)
+                starts = [b[0] - a[0] for a, b in zip(spans, spans[1:])]
+                self.assertTrue(all(g <= cecreturn.KEEPALIVE_INTERVAL_S + 2.5 for g in starts), starts)
+                self.assertEqual(self.states(), [("armed", None), ("active", None), ("disarmed", "monitor_end")])
+                self.assertEqual(bus.opts(), ANNOUNCE_SEQ)
+
+    def test_next_due_is_scheduled_after_the_emitted_poll_returns(self):
+        mon = self.monitor()
+        ka = cecreturn.Keepalive("1.0.0.0", 0x10)
+        ka.arm(self.clock.t)
+
+        def slow_poll(dev, pa, mask):
+            self.clock.t += 2.0 + 0.05 + 0.05        # attente du verrou, relecture, cec-ctl POLL
+            return "ok"
+        mon.poll = slow_poll
+        mon._ka_poll(ka, "/dev/cec0", "1.0.0.0", 0x10)
+        self.assertEqual(ka.next_due, self.clock.t + cecreturn.KEEPALIVE_INTERVAL_S)
+
+    # ----------------------------------------------------------------- (2) armement : annonce réellement transmise
+    @bounded()
+    def test_rc0_with_tx_error_or_parasite_output_never_announced_armed_or_polled(self):
+        for label, out in sorted(AS_BAD.items()):
+            with self.subTest(label):
+                self.logs.clear()
+                bus = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+                bus.tx_out["--active-source"] = out
+                mon = self.monitor([FakeLines(self.clock, at(0, state_event()) + returned() + traffic(120))],
+                                   bus=bus)
+                self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
+                rec = self.recoveries()
+                self.assertEqual([e["result"] for e in rec], ["failed"], label)
+                self.assertEqual(rec[0]["steps"], {"active_source": False}, label)
+                self.assertIn(rec[0]["tx"], cecboot.TX_CODES, label)
+                self.assertNotEqual(rec[0]["tx"], "acked", label)
+                self.assertEqual(bus.opts(), ["--give-device-power-status", "--active-source"], label)
+                self.assertEqual(bus.polls(), [], label)                  # pas armé, aucun POLL
+                self.assertEqual(self.ka_logs(), [], label)
+                self.assertEqual(wake_args(bus), [])
+                dumped = json.dumps(self.logs)                             # jamais de texte brut de cec-ctl
+                for raw in ("Tx,", "Transmit from", "CEC_TRANSMIT", "garbage", "Sequence"):
+                    self.assertNotIn(raw, dumped, label)
+        codes = {k: cecboot.tx_acked_status(0, v, cecboot.active_source_body("1.0.0.0"), cecboot.BROADCAST, 0x10)
+                 for k, v in AS_BAD.items()}
+        self.assertEqual((codes["tx_error"], codes["nack"]), ("tx_error", "nack"))
+
+    def test_exact_acknowledged_announcement_arms_and_menu_status_kept(self):
+        bus = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+        mon = self.monitor([FakeLines(self.clock, at(0, state_event()) + returned() + traffic(40))], bus=bus)
+        self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
+        rec = self.recoveries()
+        self.assertEqual([e["result"] for e in rec], ["announced"])
+        self.assertEqual(rec[0]["steps"], {"active_source": True, "menu_status": True})
+        self.assertEqual(bus.opts(), ANNOUNCE_SEQ)                        # TV allumée, AS puis Menu Status
+        self.assertEqual(self.states()[0], ("armed", None))
+        self.assertEqual(len(bus.polls()), 2)
+        # Menu Status non acquitté : inchangé (non bloquant, véridique), l'annonce AS acquittée arme toujours
+        self.logs.clear()
+        bus2 = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+        bus2.tx_out["--menu-status"] = MENU_STATUS_TX + "\tTx, Not Acknowledged (1), Max Retries\n"
+        mon2 = self.monitor([FakeLines(self.clock, at(0, state_event()) + returned() + traffic(40))], bus=bus2)
+        mon2.watch("/dev/cec0", "1.0.0.0", 0x10)
+        rec = self.recoveries()
+        self.assertEqual((rec[0]["result"], rec[0]["steps"]), ("announced", {"active_source": True,
+                                                                              "menu_status": False}))
+        self.assertEqual(bus2.opts(), ANNOUNCE_SEQ)
+
+    def test_tx_parser_exact_real_format(self):
+        body = cecboot.active_source_body("1.0.0.0")
+        st = cecboot.tx_acked_status
+        self.assertEqual(st(0, AS_OK, body, cecboot.BROADCAST, 0x10), "acked")
+        self.assertEqual(cecboot.tx_acked(AS_OK, body, cecboot.BROADCAST), 4)
+        self.assertEqual(st(0, AS_OK, body, cecboot.BROADCAST, None), "acked")
+        self.assertEqual(st(1, AS_OK, body, cecboot.BROADCAST, 0x10), "exit_nonzero")
+        self.assertEqual(st(124, "", body, cecboot.BROADCAST, 0x10), "timeout")
+        self.assertEqual(st(0, AS_BAD["foreign_la"], body, cecboot.BROADCAST, 0x10), "foreign_la")
+        self.assertEqual(st(0, AS_BAD["foreign_la"], body, cecboot.BROADCAST, 0x100), "acked")
+        for label in ("stderr_merged_before", "garbage_suffix", "other_pa", "empty", "oversize", "twice"):
+            self.assertEqual(st(0, AS_BAD[label], body, cecboot.BROADCAST, 0x10), "unverified", label)
+        # le parseur du POLL est le même (aucune divergence de format)
+        self.assertEqual(cecreturn.poll_acked_by(POLL_OK), 4)
+        self.assertEqual(st(0, POLL_NACK, cecreturn.POLL_BODY, cecreturn.TV, 0x10), "nack")
+        self.assertEqual(st(0, MENU_STATUS_TX, cecboot.MENU_STATUS_BODY, cecreturn.TV, 0x10), "acked")
+
+    def test_recover_direct_result_is_truthful(self):
+        self.bus.tx_out["--active-source"] = AS_BAD["tx_error"]
+        res = self.monitor().recover("/dev/cec0", "1.0.0.0")
+        self.assertEqual((res["result"], res["tx"], res["steps"]), ("failed", "tx_error", {"active_source": False}))
+        self.assertNotIn("--menu-status", self.bus.opts())
+
+    # ----------------------------------------------------------------- (3) relecture : identité complète « le nôtre »
+    @bounded()
+    def test_same_pa_and_mask_but_other_identity_refuses_poll_and_disarms(self):
+        changes = {"osd_name": {"osd": "SecretBox"}, "device_type_recorder": {"ptype": "Recorder"},
+                   "device_type_tuner": {"ptype": "Tuner"}, "osd_and_type": {"osd": "Other", "ptype": "Recorder"},
+                   "driver_not_vc4": {"osd": "OpenTV", "driver": "dw_hdmi"}}
+        for label, change in sorted(changes.items()):
+            with self.subTest(label):
+                self.logs.clear()
+                bus = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+
+                def r(argv, _bus=bus, _c=change):
+                    _bus.ad["/dev/cec0"].update(_c)                    # juste après la 1re sonde
+                    return 0, POLL_OK
+                bus.poll_reply = r
+                mon = self.monitor([FakeLines(self.clock, at(0, state_event()) + returned() + traffic(120))],
+                                   bus=bus)
+                self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
+                info = cecboot.parse_info(bus.render("/dev/cec0"))
+                self.assertEqual((info["physical_address"], info["mask"]), ("1.0.0.0", 0x10), label)  # même PA+masque
+                self.assertEqual(len(bus.polls()), 1, label)          # 2e sonde refusée avant toute émission
+                self.assertEqual(self.states()[-1], ("disarmed", "adapter_changed"), label)
+                self.assertEqual(bus.opts(), ANNOUNCE_SEQ)
+
+    # ----------------------------------------------------------------- (4) routage ailleurs réaliste
+    @bounded()
+    def test_realistic_routing_change_away_disarms(self):
+        for orig, new in (("0.0.0.0", "2.0.0.0"), ("2.0.0.0", "3.0.0.0"), ("1.0.0.0", "2.0.0.0"),
+                          ("0.0.0.0", "1.1.0.0")):
+            with self.subTest((orig, new)):
+                self.logs.clear()
+                self.bus.at.clear()
+                self.bus.calls.clear()
+                self.watch(at(0, state_event()) + returned() + traffic(20) + at(1, routing_change(orig, new)) +
+                           traffic(300))
+                self.assertEqual(len(self.bus.polls()), 1)
+                self.assertEqual(self.states()[-1], ("disarmed", "routed_away"))
+                self.assertEqual(self.bus.opts(), ANNOUNCE_SEQ)              # jamais de reprise
+        ka = cecreturn.Keepalive("1.0.0.0", 0x10)
+        for orig, new, want in (("0.0.0.0", "2.0.0.0", "routed_away"), ("2.0.0.0", "3.0.0.0", "routed_away"),
+                                ("2.0.0.0", "1.0.0.0", None), ("0.0.0.0", "1.0.0.0", None)):
+            parser = cecreturn.Parser()
+            items = [i for line in routing_change(orig, new) for i in parser.feed(line)]
+            self.assertEqual([i[0] for i in items], ["frame"])
+            self.assertEqual(ka.stop_reason(items[0][1]), want, (orig, new))
+
+    # ----------------------------------------------------------------- non-bloquant strict : file déjà lue d'abord
+    @bounded()
+    def test_active_source_already_buffered_disarms_before_any_poll(self):
+        """La trame <Active Source> de la TV arrive au moment même où l'échéance du POLL expire (select() rend la main
+        sur délai, la ligne est déjà dans le tampon). Elle doit être lue et désarmer AVANT tout POLL."""
+        for frame_lines, reason in ((active_source("0.0.0.0"), "native_app"),
+                                    (active_source("3.0.0.0", src=8), "other_source"),
+                                    (routing_change("0.0.0.0", "2.0.0.0"), "routed_away"),
+                                    (frame(0x36, "STANDBY"), "standby")):
+            with self.subTest(reason):
+                self.logs.clear()
+                bus = RecBus(self.clock, {"/dev/cec0": {"pa": "1.0.0.0", "state": "ours"}})
+                src = RaceLines(self.clock, at(0, state_event()) + returned() + at(120, power_poll()),
+                                frame_lines, lambda t, _b=bus: self._due_reached(_b, t))
+                mon = self.monitor([src], bus=bus)
+                self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10), ("eof", True))
+                self.assertTrue(src.fired)
+                self.assertEqual([e["result"] for e in self.recoveries()], ["announced"])
+                self.assertEqual(bus.polls(), [], reason)                     # aucun POLL après la trame
+                self.assertEqual(self.states(), [("armed", None), ("disarmed", reason)])
+
+    def _due_reached(self, bus, t):
+        menu = [x for x, a in bus.at if "--menu-status" in a]
+        return bool(menu) and t >= menu[0] + cecreturn.KEEPALIVE_INTERVAL_S
+
+    def test_popen_lines_nonblocking_read_returns_buffered_lines_then_timeout(self):
+        code = "import sys,time;sys.stdout.write('a\\nb\\nc\\n');sys.stdout.flush();time.sleep(30)"
+        src = cecreturn.PopenLines([sys.executable, "-I", "-c", code])
+        try:
+            self.assertEqual(src.readline(10.0), ("line", "a"))
+            t0 = time.monotonic()
+            self.assertEqual(src.readline(0.0), ("line", "b"))            # déjà dans le tampon : immédiat
+            self.assertEqual(src.readline(0.0), ("line", "c"))
+            self.assertEqual(src.readline(0.0), ("timeout", None))         # rien d'autre : jamais bloquant
+            self.assertLess(time.monotonic() - t0, 1.0)
+        finally:
+            src.close()
+
+
+class RaceLines(FakeLines):
+    """select() expire exactement à l'échéance (délai > 0) au moment où une trame arrive : la trame `race` est alors
+    déjà dans le tampon (lisible sans attente), mais aucun délai positif ne la rend avant l'échéance."""
+
+    def __init__(self, clock, script, race, trigger):
+        super().__init__(clock, script)
+        self.race, self.trigger, self.fired = list(race), trigger, False
+
+    def readline(self, timeout):
+        kind, line = super().readline(timeout)
+        if kind == "timeout" and not self.fired and self.trigger(self.clock.t):
+            self.fired = True
+            self.script = [(0.0, x) for x in self.race] + self.script
+            self.due = self.clock.t
+        return kind, line
 
 
 # --------------------------------------------------------------------------- CLI, configuration
@@ -1815,6 +2123,12 @@ class TestReleaseDocs(unittest.TestCase):
             for need in ("cec_return_keepalive", "OPENTV_CEC_RETURN_KEEPALIVE", "POLL", "15 s", "-s -t 0 -P",
                          "maintien", "transport", "six touches"):
                 self.assertTrue(need in text, (name, need))
+            # revue Stage-1 : cadence réelle, annonce prouvée par la sortie exacte, Home ≠ « aucune émission »
+            for need in ("jamais deux POLL à moins de 15 s", "Tx, Error", "stdout+stderr"):
+                self.assertTrue(need in text, (name, need))
+            flat = re.sub(r"\s+", " ", text)
+            self.assertIsNone(re.search(r"Home[^.;|]{0,40}(aucune|sans) émission", flat), name)
+            self.assertNotIn("toutes les 15 s exactement", flat)
         with open(os.path.join(PI4, "README.md"), encoding="utf-8") as f:
             readme = f.read()
         self.assertIn("0.7.4", readme)
