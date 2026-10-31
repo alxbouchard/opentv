@@ -960,7 +960,8 @@ class TestCanvasUiBrowser(unittest.TestCase):
         for k in ("off", "reduced"):
             self.assertEqual((x[k]["mode"], x[k]["total"]), ("static", 0), k)
         self.assertEqual(x["reduced_back"]["mode"], "run")                  # préférence relue en direct
-        expect = {"aurore-calm": 3, "aurore-alive": 4, "brume-calm": 3, "brume-alive": 4, "affiche-calm": 2,
+        # Cinéma/affiche Calme garde trois couches animées bornées : balayage, faisceau et respiration diffuse.
+        expect = {"aurore-calm": 3, "aurore-alive": 4, "brume-calm": 3, "brume-alive": 4, "affiche-calm": 3,
                   "affiche-alive": 4}
         for k, n in expect.items():
             self.assertEqual(x["combos"][k]["running"], n, (k, x["combos"][k]))
