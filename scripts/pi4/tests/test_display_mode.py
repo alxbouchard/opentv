@@ -495,11 +495,24 @@ class SimSource:
         return [], [], []
 
 
-def simulate(cage, script):
-    """Rejoue un scénario [(secondes depuis le départ, action)] ; action() -> True si un uevent DRM est émis."""
+def simulate(cage, script, installed=None, log_lines=dm.LOG_LINES):
+    """Rejoue un scénario [(secondes depuis le départ, action)] ; action() -> True si un uevent DRM est émis.
+    `mon.times` : instants des vérifications ; `mon.write_times` : instants des écritures ; `mon.log_times` : instants
+    des lignes de journal (secondes depuis le départ, horloge simulée)."""
     clock = Clock()
-    lines, log = logs()
-    check = check_for(cage)
+    lines, log_times = [], []
+
+    def write(line):
+        lines.append(line)
+        log_times.append(clock.t - 1000.0)
+    log = dm.Log(write=write, mono=clock, lines=log_lines)
+    write_times = []
+
+    def runner(args, env):
+        if args:
+            write_times.append(clock.t - 1000.0)
+        return cage.runner(args, env)
+    check = dm.Check("HDMI-A-1", TARGET, runner=runner, envfn=cage.envfn)
     times = []
 
     def timed(**kw):
@@ -507,12 +520,28 @@ def simulate(cage, script):
         return check(**kw)
     mon = dm.Monitor(timed, log, "1920x1080@60.000", "HDMI-A-1")
     src = SimSource(clock, [(clock.t + t, a) for t, a in script])
+    kw = {} if installed is None else {"installed": lambda: installed(clock.t - 1000.0)}
+    mon.returned = False
     try:
-        dm.run_monitor(mon, src, mono=clock, wait=src.wait)
+        dm.run_monitor(mon, src, mono=clock, wait=src.wait, **kw)
+        mon.returned = True
     except StopIteration:                    # plus rien de prévu ni d'événement : fin du scénario
         pass
-    mon.times = times
+    mon.times, mon.write_times, mon.log_times = times, write_times, log_times
     return mon, src, [json.loads(l) for l in lines]
+
+
+def max_writes_per_window(times, window=600.0):
+    """Plus grand nombre d'écritures dans une fenêtre glissante [t, t + window)."""
+    return max((sum(1 for u in times if t <= u < t + window) for t in times), default=0)
+
+
+def bounce(cage, on):
+    """Action de scénario : rebond HDMI (sortie recréée au mode préféré 4K, ou retirée) + uevent DRM."""
+    def act():
+        cage.hotplug_on() if on else cage.hotplug_off()
+        return True
+    return act
 
 
 class TestMonitorSimulatedHotplug(unittest.TestCase):
@@ -586,14 +615,137 @@ class TestMonitorSimulatedHotplug(unittest.TestCase):
         cage.ignore_writes = True                               # « applique » mais le compositeur ignore
         mon, src, ev = simulate(cage, [])
         self.assertEqual(len(cage.writes()), dm.BURST_APPLIES)
+        self.assertIsNone(src.waits[-1])                        # plafond de rafale seul : aucune reprise différée
         # tempête de branchements (HDMI qui rebondit 2×/s pendant 2 min) : jamais plus de 6 écritures / 10 min
         cage = FakeCage(current=SAMSUNG_MODES[0])
         cage.ignore_writes = True
         mon, src, ev = simulate(cage, [(1.0 + i * 0.5, lambda: True) for i in range(240)])
-        self.assertLessEqual(len(cage.writes()), dm.WINDOW_APPLIES)
+        self.assertEqual(max_writes_per_window(mon.write_times), dm.WINDOW_APPLIES)
+        # une seule vérification différée quand la fenêtre se libère : une écriture, puis repos (aucun duel)
+        late = [t for t in mon.write_times if t > 200]
+        self.assertEqual(len(late), 1)
+        self.assertGreaterEqual(late[0], mon.write_times[0] + dm.WINDOW_S)
+        self.assertEqual(len([t for t in mon.times if t > 200]), 1)
+        self.assertIsNone(src.waits[-1])
         self.assertLessEqual(mon.checks, 130 + 10)              # au plus ~1 lecture/s pendant la tempête
         self.assertIn("display_mode_suppressed", [e["event"] for e in ev])
-        self.assertLessEqual(len(ev), dm.LOG_LINES + 1)         # journal borné (+ une ligne « muted »)
+        # journal borné (+ une ligne « muted ») sur toute fenêtre de 10 min
+        self.assertLessEqual(max_writes_per_window(mon.log_times, dm.LOG_WINDOW_S), dm.LOG_LINES + 1)
+
+    def assert_converged_and_idle(self, cage, mon, src, ev, logged=True):
+        self.assertEqual(cage.current, TARGET)                   # convergence finale exacte
+        self.assertLessEqual(max_writes_per_window(mon.write_times), dm.WINDOW_APPLIES)
+        self.assertIsNone(src.waits[-1])                         # puis repos sans délai (aucune scrutation)
+        if logged:
+            self.assertEqual(ev[-1]["event"], "display_mode_idle")
+
+    def test_four_or_more_recreations_in_one_burst_still_end_at_1080p60(self):
+        # revue 0.7.5 : 4 recréations HDMI dans une même rafale épuisaient le budget de 3 et laissaient la TV en 4K
+        for n in (4, 5, 6):
+            cage = FakeCage()
+            mon, src, ev = simulate(cage, [(100.0 + 3.0 * i, bounce(cage, True)) for i in range(n)], log_lines=10 ** 6)
+            self.assert_converged_and_idle(cage, mon, src, ev)
+            self.assertEqual(len(mon.write_times), n, n)          # une écriture par recréation, jamais plus
+            self.assertNotIn("display_mode_deferred", [e["event"] for e in ev])
+        # 8 recréations en 21 s : 6 écritures (plafond 10 min), puis UNE vérification différée quand la fenêtre se
+        # libère (pas avant), qui rétablit 1080p60 ; aucune lecture entre-temps
+        cage = FakeCage()
+        mon, src, ev = simulate(cage, [(100.0 + 3.0 * i, bounce(cage, True)) for i in range(8)], log_lines=10 ** 6)
+        self.assert_converged_and_idle(cage, mon, src, ev)
+        self.assertEqual(len(mon.write_times), dm.WINDOW_APPLIES + 1)
+        self.assertGreaterEqual(mon.write_times[-1], mon.write_times[0] + dm.WINDOW_S)
+        self.assertLessEqual(mon.write_times[-1], mon.write_times[0] + dm.WINDOW_S + 2 * dm.SETTLE_S)
+        self.assertEqual([t for t in mon.times if 160.0 < t < mon.write_times[-1]], [])
+        deferred = [e for e in ev if e["event"] == "display_mode_deferred"]
+        self.assertEqual(len(deferred), 1)
+        self.assertEqual([e["event"] for e in ev[-3:]], ["display_mode_deferred", "display_mode_applied",
+                                                         "display_mode_idle"])
+
+    def test_hdmi_storm_ending_on_4k_converges_with_bounded_writes(self):
+        # tempête : la TV rebondit (off/on) ~3×/s pendant 90 s et finit allumée au mode préféré 4K
+        cage = FakeCage()
+        script = [(10.0 + 0.37 * i, bounce(cage, i % 2 == 1)) for i in range(240)]
+        mon, src, ev = simulate(cage, script)
+        self.assert_converged_and_idle(cage, mon, src, ev, logged=False)
+        self.assertEqual(max_writes_per_window(mon.write_times), dm.WINDOW_APPLIES)
+        self.assertLessEqual(max_writes_per_window(mon.log_times, dm.LOG_WINDOW_S), dm.LOG_LINES + 1)
+        self.assertEqual(len([t for t in mon.write_times if t > 200]), 1)     # reprise différée unique
+        self.assertEqual(len([t for t in mon.times if t > 200]), 1)
+        self.assertLessEqual(mon.checks, 160)
+        # tempête de N rebonds quelconques (finie) : toujours 1080p60 à la fin, toujours ≤ 6 écritures / 10 min
+        for n, step in ((2, 0.2), (7, 1.0), (13, 5.0), (31, 0.7), (9, 40.0)):
+            cage = FakeCage()
+            mon, src, ev = simulate(cage, [(5.0 + step * i, bounce(cage, True)) for i in range(n)], log_lines=10 ** 6)
+            self.assert_converged_and_idle(cage, mon, src, ev)
+
+    def test_global_cap_spans_separate_bursts_then_one_deferred_check(self):
+        # 8 rallumages espacés de 80 s (extinction entre deux) : rafales séparées (chacune revient au repos), mais le
+        # plafond global de 6 écritures / 10 min les couvre toutes ; la correction suivante attend que la fenêtre se
+        # libère, par UNE vérification différée (pas une rafale de 10 min)
+        cage = FakeCage()
+        script = [(100.0 + 80.0 * i, bounce(cage, True)) for i in range(8)]
+        script += [(140.0 + 80.0 * i, bounce(cage, False)) for i in range(7)]
+        mon, src, ev = simulate(cage, script, log_lines=10 ** 6)
+        self.assert_converged_and_idle(cage, mon, src, ev)
+        w = mon.write_times
+        events = [e["event"] for e in ev]
+        self.assertGreaterEqual(events.count("display_mode_idle"), 15)                # rafales réellement séparées
+        self.assertEqual(len(w), 7)
+        self.assertEqual(w[:6], [101.0, 181.0, 261.0, 341.0, 421.0, 501.0])            # une par rallumage
+        self.assertEqual(max_writes_per_window(w), dm.WINDOW_APPLIES)
+        self.assertGreaterEqual(w[6], w[0] + dm.WINDOW_S)
+        self.assertLessEqual(w[6], w[0] + dm.WINDOW_S + 2 * dm.SETTLE_S)
+        # extinction (620 s) pendant l'attente différée : rafale ordinaire de 30 s, jamais prolongée jusqu'à l'échéance
+        self.assertEqual([t for t in mon.times if 646.0 < t < 660.0], [])
+        self.assertEqual([t for t in mon.times if 686.0 < t < w[6]], [])
+        self.assertIn("display_mode_deferred", events)
+
+    def test_burst_budget_resets_per_hotplug_and_never_fights_a_reverting_compositor(self):
+        cage = FakeCage(current=SAMSUNG_MODES[0])
+        cage.ignore_writes = True                                # le compositeur n'accepte jamais l'écriture
+        mon, src, ev = simulate(cage, [(300.0, lambda: True), (400.0, lambda: True)])
+        w = mon.write_times
+        self.assertEqual(len([t for t in w if t < 100]), dm.BURST_APPLIES)            # démarrage : 3
+        self.assertEqual(len([t for t in w if 300 <= t < 340]), dm.BURST_APPLIES)     # nouveau branchement : 3 neufs
+        self.assertEqual([t for t in w if 400 <= t < 600], [])                         # plafond 10 min atteint
+        self.assertEqual(len([t for t in w if t >= 600]), 1)                           # UNE reprise différée
+        self.assertEqual(max_writes_per_window(w), dm.WINDOW_APPLIES)
+        self.assertIsNone(src.waits[-1])                                               # puis repos, aucun duel
+        # branchement qui a lui-même épuisé ses 3 essais quand la fenêtre se remplit : aucune reprise différée (le
+        # compositeur refuse : jamais de duel), même plus tard
+        cage = FakeCage(current=SAMSUNG_MODES[0])
+        cage.ignore_writes = True
+        mon, src, ev = simulate(cage, [(300.0, lambda: True)], log_lines=10 ** 6)
+        self.assertEqual(len(mon.write_times), 2 * dm.BURST_APPLIES)
+        self.assertNotIn("display_mode_deferred", [e["event"] for e in ev])
+        self.assertIsNone(src.waits[-1])
+        # budget par branchement, même au milieu d'une rafale : un rebond pendant la rafale rouvre 3 écritures
+        cage = FakeCage(current=SAMSUNG_MODES[0])
+        cage.ignore_writes = True
+        mon, src, ev = simulate(cage, [(5.0, lambda: True)])
+        self.assertEqual(len([t for t in mon.write_times if t < 100]), 2 * dm.BURST_APPLIES)
+
+    def test_monitor_stops_itself_when_its_files_are_removed(self):
+        # retour à ≤ 0.7.4 : l'ancien installateur retire le binaire mais n'arrête pas l'unité ; au premier réveil le
+        # moniteur s'arrête proprement (code 0, Restart=on-failure ne le relance pas) sans plus rien écrire
+        cage = FakeCage()
+        mon, src, ev = simulate(cage, [(200.0, lambda: True)], installed=lambda t: t < 205.0)
+        self.assertTrue(mon.returned)                               # retiré en pleine rafale : arrêt au réveil suivant,
+        self.assertFalse([t for t in mon.times if t >= 205.0])      # avant la vérification prévue
+        self.assertEqual(ev[-1]["event"], "display_mode_uninstalled")
+        cage = FakeCage()
+        mon, src, ev = simulate(cage, [(200.0, lambda: True), (300.0, bounce(cage, True))],
+                                installed=lambda t: t < 250.0)
+        self.assertTrue(mon.returned)
+        self.assertEqual(cage.writes(), [])
+        self.assertEqual(cage.current, SAMSUNG_MODES[0])            # plus aucune correction après retrait
+        self.assertEqual(ev[-1]["event"], "display_mode_uninstalled")
+        self.assertFalse([t for t in mon.times if t >= 250.0])
+        # moniteur installé : aucun arrêt
+        cage = FakeCage()
+        mon, src, ev = simulate(cage, [(300.0, bounce(cage, True))], installed=lambda t: True)
+        self.assertFalse(mon.returned)
+        self.assertEqual(len(cage.writes()), 1)
 
     def test_burst_extends_on_new_events_and_check_cadence_never_spins(self):
         cage = FakeCage()
@@ -692,6 +844,39 @@ class TestEntryPoints(unittest.TestCase):
             self.assertEqual(subprocess.run([sys.executable, "-I", BIN] + argv, capture_output=True,
                                             timeout=30).returncode, 2)
 
+    def test_installed_check_follows_the_module_and_launcher_files(self):
+        d = tempfile.mkdtemp(dir="/tmp")
+        self.addCleanup(shutil.rmtree, d, True)
+        a, b = os.path.join(d, "displaymode.py"), os.path.join(d, "opentv-display-mode")
+        for f in (a, b):
+            with open(f, "w"):
+                pass
+        alive = dm.installed_check([a, b])
+        self.assertTrue(alive())
+        os.unlink(b)
+        self.assertFalse(alive())
+        self.assertIn(os.path.abspath(dm.__file__), dm.monitor_files())
+        self.assertIn(os.path.abspath(BIN), dm.monitor_files(BIN))
+
+    def test_main_monitor_wires_the_uninstall_stop(self):
+        class Src:
+            closed = False
+
+            def close(self):
+                self.closed = True
+        src = Src()
+        seen = {}
+
+        def fake_run(mon, source, **kw):
+            seen.update(kw)
+            return 0
+        with mock.patch.object(dm, "UeventSource", return_value=src), mock.patch.object(dm, "run_monitor", fake_run):
+            self.assertEqual(dm.main(["monitor"], env={}), 0)
+        self.assertTrue(src.closed)
+        self.assertTrue(seen["installed"]())
+        with mock.patch.object(dm.os.path, "isfile", lambda p: p != os.path.abspath(dm.__file__)):
+            self.assertFalse(seen["installed"]())
+
     @unittest.skipIf(hasattr(socket, "AF_NETLINK"), "Linux : netlink disponible")
     def test_monitor_without_netlink_is_a_truthful_78(self):
         self.assertEqual(dm.main(["monitor"], env={}), dm.EX_UNAVAILABLE)
@@ -733,6 +918,16 @@ class TestUnitAndKiosk(unittest.TestCase):
             if name.endswith(".timer"):
                 self.assertNotIn("display-mode", read(os.path.join(SYSTEMD, name)), name)
 
+    def test_kiosk_restarts_can_never_leave_the_monitor_start_limited(self):
+        # PartOf= : chaque redémarrage du kiosque (Restart=always) redémarre aussi le moniteur ; une limite de démarrages
+        # (5/600 s) le laissait « start-limit-hit » après 5 redémarrages du kiosque, donc plus de correction HDMI
+        u, s = unit(UNIT)["Unit"], unit(UNIT)["Service"]
+        self.assertEqual(u["StartLimitIntervalSec"], "0")
+        self.assertNotIn("StartLimitBurst", u)
+        self.assertNotIn("StartLimitAction", u)
+        self.assertEqual((s["Restart"], s["RestartSec"], s["RestartPreventExitStatus"]), ("on-failure", "10", "78"))
+        self.assertEqual(unit("opentv-kiosk.service")["Unit"]["StartLimitIntervalSec"], "0")
+
     def test_kiosk_pulls_the_monitor_without_side_commands_or_plymouth_changes(self):
         k = unit("opentv-kiosk.service")
         u, s = k["Unit"], k["Service"]
@@ -765,6 +960,10 @@ class TestUnitAndKiosk(unittest.TestCase):
         self.assertNotIn(UNIT, enable)                                    # aucune [Install]
         restart = re.search(r"post systemctl restart ((?:[^\n]*\\\n)*[^\n]*)", inst).group(1)
         self.assertLess(restart.index("opentv-kiosk.service"), restart.index(UNIT))
+        # mise à jour depuis un 0.7.5 resté « failed »/start-limit-hit : effacé avant le redémarrage
+        reset = re.search(r"post systemctl reset-failed ([^\n]*)", inst)
+        self.assertIn(UNIT, reset.group(1).split())
+        self.assertLess(reset.start(), inst.index("post systemctl restart "))
         disable = re.search(r"host systemctl disable --now ((?:[^\n]*\\\n)*[^\n]*)", unin).group(1)
         self.assertIn(UNIT, disable)
 
@@ -855,6 +1054,57 @@ class TestHealthAndBootCheck(unittest.TestCase):
         self.assertIn("ÉCHEC  mode HDMI : opentv-display-mode inactif", out)
 
 
+class TestBootCheckEnvironment(unittest.TestCase):
+    """La cible lue par boot-check suit EnvironmentFile= de systemd (guillemets simples/doubles) et le statut ne part
+    jamais avec le XDG_RUNTIME_DIR/WAYLAND_DISPLAY de root (/run/user/0 : aucun socket Cage)."""
+
+    def run_boot_check(self, env_text):
+        from tests.test_install import TestSplashAndBootUnits as T
+        if os.geteuid() == 0:
+            self.skipTest("exécuté en root")
+        d = tempfile.mkdtemp(dir="/tmp")
+        self.addCleanup(shutil.rmtree, d, True)
+        envf, seen = os.path.join(d, "opentv.env"), os.path.join(d, "seen")
+        with open(envf, "w") as f:
+            f.write(env_text)
+        cmd = os.path.join(d, "status")
+        with open(cmd, "w") as f:
+            f.write("#!/bin/sh\nprintf '%%s|%%s|%%s|%%s\\n' \"$OPENTV_HDMI_OUTPUT\" \"$OPENTV_HDMI_MODE\" "
+                    "\"${XDG_RUNTIME_DIR-unset}\" \"${WAYLAND_DISPLAY-unset}\" > %s\n"
+                    "printf '%%s\\n' '{\"result\": \"ok\", \"current\": \"x\", \"output\": \"o\", \"target\": \"t\"}'\n" % seen)
+        os.chmod(cmd, 0o755)
+        t = T("test_boot_check_passes_on_expected_state")
+        props = dict(T.GOOD)
+        props[(UNIT, "ActiveState")] = "active"
+        try:
+            with mock.patch.dict(os.environ, {"OPENTV_DISPLAY_STATUS_CMD": cmd, "OPENTV_ENV_FILE": envf,
+                                              "XDG_RUNTIME_DIR": "/run/user/0", "WAYLAND_DISPLAY": "wayland-0"}):
+                p = t.run_check(props, T.GOOD_LINE)
+        finally:
+            t.doCleanups()
+        self.assertEqual(p.returncode, 0, p.stdout.decode())
+        return read(seen).strip().split("|")
+
+    def test_env_values_are_unquoted_like_systemd_and_root_session_is_dropped(self):
+        got = self.run_boot_check("# OPENTV_HDMI_MODE=3840x2160@30\nOPENTV_HDMI_MODE=1920x1080@60\n"
+                                  "OPENTV_HDMI_MODE='1280x720@50'\r\n OPENTV_HDMI_OUTPUT = \"HDMI-A-2\"  \n")
+        self.assertEqual(got, ["HDMI-A-2", "1280x720@50", "unset", "unset"])
+        self.assertEqual(self.run_boot_check("OPENTV_HDMI_MODE=\"1920x1080@59.94\"\n"),
+                         ["", "1920x1080@59.94", "unset", "unset"])
+        self.assertEqual(self.run_boot_check(""), ["", "", "unset", "unset"])
+
+    def test_root_branch_drops_the_root_session_before_runuser(self):
+        code = code_only(read(BOOT_CHECK))
+        self.assertRegex(code, r"/usr/bin/env -u XDG_RUNTIME_DIR -u WAYLAND_DISPLAY \"\$\{dm_cmd\[@\]\}\"")
+        root = code[code.index('if [ "${EUID:-0}" -eq 0 ]; then\n  dm_cmd='):]
+        root = root[:root.index("elif")]
+        self.assertIn("runuser -u opentv-kiosk -- /usr/bin/env -u XDG_RUNTIME_DIR -u WAYLAND_DISPLAY", root)
+        self.assertIn("/usr/bin/python3 -I /opt/opentv/bin/opentv-display-mode status", root)
+        self.assertNotIn("sudo -u opentv-kiosk", code)
+        p = subprocess.run(["bash", "-n", BOOT_CHECK], capture_output=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+
+
 class TestReleaseDocs(unittest.TestCase):
     def test_version_and_docs(self):
         self.assertEqual(VERSION, "0.7.5")
@@ -865,6 +1115,15 @@ class TestReleaseDocs(unittest.TestCase):
         gate = next(l for l in readme.splitlines() if l.startswith("| **Mode HDMI après rallumage"))
         for need in ("wlr-randr", "display_mode_applied", "NRestarts", "opentv-boot-check"):
             self.assertIn(need, gate)
+        # diagnostic manuel : même cible que l'unité (EnvironmentFile=, donc OPENTV_HDMI_MODE), jamais sudo -u (qui
+        # perd OPENTV_HDMI_MODE et vérifierait le défaut)
+        self.assertFalse(re.search(r"sudo -u opentv-kiosk [^`]*opentv-display-mode", readme))
+        diag = ("sudo systemd-run --quiet --wait --pipe -p User=opentv-kiosk -p EnvironmentFile=-/etc/opentv/opentv.env "
+                "/opt/opentv/bin/opentv-display-mode status")
+        self.assertTrue(diag in readme)
+        self.assertIn(diag, gate)
+        for need in ("display_mode_deferred", "display_mode_uninstalled", "StartLimitIntervalSec=0"):
+            self.assertTrue(need in readme, need)
 
 
 if __name__ == "__main__":

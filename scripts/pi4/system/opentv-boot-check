@@ -250,23 +250,36 @@ if [ "$(prop opentv-display-mode.service ActiveState)" = active ]; then
 else
   bad "mode HDMI : opentv-display-mode inactif (rallumage de la TV non corrigé ; journalctl -b -u opentv-display-mode)"
 fi
-envval() {   # envval <clé> : dernière valeur de /etc/opentv/opentv.env (root seulement), sans évaluation
-  sed -n "s/^$1=//p" /etc/opentv/opentv.env 2>/dev/null | tail -n 1 | tr -d '\r"'
+ENV_FILE=/etc/opentv/opentv.env
+[ "${EUID:-0}" -eq 0 ] || ENV_FILE="${OPENTV_ENV_FILE:-$ENV_FILE}"   # tests seulement (hors root)
+envval() {   # envval <clé> : dernière valeur, lue comme EnvironmentFile= de systemd (espaces autour de la clé et du
+  # « = », guillemets "…" ou '…' entourant la valeur retirés, CR ignoré, commentaires # en début de ligne), sans
+  # aucune évaluation
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$ENV_FILE" 2>/dev/null | tail -n 1 | tr -d '\r' |
+    sed -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\\(.*\\)'\$/\\1/"
 }
 jfield() { printf '%s' "$dm" | sed -n 's/.*"'"$1"'": "\([^"]*\)".*/\1/p'; }
+hdmi_out="$(envval OPENTV_HDMI_OUTPUT)"
+hdmi_mode="$(envval OPENTV_HDMI_MODE)"
 dm=""
+dm_cmd=()
 if [ "${EUID:-0}" -eq 0 ]; then
-  dm="$(run runuser -u opentv-kiosk -- /usr/bin/env OPENTV_HDMI_OUTPUT="$(envval OPENTV_HDMI_OUTPUT)" \
-    OPENTV_HDMI_MODE="$(envval OPENTV_HDMI_MODE)" /usr/bin/python3 -I /opt/opentv/bin/opentv-display-mode status)"
+  dm_cmd=(runuser -u opentv-kiosk -- /usr/bin/env -u XDG_RUNTIME_DIR -u WAYLAND_DISPLAY OPENTV_HDMI_OUTPUT="$hdmi_out"
+    OPENTV_HDMI_MODE="$hdmi_mode" /usr/bin/python3 -I /opt/opentv/bin/opentv-display-mode status)
 elif [ -n "${OPENTV_DISPLAY_STATUS_CMD:-}" ]; then   # tests seulement (hors root)
-  dm="$(run "$OPENTV_DISPLAY_STATUS_CMD")"
+  dm_cmd=(/usr/bin/env OPENTV_HDMI_OUTPUT="$hdmi_out" OPENTV_HDMI_MODE="$hdmi_mode" "$OPENTV_DISPLAY_STATUS_CMD")
+fi
+# session de root (sudo/ssh : XDG_RUNTIME_DIR=/run/user/0, WAYLAND_DISPLAY) jamais transmise : le statut doit chercher
+# le socket de Cage dans /run/user/<uid du kiosque>, sinon « no_wayland » à tort
+if [ "${#dm_cmd[@]}" -gt 0 ]; then
+  dm="$(run /usr/bin/env -u XDG_RUNTIME_DIR -u WAYLAND_DISPLAY "${dm_cmd[@]}")"
 fi
 case "$dm" in
   *'"result": "ok"'*) pass "mode HDMI : $(jfield current) effectif sur $(jfield output) (cible $(jfield target))" ;;
   *'"result": "absent"'*|*'"result": "disabled"'*)
     info "mode HDMI : sortie $(jfield output) absente ou éteinte (TV éteinte ?) : mode non vérifiable" ;;
   ''|*'"result": "no_wayland"'*|*'"result": "query_failed"'*)
-    info "mode HDMI : non lu (Cage ou wlr-randr indisponible ; sudo -u opentv-kiosk /opt/opentv/bin/opentv-display-mode status)" ;;
+    info "mode HDMI : non lu (Cage ou wlr-randr indisponible ; journalctl -b -u opentv-display-mode)" ;;
   *) bad "mode HDMI : courant $(jfield current) au lieu de $(jfield target) sur $(jfield output) ($(jfield result) ; journalctl -b -u opentv-display-mode)" ;;
 esac
 ssh_ok=0

@@ -17,8 +17,16 @@ Chaque vérification lit `wlr-randr` (argv fixe, délai borné), puis :
 - mode courant = cible (largeur, hauteur exactes, fréquence à ±25 mHz) ⇒ rien (aucune écriture) ;
 - cible absente de la liste annoncée par la TV ⇒ rien (jamais de mode « custom » fabriqué) ;
 - sinon `wlr-randr --output <sortie> --mode <L>x<H>@<fréquence exacte annoncée>Hz` puis relecture.
-Écritures bornées : au plus 3 par rafale et 6 par 10 min (jamais de duel avec le compositeur). Journal : une ligne
-JSON par changement d'état ou écriture, au plus 30 lignes par 10 min (puis une seule ligne `display_mode_log_muted`).
+Écritures bornées : au plus 3 par branchement (chaque uevent rouvre ce budget : une rafale de N recréations de la
+sortie est corrigée N fois) et au plus 6 par 10 min, toutes rafales confondues. Si le plafond de 10 min a retenu une
+correction et que la rafale finit hors cible, UNE seule vérification différée est programmée à l'instant où la fenêtre
+se libère (`display_mode_deferred`, aucune lecture entre-temps ; annulée par un nouveau branchement, qui ouvre une
+rafale ordinaire) : toute rafale finie se termine donc en mode cible, sans duel (un compositeur qui refuse l'écriture
+épuise les 3 essais du branchement puis plus rien). Journal : une ligne JSON par changement d'état ou écriture, au plus
+30 lignes par 10 min (puis une seule ligne `display_mode_log_muted`).
+Retour à une version sans ce moniteur (≤ 0.7.4) : l'ancien installateur retire ses fichiers sans arrêter l'unité ; au
+premier réveil suivant, le moniteur constate l'absence de son module ou de son lanceur et s'arrête (code 0,
+`display_mode_uninstalled`) sans plus rien écrire.
 """
 import errno
 import json
@@ -251,9 +259,9 @@ class Log:
 
 # --------------------------------------------------------------------------- rafales et budget d'écritures
 class Monitor:
-    """État pur (horloge fournie) : quand vérifier, combien écrire. `on_event` arme/prolonge une rafale ; `step`
-    exécute la vérification échue ; `timeout` = délai jusqu'à la prochaine (None : attendre un événement sans
-    délai — aucune scrutation)."""
+    """État pur (horloge fournie) : quand vérifier, combien écrire. `on_event` arme/prolonge une rafale et rouvre le
+    budget du branchement ; `step` exécute la vérification échue ; `timeout` = délai jusqu'à la prochaine (None :
+    attendre un événement sans délai — aucune scrutation)."""
 
     def __init__(self, check, log, target_txt="", output=""):
         self.check, self.log = check, log
@@ -265,15 +273,20 @@ class Monitor:
         self.applies = []
         self.last_key = None
         self.checks = 0
+        self.deferred = False
 
     def on_event(self, now, burst=None, reason="hotplug"):
         burst = BURST_S if burst is None else burst
         # chaque branchement reçu est journalisé (preuve terrain), y compris pendant une rafale (« extended ») ; une
         # tempête reste bornée par le journal (30 lignes / 10 min)
+        extending = self.next_at is not None and not self.deferred
         self.log("display_mode_watch", reason=reason, output=self.output, target=self.target_txt,
-                 extended=True if self.next_at is not None else None)
-        if self.next_at is None:
-            self.burst_applies = 0
+                 extended=True if extending else None)
+        if not extending:
+            # nouvelle rafale (ou attente différée annulée : jamais une rafale étirée jusqu'à son échéance)
+            self.next_at, self.burst_end, self.deferred = None, now, False
+        # budget par branchement : chaque recréation de la sortie peut être corrigée ; plafond global inchangé
+        self.burst_applies = 0
         self.burst_end = max(self.burst_end, now + burst)
         self.interval = SETTLE_S
         cand = now + SETTLE_S if reason == "hotplug" else now
@@ -282,15 +295,19 @@ class Monitor:
     def timeout(self, now):
         return None if self.next_at is None else max(0.0, self.next_at - now)
 
-    def may_apply(self, now):
+    def window_full(self, now):
         self.applies = [t for t in self.applies if now - t < WINDOW_S]
-        return self.burst_applies < BURST_APPLIES and len(self.applies) < WINDOW_APPLIES
+        return len(self.applies) >= WINDOW_APPLIES
+
+    def may_apply(self, now):
+        return not self.window_full(now) and self.burst_applies < BURST_APPLIES
 
     def step(self, now):
         """Vérification échue -> résultat ; sinon None."""
         if self.next_at is None or now < self.next_at:
             return None
         self.checks += 1
+        self.deferred = False
         r = self.check(may_apply=self.may_apply(now))
         if "applied" in r:
             self.burst_applies += 1
@@ -304,6 +321,17 @@ class Monitor:
         if nxt <= self.burst_end:
             self.next_at = nxt
             self.interval = min(self.interval * 2, MAX_INTERVAL_S)
+        elif r["result"] == "suppressed" and self.burst_applies < BURST_APPLIES:
+            # retenue avec des essais restants au branchement ⇒ par le seul plafond de 10 min (fenêtre pleine, donc
+            # self.applies non vide) : rafale finie hors cible. UNE vérification à l'instant où la plus ancienne
+            # écriture sort de la fenêtre (+ marge), aucune lecture d'ici là. Branchement qui a déjà épuisé ses 3
+            # essais (compositeur qui refuse/rétablit) : rien, jamais de duel
+            self.next_at = max(self.applies[0] + WINDOW_S + SETTLE_S, nxt)
+            self.burst_end = self.next_at
+            self.interval = SETTLE_S
+            self.deferred = True
+            self.log("display_mode_deferred", output=self.output, target=self.target_txt,
+                     in_s=int(round(self.next_at - now)))
         else:
             self.next_at = None
             self.log("display_mode_idle", result=r["result"])
@@ -378,15 +406,34 @@ class UeventSource:
         self.sock.close()
 
 
-def run_monitor(mon, source, mono=time.monotonic, wait=select.select, stop=lambda: False, max_loops=None):
+def monitor_files(launcher=None):
+    """Fichiers dont dépend le moniteur en cours : ce module et, s'il est connu, le lanceur installé."""
+    files = [os.path.abspath(__file__)]
+    if launcher:
+        files.append(os.path.abspath(launcher))
+    return files
+
+
+def installed_check(files):
+    """-> fonction vraie tant que tous les fichiers existent (un stat par réveil, jamais de scrutation)."""
+    files = tuple(files)
+    return lambda: all(os.path.isfile(f) for f in files)
+
+
+def run_monitor(mon, source, mono=time.monotonic, wait=select.select, stop=lambda: False, max_loops=None,
+                installed=lambda: True):
     """Boucle d'événements : `select` sur le socket avec le délai de la prochaine vérification, ou SANS délai quand
-    aucune n'est prévue. Renvoie le nombre de tours (tests : preuve d'absence de scrutation)."""
+    aucune n'est prévue. Après chaque réveil, fichiers du moniteur retirés (retour à ≤ 0.7.4) ⇒ arrêt propre avant toute
+    vérification. Renvoie le nombre de tours (tests : preuve d'absence de scrutation)."""
     loops = 0
     mon.on_event(mono(), burst=STARTUP_BURST_S, reason="startup")
     while not stop() and (max_loops is None or loops < max_loops):
         loops += 1
         to = mon.timeout(mono())
         r, _, _ = wait([source], [], [], to)
+        if not installed():
+            mon.log("display_mode_uninstalled", output=mon.output)
+            break
         if r:
             if source.drain():
                 mon.on_event(mono())
@@ -437,8 +484,9 @@ def main(argv=None, env=None):
         log("display_mode_events_unavailable", errno=e.errno)
         return EX_UNAVAILABLE
     mon = Monitor(check, log, target_txt, output)
+    launcher = sys.argv[0] if sys.argv and os.path.basename(sys.argv[0] or "") == "opentv-display-mode" else None
     try:
-        run_monitor(mon, source)
+        run_monitor(mon, source, installed=installed_check(monitor_files(launcher)))
     finally:
         source.close()
     return 0

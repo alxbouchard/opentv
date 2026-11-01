@@ -1012,7 +1012,8 @@ if [ "$ENABLE" = 1 ]; then
     opentv-catalogue-refresh.timer opentv-catalogue-ratings-retry.timer opentv-plymouth-failsafe.timer \
     opentv-muse-setup.path
   # mise à jour : un échec véridique précédent (78, jamais relancé) est effacé avant le redémarrage
-  post systemctl reset-failed opentv-cec-return.service
+  # opentv-display-mode.service : même effacement (un 0.7.5 antérieur pouvait rester « start-limit-hit »)
+  post systemctl reset-failed opentv-cec-return.service opentv-display-mode.service
   post systemctl restart opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
     opentv-display-mode.service opentv-cec.timer opentv-cec-return.service opentv-player-keys.service \
     opentv-player.service opentv-catalogue-refresh.timer \

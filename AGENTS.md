@@ -365,8 +365,14 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   « 1920x1080 » ambigu ni un mode fabriqué), appliquée par l'ouvreur dans Cage (`opentv-display-mode apply`) et par
   `opentv-display-mode.service` (compte `opentv-kiosk`, sans capacité, `AF_UNIX AF_NETLINK`, `PartOf=` kiosque, tiré
   par `Wants=` ; jamais d'`ExecStartPost` dans le kiosque) qui attend les uevents DRM sans scrutation, puis rafale
-  bornée de lectures `wlr-randr` ; rien quand le mode est déjà bon ou la TV éteinte ; écritures 3/rafale, 6/10 min.
-  Santé `display_mode_inactive`, `opentv-boot-check` lit le mode en direct. Tests `scripts/pi4/tests/test_display_mode.py`.
+  bornée de lectures `wlr-randr` ; rien quand le mode est déjà bon ou la TV éteinte ; écritures 3 par branchement
+  (chaque uevent rouvre ce budget), 6/10 min toutes rafales confondues, et UNE vérification différée quand seul ce
+  plafond a retenu la correction (`display_mode_deferred`) : toute rafale finie converge vers la cible, sans duel.
+  Unité `StartLimitIntervalSec=0` (PartOf= : chaque redémarrage du kiosque la redémarre ; une limite la laissait
+  `start-limit-hit`), `RestartSec=10`, 78 jamais relancé ; fichiers retirés (retour ≤ 0.7.4) ⇒ arrêt propre au
+  réveil suivant (`display_mode_uninstalled`). Santé `display_mode_inactive`, `opentv-boot-check` lit le mode en
+  direct (cible lue comme `EnvironmentFile=`, sans `XDG_RUNTIME_DIR`/`WAYLAND_DISPLAY` de root). Tests
+  `scripts/pi4/tests/test_display_mode.py`.
   Vérifié hors matériel + lecture seule sur la Pi (format `wlr-randr` 0.2.0 réel) ; rallumage réel à valider.
 
 ## 11. Limites connues (testées, ne pas reproposer sans élément nouveau)

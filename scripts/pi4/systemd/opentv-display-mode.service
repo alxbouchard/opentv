@@ -5,14 +5,18 @@ Documentation=file:///opt/opentv/README.md
 # alors que Chromium reste en 1920x1080 (accueil dans le quart supérieur gauche). Ce moniteur attend les uevents DRM du
 # noyau (netlink, aucun délai quand rien n'est prévu), puis vérifie par wlr-randr pendant une rafale bornée et ne
 # réécrit que le mode exact OPENTV_HDMI_MODE (défaut 1920x1080@60) quand il est annoncé par la TV. Rien quand le mode
-# est déjà bon, la TV éteinte/débranchée ou Wayland absent. Écritures bornées (3/rafale, 6/10 min).
+# est déjà bon, la TV éteinte/débranchée ou Wayland absent. Écritures bornées (3/branchement, 6/10 min ; une seule
+# vérification différée quand le plafond de 10 min a retenu une correction).
 # Tirée par opentv-kiosk.service (Wants=) et ordonnée APRÈS lui ; PartOf= : arrêtée/redémarrée avec le kiosque. Aucune
 # option TTY, aucune commande annexe dans le kiosque (pas d'ExecStartPost), aucun lien avec Plymouth : le passage
 # Plymouth -> Cage reste celui des unités opentv-plymouth-*. Le serveur OpenTV n'est jamais redémarré.
 After=opentv-kiosk.service
 PartOf=opentv-kiosk.service
-StartLimitIntervalSec=600
-StartLimitBurst=5
+# aucune limite de démarrages : PartOf= fait redémarrer ce moniteur à CHAQUE redémarrage du kiosque (Restart=always,
+# lui-même sans limite) ; une limite (ex. 5/600 s) le laisserait « start-limit-hit » après une série de plantages du
+# kiosque, donc plus aucune correction HDMI. Ses propres échecs restent espacés (RestartSec=10) et la sortie 78
+# (environnement impossible) n'est jamais relancée.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
