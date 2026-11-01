@@ -2796,6 +2796,104 @@ class TestFinalReviewBudgetsAndEnds(RBase):
                          (5.0, 30, 60))
 
 
+# --------------------------------------------------------------------------- revue de c0e20ae (mutants survivants)
+class TestCooldownEndAndPredrainRecheck(RBase):
+    """Délai anti-doublon compté depuis la FIN de l'annonce transmise (pas le début de la tentative) ; <Poll> dû avant
+    la lecture sans attente du maintien : rien n'est émis si l'échéance n'est plus due après cette lecture."""
+    ka_logs = TestKeepalive.ka_logs
+    states = TestKeepalive.states
+
+    def slow_runner(self, slow_s, ends, on=None):
+        """Bus dont la question d'alimentation de l'annonce dure `slow_s` (horloge simulée) ; fin de chaque
+        <Menu Status> (fin de l'annonce) notée dans `ends`."""
+        def runner(argv, timeout):
+            if "--give-device-power-status" in argv and (on is None or on["on"]):
+                self.clock.t += slow_s
+            out = self.bus(argv, timeout)
+            if "--menu-status" in argv:
+                ends.append(self.clock.t)
+            return out
+        return runner
+
+    @bounded()
+    def test_cooldown_starts_when_a_slow_announcement_ends_not_when_it_starts(self):
+        ends = []
+        first = at(0, state_event()) + at(5, active_source()) + at(60, routing_change()) + at(0.05, stream_path())
+        # retour exact suivant : SET_STREAM_PATH 5,85 s après le précédent ⇒ dû 7,35 s après (SETTLE_S compris), soit
+        # ≥ 5 s après le DÉBUT de la 1re tentative mais < 5 s après sa FIN (annonce lente de 3 s)
+        quick = at(5.5, active_source()) + at(0.3, routing_change()) + at(0.05, stream_path())
+        self.src = FakeLines(self.clock, first + quick + at(20, power_poll()))
+        mon = self.monitor([self.src], bus=self.slow_runner(3.0, ends))
+        self.assertEqual(mon.watch("/dev/cec0", "1.0.0.0", 0x10)[0], "eof")
+        rec = self.recoveries()
+        self.assertEqual([e["result"] for e in rec], ["announced", "cooldown_deferred", "announced"], rec)
+        t_as = [t for t, a in self.bus.at if "--active-source" in a]
+        reads = [t for t, a in self.bus.at if a == ["cec-ctl", "-d", "/dev/cec0"]]      # début de chaque tentative
+        t_start = reads[0]
+        self.assertEqual(len(t_as), 2)
+        self.assertGreater(ends[0] - t_start, 3.0)                          # annonce réellement lente
+        t_stream2 = [t for t, line in self.src.delivered if line == stream_path()[0]][1]
+        t_due2 = t_stream2 + cecreturn.SETTLE_S
+        self.assertGreaterEqual(t_due2 - t_start, cecreturn.COOLDOWN_S)     # permis si compté depuis le début…
+        self.assertLess(t_due2 - ends[0], cecreturn.COOLDOWN_S)             # … mais reporté depuis la fin
+        # 2e tentative : reportée exactement à fin de la 1re annonce + COOLDOWN_S, jamais avant
+        self.assertGreaterEqual(reads[1] - ends[0], cecreturn.COOLDOWN_S - 1e-6)
+        self.assertLessEqual(reads[1] - ends[0], cecreturn.COOLDOWN_S + 0.5)
+        self.assertGreater(t_as[1], reads[1])
+        self.assertEqual(wake_args(self.bus), [])
+
+    @bounded()
+    def test_poll_due_before_the_predrain_is_not_sent_once_an_announcement_rearmed_it(self):
+        """Le <Poll> était dû au début du tour ; pendant la lecture sans attente qui précède l'émission, une reprise
+        exacte est annoncée (ACK, lente) et réarme l'échéance à fin d'annonce + 15 s. Aucun <Poll> juste après ce
+        tour : le premier part ≥ 15 s après la fin de cette annonce (cadence contrôlée, aucune attente réelle).
+        Sonde : la reprise est rejouée depuis cette lecture (seul moment où l'échéance peut bouger entre le test
+        `due` du tour et l'émission)."""
+        cap, hook, slow, ends = {}, {"busy": False, "t": None}, {"on": False}, []
+
+        class KA(cecreturn.Keepalive):
+            def __init__(s, *a):
+                super().__init__(*a)
+                cap["ka"] = s
+
+        class DET(cecreturn.Detector):
+            def __init__(s, *a):
+                super().__init__(*a)
+                cap["det"] = s
+
+        clock = self.clock
+
+        class PredrainLines(FakeLines):
+            def readline(s, timeout):
+                kind, line = super().readline(timeout)
+                ka = cap.get("ka")
+                if kind == "timeout" and timeout == 0.0 and not hook["busy"] and hook["t"] is None and \
+                        ka is not None and ka.due(clock.t):
+                    hook["busy"], hook["t"], slow["on"] = True, clock.t, True
+                    res = mon._attempt("/dev/cec0", "1.0.0.0", cap["det"])
+                    mon._ka_after_attempt(ka, res, "/dev/cec0", "1.0.0.0")
+                    hook["busy"] = False
+                return kind, line
+
+        src = PredrainLines(self.clock, at(0, state_event()) + returned() + traffic(90))
+        mon = self.monitor([src], bus=self.slow_runner(2.0, ends, slow))
+        with mock.patch.object(cecreturn, "Keepalive", KA), mock.patch.object(cecreturn, "Detector", DET):
+            why, _ = mon.watch("/dev/cec0", "1.0.0.0", 0x10)
+        self.assertEqual(why, "eof")
+        self.assertEqual([e["result"] for e in self.recoveries()], ["announced", "announced"])
+        self.assertEqual(len(ends), 2)
+        self.assertIsNotNone(hook["t"])
+        self.assertGreaterEqual(hook["t"] - ends[0], cecreturn.KEEPALIVE_INTERVAL_S)    # le <Poll> était dû
+        self.assertGreater(ends[1] - hook["t"], 2.0)                                     # annonce lente, ACK
+        polls = self.bus.polls()
+        self.assertTrue(polls)
+        self.assertEqual([t for t in polls if t < ends[1] + cecreturn.KEEPALIVE_INTERVAL_S - 1e-6], [], polls)
+        self.assertLessEqual(polls[0] - ends[1], cecreturn.KEEPALIVE_INTERVAL_S + 0.5)
+        self.assertEqual(self.states()[0], ("armed", None))
+        self.assertNotIn("disarmed", [s for s, _ in self.states()[:-1]])
+        self.assertEqual(wake_args(self.bus), [])
+
+
 # --------------------------------------------------------------------------- CLI, configuration
 class TestCli(unittest.TestCase):
     def run_cli(self, *argv):
