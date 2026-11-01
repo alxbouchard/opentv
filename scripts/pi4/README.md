@@ -177,6 +177,7 @@ Services :
 |---|---|
 | `opentv.service` | service Python stdlib (utilisateur `opentv`, `Type=notify`, watchdog 30 s — tick borné : `nmcli` 3 s + `ip` 2 s, groupe de processus tué à l'échéance, découverte CEC en thread —, durci) : page TV loopback `127.0.0.1:8080` (réservée au compte `opentv-kiosk` par l'UID du pair TCP, `/proc/net/tcp`), formulaire LAN `:8081` **seulement pendant la configuration**, Agent Port `/run/opentv/agent.sock` ; **télécommande téléphone** `<adresse LAN actuelle>:8082/r` (jamais `0.0.0.0`) seulement configuré et en ligne, écoute relancée si l'adresse change |
 | `opentv-kiosk.service` | Cage (Wayland) sur tty1 **sans `-s`** (aucun changement de console Ctrl+Alt+Fn : un clavier branché n'atteint aucune invite de connexion ; maintenance par SSH) + Chromium Raspberry Pi OS en kiosque, sous la politique gérée dédiée `opentv-kiosk.json` (DevTools, impression, téléchargements, boîtes de fichiers, extensions, navigation privée et toute navigation hors de `http://127.0.0.1`/page de secours bloqués), `Restart=always`, `RestartSec=5`, `StartLimitIntervalSec=0` (jamais bloqué en « failed » après une série de plantages). Profil Chromium **persistant** dédié (`/var/lib/opentv-kiosk/chromium`, verrous `Singleton*` effacés au lancement ; aucun secret durable : la clé de page change à chaque démarrage du service). Le lanceur teste seulement que le **port TCP** 127.0.0.1:8080 accepte une connexion (20 s), sinon il ouvre la page de secours locale `file://…/fallback.html`, qui interroge `/healthz` et revient au tableau de bord |
+| `opentv-display-mode.service` | mode HDMI exact du kiosque (0.7.5) après chaque extinction/rallumage de la TV : moniteur long du compte `opentv-kiosk` (sans capacité, sans groupe ajouté, familles `AF_UNIX AF_NETLINK`, `IPAddressDeny=any`, `PrivateDevices`), tiré par `opentv-kiosk.service` (`Wants=`) et `PartOf=` lui ; attend les uevents DRM du noyau sans scrutation et ne réécrit que `OPENTV_HDMI_MODE` (défaut `1920x1080@60`) quand Cage a repris le mode préféré de la TV. Détails : §« Résolution ». |
 | `opentv-splash.service` | oneshot tty1 borné à 5 s, sans réseau et durci : fond sombre « OpenTV / Démarrage... » avant le kiosque — **repli** seulement : ordonné après `plymouth-start.service`, il n'écrit rien quand Plymouth affiche l'image OpenTV (`splash` + `plymouthd` vivant). Le drop-in `getty@tty1` retire l'invite de connexion seulement tant que le kiosque est activé; rien n'est masqué et SSH reste le chemin de récupération. |
 | `opentv-net-helper.path` / `.service` | helper root déclenché par un job : écrit le profil NetworkManager (keyfile 0600) et lance `nmcli` en argv fixe, sans shell. Dossier des jobs ouvert une fois sans suivre de lien (`O_DIRECTORY|O_NOFOLLOW`), lectures/suppressions relatives à ce descripteur ; résultats écrits par descripteur (`fchown`/`fchmod`, jamais de `chown`/`chmod` par chemin). **Wi-Fi transactionnel** : profil candidat `opentv-wifi-candidate` (UUID neuf, `autoconnect=false`) activé d'abord ; l'ancien `opentv-wifi` n'est remplacé (rename atomique du keyfile, UUID du candidat) qu'après succès ; échec ou délai ⇒ candidat supprimé, ancien profil remonté (ou hotspot en configuration hors ligne), dans une réserve de budget de 51 s gardée avant l'essai. Tout résidu du dossier des jobs (fichier/dossier caché, nom invalide, lien, fifo) est supprimé sans action (sans suivre de lien) : `DirectoryNotEmpty=` ne peut pas boucler. **Budget réel** d'une activation : 120 s pour tous les jobs (`TimeoutStartSec=180`) ; `nmcli --wait` courts (AP down 10 s, Wi-Fi up 35 s, AP up 20 s) + délai d'exécution = attente + 5 s tronqué au budget restant, groupe de processus tué à l'échéance ; un job qui ne tient plus attend l'activation suivante ; un `wifi-apply` pris plus de 60 s après son dépôt est refusé (`expired`) |
 | `opentv-ap-guard.timer` / `.service` | garde root du Wi-Fi temporaire (voir §3), indépendante du service Python ; oneshot, budget 40 s (`TimeoutStartSec=60`), seules commandes : `systemctl is-active opentv.service`, `nmcli`/`ip` en lecture, `nmcli connection down/delete id opentv-setup-ap` |
@@ -393,7 +394,49 @@ téléphone appairé par le nom `.local` conservé ; « Reconfigurer » ⇒ tél
 illisible ⇒ aucun téléphone autorisé (rescanner le QR) ; `uninstall.sh` sans `--purge` conserve les téléphones
 appairés pour une réinstallation, `--purge` les efface.
 
-Résolution : paramètre noyau `video=HDMI-A-1:1920x1080@60` (installé par `install.sh`) + `wlr-randr` dans Cage.
+Résolution : paramètre noyau `video=HDMI-A-1:1920x1080@60` (installé par `install.sh`, console et Plymouth) + mode
+**exact** imposé dans Cage, au démarrage **et après chaque extinction/rallumage de la TV** (0.7.5).
+Terrain Samsung du 2026-11-01 : après une nuit TV éteinte, l'accueil n'occupait plus que le quart supérieur gauche.
+`/proc/cmdline` et `fb0` étaient toujours en 1920x1080, mais dans Cage `wlr-randr` montrait `HDMI-A-1` en
+`3840x2160@30` (préféré, courant, échelle 1) alors que la surface Chromium restait en 1920x1080 : au rallumage, le
+connecteur repasse « branché », wlroots recrée la sortie et Cage l'active au mode **préféré** de l'EDID. L'ancien
+`wlr-randr --mode 1920x1080` lancé une seule fois par l'ouvreur ne couvrait pas ce rebranchement et était ambigu (le
+premier 1920x1080 annoncé était 23,976 Hz). `wlr-randr --output HDMI-A-1 --mode 1920x1080@60Hz` rétablissait
+aussitôt le plein écran. Correctif durable :
+- `OPENTV_HDMI_MODE` (défaut `1920x1080@60`) est une cible **exacte** : largeur, hauteur, fréquence (±25 mHz, donc
+  59,94 Hz ≠ 60 Hz) ; sans fréquence = 60 Hz exactement ; invalide = défaut (journal `display_mode_config_*`).
+  `OPENTV_HDMI_OUTPUT` : `HDMI-A-1`/`HDMI-A-2`.
+- L'ouvreur du kiosque (`opentv-kiosk-browser`, dans Cage, avant Chromium) appelle `opentv-display-mode apply` :
+  quelques essais bornés (≤ 15 s, jamais bloquant), puis Chromium démarre dans le bon mode.
+- `opentv-display-mode.service` (compte `opentv-kiosk`, seul propriétaire du socket Wayland de Cage) écoute les
+  **uevents** DRM du noyau (socket netlink, groupe noyau, messages du seul noyau ; `select` **sans délai** tant que rien
+  n'est prévu : aucune minuterie, aucune scrutation). Chaque `HOTPLUG=1` arme une rafale bornée de lectures
+  `wlr-randr` (1 s, puis +1, +2, +4, +8, +8 s… pendant 30 s) qui laisse wlroots recréer la sortie ; au démarrage du
+  service, même rafale sur 60 s (attente bornée du socket Wayland). Décision à chaque lecture : sortie absente (TV
+  éteinte/débranchée), désactivée ou Wayland absent ⇒ rien ; mode courant = cible ⇒ rien (lecture seule) ; cible non
+  annoncée par la TV ⇒ rien (`display_mode_unavailable`, jamais de mode fabriqué) ; sinon `wlr-randr --output
+  HDMI-A-1 --mode 1920x1080@60.000Hz` (fréquence exacte annoncée) puis relecture : `display_mode_applied` (ou
+  `display_mode_apply_failed` / `display_mode_apply_unverified`). Au plus 3 écritures par rafale et 6 par 10 min
+  (`display_mode_suppressed` au-delà : jamais de duel avec le compositeur) ; journal JSON d'une ligne par changement
+  d'état, au plus 30 lignes par 10 min (`display_mode_log_muted`). Le kiosque n'est pas redémarré, `opentv.service`
+  non plus.
+- Unité : tirée par `opentv-kiosk.service` (`Wants=`), ordonnée après lui, `PartOf=` (arrêtée/redémarrée avec lui),
+  sans `[Install]`. Le kiosque garde `TTYReset=no TTYVHangup=no TTYVTDisallocate=no` et **aucun** `ExecStartPre` /
+  `ExecStartPost` ; aucune dépendance à Plymouth (passage Plymouth → Cage inchangé). Bac à sable : `NoNewPrivileges`,
+  `CapabilityBoundingSet=` vide, `ProtectSystem=strict`, `ProtectHome=read-only` (jamais `yes`, qui masquerait
+  `/run/user` et donc le socket Wayland de Cage), `PrivateDevices`, `DevicePolicy=closed`,
+  `RestrictAddressFamilies=AF_UNIX AF_NETLINK`, `IPAddressDeny=any`, `SystemCallFilter=@system-service`, mémoire et
+  tâches bornées. Pas de `PrivateNetwork=` : les uevents du noyau n'atteignent pas un espace réseau privé. Netlink
+  refusé ⇒ sortie 78, unité `failed` non relancée (l'ouvreur continue de corriger chaque démarrage de Cage).
+- Santé : `opentv-pi health` liste `opentv-display-mode.service` ; kiosque actif sans ce moniteur ⇒ avertissement
+  `display_mode_inactive` (sans renverser `ok`). `opentv-boot-check` exige le moniteur actif et lit le mode courant
+  **en direct** dans Cage (`runuser -u opentv-kiosk … opentv-display-mode status`, lecture seule) : cible effective
+  ⇒ OK, autre mode ⇒ ÉCHEC, TV éteinte ⇒ info. Diagnostic manuel :
+  `sudo -u opentv-kiosk /opt/opentv/bin/opentv-display-mode status` et `journalctl -u opentv-display-mode`.
+- Retour à une version ≤ 0.7.4 par une réinstallation plus ancienne : l'ancien `install.sh` retire les fichiers de
+  0.7.5 mais ne connaît pas ce moniteur ; avant, `sudo systemctl stop opentv-display-mode.service` (sans effet sur le
+  kiosque). `uninstall.sh` de 0.7.5 l'arrête et le désactive avec les autres unités.
+
 Le produit reste volontairement en **1080p60** : la TV fait la mise à l'échelle. Le Pi 4 peut sortir un écran 4K60 sur
 HDMI0 avec `hdmi_enable_4kp60=1`, mais au prix d'une fréquence GPU, d'une consommation et d'une température plus
 élevées. Ce réglage n'améliore pas le décodeur de Chromium.
@@ -1412,6 +1455,12 @@ sauvegardes OpenTV, jamais un paquet.
   terrain du 2026-10-31 rejoué, faux bus). Seul le canari manuel (POLL toutes les 15 s sans suiveur) a été validé sur
   la Samsung ; l'intégration au service reste à prouver sur la Pi (gate « Maintien après retour », §9).
 
+- **Mode HDMI après rallumage (0.7.5) : vérifié hors matériel seulement** (Python 3.11/3.13 : faux compositeur au
+  format exact de `wlr-randr` 0.2/0.4, uevents DRM simulés sur un vrai socket, sous-processus `wlr-randr` factice,
+  racines d'installation temporaires). À prouver sur la Pi : réception des uevents netlink sous le bac à sable réel,
+  socket Wayland de Cage joignable depuis l'unité, `systemd-analyze verify`/`security opentv-display-mode` relus,
+  extinction/rallumage réel de la Samsung (gate « Mode HDMI après rallumage », §9).
+
 - **OpenTV Canvas (0.7.2) : vérifié hors matériel seulement** (Python 3.11/3.13, Chromium headless réel, racines
   d'installation temporaires). Cadence, CPU/RSS, température, `get_throttled`, `hvs_underrun`, masques réels des
   unités (`mountinfo`), création tmpfiles du dossier sur Bookworm et rendu à distance de canapé restent la porte
@@ -1432,6 +1481,7 @@ sauvegardes OpenTV, jamais un paquet.
 | **Télécommande USB** | télécommande 2,4 GHz branchée : flèches, OK, Retour, Accueil sur l'écran OpenTV ; Accueil/BrowserBack ne quittent jamais `/tv` ; écran QR : aucune touche n'agit ; **touche Power : la boîte reste allumée** (après redémarrage) ; clavier : F12/Ctrl+Maj+I, Ctrl+P, Ctrl+S, Ctrl+Alt+F2 sans effet |
 | **Décodage** | H.264 local 1080p60 pendant 30 min : `/dev/video10` ouvert à chaque sonde, horloge H.264 ≈ 500 MHz, maximum 0,372 % d'images perdues, température maximale 41,3 °C, `hvs_underrun=0`, `get_throttled=0x0` ; kiosque restauré et résidus supprimés. 4K/HEVC/VP9/AV1 Chromium hors cible. |
 | **Image de démarrage** | vidéo de la mise sous tension complète : **aucun arc-en-ciel**, image OpenTV (fond sombre, marque, « Démarrage… ») dès le noyau, sans texte Linux ni terminal, sans clignotement de console avant la première image de Chromium (au plus un noir bref de Cage) ; `sudo /opt/opentv/bin/opentv-boot-check` : `arc-en-ciel désactivé`, `thème opentv sélectionné`, `initramfs : thème opentv présent`, `écran texte NON écrit`, `retain-splash, DRM vc4`, `aucun secours Plymouth`, `Plymouth terminé`, `NRestarts=0`, `aucun SIGHUP`, `TTYReset=no TTYVHangup=no` ; `journalctl -b -u opentv-plymouth-quit` : `DRM vc4 /dev/dri/cardN tenu par le kiosque` ; `systemd-analyze verify` des unités kiosque/passage ; coupure secteur volontaire pendant `update-initramfs` NON exigée (prouvée hors matériel) ; arrêt/redémarrage : image sans « Démarrage… » ; mode de secours (`systemctl rescue` en essai contrôlé) : console visible ; `uninstall.sh` puis redémarrage : arc-en-ciel et démarrage d'origine rétablis |
+| **Mode HDMI après rallumage (0.7.5)** | `systemctl is-active opentv-display-mode` actif, `systemctl show -p NRestarts opentv-display-mode opentv-kiosk` = 0 ; `sudo -u opentv-kiosk /opt/opentv/bin/opentv-display-mode status` → `"result": "ok"`, `1920x1080@60.000` ; `sudo /opt/opentv/bin/opentv-boot-check` : `mode HDMI : 1920x1080@60.000 effectif` ; TV éteinte ≥ 1 min puis rallumée (télécommande Samsung) : accueil **plein écran** sans intervention en ≤ ~10 s, `journalctl -u opentv-display-mode` : `display_mode_watch` puis `display_mode_absent` à l'extinction, puis au rallumage soit `display_mode_applied` (`current` = mode préféré de la TV, `now` = `1920x1080@60.000`) soit `display_mode_ok` ; ensuite `wlr-randr` (dans Cage) : `1920x1080 px, 60.000000 Hz (current)` ; répéter 3 fois dont une nuit TV éteinte ; TV déjà en 1080p60 : aucune ligne `display_mode_applied` ; `opentv.service` et le kiosque jamais redémarrés (`NRestarts`, `ActiveEnterTimestamp` inchangés) ; `top` au repos : moniteur à 0 % ; `opentv-pi health` sans `display_mode_inactive` ; photo d'Alex |
 | **Rollback** | `uninstall.sh` ⇒ console tty1 de retour, `/opt/opentv` absent, fichiers d'origine restaurés ; réinstallation propre ; `--purge` sans perte du Wi-Fi |
 | **Assistants (Réglages)** | TV : Réglages → « Gérer les assistants » → « Non » au focus → « Oui » → QR dans la feuille, colonne Télécommande masquée ; iPhone (appareil photo) : 3 étapes, « Autorisé » et « Connecté » distincts, « Oui, enregistrer » ; TV : accueil + « C'est enregistré ! Assistants autorisés : N · connectés : M » ; `ss -ltn` : `:8081` lié à l'adresse LAN pendant le mode seulement, puis fermé ; Wi-Fi/nom inchangés (`nmcli -t device status`, `device.json`) ; aucun nouveau fichier dans `/etc/opentv/agents` ; second envoi du même QR refusé ; photo d'Alex |
 | **Regarder** | `opentv-pi playback status` → `promotion: missing` après installation (bouton absent même avec `source.env`) ; après les essais HDMI ci-dessus et `playback promote --field-validated` : bouton présent ; `playback demote` pendant une lecture ⇒ lecteur fermé, retour même carte, bouton absent en ≤ 10 s ; télécommande USB débranchée et CEC absent ⇒ bouton absent (`devices: 0`) ; unité du lecteur : décodage H.264 matériel toujours actif (`/dev/video10` tenu) avec `DevicePolicy=closed` + `SystemCallFilter=~@debug`, `systemd-analyze security opentv-player` relu, `/dev/cec0`/`/dev/input` inaccessibles depuis le lecteur, `curl http://127.0.0.1:<port TV>` refusé depuis l'unité ; groupes effectifs (`/proc/<pid>/status`) : Cage avec `input`, `playerd`/Chromium du lecteur sans `input`, `opentv-player-keys` avec `input` seulement ; photo/vidéo d'Alex |

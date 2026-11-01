@@ -3047,7 +3047,7 @@ class TestUnit(unittest.TestCase):
 # --------------------------------------------------------------------------- version et documentation
 class TestReleaseDocs(unittest.TestCase):
     def test_version_and_docs(self):
-        self.assertEqual(VERSION, "0.7.4")
+        self.assertGreaterEqual(tuple(int(x) for x in VERSION.split(".")), (0, 7, 4))   # 0.7.5 : mode HDMI
         for name in ("README.md", "CEC_COMPATIBILITY.md"):
             with open(os.path.join(PI4, name), encoding="utf-8") as f:
                 text = f.read()

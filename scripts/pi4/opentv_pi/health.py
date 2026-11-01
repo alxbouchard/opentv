@@ -11,11 +11,13 @@ from .nethelper import default_runner
 MANIFEST = "/opt/opentv/MANIFEST.sha256"
 LINE_RE = re.compile(r"([0-9a-f]{64})  (/[^\n]+)")
 UNITS_REQUIRED = ("opentv.service", "opentv-net-helper.path", "opentv-ap-guard.timer")
-UNITS_OPTIONAL = ("opentv-kiosk.service", "opentv-cec.timer", "opentv-cec-return.service",
+UNITS_OPTIONAL = ("opentv-kiosk.service", "opentv-display-mode.service", "opentv-cec.timer",
+                  "opentv-cec-return.service",
                   "opentv-catalogue-refresh.timer",
                   "opentv-catalogue-ratings.service", "opentv-catalogue-ratings-retry.timer",
                   "opentv-catalogue-ratings-retry.service")
 CEC_RETURN_UNIT = "opentv-cec-return.service"
+DISPLAY_MODE_UNIT = "opentv-display-mode.service"
 
 
 def sha256_file(path):
@@ -133,6 +135,10 @@ def run(cfg, root="/", runner=default_runner, check_http=True):
     if cfg.cec_bootstrap and cfg.cec_return_recovery and man.get("error") != "manifest_missing" and \
             units.get(CEC_RETURN_UNIT) in ("failed", "inactive"):
         warnings.append("cec_return_failed")
+    # mode HDMI exact après un rallumage de la TV : kiosque actif sans son moniteur (échec 78, relances épuisées, unité
+    # absente) ⇒ avertissement ; l'accueil peut repasser au mode préféré 4K de la TV (quart d'écran) sans correction
+    if units.get("opentv-kiosk.service") == "active" and units.get(DISPLAY_MODE_UNIT) != "active":
+        warnings.append("display_mode_inactive")
     if rat.get("exposed") or ("exposed" in rat and rat["exposed"] is None):
         # jeton présent mais une unité du compte tourne sans le masque de son dossier (ou invérifiable)
         warnings.append("ratings_credential_exposed")

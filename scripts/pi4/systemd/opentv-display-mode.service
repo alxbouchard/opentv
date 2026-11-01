@@ -1,0 +1,69 @@
+[Unit]
+Description=OpenTV Pi - mode HDMI exact du kiosque (1920x1080@60) apres chaque branchement/rallumage de la TV (uevents DRM, sans scrutation)
+Documentation=file:///opt/opentv/README.md
+# TV éteinte puis rallumée : wlroots recrée la sortie HDMI et Cage l'active au mode PRÉFÉRÉ de l'EDID (ex. 3840x2160@30)
+# alors que Chromium reste en 1920x1080 (accueil dans le quart supérieur gauche). Ce moniteur attend les uevents DRM du
+# noyau (netlink, aucun délai quand rien n'est prévu), puis vérifie par wlr-randr pendant une rafale bornée et ne
+# réécrit que le mode exact OPENTV_HDMI_MODE (défaut 1920x1080@60) quand il est annoncé par la TV. Rien quand le mode
+# est déjà bon, la TV éteinte/débranchée ou Wayland absent. Écritures bornées (3/rafale, 6/10 min).
+# Tirée par opentv-kiosk.service (Wants=) et ordonnée APRÈS lui ; PartOf= : arrêtée/redémarrée avec le kiosque. Aucune
+# option TTY, aucune commande annexe dans le kiosque (pas d'ExecStartPost), aucun lien avec Plymouth : le passage
+# Plymouth -> Cage reste celui des unités opentv-plymouth-*. Le serveur OpenTV n'est jamais redémarré.
+After=opentv-kiosk.service
+PartOf=opentv-kiosk.service
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# compte du kiosque : seul propriétaire du socket Wayland de Cage (/run/user/<uid>/wayland-N) ; aucun groupe ajouté
+User=opentv-kiosk
+Group=opentv-kiosk
+EnvironmentFile=-/etc/opentv/opentv.env
+ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-display-mode monitor
+Restart=on-failure
+RestartSec=10
+# 78 : uevents du noyau refusés (environnement impossible) ⇒ échec véridique, jamais relancé en boucle
+RestartPreventExitStatus=78
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+# read-only, jamais yes : ProtectHome=yes rendrait /run/user inaccessible, donc le socket Wayland de Cage
+# (/run/user/<uid>/wayland-N) injoignable. connect() sur un socket reste permis en lecture seule ; les autres
+# /run/user/<uid> restent protégés par leurs droits 0700.
+ProtectHome=read-only
+PrivateTmp=yes
+# aucun périphérique : wlr-randr ne parle qu'au compositeur (socket Unix), les uevents arrivent par netlink
+PrivateDevices=yes
+DevicePolicy=closed
+# dossier du jeton TMDb : jamais visible ici (lu seulement par les unites des notes)
+InaccessiblePaths=-/etc/opentv/tmdb
+# ambiance OpenTV Canvas (scene + historique) : reservee a opentv.service (dossier toujours present : tmpfiles)
+InaccessiblePaths=-/var/lib/opentv/canvas
+# uevents du noyau : socket netlink dans l'espace réseau principal (un PrivateNetwork= ne les recevrait pas) ; aucun
+# réseau IP possible (familles Unix + netlink seulement, IPAddressDeny=any)
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+IPAddressDeny=any
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+MemoryMax=64M
+TasksMax=8

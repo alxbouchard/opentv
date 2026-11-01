@@ -30,7 +30,8 @@ UNITS = ("opentv.service", "opentv-kiosk.service", "opentv-net-helper.service", 
          "opentv-catalogue-refresh.service", "opentv-catalogue-refresh.timer", "opentv-catalogue-ratings.service",
          "opentv-catalogue-ratings-retry.service", "opentv-catalogue-ratings-retry.timer",
          "opentv-plymouth-deactivate.service", "opentv-plymouth-quit.service", "opentv-plymouth-failsafe.service",
-         "opentv-plymouth-failsafe.timer", "opentv-muse.service", "opentv-muse-pair.service")
+         "opentv-plymouth-failsafe.timer", "opentv-muse.service", "opentv-muse-pair.service",
+         "opentv-display-mode.service")
 
 
 def sha(p):
@@ -946,7 +947,7 @@ class TestSplashAndBootUnits(Base):
             ("opentv-kiosk.service", "ActiveState"): "active", ("opentv-kiosk.service", "NRestarts"): "0",
             ("opentv-kiosk.service", "TTYReset"): "no", ("opentv-kiosk.service", "TTYVHangup"): "no",
             ("opentv-kiosk.service", "TTYVTDisallocate"): "no",
-            ("ssh.service", "ActiveState"): "active"}
+            ("ssh.service", "ActiveState"): "active", ("opentv-display-mode.service", "ActiveState"): "active"}
     GOOD_LINE = PI_CMDLINE.rstrip("\n") + " " + VIDEO + " " + " ".join(BOOT_ARGS) + "\n"
 
     def run_check(self, props, cmdline, kernel_lines=80):

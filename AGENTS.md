@@ -359,6 +359,15 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   chacune testée avec une LA étrangère. Terrain 2026-10-31 ~16:08 : POLL ACK (séq. 711–718) mais touches perdues,
   `cec --activate` les rétablit — un POLL ACK ne restaure pas un renvoi déjà perdu ; seul `announced` (séquence
   exacte) arme ; jamais d'annonce périodique. Vérifié hors matériel seulement.
+- **Mode HDMI exact après extinction/rallumage de la TV (0.7.5)** : terrain 2026-11-01, au rallumage wlroots recrée
+  la sortie et Cage prend le mode préféré de l'EDID (3840x2160@30) pendant que Chromium reste en 1920x1080 (quart
+  d'écran). `opentv_pi/displaymode.py` : cible exacte `OPENTV_HDMI_MODE` (défaut `1920x1080@60`, jamais un
+  « 1920x1080 » ambigu ni un mode fabriqué), appliquée par l'ouvreur dans Cage (`opentv-display-mode apply`) et par
+  `opentv-display-mode.service` (compte `opentv-kiosk`, sans capacité, `AF_UNIX AF_NETLINK`, `PartOf=` kiosque, tiré
+  par `Wants=` ; jamais d'`ExecStartPost` dans le kiosque) qui attend les uevents DRM sans scrutation, puis rafale
+  bornée de lectures `wlr-randr` ; rien quand le mode est déjà bon ou la TV éteinte ; écritures 3/rafale, 6/10 min.
+  Santé `display_mode_inactive`, `opentv-boot-check` lit le mode en direct. Tests `scripts/pi4/tests/test_display_mode.py`.
+  Vérifié hors matériel + lecture seule sur la Pi (format `wlr-randr` 0.2.0 réel) ; rallumage réel à valider.
 
 ## 11. Limites connues (testées, ne pas reproposer sans élément nouveau)
 

@@ -515,7 +515,8 @@ for d in /run/opentv-musejobs/queue /run/opentv-musejobs/tmp /var/lib/opentv/mus
   if [ -d "$dd" ] && [ ! -L "$dd" ]; then act find "$dd" -mindepth 1 -maxdepth 1 -type f -delete; fi
 done
 # plus rien ne peut (re)lancer le point d'accès : service, helper et garde arrêtés
-host systemctl disable --now opentv-player.service opentv-player-keys.service opentv-kiosk.service opentv.service \
+host systemctl disable --now opentv-player.service opentv-player-keys.service opentv-kiosk.service \
+  opentv-display-mode.service opentv.service \
   opentv-net-helper.path opentv-net-helper.service opentv-ap-guard.timer opentv-ap-guard.service opentv-cec.timer \
   opentv-cec.service opentv-cec-announce.service opentv-cec-return.service opentv-splash.service \
   opentv-catalogue-refresh.timer \

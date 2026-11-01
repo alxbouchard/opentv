@@ -12,7 +12,9 @@ Documentation=file:///opt/opentv/README.md
 #   opentv-plymouth-failsafe.{timer,service}  secours borné (120 s après le noyau, et OnFailure= ci-dessous)
 # Jamais d'attente de plymouth-quit-wait.service (qui attend la fin de Plymouth, donc ce kiosque). Kiosque désactivé :
 # plymouth-quit.service s'exécute normalement (tty1 rendue). Sans Plymouth installé : unités sans effet.
-Wants=opentv.service opentv-plymouth-deactivate.service opentv-plymouth-quit.service
+# opentv-display-mode.service (APRÈS le kiosque, PartOf=) : mode HDMI exact rétabli après chaque branchement ou
+# rallumage de la TV (uevents DRM) — jamais par une commande annexe de cette unité.
+Wants=opentv.service opentv-plymouth-deactivate.service opentv-plymouth-quit.service opentv-display-mode.service
 After=systemd-user-sessions.service plymouth-start.service plymouth-quit.service opentv-plymouth-deactivate.service opentv.service getty@tty1.service
 Conflicts=getty@tty1.service plymouth-quit.service
 # équivalent sûr de « OnFailure=plymouth-quit.service » des gestionnaires de session : plymouth-quit.service est en

@@ -144,7 +144,8 @@ in_scope() {   # chemins qu'OpenTV a le droit de retirer (même périmètre que 
 FILES=()
 add() { FILES+=("$1|$2|$3"); }
 for f in "$HERE"/opentv_pi/*.py; do add "$f" "/opt/opentv/lib/opentv_pi/$(basename "$f")" 644; done
-for b in opentv-pi opentv-mcp opentv-net-helper opentv-kiosk-browser opentv-player opentv-player-keys opentv-muse-bridge; do add "$HERE/bin/$b" "/opt/opentv/bin/$b" 755; done
+for b in opentv-pi opentv-mcp opentv-net-helper opentv-kiosk-browser opentv-display-mode opentv-player opentv-player-keys \
+         opentv-muse-bridge; do add "$HERE/bin/$b" "/opt/opentv/bin/$b" 755; done
 # pont Muse : sous-ensemble MINIMAL du SDK Linux officiel (transport + appariement), octets identiques au commit épinglé
 # (vendor/muse/PIN.json : commit, archive officielle SHA-256, empreinte de chaque fichier ; jamais @main). Ni
 # executor.py, ni fileops.py, ni service.py, ni cli.py, ni l'unité musegadget.service d'origine ne sont livrés.
@@ -191,7 +192,7 @@ add "$REPO/scripts/nanopi/opentv_tmdb.py" /opt/opentv/lib/foryou/opentv_tmdb.py 
 for u in opentv.service opentv-kiosk.service opentv-net-helper.service opentv-net-helper.path \
          opentv-ap-guard.service opentv-ap-guard.timer opentv-cec.service opentv-cec.timer \
          opentv-cec-announce.service opentv-cec-return.service opentv-splash.service opentv-player.service \
-         opentv-player-keys.service \
+         opentv-player-keys.service opentv-display-mode.service \
          opentv-catalogue-refresh.service opentv-catalogue-refresh.timer opentv-catalogue-ratings.service \
          opentv-catalogue-ratings-retry.service opentv-catalogue-ratings-retry.timer \
          opentv-plymouth-deactivate.service opentv-plymouth-quit.service opentv-plymouth-failsafe.service \
@@ -1000,6 +1001,9 @@ if [ "$ENABLE" = 1 ]; then
   # opentv-plymouth-failsafe.timer : filet absolu (120 s après le noyau) contre un Plymouth laissé indéfiniment ;
   # activé pour le prochain démarrage seulement (jamais démarré ici). Les unités de passage deactivate/quit n'ont pas
   # de section [Install] : tirées par opentv-kiosk.service (Wants=), elles ne s'activent ni ne s'exécutent seules.
+  # opentv-display-mode.service : mode HDMI exact (OPENTV_HDMI_MODE, défaut 1920x1080@60) rétabli après chaque
+  # branchement/rallumage de la TV (uevents DRM, compte opentv-kiosk, sans capacité) ; pas de section [Install] : tirée
+  # par opentv-kiosk.service (Wants=, PartOf=) ; redémarrée ici après le kiosque pour charger la nouvelle version.
   # opentv-muse-setup.path : connexion de Muse depuis la TV (Réglages > Gérer les assistants > Muse). Le helper root
   # ne fait rien sans job du service, et le service n'en dépose qu'après « Autoriser et connecter » confirmé sur la TV
   # (aucun pilotage accordé par l'installation). opentv-muse-setup.service n'a pas de section [Install].
@@ -1010,7 +1014,8 @@ if [ "$ENABLE" = 1 ]; then
   # mise à jour : un échec véridique précédent (78, jamais relancé) est effacé avant le redémarrage
   post systemctl reset-failed opentv-cec-return.service
   post systemctl restart opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
-    opentv-cec.timer opentv-cec-return.service opentv-player-keys.service opentv-player.service opentv-catalogue-refresh.timer \
+    opentv-display-mode.service opentv-cec.timer opentv-cec-return.service opentv-player-keys.service \
+    opentv-player.service opentv-catalogue-refresh.timer \
     opentv-catalogue-ratings-retry.timer opentv-muse-setup.path
 fi
 # ---------------------------------------------------------------- pont Muse : jamais activé par l'installation

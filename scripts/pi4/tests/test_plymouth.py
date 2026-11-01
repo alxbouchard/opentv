@@ -1576,7 +1576,7 @@ class TestBootCheckPlymouth(Harness):
                  ("opentv-kiosk.service", "ActiveState"): "active", ("opentv-kiosk.service", "NRestarts"): "0",
                  ("opentv-kiosk.service", "TTYReset"): "no", ("opentv-kiosk.service", "TTYVHangup"): "no",
                  ("opentv-kiosk.service", "TTYVTDisallocate"): "no",
-                 ("ssh.service", "ActiveState"): "active"}
+                 ("ssh.service", "ActiveState"): "active", ("opentv-display-mode.service", "ActiveState"): "active"}
         props.update(props_extra or {})
         with open(os.path.join(d, "props"), "w") as f:
             for (u, k), v in props.items():
