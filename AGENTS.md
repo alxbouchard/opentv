@@ -359,6 +359,17 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   chacune testée avec une LA étrangère. Terrain 2026-10-31 ~16:08 : POLL ACK (séq. 711–718) mais touches perdues,
   `cec --activate` les rétablit — un POLL ACK ne restaure pas un renvoi déjà perdu ; seul `announced` (séquence
   exacte) arme ; jamais d'annonce périodique. Vérifié hors matériel seulement.
+- **Suiveur CEC exclusif minimal (0.7.6)** : `opentv_pi/cecfollower.py` + `opentv-cec-follower.service` (service
+  dédié, compte `opentv`, groupe `video`, AUCUNE capacité, `PrivateNetwork`, `IPAddressDeny=any`). Ioctl directs (ABI
+  uapi épinglée : tailles 56/76/92/80, numéros exacts, aucun setter d'adresse), mode `INITIATOR|EXCL_FOLLOWER` relu,
+  jamais passthrough. Répond seulement aux demandes de la TV : `REPORT_POWER_STATUS` on à 0x8f dirigé, une
+  `ACTIVE_SOURCE` à `SET_STREAM_PATH` exact (TV, longueur 4, notre PA), `FEATURE_ABORT` unrecognized aux autres
+  dirigés (jamais FEATURE_ABORT/UCP/UCR/diffusion seule) ; opcode cœur du noyau reçu ⇒ 78. Liste blanche `guard_tx`
+  avant chaque émission ; jamais IVO/TVO/STANDBY/question d'alimentation/POLL/périodique/réclamation. TV off/on :
+  même descripteur, relecture à chaque événement, aucune annonce sur HPD. Verrou `/run/opentv-cec/lock` ≤ 0,4 s,
+  périmé > 0,8 s, débit borné. Le POLL 0.7.4 est coupé tant que `OPENTV_CEC_FOLLOWER≠0` ; repli/rollback
+  `OPENTV_CEC_FOLLOWER=0` ; gate `OPENTV_CEC_FOLLOWER=canary`. Santé `cec_follower_failed`. Tests
+  `scripts/pi4/tests/test_cec_follower.py` (faux noyau `tests/_cecfake.py`). Vérifié hors matériel seulement.
 - **Mode HDMI exact après extinction/rallumage de la TV (0.7.5)** : terrain 2026-11-01, au rallumage wlroots recrée
   la sortie et Cage prend le mode préféré de l'EDID (3840x2160@30) pendant que Chromium reste en 1920x1080 (quart
   d'écran). `opentv_pi/displaymode.py` : cible exacte `OPENTV_HDMI_MODE` (défaut `1920x1080@60`, jamais un

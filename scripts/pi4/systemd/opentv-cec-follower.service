@@ -1,0 +1,66 @@
+[Unit]
+Description=OpenTV Pi - suiveur HDMI-CEC exclusif minimal (repond seulement aux demandes de la TV ; jamais de reveil, de POLL ni d'emission periodique)
+Documentation=file:///opt/opentv/README.md
+After=systemd-udevd.service
+# relances bornees : au-dela, l'unite reste en echec et `opentv-pi health` avertit `cec_follower_failed` ; le noyau
+# reprend alors seul ses FEATURE_ABORT automatiques (comportement 0.7.5 sans maintien)
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=opentv
+Group=opentv
+# video : /dev/cecN (root:video). Jamais le groupe des peripheriques de touches : aucune touche lue ni produite.
+SupplementaryGroups=video
+ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-pi cec-follower
+Restart=on-failure
+RestartSec=5
+# 78 = echec veridique (anomalie de mode du noyau, autre suiveur exclusif, adaptateur illisible, ABI) : jamais relance
+RestartPreventExitStatus=78
+# SIGTERM : mode suiveur rendu (0x01) puis descripteur ferme, immediatement
+TimeoutStopSec=5
+# INITIATOR|EXCL_FOLLOWER et CEC_TRANSMIT n'exigent aucune capacite (seuls les modes moniteur en exigent une) :
+# aucune capacite, ni bornee ni ambiante
+CapabilityBoundingSet=
+AmbientCapabilities=
+# dossier et verrou CEC partages avec opentv-cec.service / opentv-cec-announce.service / opentv-cec-return.service
+# (seul le verrou y est pris, quelques millisecondes par reponse ; le temoin de demarrage n'est ni lu ni ecrit)
+RuntimeDirectory=opentv-cec
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+# dossier du jeton TMDb (root:opentv 0750, cree par tmpfiles avant toute unite) : lu seulement par les unites des
+# notes. Le DOSSIER est masque (un remplacement atomique du fichier ne peut pas le demasquer).
+InaccessiblePaths=-/etc/opentv/tmdb
+# ambiance OpenTV Canvas (scene + historique) : reservee a opentv.service (dossier toujours present : tmpfiles)
+InaccessiblePaths=-/var/lib/opentv/canvas
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+DevicePolicy=closed
+DeviceAllow=char-cec rw
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+MemoryMax=48M
+TasksMax=4
+
+[Install]
+WantedBy=multi-user.target

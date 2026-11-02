@@ -1107,7 +1107,7 @@ class TestBootCheckEnvironment(unittest.TestCase):
 
 class TestReleaseDocs(unittest.TestCase):
     def test_version_and_docs(self):
-        self.assertEqual(VERSION, "0.7.5")
+        self.assertGreaterEqual(tuple(int(x) for x in VERSION.split(".")), (0, 7, 5))   # 0.7.6 : suiveur CEC
         readme = read(os.path.join(PI4, "README.md"))
         for need in ("opentv-display-mode.service", "1920x1080@60", "3840x2160@30", "uevent", "OPENTV_HDMI_MODE",
                      "display_mode_applied", "display_mode_inactive", "PartOf=", "0.7.5"):

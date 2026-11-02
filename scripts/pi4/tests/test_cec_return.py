@@ -2906,9 +2906,12 @@ class TestCli(unittest.TestCase):
         self.assertFalse(config.Config({"OPENTV_CEC_RETURN_RECOVERY": "0"}).cec_return_recovery)
         with self.assertRaises(ValueError):
             config.Config({"OPENTV_CEC_RETURN_RECOVERY": "oui"})
-        # maintien neutre (0.7.4) : actif par défaut, opt-out indépendant
-        self.assertTrue(config.Config({}).cec_return_keepalive)
-        self.assertFalse(config.Config({"OPENTV_CEC_RETURN_KEEPALIVE": "0"}).cec_return_keepalive)
+        # maintien neutre (0.7.4) : 0.7.6, jamais pendant que le suiveur exclusif est actif (défaut) ; repli
+        # OPENTV_CEC_FOLLOWER=0 : actif par défaut, opt-out indépendant
+        self.assertFalse(config.Config({}).cec_return_keepalive)
+        self.assertTrue(config.Config({"OPENTV_CEC_FOLLOWER": "0"}).cec_return_keepalive)
+        self.assertFalse(config.Config({"OPENTV_CEC_FOLLOWER": "0",
+                                        "OPENTV_CEC_RETURN_KEEPALIVE": "0"}).cec_return_keepalive)
         with self.assertRaises(ValueError):
             config.Config({"OPENTV_CEC_RETURN_KEEPALIVE": "oui"})
         with open(os.path.join(PI4, "opentv-pi.env.example"), encoding="utf-8") as f:
@@ -2933,7 +2936,8 @@ class TestCli(unittest.TestCase):
     def test_enabled_runs_monitor_with_state_dir(self):
         d = tmpdir(self, "otvcecret")
         env = os.path.join(d, "env")
-        open(env, "w").close()
+        with open(env, "w") as f:                                   # repli 0.7.6 : suiveur désactivé
+            f.write("OPENTV_CEC_FOLLOWER=0\n")
         seen = {}
 
         def serve(me, max_cycles=None):
@@ -2942,7 +2946,7 @@ class TestCli(unittest.TestCase):
             code, _ = self.run_cli("--env", env, "cec-return-monitor", "--root", d, "--state-dir", d)
         self.assertEqual((code, seen), (0, {"root": d, "state_dir": d, "keepalive": True}))
         with open(env, "w") as f:                                   # opt-out du maintien seul : reprise conservée
-            f.write("OPENTV_CEC_RETURN_KEEPALIVE=0\n")
+            f.write("OPENTV_CEC_FOLLOWER=0\nOPENTV_CEC_RETURN_KEEPALIVE=0\n")
         with mock.patch.object(os, "geteuid", lambda: 1000), mock.patch.object(cecreturn.Monitor, "serve", serve):
             code, _ = self.run_cli("--env", env, "cec-return-monitor", "--root", d, "--state-dir", d)
         self.assertEqual((code, seen["keepalive"]), (0, False))

@@ -12,11 +12,12 @@ MANIFEST = "/opt/opentv/MANIFEST.sha256"
 LINE_RE = re.compile(r"([0-9a-f]{64})  (/[^\n]+)")
 UNITS_REQUIRED = ("opentv.service", "opentv-net-helper.path", "opentv-ap-guard.timer")
 UNITS_OPTIONAL = ("opentv-kiosk.service", "opentv-display-mode.service", "opentv-cec.timer",
-                  "opentv-cec-return.service",
+                  "opentv-cec-return.service", "opentv-cec-follower.service",
                   "opentv-catalogue-refresh.timer",
                   "opentv-catalogue-ratings.service", "opentv-catalogue-ratings-retry.timer",
                   "opentv-catalogue-ratings-retry.service")
 CEC_RETURN_UNIT = "opentv-cec-return.service"
+CEC_FOLLOWER_UNIT = "opentv-cec-follower.service"
 DISPLAY_MODE_UNIT = "opentv-display-mode.service"
 
 
@@ -135,6 +136,11 @@ def run(cfg, root="/", runner=default_runner, check_http=True):
     if cfg.cec_bootstrap and cfg.cec_return_recovery and man.get("error") != "manifest_missing" and \
             units.get(CEC_RETURN_UNIT) in ("failed", "inactive"):
         warnings.append("cec_return_failed")
+    # suiveur CEC exclusif (0.7.6) : activé mais absent/en échec (78 : anomalie de mode, autre suiveur exclusif,
+    # adaptateur illisible ; relances épuisées) ⇒ le noyau reprend ses FEATURE_ABORT automatiques
+    if cfg.cec_bootstrap and cfg.cec_follower != "off" and man.get("error") != "manifest_missing" and \
+            units.get(CEC_FOLLOWER_UNIT) in ("failed", "inactive"):
+        warnings.append("cec_follower_failed")
     # mode HDMI exact après un rallumage de la TV : kiosque actif sans son moniteur (échec 78, relances épuisées, unité
     # absente) ⇒ avertissement ; l'accueil peut repasser au mode préféré 4K de la TV (quart d'écran) sans correction
     if units.get("opentv-kiosk.service") == "active" and units.get(DISPLAY_MODE_UNIT) != "active":

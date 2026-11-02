@@ -46,7 +46,14 @@ DEFAULTS = {
     # 1 = après une reprise `announced` seulement : <Poll> neutre (1 octet, aucun opcode) vers la TV toutes les 15 s tant
     # que notre adresse reste la source choisie — la Samsung terrain cesse sinon de transmettre les touches après
     # quelques secondes/minutes. Jamais d'annonce, de réveil ni de question d'alimentation périodiques. 0 = jamais.
+    # 0.7.6 : ignoré (aucun POLL) tant que le suiveur exclusif est actif ; repli seulement avec OPENTV_CEC_FOLLOWER=0.
     "OPENTV_CEC_RETURN_KEEPALIVE": "1",
+    # 0.7.6 (opentv-cec-follower.service) : suiveur CEC exclusif minimal — répond seulement aux demandes de la TV
+    # (<Report Power Status> « on » à <Give Device Power Status>, une <Active Source> à <Set Stream Path> vers notre
+    # adresse, FEATURE_ABORT aux autres messages dirigés) ; jamais de réveil ni d'émission périodique.
+    # 1 = actif ; canary = actif + une ligne de journal par demande (gate terrain, borné) ; 0 = arrêté (repli 0.7.5 :
+    # le POLL du maintien OPENTV_CEC_RETURN_KEEPALIVE redevient possible).
+    "OPENTV_CEC_FOLLOWER": "1",
     # télécommande sur téléphone (LAN, HTTP prototype) : ouverte seulement après la configuration, en ligne, sur
     # l'adresse LAN actuelle (jamais 0.0.0.0)
     "OPENTV_REMOTE_ENABLED": "1",
@@ -167,7 +174,13 @@ class Config:
         self.cec_keymap = _bool(e["OPENTV_CEC_KEYMAP"], "OPENTV_CEC_KEYMAP")
         self.cec_boot_announce = _bool(e["OPENTV_CEC_BOOT_ANNOUNCE"], "OPENTV_CEC_BOOT_ANNOUNCE")
         self.cec_return_recovery = _bool(e["OPENTV_CEC_RETURN_RECOVERY"], "OPENTV_CEC_RETURN_RECOVERY")
-        self.cec_return_keepalive = _bool(e["OPENTV_CEC_RETURN_KEEPALIVE"], "OPENTV_CEC_RETURN_KEEPALIVE")
+        follower = {"1": "on", "canary": "canary", "0": "off"}.get(e["OPENTV_CEC_FOLLOWER"])
+        if follower is None:
+            raise ValueError("config: OPENTV_CEC_FOLLOWER invalide (1, canary ou 0)")
+        self.cec_follower = follower
+        # maintien POLL 0.7.4 : jamais à côté du suiveur exclusif (aucune émission périodique) ; repli explicite seul
+        self.cec_return_keepalive = _bool(e["OPENTV_CEC_RETURN_KEEPALIVE"], "OPENTV_CEC_RETURN_KEEPALIVE") and \
+            follower == "off"
         self.remote_enabled = _bool(e["OPENTV_REMOTE_ENABLED"], "OPENTV_REMOTE_ENABLED")
         self.remote_port = _port(e["OPENTV_REMOTE_PORT"], "OPENTV_REMOTE_PORT")
         self.remote_mdns = _bool(e["OPENTV_REMOTE_MDNS"], "OPENTV_REMOTE_MDNS")

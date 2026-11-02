@@ -518,7 +518,8 @@ done
 host systemctl disable --now opentv-player.service opentv-player-keys.service opentv-kiosk.service \
   opentv-display-mode.service opentv.service \
   opentv-net-helper.path opentv-net-helper.service opentv-ap-guard.timer opentv-ap-guard.service opentv-cec.timer \
-  opentv-cec.service opentv-cec-announce.service opentv-cec-return.service opentv-splash.service \
+  opentv-cec.service opentv-cec-announce.service opentv-cec-return.service opentv-cec-follower.service \
+  opentv-splash.service \
   opentv-catalogue-refresh.timer \
   opentv-catalogue-refresh.service opentv-catalogue-ratings.service opentv-catalogue-ratings-retry.timer \
   opentv-catalogue-ratings-retry.service opentv-plymouth-failsafe.timer \

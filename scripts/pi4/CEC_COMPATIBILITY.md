@@ -155,13 +155,59 @@ perdu : des POLL vus sur le bus avant une reprise `announced` n'arment jamais le
 ; la seule restauration automatique reste l'annonce unique déclenchée par la séquence exacte de la TV (sinon `cec
 --activate`), jamais d'annonce périodique.
 
+### Suiveur exclusif minimal (0.7.6)
+
+Terrain Samsung : la TV cesse parfois d'émettre `USER_CONTROL` après 30 s à 5 min malgré des POLL acquittés et un
+service sain ; une réannonce `ACTIVE_SOURCE` rétablit. Sans suiveur, le noyau répond `FEATURE_ABORT` à
+`GIVE_DEVICE_POWER_STATUS` ; après extinction/rallumage de la TV, le moniteur voit le changement d'état puis « prêt »
+mais rien ne rétablit l'entrée avant `cec --activate`. Un `cec-follower -m -s` complet maintenait les touches ; un
+canari tardif en espace utilisateur était invalide (l'abandon automatique du noyau partait d'abord). Contrat
+(`opentv-cec-follower.service`, module `cecfollower`, service dédié : le moniteur textuel de reprise reste inchangé) :
+
+- adaptateur vc4 découvert (jamais `/dev/cec0` en dur) dont la configuration est la nôtre (Playback « OpenTV »,
+  posée par `opentv-cec.service`) ; mode `INITIATOR|EXCL_FOLLOWER` (0x21) relu, **jamais passthrough** (0x31 refusé
+  par le transport) ; aucune capacité (pas de `CAP_NET_ADMIN`) ; adresse physique, adresses logiques et masque relus à
+  chaque événement et juste avant chaque émission ; aucune réclamation (`S_LOG_ADDRS`/`S_PHYS_ADDR` absents) ;
+  `ALLOW_RC_PASSTHRU` conservé (avertissement `rc_passthru_off` s'il manque) ;
+- `GIVE_DEVICE_POWER_STATUS` dirigé vers notre adresse logique ⇒ exactement `REPORT_POWER_STATUS` « on » en < 1 s,
+  plus aucun `FEATURE_ABORT` automatique ; un opcode que le noyau traite lui-même (`GET_CEC_VERSION`, `ABORT`,
+  `GIVE_OSD_NAME`, `GIVE_DEVICE_VENDOR_ID`, `GIVE_FEATURES`, `GIVE_PHYSICAL_ADDR`) reçu quand même ⇒ anomalie,
+  échec fermé (sortie 78, mode rendu) ;
+- `SET_STREAM_PATH` diffusé par la TV, longueur exacte, vers notre adresse physique ⇒ exactement une `ACTIVE_SOURCE`
+  (la TV demande explicitement notre chemin ; aucun `MENU_STATUS`) ; autre adresse, trame malformée, autre émetteur,
+  adaptateur qui change (événement en file ou relecture différente juste avant l'émission) ⇒ rien. C'est la réponse
+  sûre qui doit rétablir les touches après un rallumage **si** la Samsung envoie cette demande ;
+- tout autre message dirigé ⇒ `FEATURE_ABORT` « unrecognized » (parité avec le noyau seul) ; jamais pour
+  `FEATURE_ABORT`, `USER_CONTROL_PRESSED`/`RELEASED` (ni abandonnés ni injectés : le noyau les transforme en touches),
+  `REPORT_PHYSICAL_ADDR` ni les messages de diffusion seule ; aucune réponse aux diffusions hors `SET_STREAM_PATH`
+  exact (`REQUEST_ACTIVE_SOURCE` compris) ;
+- **jamais** `IMAGE_VIEW_ON`, `TEXT_VIEW_ON`, `STANDBY`, question d'alimentation, POLL, annonce périodique ni
+  réclamation : liste blanche de trois trames (octets exacts) vérifiée juste avant chaque `CEC_TRANSMIT` ;
+- extinction/rallumage : même descripteur (le noyau conserve le mode suiveur), relecture immédiate à chaque événement
+  d'état, « prêt » dès la réclamation automatique du noyau (fenêtre de retour jamais manquée, aucune scrutation) ;
+  **aucune annonce sur simple HPD** : sans demande de la TV, OpenTV reste passif et la récupération reste manuelle ;
+  configuration étrangère ⇒ mode rendu, redécouverte bornée ; adaptateur retiré ⇒ réouverture 0,2 s puis 1/2/5 s ;
+- un seul propriétaire `EXCL_FOLLOWER` (jamais volé, `exclusive_follower_busy`), verrou partagé
+  `/run/opentv-cec/lock` (attente ≤ 0,4 s), demande de plus de 0,8 s ignorée, ≤ 10 émissions/s et 120/min,
+  `ACTIVE_SOURCE` espacées de 2 s et ≤ 30/h, jamais de réémission après NACK ;
+- avec le suiveur actif, **aucun POLL** : `OPENTV_CEC_RETURN_KEEPALIVE` est ignoré ; la reprise sur séquence exacte
+  reste un repli (notre `ACTIVE_SOURCE` l'annule) ; l'annonce unique de démarrage et `cec --activate` sont inchangés ;
+- journal sobre (`cec_follower_ready`, `cec_follower_waiting`, `cec_follower_reply`, statistiques horaires) ; échec
+  véridique ⇒ `cec_follower_failed`, unité `failed`, `opentv-pi health` avertit `cec_follower_failed`.
+
+Gate terrain : `OPENTV_CEC_FOLLOWER=canary` (même comportement + une ligne par demande, bornée, rien de périodique).
+Repli et rollback : `OPENTV_CEC_FOLLOWER=0` puis
+`sudo systemctl restart opentv-cec-follower.service opentv-cec-return.service` (comportement 0.7.5). Tant que les
+gates ne sont pas passées (bus sans `FEATURE_ABORT` 0x8f, réponse < 1 s, trois cycles YouTube de 15 min, TV
+éteinte/rallumée ×3, autre entrée HDMI sans reprise, TV éteinte sans réveil), dire « restauré pour l'instant ».
+
 ### Lacunes connues
 
 - aucune action utilisateur « Afficher OpenTV » (téléphone appairé, future télécommande USB) ne déclenche encore la
   réactivation bornée sans terminal ;
-- OpenTV ne répond pas encore à `<Request Active Source>` ni à un `<Set Stream Path>` isolé émis par la TV (hors de la
-  séquence exacte de retour d'application native ci-dessus) : choisir l'entrée HDMI OpenTV au menu de la TV ne
-  rétablit donc pas forcément les touches ;
+- OpenTV ne répond pas à `<Request Active Source>` ; depuis 0.7.6, le suiveur répond à un `<Set Stream Path>` exact
+  de la TV vers notre adresse (une `ACTIVE_SOURCE`), mais choisir l'entrée HDMI OpenTV au menu de la TV ne rétablit
+  les touches que si la TV émet cette demande (à prouver sur la Samsung) ;
 - la reprise après application native n'est prouvée que sur la séquence Samsung capturée ; une autre marque qui ne
   l'émet pas exactement ne déclenche rien (repli : téléphone, `cec --activate`).
 
@@ -257,7 +303,10 @@ est armé), aucun réveil.
 - 2026-10-31 : reprise `announced` détectée et transmise, mais touches perdues après quelques secondes/minutes
   (**reproduit**) ; canari POLL neutre 15 s seul : six touches > 5 min (**PASS**, Alex) ; maintien intégré 0.7.4
   (`cec_return_keepalive`) : **à valider sur le Pi** (six touches immédiatement puis après 2, 5 et 10 min, trois
-  cycles YouTube ↔ OpenTV, Home, autre source, TV éteinte).
+  cycles YouTube ↔ OpenTV, Home, autre source, TV éteinte) ;
+- 2026-11 : sans suiveur, `FEATURE_ABORT` du noyau à `GIVE_DEVICE_POWER_STATUS` ; `cec-follower -m -s` complet garde
+  les touches ; suiveur exclusif minimal 0.7.6 (`opentv-cec-follower.service`) : **à valider sur le Pi** (gate
+  « Suiveur CEC »).
 
 Classe provisoire : **B — compatible après activation CEC terrain bornée**.
 

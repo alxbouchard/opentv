@@ -1,5 +1,5 @@
 """opentv-pi : serve | preflight | health | net-helper | ap-guard | agent issue|list|revoke | setup reset | cec |
-cec-bootstrap | cec-return-monitor | catalogue status|refresh|rollback|resume|ratings|ratings-retry|ratings-credential |
+cec-bootstrap | cec-return-monitor | cec-follower | catalogue status|refresh|rollback|resume|ratings|ratings-retry|ratings-credential |
 muse status|pair|unpair|prepare-bluetooth|restore-bluetooth | muse-setup-helper |
 manifest verify."""
 import argparse
@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 
-from . import VERSION, agents, apguard, cec, cecboot, cecreturn, config, fsutil, health, nethelper, preflight
+from . import VERSION, agents, apguard, cec, cecboot, cecfollower, cecreturn, config, fsutil, health, nethelper, preflight
 
 # Boucle du service : un tick (au pire netstate.NMCLI_TIMEOUT_S + IP_TIMEOUT_S, CEC en thread) puis cette attente.
 # Le test de budget vérifie que (tick + attente) × 2 ≤ WatchdogSec de opentv.service.
@@ -408,6 +408,18 @@ def cmd_cec_return_monitor(a):
     return cecreturn.run(cecreturn.Monitor(a.root, state_dir=a.state_dir, keepalive=cfg.cec_return_keepalive))
 
 
+def cmd_cec_follower(a):
+    """(opentv-cec-follower.service, compte opentv) suiveur CEC exclusif minimal : répond seulement aux demandes de la
+    TV (puissance « on », <Active Source> sur <Set Stream Path> exact, FEATURE_ABORT) ; jamais de réveil ni de périodique."""
+    if os.geteuid() == 0:   # root n'a pas le bac à sable de l'unité et n'écrit jamais dans /run/opentv-cec
+        return _line({"event": "cec_follower", "ok": False, "error": "run_via_systemd",
+                      "note": "sudo systemctl start opentv-cec-follower.service"}, 2)
+    cfg = config.Config.load(a.env)
+    if not (cfg.cec_bootstrap and cfg.cec_follower != "off"):
+        return _line({"event": "cec_follower", "ok": True, "result": "disabled"})
+    return cecfollower.run(cecfollower.build(a.root, state_dir=a.state_dir, canary=cfg.cec_follower == "canary"))
+
+
 def _uids(*users):
     import pwd
     out = {0}
@@ -746,6 +758,11 @@ def build_parser():
                                                    "annonce sûre seulement après la séquence exacte de la TV")
     cr.add_argument("--root", default="/")
     cr.add_argument("--state-dir", default=cecboot.STATE_DIR)
+    cf = sub.add_parser("cec-follower", help="(opentv-cec-follower.service) suiveur CEC exclusif minimal : répond "
+                                             "seulement aux demandes de la TV, jamais de réveil ni d'émission "
+                                             "périodique")
+    cf.add_argument("--root", default="/")
+    cf.add_argument("--state-dir", default=cecboot.STATE_DIR)
     pd = sub.add_parser("player-daemon", help="(opentv-kiosk) contrôleur du lecteur « Regarder » (systemd)")
     pd.add_argument("--env", default=config.ENV_FILE)
     pk = sub.add_parser("player-keys", help="(opentv-keys) aide des touches de fermeture du lecteur (systemd)")
@@ -804,5 +821,6 @@ def main(argv):
             "playback": cmd_playback, "preflight": cmd_preflight, "health": cmd_health, "net-helper": cmd_net_helper,
             "ap-guard": cmd_ap_guard, "agent": cmd_agent, "setup": cmd_setup, "cec": cmd_cec,
             "cec-bootstrap": cmd_cec_bootstrap, "cec-return-monitor": cmd_cec_return_monitor,
+            "cec-follower": cmd_cec_follower,
             "catalogue": cmd_catalogue, "manifest": cmd_manifest,
             "muse": cmd_muse, "muse-setup-helper": cmd_muse_setup_helper}[a.cmd](a)
