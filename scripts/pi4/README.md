@@ -185,7 +185,7 @@ Services :
 | `opentv-player-keys.service` | aide des touches de fermeture (compte `opentv-keys`, seul détenteur de `input` côté lecture, `DeviceAllow=char-input r`, sans réseau `PrivateNetwork=yes`, sans capacité, `ProtectSystem=strict`) : lit evdev seulement pendant une séance abonnée, n'envoie que `back/exit/home/devtools` au contrôleur par `/run/opentv-player-keys/keys.sock` (SO_PEERCRED vérifié dans les deux sens) |
 | `opentv-cec.timer` / `.service` | amorçage HDMI-CEC (20 s après le démarrage puis toutes les 30 s) : oneshot `opentv` (groupes `video`, `input`), sans capacité ni réseau, `DeviceAllow` CEC + entrée seulement, budget 40 s (`TimeoutStartSec=60`). Déclare Playback « OpenTV », remappe la touche OK, laisse une nouvelle adresse logique se stabiliser jusqu’au passage suivant, puis fait **une seule annonce `<Active Source>` par démarrage** de la boîte (fenêtre de 240 s après le boot, TV allumée seulement) : jamais de réveil de la TV, jamais de réannonce. Détails : §« Télécommandes » et `CEC_COMPATIBILITY.md`. |
 | `opentv-cec-return.service` | reprise de la télécommande après le retour de la TV depuis une application native (0.7.3) : service `opentv` long (groupe `video` seulement, jamais `input`), `CAP_NET_ADMIN` seule pour le mode moniteur CEC passif, réseau privé, `DeviceAllow` CEC seulement, mémoire/tâches bornées, relances bornées ; échec véridique = sortie 78 non relancée (`failed`, health `cec_return_failed`). Rejoue l’annonce sûre une fois seulement sur la séquence exacte de la TV ; jamais périodique ni de réveil. 0.7.4 : après une reprise `announced` seulement, maintien neutre `POLL` vers la TV toutes les 15 s (`cec_return_keepalive`, opt-out `OPENTV_CEC_RETURN_KEEPALIVE=0`), arrêté dès que la TV ou une autre source reprend la main. Détails : §« Télécommandes » et `CEC_COMPATIBILITY.md`. |
-| `opentv-cec-follower.service` | suiveur HDMI-CEC exclusif minimal (0.7.6, module `cecfollower`, `opentv-pi cec-follower`) : service `opentv` long (groupe `video` seulement), **aucune capacité** (`INITIATOR|EXCL_FOLLOWER` et l'émission n'en exigent pas), `PrivateNetwork`, `IPAddressDeny=any`, `AF_UNIX`, `DeviceAllow` CEC seulement, mémoire/tâches bornées, relances bornées ; échec véridique = sortie 78 (`failed`, health `cec_follower_failed`). Répond seulement aux demandes de la TV : `REPORT_POWER_STATUS` « on » à `GIVE_DEVICE_POWER_STATUS`, une `ACTIVE_SOURCE` à un `SET_STREAM_PATH` exact vers l'adresse de la boîte, `FEATURE_ABORT` aux autres messages dirigés ; aucun POLL, jamais de réveil ni d'émission périodique. Repli/rollback : `OPENTV_CEC_FOLLOWER=0`. Détails : §« Télécommandes » et `CEC_COMPATIBILITY.md`. |
+| `opentv-cec-follower.service` | suiveur HDMI-CEC exclusif minimal (0.7.6, module `cecfollower`, `opentv-pi cec-follower`) : service `opentv` long (groupe `video` seulement), **aucune capacité** (`INITIATOR|EXCL_FOLLOWER` et l'émission n'en exigent pas), `PrivateNetwork`, `IPAddressDeny=any`, `AF_UNIX`, `DeviceAllow` CEC seulement, mémoire/tâches bornées ; échec véridique = sortie 78 (`failed`, health `cec_follower_failed`) ; accès refusé (course udev/`DeviceAllow` au démarrage) ou erreur interne = sortie 1 transitoire, relancée toutes les 10 s sans limite de démarrages (ordonné après `opentv-kiosk.service`). Répond seulement aux demandes de la TV : `REPORT_POWER_STATUS` « on » à `GIVE_DEVICE_POWER_STATUS`, une `ACTIVE_SOURCE` à un `SET_STREAM_PATH` exact vers l'adresse de la boîte, `FEATURE_ABORT` aux autres messages dirigés ; aucun POLL, jamais de réveil ni d'émission périodique. Repli/rollback : `OPENTV_CEC_FOLLOWER=0`. Détails : §« Télécommandes » et `CEC_COMPATIBILITY.md`. |
 
 Fichiers système dédiés (manifeste, sauvegarde d'un éventuel fichier existant, retirés/restaurés par `uninstall.sh`) :
 `/etc/systemd/logind.conf.d/opentv-kiosk.conf` (touches Power, Reboot, Suspend, Hibernate **ignorées** par logind :
@@ -354,19 +354,24 @@ Télécommande — trois niveaux, dans cet ordre de priorité :
      manuelle inchangée : téléphone, `cec --activate`). Configuration devenue étrangère ⇒ mode rendu (le noyau
      reprend ses abandons automatiques) et redécouverte ; adaptateur retiré ⇒ réouverture après 0,2 s puis 1/2/5 s.
      Bornes : un seul propriétaire `EXCL_FOLLOWER` (jamais volé : `exclusive_follower_busy`, 78 si persistant ; un
-     `cec-follower` de diagnostic ne peut pas tourner en même temps), verrou partagé `/run/opentv-cec/lock` (attente
-     ≤ 0,4 s, sinon rien émis), demande de plus de 0,8 s ignorée, ≤ 10 émissions/s et 120/min, `ACTIVE_SOURCE`
+     `cec-follower` de diagnostic ne peut pas tourner en même temps), verrou partagé `/run/opentv-cec/lock` exigé
+     pour `ACTIVE_SOURCE` et `FEATURE_ABORT` (attente ≤ 0,4 s, sinon `lock_busy`, rien émis) — jamais attendu pour
+     `REPORT_POWER_STATUS`, qui répond donc même pendant que `opentv-cec.service` tient le verrou (adresse relue et
+     liste blanche quand même) ; accès refusé à l'ouverture (EACCES/EPERM) ⇒ sortie 1 relancée, jamais 78 ;
+     résultats d'émission attendus ≤ 64, perdus comptés (`tx_result_lost`) ; demande de plus de 0,8 s ignorée, ≤ 10 émissions/s et 120/min, `ACTIVE_SOURCE`
      espacées d'au moins 2 s et ≤ 30/h, jamais de réémission après un NACK. Avec le suiveur actif, **aucun POLL** :
      le maintien 0.7.4 (`OPENTV_CEC_RETURN_KEEPALIVE`) est ignoré ; la reprise sur séquence exacte reste en repli
      (notre `ACTIVE_SOURCE` déjà émise l'annule, une seule annonce). Annonce unique de démarrage et `cec --activate`
      inchangés. Journal sobre : `cec_follower_start`/`held`/`ready`/`waiting`/`released`, chaque `SET_STREAM_PATH`
      servi ou refusé (`cec_follower_reply`, `cec_follower_reply_ack` avec `e2e_ms`), statistiques horaires si elles
      changent ; jamais d'octets bruts. Gate terrain : `OPENTV_CEC_FOLLOWER=canary` (même comportement, une ligne
-     `cec_follower_rx`/`cec_follower_tx` par demande, ≤ 600/h, rien de périodique). Repli/rollback :
+     `cec_follower_rx`/`cec_follower_tx` par demande, y compris chaque demande non servie avec sa raison —
+     `action: skip`, `reason` `rx_not_ready`/`stale`/`rate_limited`/`duplicate_request`/`lock_busy`/`adapter_churn`/
+     `tx_*` —, ≤ 600/h, rien de périodique ; relevé `cec_follower_stats` final à chaque arrêt, SIGTERM compris). Repli/rollback :
      `OPENTV_CEC_FOLLOWER=0` dans `/etc/opentv/opentv.env` puis
      `sudo systemctl restart opentv-cec-follower.service opentv-cec-return.service` (comportement 0.7.5, maintien POLL
-     de nouveau possible) ; retour à une version sans ce module : le suiveur s'arrête seul au réveil suivant
-     (`cec_follower_uninstalled`), mode rendu.
+     de nouveau possible) ; retour à une version sans ce module : le suiveur s'arrête seul au réveil suivant, avant
+     de traiter quoi que ce soit (`cec_follower_uninstalled`, rien émis), mode rendu.
    - **Récupération si la télécommande de la TV est inerte** (TV allumée après la fenêtre de démarrage, HDMI
      rebranché, retour depuis une autre source…) : beaucoup de TV, dont la Samsung terrain, n'envoient les touches
      qu'à la **source active** déclarée par OpenTV. **Choisir l'entrée HDMI OpenTV ne suffit donc pas forcément** :

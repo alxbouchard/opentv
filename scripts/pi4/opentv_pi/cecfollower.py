@@ -34,14 +34,26 @@ Contrat :
   reprend), descripteur fermé, redécouverte bornée ; périphérique retiré (ENODEV, POLLERR) ⇒ réouverture après
   0,2 s puis 1/2/5 s — jamais de boucle serrée.
 - un seul propriétaire EXCL_FOLLOWER (EBUSY ⇒ jamais volé ; persistant ⇒ 78) ; verrou CEC partagé
-  /run/opentv-cec/lock (attente bornée LOCK_WAIT_S, sinon `lock_busy`, rien émis) ; demande périmée (> STALE_MS,
-  horodatage noyau) ignorée ; débit borné (TX_RATE_MAX/s, TX_MINUTE_MAX/min, <Active Source> espacées de
-  AS_MIN_SPACING_S et ≤ AS_PER_HOUR_MAX/h) ; aucune réémission après un NACK.
+  /run/opentv-cec/lock exigé pour <Active Source> et FEATURE_ABORT (attente bornée LOCK_WAIT_S, sinon `lock_busy`,
+  rien émis) ; <Report Power Status> (LOCK_FREE_KINDS) ne l'attend jamais : réponse directe à une question de la TV,
+  sans effet de source, qui doit partir < 1 s même pendant que opentv-cec.service tient le verrou (relecture de
+  l'adresse et liste blanche toujours appliquées) ; demande périmée (> STALE_MS, horodatage noyau) ignorée ; débit
+  borné (TX_RATE_MAX/s, TX_MINUTE_MAX/min, <Active Source> espacées de AS_MIN_SPACING_S et ≤ AS_PER_HOUR_MAX/h) ;
+  aucune réémission après un NACK.
+- résultats d'émission (CEC_RECEIVE, diagnostic seulement : rien n'en dépend, jamais de réémission) : au plus
+  PENDING_MAX en attente ; le plus ancien évincé au-delà, expiré après PENDING_TTL_S, tout vidé à la libération du
+  descripteur — chaque perte comptée `tx_result_lost` ; un résultat inconnu (évincé) est seulement compté.
+- accès refusé à l'ouverture (EACCES/EPERM : groupe udev pas encore posé, ou DeviceAllow=char-cec résolu avant le
+  chargement du pilote CEC) : TRANSITOIRE — quelques relectures bornées puis sortie EXIT_TRANSIENT (1), relancée par
+  systemd (Restart=on-failure, RestartSec=10, sans limite de démarrages) ; jamais 78.
 - journal JSON sobre : transitions (held/ready/waiting/released), chaque <Set Stream Path> servi ou refusé avec sa
-  raison, statistiques horaires seulement si elles changent ; mode canari (OPENTV_CEC_FOLLOWER=canary, gate terrain) :
-  une ligne par demande/réponse (opcode, latence), bornée à CANARY_LOG_MAX_PER_HOUR. Jamais d'octets bruts du bus.
+  raison, statistiques horaires seulement si elles changent, et un relevé final à toute sortie (SIGTERM compris) ;
+  mode canari (OPENTV_CEC_FOLLOWER=canary, gate terrain) : une ligne par demande/réponse (opcode, latence) ET par
+  demande non servie (`action: skip`, `intended`, `reason` : rx_not_ready, stale, rate_limited, duplicate_request,
+  lock_busy, adapter_churn, tx_*), bornée à CANARY_LOG_MAX_PER_HOUR. Jamais d'octets bruts du bus.
 - arrêt (SIGTERM), désinstallation/retour à une version sans ce module (fichier retiré ⇒ arrêt propre au réveil
-  suivant) : mode rendu (0x01) puis close() — l'abandon automatique du noyau reprend, rien de persistant.
+  suivant, vérifié aussi juste après chaque réveil, avant tout traitement : rien émis) : mode rendu (0x01) puis
+  close() — l'abandon automatique du noyau reprend, rien de persistant.
 """
 import collections
 import errno
@@ -126,6 +138,7 @@ NEVER_ABORT = NO_ABORT_DIRECTED | KERNEL_CORE_OPCODES | {GIVE_DEVICE_POWER_STATU
 
 # --------------------------------------------------------------------------- bornes
 EXIT_FATAL = 78                 # opentv-cec-follower.service : RestartPreventExitStatus=78
+EXIT_TRANSIENT = 1              # Restart=on-failure, RestartSec=10, StartLimitIntervalSec=0 : toujours relancé
 STALE_MS = 800                  # au-delà, la demande n'est plus servie (réponse < 1 s exigée)
 LOCK_WAIT_S = 0.4               # verrou CEC partagé : attente bornée, sinon rien émis
 LOCK_POLL_S = 0.02
@@ -143,9 +156,14 @@ BUSY_MAX = 3                    # EBUSY (autre suiveur exclusif) consécutifs av
 BUSY_RETRY_S = 5.0
 CANARY_LOG_MAX_PER_HOUR = 600
 DRAIN_MAX = 64                  # messages/événements lus par réveil (le reste au réveil suivant)
-PENDING_MAX = 64
+PENDING_MAX = 64                # résultats d'émission attendus (diagnostic) : borne dure
+PENDING_TTL_S = 30.0            # un résultat jamais reçu (perdu) est oublié après ce délai
+# seule réponse émise sans le verrou CEC partagé : <Report Power Status> « on » (aucun effet de source)
+LOCK_FREE_KINDS = frozenset({"reply_power"})
 DEV_RE = re.compile(r"/dev/cec[0-9]{1,2}")
-UNREADABLE_MAX = 5              # adaptateurs présents mais jamais lisibles (accès refusé…) : échec véridique
+UNREADABLE_MAX = 5              # découvertes consécutives illisibles : accès refusé ⇒ 1 (relance), sinon 78
+UNREADABLE_WHY = frozenset({"open_failed", "read_failed", "permission_denied"})
+PERMISSION_ERRNOS = frozenset({errno.EACCES, errno.EPERM})
 FATAL = frozenset({"mode_anomaly", "mode_readback_mismatch", "mode_changed", "forbidden_tx", "abi_mismatch",
                    "exclusive_follower_busy", "s_mode_failed", "adapter_unreadable"})
 ENONET = getattr(errno, "ENONET", 64)
@@ -441,6 +459,7 @@ class Follower:
         self._canary_window = (None, 0)
         self._stats_due = None
         self._stats_last = None
+        self._scan_denied = False
 
     # ---- journal ------------------------------------------------------------------------------------------------
     def _canary(self, obj):
@@ -481,7 +500,8 @@ class Follower:
         if errs:
             return self._fatal("abi_mismatch", detail=errs[:3])
         self.log({"event": "cec_follower_start", "mode": "canary" if self.canary else "on", "version": VERSION})
-        disc_i = reopen_i = busy = unreadable = 0
+        disc_i = reopen_i = busy = unreadable = denied = 0
+        denied_in_streak = False
         cycles = 0
         while max_cycles is None or cycles < max_cycles:
             cycles += 1
@@ -492,13 +512,22 @@ class Follower:
                 return 0
             found = self.discover()
             if found is None:
-                unreadable = unreadable + 1 if self._why in ("open_failed", "read_failed") else 0
+                # accès refusé (course udev / DeviceAllow résolu trop tôt) : transitoire, relance systemd — jamais 78
+                denied = denied + 1 if self._scan_denied else 0
+                if self._why in UNREADABLE_WHY:
+                    unreadable += 1
+                    denied_in_streak = denied_in_streak or self._scan_denied
+                else:
+                    unreadable, denied_in_streak = 0, False
+                if denied >= UNREADABLE_MAX or (unreadable >= UNREADABLE_MAX and denied_in_streak):
+                    return self._transient("permission_denied", failures=max(denied, unreadable))
                 if unreadable >= UNREADABLE_MAX:
                     return self._fatal("adapter_unreadable", failures=unreadable)
                 self.sleep(DISCOVER_DELAYS_S[min(disc_i, len(DISCOVER_DELAYS_S) - 1)])
                 disc_i += 1
                 continue
-            disc_i = unreadable = 0
+            disc_i = unreadable = denied = 0
+            denied_in_streak = False
             dev, ad = found
             t0 = self.mono_ns()
             why = self.hold(dev, ad)
@@ -524,15 +553,24 @@ class Follower:
         self.log(dict({"event": "cec_follower_failed", "reason": why, "exit": EXIT_FATAL}, **extra))
         return EXIT_FATAL
 
+    def _transient(self, why, **extra):
+        self.log(dict({"event": "cec_follower_failed", "reason": why, "exit": EXIT_TRANSIENT}, **extra))
+        return EXIT_TRANSIENT
+
     def discover(self):
         """Premier adaptateur vc4 émetteur dont la configuration est la nôtre -> (dev, Adapter ouvert) ; sinon None
         (raison journalisée au changement). Lecture locale seulement (ioctl), aucun trafic sur le bus."""
         why = "no_adapter"
+        self._scan_denied = False
         for dev in list(self.devices())[:cecboot.MAX_ADAPTERS]:
             try:
                 ad = self.open_adapter(dev)
-            except (OSError, ValueError):
-                why = "open_failed"
+            except (OSError, ValueError) as e:
+                if getattr(e, "errno", None) in PERMISSION_ERRNOS:
+                    self._scan_denied = True
+                    why = "permission_denied"
+                else:
+                    why = "open_failed"
                 continue
             keep = False
             try:
@@ -603,6 +641,10 @@ class Follower:
                     return "uninstalled"
                 now = self.mono_ns()
                 msg, ev = ad.wait(max(0.0, (next_verify - now) / 1e9))
+                # module retiré PENDANT l'attente : rien traité ni émis après une rétrogradation
+                if not self.installed():
+                    self.log({"event": "cec_follower_uninstalled"})
+                    return "uninstalled"
                 if ev:
                     why = self._events(ad, dev)
                     if why:
@@ -617,6 +659,7 @@ class Follower:
                     why = self.revalidate(ad, dev)
                     if why:
                         return why
+                    self._trim_pending(self.mono_ns())
                     self._stats()
                     next_verify = self.mono_ns() + int(VERIFY_S * 1e9)
         except AdapterGone:
@@ -631,6 +674,10 @@ class Follower:
                     pass                                    # close() libère EXCL_FOLLOWER de toute façon
             ad.close()
             self.ident, self.status = None, None
+            # séquences de ce descripteur : leurs résultats ne seront jamais lus
+            if self.pending:
+                self.counters["tx_result_lost"] += len(self.pending)
+                self.pending.clear()
             if set_mode:
                 self.log({"event": "cec_follower_released", "device": dev})
 
@@ -671,10 +718,22 @@ class Follower:
             self.log({"event": "cec_follower_reply_ack", "request": "set_stream_path", "ok": ok, "e2e_ms": e2e})
         self._canary({"event": "cec_follower_tx", "kind": p["kind"] if p else None, "ok": ok, "e2e_ms": e2e})
 
-    def _skip(self, a, result):
+    def _skip(self, a, result, op, init):
         self.counters[result] += 1
         if a.kind == "active_source":
             self.log({"event": "cec_follower_reply", "request": "set_stream_path", "result": result})
+        self._canary({"event": "cec_follower_rx", "opcode": op, "initiator": init, "action": "skip",
+                      "intended": a.kind, "reason": result})
+
+    def _trim_pending(self, now):
+        """Borne dure PENDING_MAX (le plus ancien évincé) et expiration PENDING_TTL_S ; chaque perte comptée."""
+        ttl = int(PENDING_TTL_S * 1e9)
+        while self.pending:
+            oldest = next(iter(self.pending.values()))
+            if len(self.pending) <= PENDING_MAX and now - oldest["sent"] < ttl:
+                break
+            self.pending.popitem(last=False)
+            self.counters["tx_result_lost"] += 1
 
     def _rate_ok(self, now, a):
         while self.tx_times and now - self.tx_times[0] >= int(60e9):
@@ -694,31 +753,37 @@ class Follower:
 
     def _rx(self, ad, dev, m):
         self.counters["rx"] += 1
+        op = m.frame[1] if len(m.frame) > 1 else None
+        init = m.frame[0] >> 4 if m.frame else None
         if self.ident is None:
+            # adaptateur déconfiguré/débranché (événement traité avant la réception du même réveil) : rien émis
             self.counters["rx_not_ready"] += 1
+            self._canary({"event": "cec_follower_rx", "opcode": op, "initiator": init, "action": "skip",
+                          "intended": None, "reason": "rx_not_ready"})
             return None
         a = decide(m.frame, self.ident)
-        op = m.frame[1] if len(m.frame) > 1 else None
         if a.kind == "anomaly":
             self.log({"event": "cec_follower_anomaly", "reason": a.reason})
             return "mode_anomaly"
         if a.frame is None:
             self.counters["ignored"] += 1
-            self._canary({"event": "cec_follower_rx", "opcode": op, "initiator": m.frame[0] >> 4,
+            self._canary({"event": "cec_follower_rx", "opcode": op, "initiator": init,
                           "action": a.kind, "reason": a.reason})
             return None
         now = self.mono_ns()
         if m.rx_ts and now - m.rx_ts > int(STALE_MS * 1e6):
-            self._skip(a, "stale")
+            self._skip(a, "stale", op, init)
             return None
         why = self._rate_ok(now, a)
         if why:
-            self._skip(a, why)
+            self._skip(a, why, op, init)
             return None
-        tok = self._acquire()
-        if tok is None:
-            self._skip(a, "lock_busy")
-            return None
+        tok = None
+        if a.kind not in LOCK_FREE_KINDS:
+            tok = self._acquire()
+            if tok is None:
+                self._skip(a, "lock_busy", op, init)
+                return None
         try:
             # juste avant l'émission, verrou tenu : événements en file (churn) puis relecture de l'adresse
             why = self._events(ad, dev)
@@ -726,20 +791,21 @@ class Follower:
                 return why
             fresh = identity_from(ad.caps(), ad.phys_addr(), ad.log_addrs())[1]
             if self.ident is None or fresh != self.ident or decide(m.frame, self.ident).frame != a.frame:
-                self._skip(a, "adapter_churn")
+                self._skip(a, "adapter_churn", op, init)
                 return self.revalidate(ad, dev)
             now = self.mono_ns()
             if m.rx_ts and now - m.rx_ts > int(STALE_MS * 1e6):
-                self._skip(a, "stale")
+                self._skip(a, "stale", op, init)
                 return None
             frame = guard_tx(a.frame, self.ident)
             try:
                 seq = ad.transmit(frame)
             except OSError as e:
-                self._skip(a, "tx_" + (errno.errorcode.get(e.errno, "error").lower()))
+                self._skip(a, "tx_" + (errno.errorcode.get(e.errno, "error").lower()), op, init)
                 return None
         finally:
-            self.unlock(tok)
+            if tok is not None:
+                self.unlock(tok)
         sent = self.mono_ns()
         self.tx_times.append(sent)
         if a.kind == "active_source":
@@ -751,10 +817,9 @@ class Follower:
             self.counters["power_replies"] += 1
         else:
             self.counters["feature_aborts"] += 1
-        self.pending[seq] = {"kind": a.kind, "rx_ts": m.rx_ts}
-        while len(self.pending) > PENDING_MAX:
-            self.pending.popitem(last=False)
-        self._canary({"event": "cec_follower_rx", "opcode": op, "initiator": m.frame[0] >> 4, "action": a.kind,
+        self.pending[seq] = {"kind": a.kind, "rx_ts": m.rx_ts, "sent": sent}
+        self._trim_pending(sent)
+        self._canary({"event": "cec_follower_rx", "opcode": op, "initiator": init, "action": a.kind,
                       "submit_ms": _ms(sent - m.rx_ts) if m.rx_ts else None})
         return None
 
@@ -775,7 +840,8 @@ def build(root="/", state_dir=cecboot.STATE_DIR, canary=False):
 
 def run(follower):
     """Point d'entrée du service : SIGTERM ⇒ sortie 0 (mode rendu, descripteur fermé dans hold) ; échec véridique ⇒
-    78 (RestartPreventExitStatus) ; erreur inattendue ⇒ 1 après journal (relance bornée par systemd)."""
+    78 (RestartPreventExitStatus) ; transitoire (accès refusé) ou erreur inattendue ⇒ 1 après journal (relance
+    systemd toutes les 10 s). Toute sortie, SIGTERM compris, écrit le relevé final des compteurs s'il a changé."""
     def stop(*_):
         raise SystemExit(0)
     prev = signal.signal(signal.SIGTERM, stop)
@@ -785,8 +851,12 @@ def run(follower):
         raise
     except Exception as e:  # noqa: BLE001 — journal stable, jamais de trace brute du bus
         follower.log({"event": "cec_follower_failed", "reason": "internal_error", "error": type(e).__name__,
-                      "exit": 1})
-        return 1
+                      "exit": EXIT_TRANSIENT})
+        return EXIT_TRANSIENT
     finally:
         signal.signal(signal.SIGTERM, prev)
+        try:
+            follower._stats(force=True)
+        except Exception:  # noqa: BLE001 — le relevé final ne change jamais le code de sortie
+            pass
     return 0 if code is None else code

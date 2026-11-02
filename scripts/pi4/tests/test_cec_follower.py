@@ -27,6 +27,7 @@ ID4 = cf.Identity(pa=0x1000, las=(4,), mask=1 << 4, primary=4, flags=2)
 ID8 = cf.Identity(pa=0x2100, las=(8,), mask=1 << 8, primary=8, flags=2)
 ID11 = cf.Identity(pa=0x3400, las=(11,), mask=1 << 11, primary=11, flags=2)
 ALLOWED_TX_OPS = {0x00, 0x82, 0x90}
+CANARY_KEYS = {"event", "opcode", "initiator", "action", "intended", "reason", "kind", "ok", "e2e_ms", "submit_ms"}
 
 
 def offsets(fmt, n):
@@ -535,13 +536,14 @@ class TestEngine(EngineBase):
         self.assertEqual(events(self.logs, "cec_follower_reply")[0]["result"], "stale")
 
     def test_lock_busy_bounded_wait_then_skip(self):
-        self.tv(1010, [0x04, 0x8F])
-        self.tv(1020, [0x04, 0x8F])
+        # verrou exigé pour FEATURE_ABORT et ACTIVE_SOURCE (seul REPORT_POWER_STATUS s'en passe, voir plus bas)
+        self.tv(1010, [0x04, 0x8D, 0x00])
+        self.tv(1020, [0x04, 0x8D, 0x00])
         f, logs, lock = make(self.k, 1100)
         lock.busy_until = 1015.0
         f.serve()
         ours = self.k.ours()
-        self.assertEqual(len(ours), 1)
+        self.assertEqual([fr for _, fr in ours], [bytes([0x40, 0x00, 0x8D, 0x00])])
         self.assertLess(ours[0][0] - int(1020e9), int(1e9))
         self.assertLessEqual(lock.calls, 2 + int(cf.LOCK_WAIT_S / cf.LOCK_POLL_S) + 2)
         self.assertEqual(lock.held, 0)
@@ -549,7 +551,7 @@ class TestEngine(EngineBase):
         self.assertEqual(f.counters["lock_busy"], 1)
 
     def test_lock_released_after_wait_is_used(self):
-        self.tv(1010, [0x04, 0x8F])
+        self.tv(1010, [0x04, 0x8D, 0x00])
         f, logs, lock = make(self.k, 1100)
         lock.busy_until = 1010.1
         f.serve()
@@ -558,7 +560,7 @@ class TestEngine(EngineBase):
 
     def test_request_gone_stale_during_lock_wait_not_answered(self):
         # fraîche à la réception (0,5 s) mais périmée après l'attente du verrou (0,35 s) : rien émis
-        self.tv(1010, [0x04, 0x8F], age_s=0.5)
+        self.tv(1010, [0x04, 0x8D, 0x00], age_s=0.5)
         f, logs, lock = make(self.k, 1100)
         lock.busy_until = 1010.35
         f.serve()
@@ -759,8 +761,9 @@ class TestEngine(EngineBase):
         self.assertEqual(self.k.open_fds(), [])
 
     def test_unreadable_adapters_fail_truthfully(self):
+        # erreur d'E/S persistante (pas un accès refusé) : échec véridique 78
         def refuse(path):
-            raise PermissionError(errno.EACCES, path)
+            raise OSError(errno.EIO, path)
         logs = []
         f = cf.Follower(devices=self.k.devices, open_adapter=refuse, mono_ns=self.k.clock, sleep=self.k.sleep,
                         log=logs.append, stop=lambda: self.k.clock.s >= 2000)
@@ -794,8 +797,7 @@ class TestEngine(EngineBase):
         self.assertEqual(len(rx), cf.CANARY_LOG_MAX_PER_HOUR)
         tx = [e for e in logs if e["event"] == "cec_follower_tx"]
         self.assertTrue(all(e["e2e_ms"] < 1000 for e in tx))
-        self.assertTrue(all(set(e) <= {"event", "opcode", "initiator", "action", "reason", "kind", "ok",
-                                       "e2e_ms", "submit_ms"} for e in rx))
+        self.assertTrue(all(set(e) <= CANARY_KEYS for e in rx))
 
     def test_stats_hourly_only_when_changed(self):
         self.tv(1010, [0x04, 0x8F])
@@ -803,6 +805,435 @@ class TestEngine(EngineBase):
         st = events(self.logs, "cec_follower_stats")
         self.assertEqual(len(st), 1)
         self.assertEqual(st[0]["counters"]["power_replies"], 1)
+
+
+def canary_rx(logs, action=None):
+    return [e for e in logs if e["event"] == "cec_follower_rx" and (action is None or e.get("action") == action)]
+
+
+class TestReviewFollowup(EngineBase):
+    """Revue 0.7.6 : accès refusé transitoire, diagnostics canari des demandes non servies, statistiques à l'arrêt,
+    course identité/réception, borne des résultats d'émission, arrêt sur rétrogradation, verrou et 0x8f."""
+
+    # ---- 1) course de permission (udev / DeviceAllow=char-cec) : transitoire, jamais 78
+    def _refusing(self, err, n=None, logs=None):
+        calls = {"n": 0}
+        k = self.k
+
+        def open_adapter(p):
+            calls["n"] += 1
+            if n is None or calls["n"] <= n:
+                raise PermissionError(err, p) if err in (errno.EACCES, errno.EPERM) else OSError(err, p)
+            return cf.Adapter(p, ioctl_fn=k.ioctl, opener=k.open, closer=k.close, poll_factory=k.poller)
+        logs = [] if logs is None else logs
+        f = cf.Follower(devices=k.devices, open_adapter=open_adapter, mono_ns=k.clock, sleep=k.sleep,
+                        log=logs.append, stop=lambda: k.clock.s >= 2000)
+        return f, logs, calls
+
+    def test_permission_denied_is_transient_exit_1_never_78(self):
+        for err in (errno.EACCES, errno.EPERM):
+            with self.subTest(err=errno.errorcode[err]):
+                self.k = FakeKernel(Clock(1000.0))
+                f, logs, calls = self._refusing(err)
+                code = f.serve()
+                self.assertEqual(code, cf.EXIT_TRANSIENT)
+                self.assertNotEqual(code, cf.EXIT_FATAL)
+                failed = events(logs, "cec_follower_failed")
+                self.assertEqual([(e["reason"], e["exit"]) for e in failed], [("permission_denied", 1)])
+                self.assertEqual(calls["n"], cf.UNREADABLE_MAX)              # quelques essais bornés, jamais serrés
+                self.assertLess(self.k.clock.s, 1030)
+                self.assertIn("permission_denied", [e["reason"] for e in events(logs, "cec_follower_waiting")])
+                self.assertEqual(self.k.ours(), [])
+                # par le point d'entrée du service : 1 ⇒ Restart=on-failure (78 seul est RestartPreventExitStatus)
+                self.k = FakeKernel(Clock(1000.0))
+                f, logs, _ = self._refusing(err)
+                self.assertEqual(cf.run(f), 1)
+        self.assertNotIn("permission_denied", cf.FATAL)
+
+    def test_permission_denied_then_granted_serves(self):
+        # udev applique le groupe video un peu après le démarrage : réessai borné en interne puis service normal
+        self.k.at(1030, lambda: self.k.send(bytes([0x04, 0x8F])))
+        f, logs, calls = self._refusing(errno.EACCES, n=cf.UNREADABLE_MAX - 1)
+        self.assertEqual(f.serve(), 0)
+        self.assertEqual([fr for _, fr in self.k.ours()], [bytes([0x40, 0x90, 0x00])])
+        self.assertEqual(events(logs, "cec_follower_failed"), [])
+        self.assertEqual(calls["n"], cf.UNREADABLE_MAX)
+
+    def test_permission_on_one_adapter_while_other_not_ours_is_still_transient(self):
+        # Pi 4 : deux adaptateurs vc4 ; le nôtre refusé, l'autre étranger ⇒ jamais une attente infinie silencieuse
+        self.k.add_adapter("/dev/cec1", ours=False, configured=False)
+        k = self.k
+        logs = []
+
+        def open_adapter(p):
+            if p == "/dev/cec0":
+                raise PermissionError(errno.EPERM, p)
+            return cf.Adapter(p, ioctl_fn=k.ioctl, opener=k.open, closer=k.close, poll_factory=k.poller)
+        f = cf.Follower(devices=k.devices, open_adapter=open_adapter, mono_ns=k.clock, sleep=k.sleep,
+                        log=logs.append, stop=lambda: k.clock.s >= 2000)
+        self.assertEqual(f.serve(), cf.EXIT_TRANSIENT)
+        self.assertEqual(events(logs, "cec_follower_failed")[0]["reason"], "permission_denied")
+
+    def test_permission_seen_in_unreadable_streak_is_transient(self):
+        seq = iter([errno.EIO, errno.EACCES, errno.EIO, errno.EIO, errno.EIO, errno.EIO])
+        k = self.k
+        logs = []
+
+        def open_adapter(p):
+            err = next(seq)
+            raise PermissionError(err, p) if err == errno.EACCES else OSError(err, p)
+        f = cf.Follower(devices=k.devices, open_adapter=open_adapter, mono_ns=k.clock, sleep=k.sleep,
+                        log=logs.append, stop=lambda: k.clock.s >= 2000)
+        self.assertEqual(f.serve(), cf.EXIT_TRANSIENT)
+
+    # ---- 2) canari : chaque demande non servie a sa ligne bornée avec la raison ; statistiques à l'arrêt
+    def test_canary_logs_every_skipped_request_with_reason(self):
+        k = self.k
+        self.tv(1010, [0x04, 0x8F], age_s=0.9)                       # stale (8f)
+        self.tv(1020, [0x0F, 0x86, 0x10, 0x00])                      # servie
+        self.tv(1020.5, [0x0F, 0x86, 0x10, 0x00])                    # duplicate_request
+        self.tv(1030, [0x04, 0x8D, 0x00])                            # lock_busy (inconnu dirigé)
+        for i in range(30):
+            self.tv(1040 + i * 0.01, [0x04, 0x8F])                   # rate_limited
+        orig = k._transmit
+
+        def eio(fh, buf):
+            raise OSError(errno.EIO, "tx")
+        k.at(1049.9, lambda: setattr(k, "_transmit", eio))
+        self.tv(1050, [0x04, 0x8F])                                   # tx_eio
+        k.at(1050.5, lambda: setattr(k, "_transmit", orig))
+
+        def silent_change():
+            k.adap().pa = 0x2000
+            k.send(bytes([0x0F, 0x86, 0x10, 0x00]))
+        k.at(1060, silent_change)                                     # adapter_churn
+        k.at(1070, lambda: (k.send(bytes([0x04, 0x8F])), k.hpd_low()))  # rx_not_ready (voir course plus bas)
+        f, logs, lock = make(k, 1100, canary=True)
+        k.at(1029.9, lambda: setattr(lock, "busy_until", 1031.0))
+        f.serve()
+        skips = canary_rx(logs, "skip")
+        reasons = [e["reason"] for e in skips]
+        for want in ("stale", "duplicate_request", "lock_busy", "rate_limited", "tx_eio", "adapter_churn",
+                     "rx_not_ready"):
+            self.assertIn(want, reasons, want)
+        by = {e["reason"]: e for e in skips}
+        self.assertEqual((by["stale"]["opcode"], by["stale"]["intended"]), (0x8F, "reply_power"))
+        self.assertEqual((by["duplicate_request"]["opcode"], by["duplicate_request"]["intended"]),
+                         (0x86, "active_source"))
+        self.assertEqual((by["lock_busy"]["opcode"], by["lock_busy"]["intended"]), (0x8D, "feature_abort"))
+        self.assertEqual(by["tx_eio"]["intended"], "reply_power")
+        self.assertEqual(by["rx_not_ready"]["opcode"], 0x8F)
+        self.assertTrue(all(set(e) <= CANARY_KEYS for e in canary_rx(logs)))
+        # un compteur par raison, une ligne canari par demande non servie (aucune perdue, aucune en double)
+        for r in set(reasons):
+            self.assertEqual(reasons.count(r), f.counters[r], r)
+        # aucun octet brut
+        self.assertFalse(any("frame" in e or "raw" in e for e in logs))
+
+    def test_production_mode_never_logs_per_request_skips(self):
+        self.tv(1010, [0x04, 0x8F], age_s=0.9)
+        for i in range(30):
+            self.tv(1040 + i * 0.01, [0x04, 0x8F])
+        self.run_until(1100)
+        self.assertEqual(canary_rx(self.logs), [])
+        self.assertEqual(self.f.counters["stale"], 1)
+        self.assertGreater(self.f.counters["rate_limited"], 0)
+
+    def test_canary_skip_lines_capped_no_flood(self):
+        # 3000 demandes périmées en une heure : au plus CANARY_LOG_MAX_PER_HOUR lignes, le reste compté
+        for i in range(3000):
+            self.tv(1010 + i * 1.0, [0x04, 0x8F], age_s=0.9)
+        f, logs, _ = make(self.k, 1010 + 3000 + 5, canary=True)
+        f.serve()
+        self.assertEqual(len(canary_rx(logs)), cf.CANARY_LOG_MAX_PER_HOUR)
+        self.assertEqual(f.counters["stale"], 3000)
+        self.assertEqual(f.counters["canary_log_suppressed"], 3000 - cf.CANARY_LOG_MAX_PER_HOUR)
+        self.assertEqual(self.k.ours(), [])
+
+    def test_stats_forced_on_normal_exit(self):
+        self.tv(1010, [0x04, 0x8F])
+        f, logs, _ = make(self.k, 1050)
+        self.assertEqual(cf.run(f), 0)
+        st = events(logs, "cec_follower_stats")
+        self.assertEqual(len(st), 1)                                   # < 1 h : seulement le relevé final
+        self.assertEqual(st[0]["counters"]["power_replies"], 1)
+        self.assertEqual(logs[-1]["event"], "cec_follower_stats")
+
+    def test_stats_forced_on_sigterm_and_mode_released(self):
+        import signal
+        self.tv(1010, [0x04, 0x8F])
+        self.tv(1011, [0x04, 0x8F], age_s=0.9)
+        self.k.at(1020, lambda: os.kill(os.getpid(), signal.SIGTERM))
+        f, logs, _ = make(self.k, 5000)
+        before = signal.getsignal(signal.SIGTERM)
+        with self.assertRaises(SystemExit) as cm:
+            cf.run(f)
+        self.assertEqual(cm.exception.code, 0)
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+        st = events(logs, "cec_follower_stats")
+        self.assertEqual(len(st), 1)
+        self.assertEqual((st[0]["counters"]["power_replies"], st[0]["counters"]["stale"]), (1, 1))
+        self.assertEqual(self.k.open_fds(), [])
+        names = [e["event"] for e in logs]
+        self.assertLess(names.index("cec_follower_released"), names.index("cec_follower_stats"))
+
+    def test_stats_forced_on_failure_exit(self):
+        self.k.adap().leak_core = True
+        self.tv(1009, [0x04, 0x8F])
+        self.tv(1010, [0x04, 0x9F])
+        f, logs, _ = make(self.k, 1100)
+        self.assertEqual(cf.run(f), cf.EXIT_FATAL)
+        self.assertEqual(events(logs, "cec_follower_stats")[-1]["counters"]["power_replies"], 1)
+
+    def test_stats_not_repeated_when_unchanged(self):
+        f, logs, _ = make(self.k, 1050)
+        self.assertEqual(cf.run(f), 0)
+        self.assertEqual(events(logs, "cec_follower_stats"), [])     # rien compté : aucune ligne
+
+    # ---- 3) course : message en file puis déconfiguration dans le même réveil
+    def test_queued_request_then_unconfigure_same_wakeup_is_rx_not_ready(self):
+        k = self.k
+        a = k.adap()
+
+        def unconfigure():
+            a.configured = False
+            k._event(a, a.pa, 0)
+
+        for name, change in (("unconfigured", unconfigure), ("disconnected", lambda: k.hpd_low())):
+            with self.subTest(change=name):
+                self.setUp()
+                k, a = self.k, self.k.adap()
+
+                def race(change=change, k=k, a=a):
+                    k.send(bytes([0x04, 0x8F]))
+                    k.send(bytes([0x0F, 0x86, 0x10, 0x00]))
+                    if change is unconfigure:
+                        a.configured = False
+                        k._event(a, a.pa, 0)
+                    else:
+                        k.hpd_low()
+                k.at(1010, race)
+                f, logs, lock = make(k, 1100, canary=True)
+                self.assertEqual(f.serve(), 0)
+                self.assertEqual(k.ours(), [])
+                self.assertNotIn("CEC_TRANSMIT", k.ioctls)
+                self.assertEqual(f.counters["rx_not_ready"], 2)
+                self.assertEqual(f.counters["adapter_churn"], 0)    # événement traité AVANT la réception
+                self.assertEqual(lock.calls, 0)
+                self.assertEqual(sorted(e["opcode"] for e in canary_rx(logs, "skip")), [0x86, 0x8F])
+                self.assertTrue(all(e["reason"] == "rx_not_ready" for e in canary_rx(logs, "skip")))
+                self.assertIn(name, [e["reason"] for e in events(logs, "cec_follower_waiting")])
+                self.assertEqual(events(logs, "cec_follower_failed"), [])
+
+    def test_rx_with_no_identity_never_calls_policy(self):
+        f, logs, _ = make(self.k, 1100)
+        f.ident = None
+        m = cf.RxMsg(bytes([0x04, 0x8F]), 1, 0, 0, 1, 0, 0)
+        with mock.patch.object(cf, "decide", side_effect=AssertionError("decide")):
+            self.assertIsNone(f._rx(None, "/dev/cec0", m))
+            self.assertIsNone(f._rx(None, "/dev/cec0", cf.RxMsg(b"\x0f", 1, 0, 0, 1, 0, 0)))
+        self.assertEqual(f.counters["rx_not_ready"], 2)
+
+    # ---- 4) résultats d'émission perdus : en attente borné, nettoyage explicite
+    def test_pending_bounded_when_tx_results_lost(self):
+        k = self.k
+        k.drop_tx_results = True
+        n = cf.PENDING_MAX + 16
+        for i in range(n):
+            self.tv(1010 + i * 0.15, [0x04, 0x8F])
+        f, logs, _ = make(k, 1100)
+        snap = {}
+        t_last = 1010 + (n - 1) * 0.15
+        k.at(t_last + 0.05, lambda: snap.update(keys=list(f.pending), lost=f.counters["tx_result_lost"]))
+        self.assertEqual(f.serve(), 0)
+        self.assertEqual(len(k.ours()), n)                            # aucune émission retenue ni réémise
+        self.assertEqual(snap["keys"], list(range(n - cf.PENDING_MAX + 1, n + 1)))   # les plus récentes, bornées
+        self.assertEqual(snap["lost"], n - cf.PENDING_MAX)            # les plus anciennes évincées, comptées
+        self.assertEqual(f.pending, {})                               # nettoyé à la libération du descripteur
+        self.assertEqual(f.counters["tx_result_lost"], n)
+        self.assertEqual(f.counters["tx_ok"] + f.counters["tx_failed"], 0)
+
+    def test_pending_expires_and_late_result_harmless(self):
+        k = self.k
+        k.drop_tx_results = True
+        for i in range(3):
+            self.tv(1010 + i, [0x04, 0x8F])
+        f, logs, _ = make(k, 1100)
+        snap = {}
+        k.at(1012 + cf.PENDING_TTL_S + cf.VERIFY_S + 0.5, lambda: snap.update(n=len(f.pending),
+                                                                               lost=f.counters["tx_result_lost"]))
+        k.at(1080, lambda: setattr(k, "drop_tx_results", False))
+        self.tv(1090, [0x04, 0x8F])
+        self.assertEqual(f.serve(), 0)
+        self.assertEqual(snap, {"n": 0, "lost": 3})
+        self.assertEqual(f.counters["tx_ok"], 1)
+        # résultat d'une séquence inconnue (évincée) : compté, jamais d'erreur
+        f._tx_result(cf.RxMsg(bytes([0x40, 0x90, 0x00]), 0, 5, 999, 0, 1, 0))
+        self.assertEqual(f.counters["tx_ok"], 2)
+
+    def test_non_consecutive_permission_denials_never_exit(self):
+        # refus isolés séparés par une configuration étrangère (attente normale) : jamais de sortie, ni 1 ni 78
+        a = self.k.adap()
+        a.osd, a.prim, a.num_log_addrs, a.configured = "Kodi", 0, 1, True
+        k = self.k
+        logs = []
+        n = {"i": 0}
+        deny = {1, 2, 11, 12, 13, 14, 25}
+
+        def open_adapter(p):
+            n["i"] += 1
+            if n["i"] in deny:
+                raise PermissionError(errno.EACCES, p)
+            return cf.Adapter(p, ioctl_fn=k.ioctl, opener=k.open, closer=k.close, poll_factory=k.poller)
+        f = cf.Follower(devices=k.devices, open_adapter=open_adapter, mono_ns=k.clock, sleep=k.sleep,
+                        log=logs.append, stop=lambda: n["i"] >= 40)
+        self.assertEqual(f.serve(), 0)
+        self.assertEqual(events(logs, "cec_follower_failed"), [])
+
+    def test_internal_error_is_transient_exit_1(self):
+        f, logs, _ = make(self.k, 1100)
+        with mock.patch.object(f, "serve", side_effect=RuntimeError("boom")):
+            self.assertEqual(cf.run(f), cf.EXIT_TRANSIENT)
+        self.assertEqual([(e["reason"], e["exit"]) for e in events(logs, "cec_follower_failed")],
+                         [("internal_error", 1)])
+
+    def test_pending_cleared_on_release_before_ttl(self):
+        k = self.k
+        k.drop_tx_results = True
+        for i in range(3):
+            self.tv(1010 + i, [0x04, 0x8F])
+        snap = {}
+
+        def foreign():
+            a = k.adap()
+            a.osd = "Kodi"
+            k._event(a, a.pa, a.mask)
+        k.at(1015, foreign)                                           # descripteur rendu bien avant PENDING_TTL_S
+        f, logs, _ = make(k, 1100)
+        k.at(1016, lambda: snap.update(n=len(f.pending), lost=f.counters["tx_result_lost"]))
+        self.assertEqual(f.serve(), 0)
+        self.assertEqual(snap, {"n": 0, "lost": 3})
+
+    def test_pending_bound_constant(self):
+        self.assertEqual(cf.PENDING_MAX, 64)
+        self.assertLessEqual(cf.PENDING_TTL_S, 60)
+
+    # ---- 5) rétrogradation : module retiré pendant l'attente ou au réveil
+    def _installed_flag(self):
+        flag = {"ok": True}
+        return flag, (lambda: flag["ok"])
+
+    def _assert_clean_uninstall(self, f, logs, seen_mode):
+        self.assertEqual(self.k.ours(), [])
+        self.assertNotIn("CEC_TRANSMIT", self.k.ioctls)
+        self.assertEqual(self.k.open_fds(), [])
+        self.assertEqual(seen_mode, [cf.MODE_PLAIN])
+        names = [e["event"] for e in logs]
+        self.assertIn("cec_follower_uninstalled", names)
+        self.assertLess(names.index("cec_follower_uninstalled"), names.index("cec_follower_released"))
+        self.assertEqual(events(logs, "cec_follower_failed"), [])
+
+    def _watch_close(self):
+        seen = []
+        orig = self.k.close
+
+        def close(fd):
+            if fd in self.k.fhs:
+                seen.append(self.k.fhs[fd].mode)
+            orig(fd)
+        self.k.close = close
+        return seen
+
+    def test_downgrade_during_idle_exits_cleanly(self):
+        flag, installed = self._installed_flag()
+        seen = self._watch_close()
+        self.k.at(1010, lambda: flag.update(ok=False))
+        f, logs, _ = make(self.k, 5000, installed=installed)
+        self.assertEqual(f.serve(), 0)
+        self.assertLessEqual(self.k.clock.s, 1010 + cf.VERIFY_S + 0.01)
+        self._assert_clean_uninstall(f, logs, seen)
+
+    def test_downgrade_during_wakeup_exits_without_tx(self):
+        flag, installed = self._installed_flag()
+        seen = self._watch_close()
+
+        def downgrade_and_request():
+            flag["ok"] = False
+            self.k.send(bytes([0x04, 0x8F]))
+            self.k.send(bytes([0x0F, 0x86, 0x10, 0x00]))
+            self.k.send(bytes([0x04, 0x8D, 0x00]))
+        self.k.at(1010, downgrade_and_request)
+        f, logs, lock = make(self.k, 5000, installed=installed)
+        self.assertEqual(f.serve(), 0)
+        self.assertLess(self.k.clock.s, 1010.01)
+        self.assertEqual(f.counters["rx"], 0)
+        self.assertEqual(lock.calls, 0)
+        self._assert_clean_uninstall(f, logs, seen)
+
+    def test_downgrade_during_event_wakeup_exits_without_tx(self):
+        flag, installed = self._installed_flag()
+        seen = self._watch_close()
+
+        def downgrade_and_hpd():
+            flag["ok"] = False
+            self.k.hpd_low()
+        self.k.at(1010, downgrade_and_hpd)
+        f, logs, _ = make(self.k, 5000, installed=installed)
+        self.assertEqual(f.serve(), 0)
+        self.assertLess(self.k.clock.s, 1010.01)
+        self._assert_clean_uninstall(f, logs, seen)
+
+    # ---- recommandé : REPORT_POWER_STATUS sans le verrou partagé (ACTIVE_SOURCE/FEATURE_ABORT le gardent)
+    def test_lock_free_kinds_whitelist(self):
+        self.assertEqual(cf.LOCK_FREE_KINDS, frozenset({"reply_power"}))
+        a = cf.decide(bytes([0x04, 0x8F]), ID4)
+        self.assertIn(a.kind, cf.LOCK_FREE_KINDS)
+        self.assertEqual(cf.guard_tx(a.frame, ID4), bytes([0x40, 0x90, 0x00]))
+        for frame in (bytes([0x0F, 0x86, 0x10, 0x00]), bytes([0x04, 0x8D, 0x00])):
+            self.assertNotIn(cf.decide(frame, ID4).kind, cf.LOCK_FREE_KINDS)
+
+    def test_power_reply_answers_while_bootstrap_holds_lock(self):
+        self.tv(1010, [0x04, 0x8F])
+        self.tv(1020, [0x0F, 0x86, 0x10, 0x00])
+        self.tv(1030, [0x04, 0x8D, 0x00])
+        self.tv(1040, [0x04, 0x8F])
+        f, logs, lock = make(self.k, 1100, canary=True)
+        lock.busy_until = 10 ** 9                                     # opentv-cec.service tient le verrou
+        self.assertEqual(f.serve(), 0)
+        ours = self.k.ours()
+        self.assertEqual([fr for _, fr in ours], [bytes([0x40, 0x90, 0x00])] * 2)
+        self.assertLess(ours[0][0] - int(1010e9), int(0.1e9))         # aucune attente du verrou
+        self.assertLess(ours[1][0] - int(1040e9), int(0.1e9))
+        self.assertEqual(f.counters["lock_busy"], 2)                  # 86 et 8d : jamais sans verrou
+        self.assertEqual(sorted(e["intended"] for e in canary_rx(logs, "skip")), ["active_source", "feature_abort"])
+        per_attempt = 1 + int(cf.LOCK_WAIT_S / cf.LOCK_POLL_S)
+        self.assertLessEqual(lock.calls, 2 * per_attempt)             # le verrou n'est jamais demandé pour 8f
+        self.assertEqual(lock.held, 0)
+
+    def test_power_reply_never_touches_lock(self):
+        self.tv(1010, [0x04, 0x8F])
+        f, logs, lock = make(self.k, 1100)
+        self.assertEqual(f.serve(), 0)
+        self.assertEqual((lock.calls, lock.held), (0, 0))
+        self.assertEqual(len(self.k.ours()), 1)
+
+    def test_power_reply_without_lock_still_revalidates_and_guards(self):
+        # sans verrou, l'adresse est quand même relue juste avant l'émission ; la garde reste appliquée
+        def silent_move():
+            self.k.send(bytes([0x04, 0x8F]))
+            self.k.adap().las = (8,)
+        self.k.at(1010, silent_move)
+        self.run_until(1100)
+        self.assertEqual(self.k.ours(), [])
+        self.assertEqual(self.f.counters["adapter_churn"], 1)
+        self.assertEqual(self.lock.calls, 0)
+        bad = cf.Action("reply_power", bytes([0x40, 0x04]), "mutant")
+        self.setUp()
+        self.tv(1010, [0x04, 0x8F])
+        with mock.patch.object(cf, "decide", lambda frame, ident: bad):
+            self.assertEqual(self.run_until(1100), cf.EXIT_FATAL)
+        self.assertEqual(self.k.ours(), [])
+        self.assertEqual(self.lock.calls, 0)
 
 
 class TestReturnInterplay(unittest.TestCase):
@@ -971,8 +1402,20 @@ class TestUnit(unittest.TestCase):
         self.assertEqual((s["RuntimeDirectoryMode"], s["UMask"]), (same["RuntimeDirectoryMode"], same["UMask"]))
         self.assertEqual(s["Restart"], "on-failure")
         self.assertEqual(s["RestartPreventExitStatus"].split(), [str(cf.EXIT_FATAL)])
-        self.assertLessEqual(int(s["RestartSec"]), 10)
-        self.assertLessEqual(int(cp["Unit"]["StartLimitBurst"]), 10)
+        # transitoire (accès refusé : course udev/DeviceAllow, erreur interne) : 1, relancé toutes les 10 s, jamais
+        # d'échec définitif « start-limit-hit »
+        self.assertEqual(cf.EXIT_TRANSIENT, 1)
+        self.assertNotIn(str(cf.EXIT_TRANSIENT), s["RestartPreventExitStatus"].split())
+        self.assertNotIn("SuccessExitStatus", s)
+        self.assertEqual(s["RestartSec"], "10")
+        self.assertEqual(cp["Unit"]["StartLimitIntervalSec"], "0")
+        self.assertNotIn("StartLimitBurst", cp["Unit"])
+        self.assertNotIn("StartLimitAction", cp["Unit"])
+        # DeviceAllow=char-cec est résolu (/proc/devices) au démarrage de l'unité : ordonné après udev ET le kiosque
+        # (vc4/cec chargés), sans dépendance qui l'arrêterait avec le kiosque
+        self.assertEqual(cp["Unit"]["After"].split(), ["systemd-udevd.service", "opentv-kiosk.service"])
+        for dep in ("Requires", "BindsTo", "PartOf", "Requisite", "Wants"):
+            self.assertNotIn(dep, cp["Unit"], dep)
         self.assertLessEqual(int(s["TimeoutStopSec"]), 10)
         self.assertIn("MemoryMax", s)
         self.assertLessEqual(int(s["TasksMax"]), 8)

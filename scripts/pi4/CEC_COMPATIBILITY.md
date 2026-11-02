@@ -188,14 +188,20 @@ canari tardif en espace utilisateur était invalide (l'abandon automatique du no
   **aucune annonce sur simple HPD** : sans demande de la TV, OpenTV reste passif et la récupération reste manuelle ;
   configuration étrangère ⇒ mode rendu, redécouverte bornée ; adaptateur retiré ⇒ réouverture 0,2 s puis 1/2/5 s ;
 - un seul propriétaire `EXCL_FOLLOWER` (jamais volé, `exclusive_follower_busy`), verrou partagé
-  `/run/opentv-cec/lock` (attente ≤ 0,4 s), demande de plus de 0,8 s ignorée, ≤ 10 émissions/s et 120/min,
+  `/run/opentv-cec/lock` exigé pour `ACTIVE_SOURCE`/`FEATURE_ABORT` (attente ≤ 0,4 s), jamais attendu pour
+  `REPORT_POWER_STATUS` (réponse sans effet de source, < 1 s même si l'amorçage tient le verrou), demande de plus de
+  0,8 s ignorée, ≤ 10 émissions/s et 120/min,
   `ACTIVE_SOURCE` espacées de 2 s et ≤ 30/h, jamais de réémission après NACK ;
 - avec le suiveur actif, **aucun POLL** : `OPENTV_CEC_RETURN_KEEPALIVE` est ignoré ; la reprise sur séquence exacte
   reste un repli (notre `ACTIVE_SOURCE` l'annule) ; l'annonce unique de démarrage et `cec --activate` sont inchangés ;
-- journal sobre (`cec_follower_ready`, `cec_follower_waiting`, `cec_follower_reply`, statistiques horaires) ; échec
-  véridique ⇒ `cec_follower_failed`, unité `failed`, `opentv-pi health` avertit `cec_follower_failed`.
+- journal sobre (`cec_follower_ready`, `cec_follower_waiting`, `cec_follower_reply`, statistiques horaires + relevé
+  final à l'arrêt) ; échec véridique ⇒ sortie 78, `cec_follower_failed`, unité `failed`, `opentv-pi health` avertit
+  `cec_follower_failed` ; accès refusé (course udev/`DeviceAllow` au démarrage) ⇒ sortie 1, relance toutes les 10 s
+  sans limite, jamais 78.
 
-Gate terrain : `OPENTV_CEC_FOLLOWER=canary` (même comportement + une ligne par demande, bornée, rien de périodique).
+Gate terrain : `OPENTV_CEC_FOLLOWER=canary` (même comportement + une ligne par demande, servie ou non — raison
+`rx_not_ready`, `stale`, `rate_limited`, `duplicate_request`, `lock_busy`, `adapter_churn`, `tx_*` —, bornée, rien de
+périodique).
 Repli et rollback : `OPENTV_CEC_FOLLOWER=0` puis
 `sudo systemctl restart opentv-cec-follower.service opentv-cec-return.service` (comportement 0.7.5). Tant que les
 gates ne sont pas passées (bus sans `FEATURE_ABORT` 0x8f, réponse < 1 s, trois cycles YouTube de 15 min, TV

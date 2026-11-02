@@ -88,6 +88,7 @@ class FakeKernel:
         self.ioctls = []         # noms
         self.nack = set()        # destinations absentes (émission non acquittée)
         self.tx_delay_ns = int(0.03e9)
+        self.drop_tx_results = False   # résultats d'émission perdus (file de réception pleine, LOST_MSGS)
 
     # ---------------------------------------------------------------- topologie
     def add_adapter(self, path, pa=0x1000, las=(4,), configured=True, ours=True, driver="vc4_hdmi", caps=0x7E,
@@ -213,8 +214,9 @@ class FakeKernel:
         self.bus.append((t, "follower", frame))
         dest = frame[0] & 0xF
         ok = dest == 15 or dest not in self.nack
-        fh.msgs.append({"frame": frame, "sequence": self.seq, "tx_ts": t, "tx_status": 0x01 if ok else 0x04,
-                        "nack": 0 if ok else 1})
+        if not self.drop_tx_results:
+            fh.msgs.append({"frame": frame, "sequence": self.seq, "tx_ts": t, "tx_status": 0x01 if ok else 0x04,
+                            "nack": 0 if ok else 1})
         struct.pack_into("=I", buf, 24, self.seq)
         return 0
 

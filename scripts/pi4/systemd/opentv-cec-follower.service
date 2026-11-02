@@ -1,11 +1,16 @@
 [Unit]
 Description=OpenTV Pi - suiveur HDMI-CEC exclusif minimal (repond seulement aux demandes de la TV ; jamais de reveil, de POLL ni d'emission periodique)
 Documentation=file:///opt/opentv/README.md
-After=systemd-udevd.service
-# relances bornees : au-dela, l'unite reste en echec et `opentv-pi health` avertit `cec_follower_failed` ; le noyau
-# reprend alors seul ses FEATURE_ABORT automatiques (comportement 0.7.5 sans maintien)
-StartLimitIntervalSec=600
-StartLimitBurst=5
+# DevicePolicy=closed + DeviceAllow=char-cec : systemd resout "char-cec" (/proc/devices) AU DEMARRAGE de l'unite ;
+# lance avant le chargement du pilote CEC (vc4), l'acces au peripherique reste refuse (EPERM) pour ce processus.
+# Ordonne apres udev (groupe video pose sur /dev/cecN) ET apres le kiosque (vc4/DRM charges), sans dependance : le
+# suiveur n'est jamais arrete ni redemarre avec le kiosque.
+After=systemd-udevd.service opentv-kiosk.service
+# aucune limite de demarrages : un acces refuse (course udev/DeviceAllow) ou une erreur interne sort en 1, relance
+# toutes les 10 s (le nouveau processus resout de nouveau DeviceAllow) ; jamais "start-limit-hit" definitif. Les
+# echecs veridiques (78) ne sont jamais relances : unite failed, `opentv-pi health` avertit `cec_follower_failed`, le
+# noyau reprend alors seul ses FEATURE_ABORT automatiques (comportement 0.7.5 sans maintien)
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -15,8 +20,9 @@ Group=opentv
 SupplementaryGroups=video
 ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-pi cec-follower
 Restart=on-failure
-RestartSec=5
-# 78 = echec veridique (anomalie de mode du noyau, autre suiveur exclusif, adaptateur illisible, ABI) : jamais relance
+RestartSec=10
+# 78 = echec veridique (anomalie de mode du noyau, autre suiveur exclusif, adaptateur illisible hors acces refuse,
+# ABI) : jamais relance. 1 = transitoire (acces refuse, erreur interne) : relance.
 RestartPreventExitStatus=78
 # SIGTERM : mode suiveur rendu (0x01) puis descripteur ferme, immediatement
 TimeoutStopSec=5

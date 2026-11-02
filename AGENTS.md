@@ -366,9 +366,12 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   `ACTIVE_SOURCE` à `SET_STREAM_PATH` exact (TV, longueur 4, notre PA), `FEATURE_ABORT` unrecognized aux autres
   dirigés (jamais FEATURE_ABORT/UCP/UCR/diffusion seule) ; opcode cœur du noyau reçu ⇒ 78. Liste blanche `guard_tx`
   avant chaque émission ; jamais IVO/TVO/STANDBY/question d'alimentation/POLL/périodique/réclamation. TV off/on :
-  même descripteur, relecture à chaque événement, aucune annonce sur HPD. Verrou `/run/opentv-cec/lock` ≤ 0,4 s,
-  périmé > 0,8 s, débit borné. Le POLL 0.7.4 est coupé tant que `OPENTV_CEC_FOLLOWER≠0` ; repli/rollback
-  `OPENTV_CEC_FOLLOWER=0` ; gate `OPENTV_CEC_FOLLOWER=canary`. Santé `cec_follower_failed`. Tests
+  même descripteur, relecture à chaque événement, aucune annonce sur HPD. Verrou `/run/opentv-cec/lock` ≤ 0,4 s
+  (jamais pour `REPORT_POWER_STATUS`, `LOCK_FREE_KINDS`), périmé > 0,8 s, débit borné, résultats d'émission ≤ 64
+  (`tx_result_lost`). EACCES/EPERM à l'ouverture = sortie 1 relancée (RestartSec=10, StartLimitIntervalSec=0,
+  After=opentv-kiosk.service), jamais 78 ; canari : une ligne par demande non servie avec sa raison ; relevé final
+  des compteurs à toute sortie (SIGTERM compris) ; module retiré ⇒ arrêt juste après le réveil, rien émis. Le POLL 0.7.4
+  est coupé tant que `OPENTV_CEC_FOLLOWER≠0` ; repli/rollback `OPENTV_CEC_FOLLOWER=0` ; gate `OPENTV_CEC_FOLLOWER=canary`. Santé `cec_follower_failed`. Tests
   `scripts/pi4/tests/test_cec_follower.py` (faux noyau `tests/_cecfake.py`). Vérifié hors matériel seulement.
 - **Mode HDMI exact après extinction/rallumage de la TV (0.7.5)** : terrain 2026-11-01, au rallumage wlroots recrée
   la sortie et Cage prend le mode préféré de l'EDID (3840x2160@30) pendant que Chromium reste en 1920x1080 (quart
