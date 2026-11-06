@@ -2596,8 +2596,8 @@ class TestKioskHardening(unittest.TestCase):
                                                                "file:///opt/opentv/share/ui/fallback.html",
                                                                "https://x.com", "https://twitter.com"]))
         self.assertEqual(pol["IncognitoModeAvailability"], 1)
-        self.assertEqual(pol["ExtensionInstallBlocklist"], ["*"])
-        self.assertEqual(pol["ExtensionInstallAllowlist"], ["mmoccejphjkmbhejebkbhkbbmmocfafi"])
+        # aucune liste d'extensions (elles bloquent l'extension X décompressée, canari Pi 0.7.8) : verrou au lanceur
+        self.assertFalse([k for k in pol if k.startswith(("ExtensionInstall", "ExtensionSettings"))], pol)
         self.assertIs(pol["AllowFileSelectionDialogs"], False)
         # aucune politique ne touche au clavier : les 7 touches de navigation restent intactes
         for k in pol:

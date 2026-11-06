@@ -629,7 +629,8 @@ class TestXTvRollback(unittest.TestCase):
 
     def test_kiosk_rollback_loads_no_extension(self):
         from tests.test_x_tv import TestKioskAndPolicy
-        self.assertEqual(TestKioskAndPolicy.kiosk_x_args(self, {"OPENTV_X_TV": "0"}), [])
+        # rollback : aucune extension, explicitement (la politique n'a plus de liste d'extensions)
+        self.assertEqual(TestKioskAndPolicy.kiosk_x_args(self, {"OPENTV_X_TV": "0"}), ["--disable-extensions"])
 
 
 # --------------------------------------------------------------------------------------------- extension (source)

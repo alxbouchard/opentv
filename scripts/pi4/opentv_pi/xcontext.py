@@ -28,7 +28,8 @@ import unicodedata
 from . import validate
 
 # ID Chromium de l'extension locale : dérivé de la clé PUBLIQUE de son manifest (aucune clé privée n'existe dans
-# le dépôt ; elle n'a servi qu'à fixer cet ID). Politique du kiosque : ExtensionInstallAllowlist = [EXTENSION_ID].
+# le dépôt ; elle n'a servi qu'à fixer cet ID). Aucune liste d'extensions dans la politique (elle bloquerait toute
+# extension décompressée) : le lanceur du kiosque n'autorise que ce dossier (--disable-extensions-except).
 EXTENSION_ID = "mmoccejphjkmbhejebkbhkbbmmocfafi"
 EXTENSION_ORIGIN = "chrome-extension://" + EXTENSION_ID
 SHARE_PATH = "/api/tv/x/context"

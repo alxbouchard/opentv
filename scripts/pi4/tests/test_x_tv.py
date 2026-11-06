@@ -40,6 +40,12 @@ INSTALL = os.path.join(PI4, "install.sh")
 UNINSTALL = os.path.join(PI4, "uninstall.sh")
 KIOSK = os.path.join(PI4, "bin", "opentv-kiosk-browser")
 POLICY = os.path.join(PI4, "system", "chromium-policy-opentv-kiosk.json")
+POLICY_DSTS = ("/etc/chromium/policies/managed/opentv-kiosk.json",
+               "/etc/chromium-browser/policies/managed/opentv-kiosk.json")
+# clés de politique qui bloqueraient l'extension décompressée (ou rouvriraient l'installation) : jamais au kiosque
+FORBIDDEN_EXT_POLICY = ("ExtensionInstallBlocklist", "ExtensionInstallAllowlist", "ExtensionInstallBlacklist",
+                        "ExtensionInstallWhitelist", "ExtensionInstallForcelist", "ExtensionInstallSources",
+                        "ExtensionSettings", "ExtensionAllowedTypes")
 NODE = shutil.which("node")
 ORIGIN = "chrome-extension://" + xcontext.EXTENSION_ID
 READY = "Prêt pour Hermit ou Muse. Demande-lui de résumer ce post."
@@ -677,8 +683,9 @@ class TestKioskAndPolicy(unittest.TestCase):
         ext = ["--disable-extensions-except=$XEXT", "--load-extension=$XEXT"]
         self.assertEqual(self.kiosk_x_args({}), ["--force-dark-mode"] + ext)                 # défaut : X actif
         self.assertEqual(self.kiosk_x_args({"OPENTV_X_TV": "1"}), ["--force-dark-mode"] + ext)
-        self.assertEqual(self.kiosk_x_args({"OPENTV_X_TV": "1"}, ext_present=False), ["--force-dark-mode"])
-        self.assertEqual(self.kiosk_x_args({"OPENTV_X_TV": "0"}), [])                         # désactivé : rien
+        self.assertEqual(self.kiosk_x_args({"OPENTV_X_TV": "1"}, ext_present=False),
+                         ["--force-dark-mode", "--disable-extensions"])
+        self.assertEqual(self.kiosk_x_args({"OPENTV_X_TV": "0"}), ["--disable-extensions"])   # désactivé : aucune
         text = code_only(read(KIOSK), "#")
         for bad in ("force-dark-mode=", "forceDarkModeEnabled", "blink-settings", "enable-features=WebContentsForceDark",
                     "WebContentsForceDark"):
@@ -687,14 +694,17 @@ class TestKioskAndPolicy(unittest.TestCase):
 
     def test_kiosk_wrapper_kind_never_loads_extension(self):
         # wrapper Debian seul : son --load-extension nu préfixé masquerait le nôtre -> extension refusée (diagnostic)
-        self.assertEqual(self.kiosk_x_args({}, kind="wrapper"), ["--force-dark-mode"])
-        self.assertEqual(self.kiosk_x_args({"OPENTV_X_TV": "0"}, kind="wrapper"), [])
+        self.assertEqual(self.kiosk_x_args({}, kind="wrapper"), ["--force-dark-mode", "--disable-extensions"])
+        self.assertEqual(self.kiosk_x_args({"OPENTV_X_TV": "0"}, kind="wrapper"), ["--disable-extensions"])
 
-    def test_policy_allows_x_and_only_this_extension(self):
+    def test_policy_has_no_extension_install_lists_and_keeps_lockdown(self):
+        # canari Pi 0.7.8 : Blocklist « * » + Allowlist de l'ID bloquent l'extension DÉCOMPRESSÉE (pages.tv absent) ;
+        # ces deux clés seules retirées ⇒ injectée. Le verrou des extensions est le lanceur (TestKioskChromiumBinary).
         pol = json.loads(read(POLICY))
-        self.assertEqual(pol["ExtensionInstallBlocklist"], ["*"])
-        self.assertEqual(pol["ExtensionInstallAllowlist"], [xcontext.EXTENSION_ID])
-        self.assertNotIn("ExtensionInstallForcelist", pol)
+        for k in FORBIDDEN_EXT_POLICY:
+            self.assertNotIn(k, pol, k)
+        self.assertFalse([k for k in pol if k.startswith("ExtensionInstall")], pol)
+        self.assertNotIn(xcontext.EXTENSION_ID, read(POLICY))
         self.assertEqual(pol["DeveloperToolsAvailability"], 2)
         self.assertEqual(set(pol["URLBlocklist"]), {"*", "chrome://*", "chrome-untrusted://*", "devtools://*"})
         self.assertEqual(sorted(pol["URLAllowlist"]), sorted(["http://127.0.0.1", "about:blank",
@@ -783,7 +793,8 @@ class TestKioskChromiumBinary(unittest.TestCase):
         self.assertNotIn("--disable-gpu", argv)
 
     def ext_args(self, argv):
-        return [a for a in argv if a.startswith(("--load-extension", "--disable-extensions-except"))]
+        # TOUT argument qui touche aux extensions (aucun autre chemin ni flag d'extension ne doit passer)
+        return [a for a in argv if "extension" in a]
 
     def test_direct_binary_preferred_with_exactly_one_nonempty_load_extension(self):
         rc, argv, logs, port = self.run_kiosk([self.DIRECT, self.DIRECT_OLD, self.WRAP, self.WRAP_OLD])
@@ -802,8 +813,7 @@ class TestKioskChromiumBinary(unittest.TestCase):
         rc, argv, logs, port = self.run_kiosk([self.DIRECT, self.WRAP], env={"OPENTV_X_TV": "0"})
         self.assertEqual(rc, 0, logs)
         self.assertEqual(argv[0], self.DIRECT)
-        self.assertEqual(self.ext_args(argv), [])
-        self.assertFalse([a for a in argv if "extension" in a])
+        self.assertEqual(self.ext_args(argv), ["--disable-extensions"])   # aucune extension, même sans politique
         self.assertNotIn("--force-dark-mode", argv)
         self.common(argv, port)
 
@@ -811,7 +821,8 @@ class TestKioskChromiumBinary(unittest.TestCase):
         rc, argv, logs, port = self.run_kiosk([self.DIRECT_OLD, self.WRAP, self.WRAP_OLD])
         self.assertEqual(rc, 0, logs)
         self.assertEqual(argv[0], self.DIRECT_OLD)
-        self.assertEqual(len([a for a in argv if a.startswith("--load-extension=")]), 1)
+        ext = "/opt/opentv/share/x-tv-extension"
+        self.assertEqual(self.ext_args(argv), ["--disable-extensions-except=" + ext, "--load-extension=" + ext])
         self.common(argv, port)
 
     def test_wrapper_fallback_refuses_extension_with_diagnostic(self):
@@ -820,7 +831,8 @@ class TestKioskChromiumBinary(unittest.TestCase):
             rc, argv, logs, port = self.run_kiosk(bins, script_direct=script_direct)
             self.assertEqual(rc, 0, logs)
             self.assertTrue(argv[0].startswith("/usr/bin/chromium"), argv[0])
-            self.assertEqual(self.ext_args(argv), [], bins)          # jamais un --load-extension masqué = faux succès
+            # jamais un --load-extension masqué = faux succès ; --disable-extensions neutralise aussi le nu du wrapper
+            self.assertEqual(self.ext_args(argv), ["--disable-extensions"], bins)
             self.assertEqual(argv.count("--force-dark-mode"), 1)
             self.assertEqual([l["event"] for l in logs if l["event"] == "kiosk_x_tv_unavailable"],
                              ["kiosk_x_tv_unavailable"])
@@ -831,13 +843,13 @@ class TestKioskChromiumBinary(unittest.TestCase):
     def test_wrapper_fallback_x_disabled_is_silent(self):
         rc, argv, logs, port = self.run_kiosk([self.WRAP], env={"OPENTV_X_TV": "0"})
         self.assertEqual(rc, 0, logs)
-        self.assertEqual(self.ext_args(argv), [])
+        self.assertEqual(self.ext_args(argv), ["--disable-extensions"])
         self.assertFalse([l for l in logs if l["event"] == "kiosk_x_tv_unavailable"])
 
     def test_extension_missing_no_load_extension(self):
         rc, argv, logs, port = self.run_kiosk([self.DIRECT], ext=False)
         self.assertEqual(rc, 0, logs)
-        self.assertEqual(self.ext_args(argv), [])
+        self.assertEqual(self.ext_args(argv), ["--disable-extensions"])
         self.assertEqual(argv.count("--force-dark-mode"), 1)
 
     def test_no_chromium_fails_closed(self):
@@ -853,6 +865,25 @@ class TestKioskChromiumBinary(unittest.TestCase):
         self.assertEqual(text.count("--load-extension"), 1)
         self.assertNotRegex(text, r"--load-extension(\s|$|\\)")      # jamais nu
         self.assertNotIn("CHROMIUM_FLAGS", text)
+
+    def test_exact_extension_path_is_the_only_one_in_source(self):
+        text = code_only(read(KIOSK), "#")
+        self.assertEqual(re.findall(r'^XEXT=(.*)$', text, re.M), ['"/opt/opentv/share/x-tv-extension"'])
+        self.assertEqual(re.findall(r"--disable-extensions-except=[^\s)]+", text), ['--disable-extensions-except="$XEXT"'])
+        self.assertEqual(re.findall(r"--load-extension=[^\s)]+", text), ['--load-extension="$XEXT"'])
+        self.assertEqual(text.count("--disable-extensions)"), 1)              # repli unique : aucune extension
+        for bad in ("/usr/share/chromium/extensions", "/etc/chromium.d", "--enable-remote-extensions",
+                    "extensions-on-chrome-urls", "--show-component-extension-options"):
+            self.assertNotIn(bad, text, bad)
+
+    def test_x_enabled_never_combines_load_with_disable_all(self):
+        # --disable-extensions + --load-extension = extension X coupée : jamais ensemble
+        rc, argv, logs, port = self.run_kiosk([self.DIRECT])
+        self.assertEqual(rc, 0, logs)
+        self.assertNotIn("--disable-extensions", argv)
+        for env in ({"OPENTV_X_TV": "0"},):
+            rc, argv, logs, port = self.run_kiosk([self.DIRECT], env=env)
+            self.assertFalse([a for a in argv if a.startswith(("--load-extension", "--disable-extensions-except"))])
 
 
 class TestXPasskeyPathAudit(unittest.TestCase):
@@ -916,6 +947,54 @@ class TestInstallUninstallExtension(unittest.TestCase):
         p = sh([UNINSTALL, "--root", r])
         self.assertEqual(p.returncode, 0, p.stdout.decode()[-3000:] + p.stderr.decode()[-3000:])
         self.assertFalse(os.path.exists(os.path.join(r, EXT_DST.lstrip("/"))))
+
+    def old_policy(self):
+        pol = json.loads(read(POLICY))
+        pol["ExtensionInstallBlocklist"] = ["*"]
+        pol["ExtensionInstallAllowlist"] = [xcontext.EXTENSION_ID]
+        return json.dumps(pol, indent=2, sort_keys=True) + "\n"
+
+    def test_install_writes_both_policy_paths_without_extension_lists_then_uninstall(self):
+        r = tempfile.mkdtemp(prefix="otvxpol", dir="/tmp")
+        self.addCleanup(shutil.rmtree, r, True)
+        old = self.old_policy()                  # politique bloquante (0.7.8) déjà en place aux deux chemins
+        for dst in POLICY_DSTS:
+            os.makedirs(os.path.join(r, os.path.dirname(dst).lstrip("/")))
+            with open(os.path.join(r, dst.lstrip("/")), "w") as f:
+                f.write(old)
+        for _ in range(2):                       # installation puis réinstallation (mise à jour)
+            p = sh([INSTALL, "--root", r, "--skip-preflight"])
+            self.assertEqual(p.returncode, 0, p.stdout.decode()[-3000:] + p.stderr.decode()[-3000:])
+            man = read(os.path.join(r, "opt/opentv/MANIFEST.sha256"))
+            for dst in POLICY_DSTS:
+                self.assertIn(dst, man)
+                got = read(os.path.join(r, dst.lstrip("/")))
+                self.assertEqual(got, read(POLICY), dst)                       # gabarit livré à l'identique
+                pol = json.loads(got)
+                for k in FORBIDDEN_EXT_POLICY:
+                    self.assertNotIn(k, pol, (dst, k))
+                self.assertEqual(pol["DeveloperToolsAvailability"], 2)
+                self.assertIn("chrome://*", pol["URLBlocklist"])
+        p = sh([UNINSTALL, "--root", r])
+        self.assertEqual(p.returncode, 0, p.stdout.decode()[-3000:] + p.stderr.decode()[-3000:])
+        for dst in POLICY_DSTS:                  # originaux d'avant l'installation rendus à l'octet
+            self.assertEqual(read(os.path.join(r, dst.lstrip("/"))), old, dst)
+
+    def test_install_failure_rolls_back_policy_exactly(self):
+        r = tempfile.mkdtemp(prefix="otvxpolrb", dir="/tmp")
+        self.addCleanup(shutil.rmtree, r, True)
+        os.makedirs(os.path.join(r, "etc/chromium/policies/managed"))
+        prior = os.path.join(r, POLICY_DSTS[0].lstrip("/"))
+        with open(prior, "w") as f:
+            f.write(self.old_policy())
+        ro = os.path.join(r, "etc/chromium-browser/policies")
+        os.makedirs(ro)
+        os.chmod(ro, 0o555)                      # échec de copie injecté au second chemin
+        self.addCleanup(os.chmod, ro, 0o755)
+        p = sh([INSTALL, "--root", r, "--skip-preflight"])
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(read(prior), self.old_policy())
+        self.assertFalse(os.path.exists(os.path.join(r, "opt/opentv/MANIFEST.sha256")))
 
 
 # --------------------------------------------------------------------------------------------- bout en bout

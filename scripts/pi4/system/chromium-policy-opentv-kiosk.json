@@ -13,12 +13,6 @@
   "DownloadRestrictions": 3,
   "EditBookmarksEnabled": false,
   "EnableMediaRouter": false,
-  "ExtensionInstallAllowlist": [
-    "mmoccejphjkmbhejebkbhkbbmmocfafi"
-  ],
-  "ExtensionInstallBlocklist": [
-    "*"
-  ],
   "IncognitoModeAvailability": 1,
   "MetricsReportingEnabled": false,
   "PasswordManagerEnabled": false,

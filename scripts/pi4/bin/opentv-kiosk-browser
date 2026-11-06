@@ -36,7 +36,7 @@ fi
 log kiosk_chromium "${CHROMIUM_KIND}:${CHROMIUM_BIN}"
 
 # Flags du wrapper Debian / Raspberry Pi OS repris tels quels pour le binaire direct (jamais son --load-extension nu,
-# ni --show-component-extension-options : chrome://extensions est bloqué par la politique, inutile au kiosque).
+# ni --show-component-extension-options : chrome://extensions est bloqué par la politique URLBlocklist, inutile).
 # --disable-dev-shm-usage : /dev/shm de la Pi est petit (le wrapper RPi l'ajoute aussi) ; --use-angle=gles : GPU V3D.
 WRAPPER_ARGS=(--enable-gpu-rasterization --no-default-browser-check --disable-pings --media-router=0
   --disable-dev-shm-usage --use-angle=gles)
@@ -60,24 +60,34 @@ log kiosk_start "${target%%#*}"
 mkdir -p -- "$PROFILE"
 rm -f -- "${PROFILE:?}/SingletonLock" "${PROFILE:?}/SingletonSocket" "${PROFILE:?}/SingletonCookie"
 
-# X TV Mode (0.7.7) : extension locale livrée par install.sh (root, manifestée), ID fixe autorisé par la politique
-# gérée (ExtensionInstallAllowlist) ; aucune autre extension. Même profil persistant (connexion X faite par Alex
-# lui-même, jamais remplie). Sandbox et sécurité web inchangés. OPENTV_X_TV=0 : extension jamais chargée.
+# X TV Mode (0.7.7) : extension locale livrée par install.sh (root, manifestée). La politique gérée N'UTILISE PAS
+# ExtensionInstallBlocklist/Allowlist : Chromium n'y autorise que des extensions empaquetées signées et bloque TOUTE
+# extension décompressée, même chargée par --load-extension (canari Pi 0.7.8 : pages.tv absent avec ces deux clés,
+# présent sans elles, flags identiques). Le verrou est donc ICI : X actif + binaire direct ⇒ exactement
+# --disable-extensions-except=<ce seul dossier> + un seul --load-extension=<ce seul dossier> ; tout autre cas
+# (OPENTV_X_TV=0, wrapper seul, extension absente) ⇒ --disable-extensions, aucune extension. chrome://extensions,
+# DevTools et le mode développeur restent bloqués par la politique (URLBlocklist chrome://*, DeveloperToolsAvailability
+# 2) ; profil dédié. Même profil persistant (connexion X faite par Alex lui-même, jamais remplie). Sandbox et sécurité
+# web inchangés.
 # Mode sombre NATIF (--force-dark-mode : prefers-color-scheme: dark, comme un appareil réglé en sombre) : X s'affiche
 # sombre dès la connexion et dans le fil, sans recoloriage forcé des pages ; /tv (aucun color-scheme déclaré) inchangé.
 XEXT="/opt/opentv/share/x-tv-extension"
 X_ARGS=()
+X_EXT_LOADED=0
 if [[ "${OPENTV_X_TV:-1}" != "0" ]]; then
   X_ARGS=(--force-dark-mode)
   if [[ -f "$XEXT/manifest.json" ]]; then
     if [[ "$CHROMIUM_KIND" == "direct" ]]; then
       X_ARGS+=(--disable-extensions-except="$XEXT" --load-extension="$XEXT")
+      X_EXT_LOADED=1
     else
       # wrapper seul : son --load-extension préfixé masquerait le nôtre ; extension refusée, jamais un faux succès
       log kiosk_x_tv_unavailable "wrapper_only:${CHROMIUM_BIN}"
     fi
   fi
 fi
+# aucune extension X chargée ⇒ AUCUNE extension (remplace l'ancien ExtensionInstallBlocklist « * » de la politique)
+[[ "$X_EXT_LOADED" == 1 ]] || X_ARGS+=(--disable-extensions)
 
 exec "$CHROMIUM_BIN" \
   --kiosk --ozone-platform=wayland --noerrdialogs --disable-infobars --no-first-run \
