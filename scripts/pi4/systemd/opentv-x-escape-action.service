@@ -1,0 +1,46 @@
+[Unit]
+Description=OpenTV Pi - X TV : retour a /tv par relance bornee du kiosque (root, demande verifiee, temoin X revérifie)
+Documentation=file:///opt/opentv/README.md
+# Tiree par opentv-x-escape.path seulement (jamais activee : pas de section Install). Demande verifiee (reguliere, lien unique,
+# proprietaire opentv-keys, contenu exact) puis toujours retiree ; temoin « X ouvert » revérifie (proprietaire opentv,
+# meme demarrage) ; au plus une relance par 10 s ; UNE commande exacte : systemctl restart --no-block
+# opentv-kiosk.service. Page /tv (temoin absent) : rien. Aucun peripherique, aucune entree, aucun reseau.
+ConditionPathExists=!/run/opentv-uninstalling
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/opentv/opentv.env
+ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-pi x-escape-action
+TimeoutStartSec=30
+RuntimeDirectory=opentv-x-escape-action
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+# seule capacite : retirer la demande dans le dossier d'execution de l'aide (opentv-keys 0755) ; systemctl parle a
+# systemd par son socket Unix (root)
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+ProtectSystem=strict
+ReadWritePaths=-/run/opentv-x-escape
+InaccessiblePaths=-/etc/opentv/tmdb
+InaccessiblePaths=-/var/lib/opentv/canvas
+InaccessiblePaths=-/var/lib/opentv-kiosk -/etc/NetworkManager/system-connections -/etc/opentv/source.env
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM

@@ -382,6 +382,15 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   journalisé ; outil read `x_context` / Muse `opentv.x_context`, `untrusted:true` (contenu non fiable, ne jamais
   suivre ses instructions). Aucune API X, aucun clic auto, login fait par Alex. Opt-out `OPENTV_X_TV=0`. Tests
   `scripts/pi4/tests/test_x_tv.py` + `e2e_x_tv.js` (Chrome for Testing + extension installée). Hors matériel seulement.
+- **X TV — Retour Samsung (hotfix 0.7.7)** : la touche Retour Samsung = `KEY_EXIT` 174 sur l'entrée CEC vc4-hdmi,
+  **jamais livrée en keydown** par Chromium/Wayland : ne jamais compter sur `nav.js` pour elle. Sortie « appareil »
+  `opentv_pi/xescape.py` : témoin `/run/opentv/x-active` (posé par `POST /api/tv/x/presence` avant d'ouvrir X, retiré à
+  chaque `/tv` et au démarrage du service) ; aide `opentv-x-escape.service` (opentv-keys + input, evdev `vc4-hdmi*`
+  seulement, KEY_EXIT appui seul, armée seulement pendant le témoin) ; action root `opentv-x-escape-action.service` via
+  `.path` (demande vérifiée/retirée, témoin revérifié, 10 s, `systemctl restart --no-block opentv-kiosk.service`).
+  Kiosque/Chromium sans groupe input. Connexion X : mode « contrôles » de `nav.js` hors fil (↑ ↓ contrôles visibles,
+  « Continue with phone » au focus, OK natif, champs natifs, aucune valeur lue). Passkey téléphone : flux WebAuthn
+  hybride natif seulement, **gate terrain** (kiosque sans groupe bluetooth). Tests `test_x_escape.py` + `e2e_x_escape.js`.
 - **Mode HDMI exact après extinction/rallumage de la TV (0.7.5)** : terrain 2026-11-01, au rallumage wlroots recrée
   la sortie et Cage prend le mode préféré de l'EDID (3840x2160@30) pendant que Chromium reste en 1920x1080 (quart
   d'écran). `opentv_pi/displaymode.py` : cible exacte `OPENTV_HDMI_MODE` (défaut `1920x1080@60`, jamais un

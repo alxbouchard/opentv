@@ -1452,6 +1452,65 @@ du lecteur. « Vivant » doit tenir le même budget, sinon il reste un choix du 
   post » ; Retour/Accueil ⇒ /tv ; `systemctl restart opentv` puis /tv ⇒ partage de nouveau accepté ; photo d'Alex.
   Rendu sur le vrai DOM de X (sélecteurs `data-testid` changeants) à valider : en cas d'échec, le fil reste celui de X.
 
+### 6 sexies-a. Sortie « appareil » de X (touche Retour Samsung = KEY_EXIT) et connexion à la télécommande (hotfix 0.7.7)
+
+**Terrain** : la touche **Retour** de la télécommande Samsung arrive en `KEY_EXIT` (174) sur le périphérique d'entrée
+CEC du noyau (`vc4-hdmi`), mais **Chromium/Wayland ne délivre aucun `keydown` à la page** : `nav.js` ne peut pas la
+voir, Alex restait coincé sur x.com. Relancer `opentv-kiosk.service` ramène toujours `/tv`. Chaîne bornée :
+
+- **Témoin « X ouvert »** `/run/opentv/x-active` (opentv 0644, JSON `{v:1, boot_id}`) : posé SEULEMENT par
+  `POST /api/tv/x/presence {"active": true}` (portes TV complètes : loopback, Host, UID kiosque, clé TV ; champ fermé)
+  que `/tv` envoie **avant** d'ouvrir X — témoin refusé ⇒ X ne s'ouvre pas (« le retour à OpenTV n'est pas garanti »).
+  Retiré à **chaque chargement de `/tv`** et au **démarrage du service**.
+- **`opentv-x-escape.service`** (compte `opentv-keys`, groupe `input` donné par l'unité seule, sans réseau ni capacité,
+  `DeviceAllow=char-input r`) : lit le témoin (propriétaire opentv, lien unique, même `boot_id`, sinon rien) ; evdev
+  ouvert **seulement pendant qu'il existe**, et seulement les périphériques dont `EVIOCGNAME` est exactement
+  `vc4-hdmi[-N]` **et** qui exposent `KEY_EXIT` — choisis dynamiquement (jamais `event3` en dur), rebalayés toutes les
+  0,5 s (débranchement/rebranchement, TV éteinte/rallumée). **Jamais un clavier** : la saisie d'Alex n'est jamais lue.
+  Seul l'appui (`value=1`) compte : répétitions et relâchés ignorés ; au plus une demande par 3 s ; demande au contenu
+  fixe posée atomiquement dans `/run/opentv-x-escape/request`. Aucun code de touche journalisé.
+- **`opentv-x-escape.path` → `opentv-x-escape-action.service`** (root oneshot, sans réseau ni périphérique, seule
+  capacité `CAP_DAC_OVERRIDE` pour retirer la demande, pas de section `[Install]`) : demande vérifiée (régulière, lien
+  unique, propriétaire `opentv-keys`, contenu exact) puis **toujours retirée** ; témoin **revérifié** ; au plus une
+  relance par 10 s ; puis UNE commande exacte `systemctl restart --no-block opentv-kiosk.service`. Sur `/tv` (témoin
+  absent) : rien — le comportement Retour de `/tv` est inchangé, **aucune relance inconditionnelle**.
+- **Fail-safe** : témoin illisible/lien/propriétaire/boot faux, demande invalide, dossier absent ⇒ aucune action.
+  Limite connue : si `opentv.service` redémarre pendant que X est ouvert, le témoin est effacé (exigence « nettoyé au
+  redémarrage ») et KEY_EXIT ne ramène plus à `/tv` jusqu'au prochain passage par `/tv` ; Accueil/Échap (si livrés à
+  la page) ou `sudo systemctl restart opentv-kiosk` restent les sorties.
+- **Santé** : `opentv-x-escape.service` et `opentv-x-escape.path` dans `opentv-pi health` (optionnels) ; journal :
+  `x_escape_armed|disarmed|requested|rate_limited|kiosk_restart`.
+
+**Connexion à la télécommande (mode « contrôles » de `nav.js`, pages sans fil seulement)** : ↑ ↓ (et ← → hors champ)
+parcourent les contrôles **visibles et activables** (boutons, liens, champs ; ordre du document ; limités à la fenêtre
+modale de X ; jamais masqués, désactivés ni l'iframe Google) avec un anneau jaune ; au chargement, **« Continue with
+phone »** reçoit le focus (OK direct, zéro flèche) si rien n'a le focus ; consigne à l'écran « ↑ ↓ choisir · OK
+valider · Retour : OpenTV · Identifiant et mot de passe : au clavier ». **OK réel** : activation native de Chromium
+sur un bouton/lien natif (geste humain) ; pour un `role="button"` non natif seulement, UN clic de repli sur CE
+contrôle si X n'a pas traité l'Entrée. Champ au focus : saisie **100 % native au clavier physique** (← → Entrée Retour
+arrière) ; ↑ ↓ quittent un champ d'une ligne. Aucune valeur de champ lue, copiée ou transmise ; aucun clic automatique ;
+aucun relais d'identifiant ni de texte.
+
+**Connexion par le téléphone (passkey) — gate terrain, NON prouvé** : le QR affiché par la page de connexion X
+(« Scan to get the app ») **n'est pas** un QR de connexion : il ouvre seulement le magasin d'applications. OpenTV ne
+construit **aucun** relais de mot de passe ou de texte. Le seul chemin téléphone sûr est le flux **WebAuthn hybride
+natif de Chromium** (passkey sur un autre appareil) : passkey X déjà activée sur l'iPhone/Android d'Alex → sur la TV,
+choisir la connexion par passkey (« Sign in with passkey » / « Use a phone or tablet ») → Chromium affiche **son propre
+QR d'authentification** (dans une boîte du navigateur, distinct du QR « get the app ») → le téléphone le scanne,
+vérifie la proximité par Bluetooth puis valide. Vérifié hors matériel (`test_x_tv.TestXPasskeyPathAudit`) : le kiosque
+ne désactive ni WebAuthn ni l'interface d'authentification (aucun `--disable-features` WebAuthn, aucune politique
+WebAuthn/SecurityKey), `URLAllowlist` inchangée (x.com/twitter.com seulement, aucun domaine non observé ajouté).
+**Bloquant probable à confirmer sur la Pi** : l'hybride de Chromium Linux passe par BlueZ (D-Bus système) ; le compte
+`opentv-kiosk` n'a **pas** le groupe `bluetooth` (séparation des privilèges : seul `opentv-muse-pair.service` l'a). Si
+Chromium répond « Bluetooth indisponible », ne PAS ajouter le groupe sans décision explicite d'Alex (élargit la surface
+du kiosque) ; le tunnel caBLE utilise aussi un serveur de relais Google, non autorisé délibérément ici. Gate : passkey
+X active sur le téléphone, flux complet réussi sur la TV, photo — sinon connexion au clavier physique.
+
+**Gates terrain (hotfix)** : sur la Pi, `journalctl -u opentv-x-escape` montre `x_escape_armed` à l'ouverture de X et
+`x_escape_disarmed` au retour ; Retour Samsung sur la connexion X sombre ET sur le fil ⇒ `/tv` (≤ 10 s) ; Retour sur
+`/tv` : comportement inchangé, aucun `x_escape_kiosk_restart` ; TV éteinte/rallumée puis X ⇒ Retour fonctionne encore
+(nouveau périphérique vc4-hdmi) ; ↓/OK sur « Continue with phone » du VRAI DOM de X ; photo d'Alex.
+
 ## 7. Retour arrière
 
 ```sh
@@ -1641,7 +1700,8 @@ python3.11 -m unittest discover -s scripts/pi4/tests -t scripts/pi4   # version 
 #    validation des calques du lecteur dans un vrai Chromium : tests/e2e_assist.js ;
 #    OpenTV Canvas : tests/e2e_canvas_ui.js et e2e_canvas_service.js ; paquet/cycle de vie : test_canvas_packaging.py ;
 #    X TV Mode : tests/e2e_x_tv.js, extension installée chargée dans un Chromium COMPLET (pas headless-shell) :
-#    OPENTV_TEST_CHROME_FULL=<binaire Chrome for Testing/Chromium>, captures x-tile/x-feed-shared/x-login.png)
+#    OPENTV_TEST_CHROME_FULL=<binaire Chrome for Testing/Chromium>, captures x-tile/x-feed-shared/x-login.png,
+#    x-login-phone.png ; sortie KEY_EXIT de bout en bout : tests/e2e_x_escape.js piloté par test_x_escape.py)
 ./scripts/pi4/install.sh --dry-run ; ./scripts/pi4/install.sh --root /tmp/rfs --skip-preflight
 # image Plymouth : régénérée (Chromium headless, aucun réseau) puis réencodée en PNG RVB déterministe ; fichiers livrés
 #   scripts/pi4/system/plymouth/opentv.png (1920×1080) et opentv-mask.png (bande sans « Démarrage… »)

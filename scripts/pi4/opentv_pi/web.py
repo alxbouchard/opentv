@@ -31,7 +31,7 @@ import threading
 import time
 import urllib.parse
 
-from . import VERSION, agents, bounded, musesetup, museweb, phoneremote, validate, wifiscan, xcontext
+from . import VERSION, agents, bounded, musesetup, museweb, phoneremote, validate, wifiscan, xcontext, xescape
 from . import app as appmod   # constantes d'erreur du formulaire (app n'importe pas web : pas de cycle)
 
 TV_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; "
@@ -295,6 +295,7 @@ class TVHandler(_Base):
         if path == "/healthz":
             return self.send_json(200, {"ok": True, "version": VERSION})
         if path in ("/", "/tv"):
+            self.app.x_presence_clear()   # X TV : /tv chargée = plus jamais « X ouvert » (xescape)
             try:
                 with open(os.path.join(self.app.cfg.share_dir, "tv.html"), encoding="utf-8") as f:
                     page = f.read()
@@ -340,6 +341,8 @@ class TVHandler(_Base):
             return self.send_json(400, {"ok": False, "error": "bad_json"})
         if not isinstance(body, dict):
             return self.send_json(400, {"ok": False, "error": "bad_json"})
+        if path == xescape.PRESENCE_PATH:   # X TV : témoin « X ouvert » posé par /tv juste avant d'ouvrir X
+            return self.send_json(*self.app.x_presence(body))
         if path.startswith(CANVAS_PREFIX):   # feuille de confirmation et Réglages : jamais un geste « ordinaire »
             return self.send_json(*self.app.canvas_tv_post(path[len(CANVAS_PREFIX):], body))
         if path in TV_HUMAN_POSTS:   # geste humain ordinaire : l'aperçu Canvas est annulé AVANT l'action

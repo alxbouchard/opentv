@@ -1,0 +1,60 @@
+[Unit]
+Description=OpenTV Pi - X TV : touche Retour Samsung (KEY_EXIT) vers /tv quand X est ouvert (lecture evdev vc4-hdmi seule, sans reseau)
+Documentation=file:///opt/opentv/README.md
+# Chromium/Wayland ne delivre aucun keydown pour KEY_EXIT (174) : la sortie de x.com ne peut pas dependre de la page.
+# Cette aide (compte opentv-keys, groupe input donne par CETTE unite seulement ; jamais au kiosque ni a Chromium) lit
+# le temoin « X ouvert » de opentv.service (/run/opentv/x-active) et n'ouvre evdev QUE pendant qu'il existe, SEULEMENT
+# les peripheriques CEC vc4-hdmi* (jamais un clavier : la saisie d'Alex n'est jamais lue), KEY_EXIT appui seul. Elle
+# depose une demande au contenu fixe dans son dossier d'execution ; opentv-x-escape.path lance alors l'action root
+# bornee (opentv-x-escape-action.service). Aucun code de touche journalise.
+After=opentv.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=opentv-keys
+Group=opentv-keys
+SupplementaryGroups=input
+EnvironmentFile=-/etc/opentv/opentv.env
+ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-pi x-escape-helper
+Restart=always
+RestartSec=2
+# dossier des demandes : lisible par root (action), ecrit par cette aide seule
+RuntimeDirectory=opentv-x-escape
+RuntimeDirectoryMode=0755
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+# temoin « X ouvert » : /run/opentv (0751, opentv) lu par nom seulement, jamais ecrit ici
+InaccessiblePaths=-/etc/opentv/tmdb
+InaccessiblePaths=-/var/lib/opentv/canvas
+InaccessiblePaths=-/var/lib/opentv-kiosk
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+# peripheriques d'entree en LECTURE seulement ; aucun autre peripherique
+DevicePolicy=closed
+DeviceAllow=char-input r
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# /proc/sys/kernel/random/boot_id lu (temoin lie au demarrage) : aucun sous-ensemble de /proc ici
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+MemoryMax=48M
+TasksMax=8
+
+[Install]
+WantedBy=multi-user.target

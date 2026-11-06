@@ -134,8 +134,9 @@ class KeyWatcher:
     une touche de fermeture ; `on_devices(n)` est appelé à chaque changement de ce nombre."""
 
     def __init__(self, on_key, pattern="/dev/input/event*", rescan_s=0.5, opener=None, has_key=has_close_key,
-                 on_devices=None):
+                 on_devices=None, decoder_factory=KeyDecoder):
         self.on_key, self.pattern, self.rescan_s = on_key, pattern, rescan_s
+        self.decoder_factory = decoder_factory   # X TV (xescape) : décodeur restreint à KEY_EXIT seul
         self.opener = opener or (lambda p: os.open(p, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC))
         self.has_key = has_key
         self.on_devices = on_devices
@@ -186,7 +187,7 @@ class KeyWatcher:
                 ok = False
             if ok:
                 self.fds[p] = fd
-                self.decoders[fd] = KeyDecoder()
+                self.decoders[fd] = self.decoder_factory()
             else:
                 os.close(fd)
 

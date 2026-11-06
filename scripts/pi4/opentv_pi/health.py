@@ -15,7 +15,7 @@ UNITS_OPTIONAL = ("opentv-kiosk.service", "opentv-display-mode.service", "opentv
                   "opentv-cec-return.service", "opentv-cec-follower.service",
                   "opentv-catalogue-refresh.timer",
                   "opentv-catalogue-ratings.service", "opentv-catalogue-ratings-retry.timer",
-                  "opentv-catalogue-ratings-retry.service")
+                  "opentv-catalogue-ratings-retry.service", "opentv-x-escape.service", "opentv-x-escape.path")
 CEC_RETURN_UNIT = "opentv-cec-return.service"
 CEC_FOLLOWER_UNIT = "opentv-cec-follower.service"
 DISPLAY_MODE_UNIT = "opentv-display-mode.service"

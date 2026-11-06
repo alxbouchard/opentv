@@ -1,0 +1,11 @@
+[Unit]
+Description=OpenTV Pi - X TV : surveille la demande de retour a /tv deposee par opentv-x-escape (KEY_EXIT)
+
+[Path]
+PathExists=/run/opentv-x-escape/request
+Unit=opentv-x-escape-action.service
+TriggerLimitIntervalSec=10
+TriggerLimitBurst=20
+
+[Install]
+WantedBy=multi-user.target

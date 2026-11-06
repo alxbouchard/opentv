@@ -16,7 +16,7 @@ import time
 from . import (VERSION, agents, bootid, canvas_tools, canvas_tv, cec, config, fsutil, musesetup, netjobs, netstate,
                nethelper, peeruid, phoneremote, tools, tvcontrol, validate, wifiscan)
 from .foryou import ForYou, EngineError
-from . import promotion, xcontext
+from . import promotion, xcontext, xescape
 from . import source as sourcemod
 from .playback import Playback
 from .playerclient import PlayerClient
@@ -177,6 +177,8 @@ class App:
         self.lock = threading.RLock()
         self.fy_lock = threading.Lock()   # « Pour toi » (SQLite, catalogue) : jamais sous self.lock, que tick() prend
         self.tv_key = secrets.token_urlsafe(32)
+        # X TV : témoin « X ouvert » (sortie KEY_EXIT de l'appareil, xescape) toujours retiré au démarrage du service
+        xescape.set_marker(cfg.run_dir, False)
         # page TV et API réservées au compte du kiosque (UID du pair TCP) ; None = contrôle indisponible (hors Linux)
         self.tv_client_uids = peeruid.allowed_uids(cfg.tv_client_user, proc_root)
         self.peer_uid_fn = lambda ip, port, sport: peeruid.tcp_peer_uid(ip, port, sport, proc_root)
@@ -1209,6 +1211,23 @@ class App:
 
     def tv_x_share(self, body):   # POST /api/tv/x/context, portes du kiosque passées : rien journalisé ni audité
         return xcontext.share_response(self.cfg.x_tv, self.x_context, body)
+
+    def x_presence(self, body):
+        """POST /api/tv/x/presence (page /tv, portes TV déjà passées) : {"active": bool} exactement. Pose le témoin
+        « X ouvert » juste avant l'ouverture de X (sortie KEY_EXIT de l'appareil) ; -> (code, réponse)."""
+        if not isinstance(body, dict) or set(body) != {"active"} or not isinstance(body.get("active"), bool):
+            return 400, {"ok": False, "error": "bad_request"}
+        if body["active"] and not self.cfg.x_tv:
+            return 409, {"ok": False, "error": "x_tv_disabled"}
+        ok = xescape.set_marker(self.cfg.run_dir, body["active"])
+        if not ok:
+            self.log("x_presence_failed")
+            return 503, {"ok": False, "error": "marker"}
+        return 200, {"ok": True, "active": body["active"]}
+
+    def x_presence_clear(self):
+        """Chargement de /tv : jamais « X ouvert » (aucune relance du kiosque par KEY_EXIT sur /tv)."""
+        xescape.set_marker(self.cfg.run_dir, False)
 
     def agent_x_context(self):   # outil x_context (read) : dernier post partagé, contenu NON FIABLE (untrusted:true)
         return self.x_context.view() if self.cfg.x_tv else {"available": False}

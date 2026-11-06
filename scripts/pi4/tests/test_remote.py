@@ -996,6 +996,10 @@ HARNESS_DRIVER = r"""
       var p = st[0] === "mouse" ? mouse(st[1]) : press(st[0], st[1]);
       snap(st[0] + (st[1] && st[1].tag ? ":" + st[1].tag : ""), p);
     });
+    // réponses asynchrones attendues après la dernière touche (ex. témoin X avant navigation) : délai opt-in
+    if (window.__SETTLE_MS__) { setTimeout(finish, window.__SETTLE_MS__); } else { finish(); }
+  }, window.__DELAY__ || 1500);
+  function finish() {
     var r = document.createElement("pre");
     r.id = "result";
     var f = document.querySelector(".card.focused .t");
@@ -1011,7 +1015,7 @@ HARNESS_DRIVER = r"""
                                      text: document.body.innerText,
                                      extra: window.__EXTRA__ ? window.__EXTRA__() : null });
     document.body.appendChild(r);
-  }, window.__DELAY__ || 1500);
+  }
 })();
 </script>
 """

@@ -468,6 +468,43 @@ def cmd_player_keys(a):
     return 0
 
 
+def _uid_of(user):
+    try:
+        return pwd.getpwnam(user).pw_uid
+    except KeyError:
+        return None
+
+
+def cmd_x_escape_helper(a):
+    """(opentv-x-escape.service, opentv-keys + groupe input par l'unité) : KEY_EXIT des périphériques vc4-hdmi lu
+    SEULEMENT pendant que le témoin « X ouvert » d'opentv.service existe ; demande root bornée (xescape)."""
+    from . import xescape
+    cfg = config.Config.load(a.env)
+    uid = _uid_of(cfg.service_user)
+    if uid is None:   # compte du service absent : aucun témoin digne de confiance, jamais armé
+        log("x_escape_no_service_user")
+    stop = threading.Event()
+    for s in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(s, lambda *_: stop.set())
+    h = xescape.Helper(cfg.run_dir, xescape.REQUEST_DIR, uid if uid is not None else -1, log=log)
+    log("x_escape_ready")
+    h.run(stop)
+    return 0
+
+
+def cmd_x_escape_action(a):
+    """(root, opentv-x-escape-action.service) : demande de l'aide vérifiée et retirée ; témoin revérifié ; au plus une
+    relance de opentv-kiosk.service (retour à /tv) par intervalle borné."""
+    from . import xescape
+    cfg = config.Config.load(a.env)
+    keys, svc = _uid_of(cfg.player_keys_user), _uid_of(cfg.service_user)
+    if keys is None or svc is None:
+        return _out({"ok": False, "action": "refused", "reason": "accounts"}, 0)
+    rep = xescape.run_action(xescape.REQUEST_DIR, cfg.run_dir, xescape.STAMP_DIR, keys_uid=keys, service_uid=svc,
+                             log=log)
+    return _out(rep, 0)
+
+
 def cmd_playback(a):
     """Porte de production de « Regarder » : status (lecture seule), promote (root, après validation terrain), demote
     (root : témoin retiré PUIS séance en cours fermée côté contrôleur). Témoin et manifeste : root seulement."""
@@ -767,6 +804,9 @@ def build_parser():
     pd.add_argument("--env", default=config.ENV_FILE)
     pk = sub.add_parser("player-keys", help="(opentv-keys) aide des touches de fermeture du lecteur (systemd)")
     pk.add_argument("--env", default=config.ENV_FILE)
+    sub.add_parser("x-escape-helper", help="(opentv-keys) X TV : touche Retour Samsung (KEY_EXIT) -> /tv quand X est "
+                   "ouvert (systemd)")
+    sub.add_parser("x-escape-action", help="(root) X TV : relance bornée du kiosque sur demande vérifiée (systemd)")
     pb = sub.add_parser("playback", help="porte de production de « Regarder » : status | promote | demote")
     pb.add_argument("action", choices=("status", "promote", "demote"))
     pb.add_argument("--field-validated", action="store_true",
@@ -818,6 +858,7 @@ def main(argv):
     if a.cmd == "agent" and a.action in ("issue", "revoke") and not a.id:
         return _out({"ok": False, "error": "id_required"}, 2)
     return {"serve": cmd_serve, "player-daemon": cmd_player_daemon, "player-keys": cmd_player_keys,
+            "x-escape-helper": cmd_x_escape_helper, "x-escape-action": cmd_x_escape_action,
             "playback": cmd_playback, "preflight": cmd_preflight, "health": cmd_health, "net-helper": cmd_net_helper,
             "ap-guard": cmd_ap_guard, "agent": cmd_agent, "setup": cmd_setup, "cec": cmd_cec,
             "cec-bootstrap": cmd_cec_bootstrap, "cec-return-monitor": cmd_cec_return_monitor,

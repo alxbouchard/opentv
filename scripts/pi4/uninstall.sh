@@ -524,7 +524,8 @@ host systemctl disable --now opentv-player.service opentv-player-keys.service op
   opentv-catalogue-refresh.service opentv-catalogue-ratings.service opentv-catalogue-ratings-retry.timer \
   opentv-catalogue-ratings-retry.service opentv-plymouth-failsafe.timer \
   opentv-plymouth-failsafe.service opentv-plymouth-deactivate.service opentv-plymouth-quit.service \
-  opentv-muse.service opentv-muse-pair.service opentv-muse-setup.path opentv-muse-setup.service
+  opentv-muse.service opentv-muse-pair.service opentv-muse-setup.path opentv-muse-setup.service \
+  opentv-x-escape.path opentv-x-escape.service opentv-x-escape-action.service
 # service arrêté : plus aucun écrivain de jobs Muse — dernier passage (job déposé entre-temps), puis dossiers tmpfs
 # retirés (vides seulement ; tmpfiles ne les recrée plus une fois sa configuration retirée)
 for d in /run/opentv-musejobs/queue /run/opentv-musejobs/tmp; do

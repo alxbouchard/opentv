@@ -48,6 +48,23 @@ const LOGIN = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title
   `<body><div role="dialog" aria-modal="true"><h1>Connexion à X</h1><input id="user" name="text" autofocus ` +
   `autocomplete="username"><button id="next">Suivant</button></div><div data-testid="sidebarColumn" id="sb">Pied</div>` +
   `${INSTR}</body></html>`;
+// accueil déconnecté RÉALISTE (photo terrain : connexion X sombre, bouton « Continue with phone ») : modale de X,
+// iframe Google (jamais un contrôle), boutons natifs, champ sans autofocus, rôles « button » non natifs (div), un
+// bouton désactivé et un masqué (jamais focalisés). Chaque activation est comptée par id (window.__hits).
+const LANDING = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>X. It’s what’s happening / X</title>` +
+  `${STYLE}<style>button,[role=button],a,input{display:block;margin:12px auto;width:300px;height:40px}</style></head>` +
+  `<body><div id="react-root"><div role="dialog" aria-modal="true" aria-labelledby="h"><h1 id="h">Sign in to X</h1>` +
+  `<iframe title="Sign in with Google" srcdoc="<p>Google</p>" style="width:300px;height:40px"></iframe>` +
+  `<button id="apple" type="button" onclick="__hits.push('apple')">Sign in with Apple</button>` +
+  `<button id="phone" type="button" onclick="__hits.push('phone')"><span>Continue with phone</span></button>` +
+  `<button id="gone" type="button" style="display:none" onclick="__hits.push('gone')">Hidden</button>` +
+  `<div>or</div><label><span>Phone, email, or username</span>` +
+  `<input id="user" name="text" autocomplete="username" type="text"></label>` +
+  `<button id="off" type="button" disabled onclick="__hits.push('off')">Disabled</button>` +
+  `<div id="next" role="button" tabindex="0" onclick="__hits.push('next')"><span>Next</span></div>` +
+  `<div id="forgot" role="button" tabindex="0" onclick="__hits.push('forgot')"><span>Forgot password?</span></div>` +
+  `<span>Don't have an account? <a id="signup" href="/i/flow/signup">Sign up</a></span></div></div>` +
+  `<script>window.__hits=[];</script>${INSTR}</body></html>`;
 // connexion bloquée en chargement (script de tête jamais servi) : le script du fil (document_idle) n'y tourne jamais
 const STALL = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Connexion / X</title>${STYLE}` +
   `<script src="https://x.com/stall.js"></script></head><body>Connexion…</body></html>`;
@@ -76,7 +93,7 @@ function ctl(p) {
     await ctx.route(/^https:\/\/(x|twitter)\.com\//, (route) => {
       const u = new URL(route.request().url());
       if (u.pathname === "/stall.js") { return undefined; }              // jamais servi : page en chargement
-      const body = u.pathname === "/i/flow/stall" ? STALL :
+      const body = u.pathname === "/i/flow/stall" ? STALL : u.pathname === "/" ? LANDING :
         (u.pathname.indexOf("/i/flow/login") === 0 || u.pathname.indexOf("/account/") === 0) ? LOGIN :
         /\/status\/\d+$/.test(u.pathname) ? STATUS : FEED;
       return route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: body });
@@ -226,7 +243,7 @@ function ctl(p) {
     Object.assign(lg, await look());
     await page.keyboard.type("alice");
     await page.keyboard.press("Backspace");
-    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowLeft");                               // ← dans le champ : curseur natif
     await page.keyboard.press("Home");                                    // Début dans le champ : natif, on reste
     await sleep(300);
     lg.typed = await page.evaluate(() => document.getElementById("user").value);
@@ -250,6 +267,54 @@ function ctl(p) {
     // post ouvert directement (aucune page x.com avant lui) : rien à fermer de détectable -> OpenTV
     lg.thread_direct = await viaKey("https://x.com/alice_m/status/2", () => page.keyboard.press("Escape"));
     out.steps.login = lg;
+
+    // 7 bis) accueil déconnecté (photo terrain) : focus TV initial sur « Continue with phone », OK = UN clic exact sur
+    //         ce bouton (activation native, geste réel) ; ↑ ↓ parcourent les contrôles visibles/activables dans
+    //         l'ordre ; champ : saisie native, aucune valeur lue par l'extension ; rôle « button » non natif activé
+    //         par OK réel seulement ; touche OK synthétique : rien
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    await page.goto("https://x.com/");
+    await sleep(900);
+    const ph = {};
+    const st = () => page.evaluate(() => {
+      const ae = document.activeElement, f = document.querySelector("[data-otvx-focus]");
+      const cs = f ? getComputedStyle(f) : null, h = document.querySelector(".otvx-login-help");
+      return { active: ae && ae.id || null, ring: f ? f.id : null, outline: cs ? cs.outlineStyle + " " + cs.outlineWidth : "",
+               help: h ? h.textContent : "", hits: window.__hits.slice(), clicks: window.__clicks };
+    });
+    ph.initial = await st();
+    if (cfg.shots) { await page.screenshot({ path: path.join(cfg.shots, "x-login-phone.png") }); }
+    await page.evaluate(() => document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+    await sleep(150);
+    ph.synthetic = await st();
+    await page.keyboard.press("Enter");
+    await sleep(200);
+    ph.ok = await st();
+    ph.url_after_ok = page.url();
+    const order = [];
+    await page.keyboard.press("ArrowUp"); await sleep(60); order.push((await st()).active);
+    await page.keyboard.press("ArrowUp"); await sleep(60); order.push((await st()).active);   // bord : on reste
+    for (let i = 0; i < 6; i++) { await page.keyboard.press("ArrowDown"); await sleep(60); order.push((await st()).active); }
+    ph.seq = order;
+    await page.keyboard.press("ArrowUp"); await sleep(60);   // signup -> forgot
+    await page.keyboard.press("ArrowUp"); await sleep(60);   // forgot -> next
+    await page.keyboard.press("ArrowUp"); await sleep(60);   // next -> user (champ)
+    ph.field = (await st()).active;
+    await page.keyboard.type("alice@example.com");
+    await page.keyboard.press("ArrowLeft");                  // natif dans le champ
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("Backspace");
+    ph.after_typing = await st();
+    ph.typed = await page.evaluate(() => document.getElementById("user").value);
+    await page.keyboard.press("ArrowDown"); await sleep(60);   // champ d'une ligne : ↓ en sort vers Next
+    await page.keyboard.press("ArrowDown"); await sleep(60);   // Forgot password? (div role=button)
+    ph.on_forgot = (await st()).active;
+    await page.keyboard.press("Enter"); await sleep(200);      // OK réel : repli sur CE contrôle seulement
+    ph.forgot = await st();
+    ph.url_end = page.url();
+    await page.keyboard.press("Escape");
+    ph.url_after_back = await waitUrl((u) => u === cfg.tv);
+    out.steps.phone_login = ph;
 
     // 8) service redémarré (clé tournée) : refus honnête ; /tv recapture la nouvelle clé ; le partage repasse
     await page.waitForSelector(".card.focused", { timeout: 10000 });

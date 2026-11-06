@@ -371,7 +371,7 @@ class TestMuseBridgeXContext(unittest.TestCase):
 # Retour/Accueil (Alex coincé si CEC échoue). OK du téléphone sur la tuile : refusé avec un message ; OK de la
 # télécommande de la télé (CEC -> clavier) ou du clavier : ouvre X. Navigation observée par l'API Navigation du
 # harnais (annulée : aucun accès réseau), jamais par un crochet du produit.
-NAV_SPY = ("<script>window.__NAV__=[];if(window.navigation){navigation.addEventListener('navigate',function(e){"
+NAV_SPY = ("<script>window.__SETTLE_MS__=400;window.__NAV__=[];if(window.navigation){navigation.addEventListener('navigate',function(e){"
            "window.__NAV__.push(e.destination.url);if(e.cancelable){e.preventDefault();}});}"
            "window.__EXTRA__=function(){return {nav:window.__NAV__,spy:!!window.navigation};};</script>")
 PHONE_REFUSED = "Utilise la télécommande de la télé pour ouvrir X."
@@ -412,6 +412,23 @@ class TestXTileKeySource(unittest.TestCase):
                 self.assertEqual(res["extra"]["nav"], ["https://x.com/home"])
                 self.assertEqual(res["toast"], "Ouverture de X…")
                 self.assertFalse(res["panel"])
+
+    def test_x_opens_only_after_presence_marker_acknowledged(self):
+        """KEY_EXIT de l'appareil (xescape) : /tv pose le témoin « X ouvert » AVANT de quitter ; refus = X fermé."""
+        res = self.render([["Enter"]])
+        posts = [c for c in res["calls"] if c.startswith("POST")]
+        self.assertEqual(posts, ["POST /api/tv/x/presence"])
+        self.assertEqual(res["extra"]["nav"], ["https://x.com/home"])
+        fail = ("<script>(function(){var f=window.fetch;window.fetch=function(p,o){if(p==='/api/tv/x/presence'){"
+                "window.__CALLS__.push('POST '+p);return Promise.resolve({ok:false,status:503,json:function(){"
+                "return Promise.resolve({ok:false,error:'marker',message:'x'});}});}return f(p,o);};})();</script>")
+        from tests.test_remote import TestTvKeysInChromium
+        res = vars(TestTvKeysInChromium)["render"](self, self.STATE, [["Enter"], ["Enter"]], fy=self.FY,
+                                                   inject=fail + NAV_SPY)
+        self.assertEqual(res["extra"]["nav"], [])                                # jamais X sans sortie garantie
+        self.assertEqual(res["toast"], "Ouverture impossible pour l'instant : le retour à OpenTV n'est pas garanti.")
+        # second OK pendant la demande en vol : ignoré (jamais deux témoins ni deux navigations)
+        self.assertEqual([c for c in res["calls"] if c.startswith("POST")], ["POST /api/tv/x/presence"])
 
     # accueil réel : plusieurs rangées de films ; la rangée « Applications » doit être ENTIÈREMENT sur l'écran 1080p
     # dès l'ouverture (photo d'Alex : en dernier, X tombait sous la dernière rangée, hors de l'écran)
@@ -505,6 +522,9 @@ class TestXExtensionStatic(unittest.TestCase):
                         "sendBeacon", "WebSocket", "importScripts", "chrome.tabs.query", "chrome.history",
                         "\"like\"", "'like'", "retweet", "tweetButton", "\"reply\"", "unlike", "bookmark",
                         "requestSubmit", ".submit(", ".focus().click"):
+                if f == "nav.js" and bad == ".click(":   # repli unique d'un OK réel (test_login_controls_mode_…)
+                    self.assertEqual(src.count(bad), 1)
+                    continue
                 self.assertNotIn(bad, src, "%s : %s" % (f, bad))
         bg = code_only(read(os.path.join(EXT, "background.js")))
         self.assertIn("storage.session", bg)
@@ -545,8 +565,38 @@ class TestXExtensionStatic(unittest.TestCase):
         self.assertIn('type: "home"', nav)
         self.assertNotIn("history.back", x)
         self.assertNotIn('type: "home"', x)
-        self.assertNotIn("COLUMN_SEL", nav)                               # aucune dépendance au fil
-        self.assertNotIn("primaryColumn", nav)
+        # Retour/Accueil : aucune dépendance au fil ; la colonne principale ne sert QU'À borner le mode « contrôles »
+        # de la connexion (loginMode), jamais à Retour/Accueil
+        self.assertEqual(nav.count("COLUMN_SEL"), 2)
+        self.assertIn("function loginMode() { return !!document.body && !document.querySelector(COLUMN_SEL); }", nav)
+        for fn in ("function back()", "function goHome()", "function keyAction(", "function direct()"):
+            body = nav[nav.index(fn):nav.index("\n  }\n", nav.index(fn))]
+            self.assertNotIn("COLUMN_SEL", body, fn)
+            self.assertNotIn("loginMode", body, fn)
+
+    def test_login_controls_mode_bounded_no_credentials(self):
+        """Mode « contrôles » (connexion) : jamais une valeur de champ lue, jamais un message de plus, UN seul clic
+        possible — repli d'un OK RÉEL sur le contrôle au focus non natif, même événement, après les gestionnaires X."""
+        nav = code_only(read(os.path.join(EXT, "nav.js")))
+        for bad in (".value", "selectionStart", "getSelection", "clipboard", "FormData", "elements[", "password\"",
+                    "type=password", "chrome.storage", "fetch(", "postMessage", "localStorage", "dispatchEvent",
+                    "requestSubmit", ".submit("):
+            self.assertNotIn(bad, nav, bad)
+        self.assertEqual(nav.count("sendMessage("), 1)                    # « home » seulement (goHome)
+        self.assertEqual(nav.count(".click("), 1)
+        late = nav[nav.index("function onKeyLate(e)"):nav.index("function loginKey(e)")]
+        self.assertIn("p.el.click();", late)
+        self.assertIn("p.ev !== e", late)                                  # même touche réelle seulement
+        self.assertIn("!e.isTrusted", late)
+        self.assertIn("e.defaultPrevented", late)                          # X a traité l'Entrée : jamais de repli
+        self.assertIn("document.activeElement !== p.el", late)
+        lk = nav[nav.index("function loginKey(e)"):nav.index("function refresh()")]
+        self.assertIn("NATIVE_RE.test(ae.tagName)) { return false; }", lk)   # bouton/lien natif : activation native
+        self.assertIn("editable(ae)", lk)                                  # champ : Entrée native
+        self.assertIn("!e.repeat", lk)
+        self.assertIn('window.addEventListener("keydown", onKeyLate, false);', nav)
+        self.assertIn("Continue with phone".lower(), nav.lower())
+        self.assertIn("if (editable(el)) { return \"\"; }", nav)         # libellé : jamais celui d'un champ
 
     def test_css_inert_outside_feed_mode(self):
         css = read(os.path.join(EXT, "x.css"))
@@ -635,6 +685,48 @@ class TestKioskAndPolicy(unittest.TestCase):
         readme = read(os.path.join(PI4, "README.md"))
         for need in ("X TV Mode", "OPENTV_X_TV=0", "x_context", "non fiable", "connecte-toi", xcontext.EXTENSION_ID):
             self.assertTrue(need in readme, "README sans « %s »" % need)
+
+
+class TestXPasskeyPathAudit(unittest.TestCase):
+    """Connexion par téléphone : SEUL le flux WebAuthn hybride natif de Chromium (QR d'authentification du navigateur,
+    distinct du QR « Scan to get the app » de X). Hors matériel on prouve seulement que le kiosque ne le désactive pas
+    et que rien n'a été élargi ; le flux lui-même reste un gate terrain (Bluetooth/BlueZ du compte kiosque)."""
+
+    def test_kiosk_never_disables_webauthn(self):
+        k = read(KIOSK)
+        flags = re.findall(r"--disable-features=([^\s\\]+)", k)
+        self.assertEqual(flags, ["Translate,MediaRouter"])
+        for bad in ("WebAuthentication", "WebAuthn", "Cable", "--disable-web-security", "--disable-bluetooth"):
+            self.assertNotIn(bad, k, bad)
+        pol = json.loads(read(POLICY))
+        for key in pol:
+            self.assertNotRegex(key, r"(?i)webauthn|securitykey|passkey|bluetooth", key)
+
+    def test_url_allowlist_not_widened(self):
+        pol = json.loads(read(POLICY))
+        self.assertEqual(pol["URLAllowlist"], ["http://127.0.0.1", "file:///opt/opentv/share/ui/fallback.html",
+                                               "about:blank", "https://x.com", "https://twitter.com"])
+
+    def test_security_split_kiosk_without_bluetooth_and_gate_documented(self):
+        unit = read(os.path.join(PI4, "systemd", "opentv-kiosk.service"))
+        self.assertEqual(re.findall(r"^SupplementaryGroups=(.*)$", unit, re.M), ["input"])   # Cage seul, inchangé
+        doc = read(os.path.join(PI4, "README.md"))
+        for want in ("« Scan to get the app »", "n'est pas", "WebAuthn", "gate terrain", "groupe `bluetooth`",
+                     "aucun relais de mot de passe"):
+            self.assertIn(want, doc.replace("**aucun** relais", "aucun relais"), want)
+
+    def test_no_credential_or_text_relay_route(self):
+        web_src = read(os.path.join(PI4, "opentv_pi", "web.py"))
+        x_routes = set(re.findall(r"/api/tv/x/[a-z_]+", web_src + read(os.path.join(PI4, "opentv_pi", "xcontext.py")) +
+                                  read(os.path.join(PI4, "opentv_pi", "xescape.py"))))
+        self.assertEqual(x_routes, {"/api/tv/x/context", "/api/tv/x/presence"})   # aucune route de saisie/relais
+        for f in ("nav.js", "x.js", "background.js"):
+            src = code_only(read(os.path.join(EXT, f))).lower()
+            # seul usage permis : type de champ d'une ligne (↑ ↓ quittent aussi un champ mot de passe ; valeur jamais lue)
+            src = src.replace("const line_input_re = /^(text|email|tel|password|search|url|number|)$/;", "")
+            src = src.replace('credentials: "omit"', "")   # fetch sans cookies (background.js) : permis
+            for bad in ("password", "credential", "navigator.credentials", "one-time-code"):
+                self.assertNotIn(bad, src, (f, bad))
 
 
 class TestInstallUninstallExtension(unittest.TestCase):
@@ -772,6 +864,29 @@ class TestXEndToEnd(unittest.TestCase):
         # Close (Exit CEC), BrowserBack (vérification /account/), Alt+←, BrowserHome : toujours /tv
         for k in ("close", "browser_back", "alt_left", "browser_home", "thread_direct"):
             self.assertEqual(lg[k]["url"], cfg["tv"], (k, lg[k]))
+        # accueil déconnecté (photo terrain) : « Continue with phone » au focus TV dès le chargement, anneau visible,
+        # consigne à l'écran ; OK synthétique : rien ; OK réel : UN clic, exactement sur ce bouton
+        ph = st["phone_login"]
+        self.assertEqual((ph["initial"]["active"], ph["initial"]["ring"]), ("phone", "phone"), ph["initial"])
+        self.assertTrue(ph["initial"]["outline"].startswith("solid 6px"), ph["initial"])
+        self.assertIn("OK valider", ph["initial"]["help"])
+        self.assertIn("au clavier", ph["initial"]["help"])
+        self.assertEqual((ph["initial"]["hits"], ph["initial"]["clicks"]), ([], 0))
+        self.assertEqual((ph["synthetic"]["hits"], ph["synthetic"]["clicks"]), ([], 0))
+        self.assertEqual((ph["ok"]["hits"], ph["ok"]["clicks"]), (["phone"], 1))
+        self.assertEqual(ph["url_after_ok"], "https://x.com/")
+        # ↑ ↓ : contrôles visibles et activables, ordre du document, dans la modale ; jamais l'iframe Google, le
+        # bouton masqué ni le désactivé ; bords : on reste
+        self.assertEqual(ph["seq"], ["apple", "apple", "phone", "user", "next", "forgot", "signup", "signup"])
+        # champ : saisie au clavier physique native (← → Retour arrière), aucun clic, ↑ ↓ en sortent
+        self.assertEqual(ph["field"], "user")
+        self.assertEqual(ph["typed"], "alice@example.co")
+        self.assertEqual((ph["after_typing"]["active"], ph["after_typing"]["clicks"]), ("user", 1))
+        # rôle « button » non natif : OK réel active CE contrôle seulement (repli), aucun autre
+        self.assertEqual(ph["on_forgot"], "forgot")
+        self.assertEqual((ph["forgot"]["hits"], ph["forgot"]["clicks"]), (["phone", "forgot"], 2))
+        self.assertEqual(ph["url_end"], "https://x.com/")
+        self.assertEqual(ph["url_after_back"], cfg["tv"])
         # connexion encore en chargement (script du fil jamais injecté) : Retour ramène quand même à /tv
         self.assertEqual(lg["stalled"], {"url": cfg["tv"], "ready": "loading"})
         # témoin A/B (Chromium en apparence claire) : sans les arguments X du kiosque la connexion reste claire, avec

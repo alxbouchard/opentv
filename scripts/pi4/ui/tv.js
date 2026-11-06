@@ -1011,10 +1011,24 @@
     else if (kind === "unavailable") { toast(MSG_AGENTS_QR + "\nRien n'a changé."); }
     else if (cancelled) { toast("Annulé sur le téléphone : rien n'a changé."); }
   }
+  // X TV : avant de quitter /tv, le service pose le témoin « X ouvert » ; la touche Retour Samsung (KEY_EXIT, jamais
+  // délivrée à la page) ramène alors à /tv au niveau de l'appareil (opentv-x-escape). Témoin refusé : X n'est PAS
+  // ouvert (jamais un site sans sortie garantie).
+  var MSG_APP_NO_EXIT = "Ouverture impossible pour l'instant : le retour à OpenTV n'est pas garanti.";
+  var appOpening = false;
   function openApp(it) {   // OK humain sur une application : quitte /tv pour le site (même onglet, même profil)
-    if (!isApp(it) || play || panel || !APPS.hasOwnProperty(it.app)) { return; }
+    if (!isApp(it) || play || panel || appOpening || !APPS.hasOwnProperty(it.app)) { return; }
+    var url = APPS[it.app].url;
+    appOpening = true;
     toast("Ouverture de " + it.title + "…");
-    location.assign(APPS[it.app].url);
+    api("POST", "/api/tv/x/presence", { active: true }).then(function (j) {
+      if (j && j.ok === true) { location.assign(url); return; }
+      appOpening = false;
+      toast(MSG_APP_NO_EXIT);
+    }, function () {
+      appOpening = false;
+      toast(MSG_APP_NO_EXIT);
+    });
   }
   function goStart() {
     focus.row = 0; focus.cols = [];
