@@ -2,8 +2,10 @@
 actif sur /tv et x.com sous la vraie politique du kiosque, et les touches physiques atteignent-elles la page ?
 
 Chaîne, sans disque ni journal de contenu :
-1. nav.js (x.com, cadre principal) envoie au service de l'extension, borné et limité (≥ 400 ms entre deux envois,
-   au plus SEND_MAX par chargement), un INSTANTANÉ cumulatif : mode de la page, compteurs d'APPUIS RÉELS par classe
+1. nav.js (x.com, cadre principal) envoie au service de l'extension, borné (≥ PROBE_MIN_MS = 400 ms entre deux envois ;
+   AUCUN plafond par document : le battement ne meurt jamais sur une page restée ouverte longtemps — débit tenu par
+   l'intervalle, puis par background.js et RATE_MAX ci-dessous), un INSTANTANÉ cumulatif : mode de la page, compteurs
+   d'APPUIS RÉELS par classe
    (`move` = flèches, `ok` = OK/Entrée, `other`) — répétitions (`e.repeat`, touche tenue) comptées à part dans
    `repeat`, si bien que move/ok se comparent 1:1 aux appuis evdev de l'aide x-escape —, compteur de touches
    synthétiques, document au focus et page visible (chaque instantané, battement compris : une absence de touches
@@ -16,16 +18,20 @@ Chaîne, sans disque ni journal de contenu :
    envoi en vol, coalescé ; POST PROBE_PATH sur la boucle locale avec la clé TV éphémère de ce démarrage. Sur /tv :
    instantané « tv » à la capture de la clé puis battement toutes les 30 s (< TTL_S) envoyé par tvkey.js.
    Redémarrage du service pendant que X est ouvert : la clé gardée par l'extension (stockage de SESSION du navigateur,
-   jamais sur disque) est périmée, la sonde est refusée (403, ignorée) et disparaît de la vue après TTL_S ; par
-   conception l'extension ne reprend une clé QUE sur /tv (tvkey.js lit la page de CE démarrage) — retour à /tv
-   (Retour/Accueil) et la sonde revient. Aucune autre voie d'acquisition ni persistance de la clé.
+   jamais sur disque) est périmée ; au PREMIER 403 « tv_key », background.js la retire (et retient la clé morte pour
+   ne jamais la reprendre) et n'envoie PLUS RIEN — ni instantané ni battement — jusqu'à une clé NEUVE validée remise
+   par tvkey.js sur /tv (seule voie d'acquisition, aucune persistance) ; la sonde disparaît de la vue après TTL_S.
 3. ce module : portes TV complètes déjà passées (loopback, Host exact, UID du pair = kiosque, clé TV), puis Origin
    EXACTEMENT chrome-extension://<ID> (obligatoire), Referer absent ou de l'extension, JSON ≤ BODY_MAX, champs fermés,
    débit ≤ RATE_MAX par RATE_WINDOW_S et par page (429 au-delà). Dernier instantané par page en MÉMOIRE seulement,
-   TTL_S court ; perdu au redémarrage du service ; jamais journalisé, audité ni écrit sur disque.
+   TTL_S court ; perdu au redémarrage du service ; jamais journalisé, audité ni écrit sur disque. Journal HTTP : AUCUNE
+   ligne par requête sur PROBE_PATH, quel que soit le statut (200, 400, 403, 429…) — sinon journald porterait le rythme
+   des touches ; seuls des compteurs de statut agrégés EN MÉMOIRE (`http`, HTTP_CLASSES) lisibles par l'opérateur.
 4. lecture opérateur : GET STATUS_PATH sur la boucle locale, réservé à root (UID du pair TCP, /proc/net/tcp ; contrôle
-   indisponible = refus), via `sudo opentv-pi x-probe`, qui y joint les compteurs evdev EN MÉMOIRE de l'aide
-   x-escape (xescape.NavServer, même TTL). Jamais lisible par le kiosque, une page ou un agent.
+   indisponible = refus), via `sudo opentv-pi x-probe`, qui vérifie que l'écoute appartient au compte du service,
+   revalide la réponse sur un schéma FERMÉ (status_clean, sinon refus sans rien recopier) et y joint les compteurs
+   evdev EN MÉMOIRE de l'aide x-escape (xescape.NavServer, même TTL). Jamais lisible par le kiosque, une page ou un
+   agent.
 
 Ce module porte aussi les routes HTTP X de web.TVHandler (câblage minimal côté web) : POSTS (partage xcontext, sonde,
 témoin « X ouvert » de xescape) et la lecture opérateur avec sa porte root (guard_operator).
@@ -55,6 +61,15 @@ COUNTS = ("seq", "move", "ok", "other", "repeat", "synthetic", "sw_s")
 FIELDS = frozenset(COUNTS + ("v", "page", "mode", "event", "doc_focus", "visible", "last", "ext"))
 LAST_FIELDS = frozenset(("cls", "trusted", "editable", "doc_focus", "handled"))
 EXT_RE = re.compile(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}")
+# statuts HTTP de PROBE_PATH, agrégés EN MÉMOIRE (aucune ligne de journal par requête, quel que soit le statut)
+HTTP_CLASSES = ("2xx", "400", "403", "404", "413", "415", "421", "429", "other")
+
+
+def http_class(status):
+    if isinstance(status, int) and 200 <= status < 300:
+        return "2xx"
+    s = str(status)
+    return s if s in HTTP_CLASSES else "other"
 
 
 def _count(v):
@@ -102,6 +117,14 @@ class XProbe:
         self._hits = {p: [] for p in PAGES}
         self._stats = {p: {"accepted": 0, "rate_limited": 0} for p in PAGES}
         self._rejected = 0
+        self._http = {k: 0 for k in HTTP_CLASSES}
+
+    def note_http(self, status):
+        """Statut d'une requête PROBE_PATH (web.log_request, à la place d'une ligne de journal) : compteur agrégé en
+        mémoire seulement, borné ; jamais d'horodatage, de chemin ni de corps."""
+        k = http_class(status)
+        with self.lock:
+            self._http[k] = min(self._http[k] + 1, COUNT_MAX)
 
     def record(self, body):
         """-> (code HTTP, réponse). Refus : rien n'est modifié sauf le compteur de refus."""
@@ -147,7 +170,7 @@ class XProbe:
                 entry["accepted"] = self._stats[p]["accepted"]
                 entry["rate_limited"] = self._stats[p]["rate_limited"]
                 pages[p] = entry
-            return {"ttl_s": int(TTL_S), "pages": pages, "rejected": self._rejected}
+            return {"ttl_s": int(TTL_S), "pages": pages, "rejected": self._rejected, "http": dict(self._http)}
 
     def clear(self):
         with self.lock:
@@ -176,6 +199,13 @@ def _read_json(handler, cap):
         return json.loads(raw.decode("utf-8") or "{}"), None
     except (ValueError, UnicodeDecodeError, RecursionError):
         return None, (400, {"ok": False, "error": "bad_json"})
+
+
+def quiet_log(handler, status):
+    """web._Base.log_request pour PROBE_PATH : AUCUNE ligne de journal, quel que soit le statut (200, 400, 403, 429…) —
+    journald ne porte jamais le rythme des touches ; serveur TV seulement : compteur agrégé en mémoire (note_http)."""
+    if getattr(handler, "probe_route", False):
+        handler.app.x_probe.note_http(status)
 
 
 def handle_probe(handler, app):

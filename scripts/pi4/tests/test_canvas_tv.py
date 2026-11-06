@@ -1190,9 +1190,12 @@ class TestModule(unittest.TestCase):
         import sys
         # web : + 2 lignes en 0.7.7 (délégation de la route X ; sa logique vit dans xcontext.py) ; + 3 en 0.7.8 : retrait
         # du témoin « X ouvert » au chargement de /tv (1) et lecture opérateur root de la sonde (2), AVANT les portes du
-        # kiosque — toute la logique X (portes, validation, routes POST) vit dans xprobe/xcontext/xescape
+        # kiosque — toute la logique X (portes, validation, routes POST) vit dans xprobe/xcontext/xescape ; + 3 en
+        # 0.7.8 (revue qualité) : sonde jamais journalisée, quel que soit le statut (2, délégués à xprobe.quiet_log) et
+        # marqueur du serveur TV (1). xprobe : + 20 (statuts agrégés en mémoire, quiet_log, contrat documenté) ; la
+        # lecture opérateur (écoute vérifiée, schéma fermé) vit dans son propre module xstatus.
         over = []   # tous les dépassements d'un coup (jamais seulement le premier)
-        for name, cap in (("canvas_tv", 320), ("app", 1400), ("web", 1535), ("xprobe", 260)):
+        for name, cap in (("canvas_tv", 320), ("app", 1400), ("web", 1538), ("xprobe", 280), ("xstatus", 150)):
             with open(os.path.join(PI4, "opentv_pi", name + ".py"), encoding="utf-8") as f:
                 n = len(f.read().splitlines())
             if n > cap:

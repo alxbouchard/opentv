@@ -28,14 +28,17 @@
  *  Anneau et consigne : feuille de l'extension nav.css (hors CSP de la page) ; repli CSSOM en ligne (jamais bloqué
  *           par la CSP) seulement si la feuille manquait ; jamais de <style> injecté.
  *  Sonde canari (0.7.8) : au chargement, à chaque changement de mode, à chaque APPUI réel et toutes les BEAT_MS
- *           (page visible ou non : l'état est dans l'instantané), instantané borné (≥ PROBE_MIN_MS entre deux envois,
- *           ≤ PROBE_MAX par page) au service de l'extension : mode, document au focus, page visible, compteurs
+ *           (page visible ou non : l'état est dans l'instantané), instantané borné (≥ PROBE_MIN_MS entre deux envois ;
+ *           AUCUN plafond par document : le battement ne meurt jamais sur une page ouverte longtemps — débit tenu
+ *           par l'intervalle puis par background.js et le service) au service de l'extension : mode, document au
+ *           focus, page visible, compteurs
  *           d'APPUIS par classe move/ok/other (répétitions d'une touche tenue à part dans « repeat », jamais
  *           envoyées seules : move/ok se comparent 1:1 aux appuis evdev), compteur de touches synthétiques, et
  *           booléens du dernier appui réel (fiable, champ au focus, document au focus, traitée par OpenTV). Champ
  *           éditable au focus : une touche de saisie (« other ») n'est NI comptée NI envoyée (longueur et rythme d'un
  *           mot de passe jamais observables). Jamais une valeur ni un code de touche, un texte, une URL ni la valeur
- *           d'un champ.
+ *           d'un champ. Départ de la page (pagehide) : l'instantané DÉJÀ en attente part tout de suite (au mieux),
+ *           sans rien capturer de plus (aucun événement, aucune touche, aucun compteur nouveaux).
  * Touches synthétiques (non fiables) : jamais d'action. Aucune lecture de contenu hors libellés des contrôles.
  */
 (() => {
@@ -299,19 +302,17 @@
 
   // ---------------------------------------------------------------- sonde canari (0.7.8) : preuve, jamais une action
   const PROBE_MIN_MS = 400;
-  const PROBE_MAX = 3000;
   const BEAT_MS = 30000;
   const COUNT_MAX = 1000000;
   const PROBE_RANK = { load: 0, mode: 1, key: 2, beat: 3 };
-  const probe = { mode: "loading", seq: 0, move: 0, ok: 0, other: 0, repeat: 0, synthetic: 0, last: null, sent: 0,
-                  at: 0, pending: null, timer: 0, loaded: false };
+  const probe = { mode: "loading", seq: 0, move: 0, ok: 0, other: 0, repeat: 0, synthetic: 0, last: null, at: 0,
+                  pending: null, timer: 0, loaded: false };
   function bump(k) { probe[k] = Math.min(probe[k] + 1, COUNT_MAX); }
   function probeFlush() {
     probe.timer = 0;
     const ev = probe.pending;
     probe.pending = null;
-    if (!ev || probe.sent >= PROBE_MAX) { return; }
-    probe.sent += 1;
+    if (!ev) { return; }
     probe.at = Date.now();
     probe.seq = Math.min(probe.seq + 1, COUNT_MAX);
     const msg = { type: "probe", mode: probe.mode, event: ev, seq: probe.seq, move: probe.move, ok: probe.ok,
@@ -320,10 +321,15 @@
     try { chrome.runtime.sendMessage(msg, () => void chrome.runtime.lastError); } catch (err) { /* rechargée */ }
   }
   function probeSend(ev) {
-    if (probe.sent >= PROBE_MAX) { return; }
     if (probe.pending === null || PROBE_RANK[ev] < PROBE_RANK[probe.pending]) { probe.pending = ev; }
     if (probe.timer) { return; }
     probe.timer = setTimeout(probeFlush, Math.max(0, PROBE_MIN_MS - (Date.now() - probe.at)));
+  }
+  // départ de la page : l'instantané EN ATTENTE part sans attendre PROBE_MIN_MS (au mieux) ; rien de nouveau capturé
+  function probeLeave() {
+    if (!probe.timer) { return; }
+    clearTimeout(probe.timer);
+    probeFlush();
   }
   function probeMode(mode) {
     if (!probe.loaded) { probe.loaded = true; probe.mode = mode; probeSend("load"); return; }
@@ -380,5 +386,6 @@
   new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });
   if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule); } else { schedule(); }
   window.addEventListener("load", schedule);
+  window.addEventListener("pagehide", probeLeave, true);
   setInterval(() => probeSend("beat"), BEAT_MS);   // toujours (< TTL 120 s) : doc_focus/visible expliquent un silence
 })();

@@ -516,29 +516,15 @@ def cmd_x_escape_action(a):
 
 
 def cmd_x_probe(a, timeout=3.0):
-    """Lecture opérateur de la sonde canari X (root) : GET xprobe.STATUS_PATH sur la boucle locale du service (le service
-    vérifie lui-même l'UID du pair : root) + `evdev` : compteurs move/ok EN MÉMOIRE de l'aide x-escape (socket Unix
-    root seulement, xescape.NavServer, même TTL). Rien n'est écrit ni journalisé ; vue fermée."""
-    import http.client
-    from . import xescape, xprobe
+    """Lecture opérateur de la sonde canari X (root, xstatus) : écoute TCP du service vérifiée (compte du service),
+    GET xprobe.STATUS_PATH (le service vérifie lui-même l'UID du pair : root), réponse revalidée sur un schéma FERMÉ
+    (sinon refus, rien recopié) + `evdev` : compteurs move/ok EN MÉMOIRE de l'aide x-escape (socket Unix, UID du
+    serveur vérifié = opentv-keys). Rien n'est écrit ni journalisé."""
+    from . import xstatus
     cfg = config.Config.load(a.env)
-    keys = _uid_of(cfg.player_keys_user)
-    evdev = xescape.read_nav(xescape.REQUEST_DIR, keys) if keys is not None else \
-        {"present": False, "error": "accounts"}
-    try:
-        c = http.client.HTTPConnection("127.0.0.1", cfg.tv_port, timeout=timeout)
-        c.request("GET", xprobe.STATUS_PATH, headers={"Host": "127.0.0.1:%d" % cfg.tv_port})
-        r = c.getresponse()
-        raw = r.read(64 * 1024)
-        c.close()
-        body = json.loads(raw.decode("utf-8"))
-    except (OSError, ValueError, http.client.HTTPException):
-        return _out({"ok": False, "error": "service_unreachable", "evdev": evdev}, 1)
-    if r.status != 200 or not isinstance(body, dict):
-        return _out({"ok": False, "error": body.get("error") if isinstance(body, dict) else "refused",
-                     "status": r.status, "evdev": evdev}, 1)
-    body["evdev"] = evdev
-    return _out(body, 0)
+    rc, out = xstatus.operator_view(cfg.tv_port, _uid_of(cfg.service_user), _uid_of(cfg.player_keys_user),
+                                    timeout=timeout)
+    return _out(out, rc)
 
 
 def cmd_playback(a):

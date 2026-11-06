@@ -24,9 +24,10 @@ périphérique CEC par CLASSE seulement — `move` (↑ ↓ ← →, sans direct
 en MÉMOIRE de l'aide : jamais journalisés (aucune trace d'activité ni de rythme dans journald), jamais écrits sur
 disque. Lecture root seulement par NavServer : socket Unix NAV_SOCK dans le dossier d'exécution de l'aide (tmpfs /run,
 0600), pair vérifié par SO_PEERCRED (UID 0 ; contrôle indisponible = refus), une ligne JSON fermée, rien lu du client ;
-vivants NAV_TTL_S après le dernier armement/appui/désarmement, puis oubliés. `sudo opentv-pi x-probe` les joint à la
-sonde de l'extension : ils séparent « la touche n'arrive pas au Pi » de « elle n'atteint pas la page ». Seule
-KEY_EXIT produit une demande.
+vivants NAV_TTL_S après le dernier armement/appui/désarmement, puis oubliés. `sudo opentv-pi x-probe` (read_nav :
+socket du compte de l'aide, jamais un lien, UID du processus SERVEUR vérifié par SO_PEERCRED avant toute lecture,
+vue revalidée ; contrôle indisponible = refus) les joint à la sonde de l'extension : ils séparent « la touche n'arrive
+pas au Pi » de « elle n'atteint pas la page ». Seule KEY_EXIT produit une demande.
 
 Fail-safe : tout doute (témoin illisible, lien, propriétaire, boot_id, demande invalide) = aucune action. Rien de
 saisi n'est lu, journalisé ni transmis ; aucun code de touche n'est journalisé.
@@ -62,6 +63,7 @@ NAV_SOCK_UIDS = frozenset({0})                      # lecture opérateur : root 
 NAV_SOCK_TIMEOUT_S = 1.0
 NAV_VIEW_MAX = 512
 POLL_S = 0.5
+NAV_STOP_JOIN_S = NAV_SOCK_TIMEOUT_S + 4 * POLL_S   # arrêt : > une connexion servie + deux délais de accept
 HELPER_MIN_INTERVAL_S = 3.0
 ACTION_MIN_INTERVAL_S = 10.0
 RESTART_TIMEOUT_S = 15
@@ -356,13 +358,21 @@ class NavServer:
     """Lecture opérateur des compteurs canari de l'aide, sans disque ni journal : socket Unix `sock_dir/NAV_SOCK`
     (0600 ; /run est un tmpfs), pair vérifié par SO_PEERCRED (UID dans `allowed`, root ; inconnu = refus). Une ligne
     JSON (`view()`, champs fermés) par connexion, rien n'est lu du client, délai NAV_SOCK_TIMEOUT_S ; jamais une action.
-    Une panne ici n'empêche jamais KEY_EXIT (l'aide continue sans lecture opérateur)."""
+    Une panne ici n'empêche jamais KEY_EXIT (l'aide continue sans lecture opérateur).
+
+    Cycle de vie : start() lie, restreint (0600), écoute puis lance UN thread ; tout échec partiel (chmod, listen,
+    thread refusé par TasksMax de l'unité) ferme le socket, retire le fichier lié par CE serveur et lève OSError.
+    stop() est ordonné et idempotent : signal -> réveil de accept -> join borné -> fermeture -> retrait du fichier
+    SEULEMENT s'il est encore celui lié par ce serveur (même dev/inode : jamais celui d'un successeur)."""
 
     def __init__(self, sock_dir, view, allowed=NAV_SOCK_UIDS, peer_uid=_peer_uid):
         self.path, self.view, self.allowed, self.peer_uid = os.path.join(sock_dir, NAV_SOCK), view, allowed, peer_uid
         self.sock, self.thread, self.stopping = None, None, threading.Event()
+        self._ident = None   # (st_dev, st_ino) du socket lié par CE serveur
 
     def start(self):
+        if self.sock is not None or self.stopping.is_set():
+            raise OSError("NavServer : démarrage unique")
         try:
             if stat.S_ISSOCK(os.lstat(self.path).st_mode):   # socket d'un démarrage précédent : remplacé
                 os.unlink(self.path)
@@ -370,22 +380,27 @@ class NavServer:
             pass
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            s.bind(self.path)
+            s.bind(self.path)   # fichier régulier ou autre déjà là : EADDRINUSE, jamais retiré
+            st = os.lstat(self.path)
+            self._ident = (st.st_dev, st.st_ino)
             os.chmod(self.path, 0o600)
             s.listen(2)
             s.settimeout(POLL_S)
-        except OSError:
+            t = threading.Thread(target=self._serve, args=(s,), daemon=True, name="x-escape-nav")
+            t.start()   # TasksMax de l'unité atteint : RuntimeError
+        except (OSError, RuntimeError) as e:
             s.close()
-            raise
-        self.sock = s
-        self.thread = threading.Thread(target=self._serve, daemon=True, name="x-escape-nav")
-        self.thread.start()
+            self._unlink_own()
+            if isinstance(e, OSError):
+                raise
+            raise OSError("NavServer : thread refusé (%s)" % type(e).__name__) from e
+        self.sock, self.thread = s, t
         return self
 
-    def _serve(self):
+    def _serve(self, s):
         while not self.stopping.is_set():
             try:
-                conn, _ = self.sock.accept()
+                conn, _ = s.accept()
             except socket.timeout:
                 continue
             except OSError:
@@ -403,16 +418,35 @@ class NavServer:
             finally:
                 conn.close()
 
+    def _unlink_own(self):
+        ident, self._ident = self._ident, None
+        if ident is None:
+            return
+        try:
+            st = os.lstat(self.path)
+            if stat.S_ISSOCK(st.st_mode) and (st.st_dev, st.st_ino) == ident:
+                os.unlink(self.path)
+        except OSError:
+            pass
+
+    def _wake(self, s):
+        """Réveille accept : Linux, tout de suite (EINVAL) ; ailleurs, au plus POLL_S (délai de accept)."""
+        try:
+            s.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
     def stop(self):
         self.stopping.set()
-        if self.sock is not None:
-            self.sock.close()
-            try:
-                os.unlink(self.path)
-            except OSError:
-                pass
-        if self.thread is not None:
-            self.thread.join(2.0)
+        s, t = self.sock, self.thread
+        self.sock = self.thread = None
+        if s is not None:
+            self._wake(s)
+        if t is not None and t is not threading.current_thread():
+            t.join(NAV_STOP_JOIN_S)
+        if s is not None:
+            s.close()   # APRÈS le join : jamais un descripteur fermé sous un accept en cours
+        self._unlink_own()
 
 
 def _nav_ok(doc):
@@ -425,10 +459,12 @@ def _nav_ok(doc):
         isinstance(doc["age_s"], (int, float)) and not isinstance(doc["age_s"], bool) and 0 <= doc["age_s"] < 1e9
 
 
-def read_nav(sock_dir, keys_uid, timeout=NAV_SOCK_TIMEOUT_S):
+def read_nav(sock_dir, keys_uid, timeout=NAV_SOCK_TIMEOUT_S, peer_uid=None):
     """(root, `opentv-pi x-probe`) vue de NavServer, revalidée sur une liste fermée -> dict ; sinon
     {"present": False, "error": ...}. Le socket doit être un socket appartenant au compte de l'aide (jamais un lien) ;
-    rien n'est envoyé, ≤ NAV_VIEW_MAX octets lus."""
+    après connexion, AVANT toute lecture, le processus SERVEUR doit être le compte de l'aide (SO_PEERCRED du côté
+    client = UID de celui qui écoute ; indisponible ou autre compte : refus `peer`, rien lu). Rien n'est envoyé,
+    ≤ NAV_VIEW_MAX octets lus."""
     path = os.path.join(sock_dir, NAV_SOCK)
     try:
         st = os.lstat(path)
@@ -437,6 +473,9 @@ def read_nav(sock_dir, keys_uid, timeout=NAV_SOCK_TIMEOUT_S):
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
             c.settimeout(timeout)
             c.connect(path)
+            server = (peer_uid or _peer_uid)(c)   # résolu à l'appel (jamais figé à l'import)
+            if server is None or server != keys_uid:   # fail closed : hors Linux, jamais une vue non vérifiée
+                return {"present": False, "error": "peer"}
             data = b""
             while len(data) <= NAV_VIEW_MAX:
                 chunk = c.recv(NAV_VIEW_MAX + 1)

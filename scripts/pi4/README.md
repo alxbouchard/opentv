@@ -1521,7 +1521,9 @@ contrôle que pendant une touche **réelle** (`isTrusted`).
 
 - **Sonde de l'extension** (`opentv_pi/xprobe.py`) : `nav.js` envoie au service de l'extension, au chargement, à chaque
   changement de mode (`feed` / `dialog` / `controls` / `loading`), à chaque **appui réel** et toutes les 30 s (page
-  visible ou non), un instantané borné (≥ 400 ms entre deux envois, ≤ 3000 par page) : compteurs d'**appuis par
+  visible ou non), un instantané borné (≥ 400 ms entre deux envois ; **aucun plafond par document** : le battement
+  d'une page restée ouverte des heures ne s'arrête jamais — débit tenu par l'intervalle, puis ≤ 30 par 10 s côté
+  extension et ≤ 40 par 10 s côté service) : compteurs d'**appuis par
   classe** `move` / `ok` / `other` (répétitions d'une touche tenue `e.repeat` comptées à part dans `repeat`, jamais
   envoyées seules : `move`/`ok` se comparent **1:1** aux appuis evdev), compteur de touches synthétiques, `doc_focus`
   et `visible` (chaque instantané, battement compris : une absence de touches reste explicable), et pour le dernier
@@ -1532,27 +1534,42 @@ contrôle que pendant une touche **réelle** (`isTrusted`).
   l'**expéditeur** vérifié (cette extension, cadre principal, page attendue), reconstruit une liste fermée, coalesce
   (un envoi en vol, ≤ 30 par 10 s) et poste `POST /api/tv/x/probe` sur la boucle locale avec la **clé TV éphémère** ;
   sur `/tv`, instantané `tv` à la capture de la clé puis **battement toutes les 30 s** (`tvkey.js`, < TTL 120 s).
-  Une page x.com ne peut pas forger ces messages (aucun `externally_connectable`, aucun écouteur `postMessage`).
+  Départ de la page (`pagehide`) : l'instantané **déjà en attente** part tout de suite (au mieux), sans rien capturer
+  de plus. Une page x.com ne peut pas forger ces messages (aucun `externally_connectable`, aucun écouteur
+  `postMessage`).
 - **Redémarrage du service pendant que X est ouvert** : la clé TV gardée par l'extension (stockage de **session** du
-  navigateur, jamais sur disque) est périmée ; la sonde est refusée (403, ignorée) et `pages.x` disparaît après 120 s.
+  navigateur, jamais sur disque) est périmée. Au **premier** 403 `tv_key`, `background.js` la retire (seulement si
+  c'est encore elle : une clé neuve arrivée entre-temps reste) et la retient comme morte ; ensuite **plus aucun
+  envoi** — ni instantané, ni battement x.com ou `/tv` — jusqu'à une clé **neuve** validée ; une ancienne page `/tv`
+  qui remettrait la clé morte est ignorée ; le partage dit « OpenTV a redémarré ». `pages.x` disparaît après 120 s.
   **Par conception**, l'extension ne reprend une clé **que sur `/tv`** (`tvkey.js` lit la page de CE démarrage) :
   revenir à `/tv` (Retour/Accueil) et la sonde revient. Aucune autre voie d'acquisition ni persistance de la clé.
 - **Route** : portes TV complètes (loopback, Host, UID du pair = kiosque, clé TV) + `Origin` **obligatoire** et
   exactement `chrome-extension://mmoccejphjkmbhejebkbhkbbmmocfafi`, JSON ≤ 1 Kio, champs fermés (chaque énumération
   doit être une **chaîne** de la liste : liste/dict ⇒ 400 `bad_fields`, compté dans `rejected`, jamais un 500), ≤ 40
   par 10 s et par page (429), **mémoire seulement**, TTL 120 s, perdu au redémarrage, jamais journalisé ni écrit sur
-  disque. Portes, validation et routes X (`xprobe.POSTS`, `guard_operator`) vivent dans `xprobe.py` ; `web.py` ne fait
+  disque. **Journal HTTP** : aucune ligne pour `/api/tv/x/probe`, **quel que soit le statut** (200, 400, 403 clé
+  périmée ou Origin, 404, 413, 415, 429…) — journald ne porte jamais le rythme des touches ; seuls des compteurs
+  agrégés en mémoire (`http` : `2xx`, `400`, `403`, `404`, `413`, `415`, `421`, `429`, `other`) le disent à
+  l'opérateur. Portes, validation et routes X (`xprobe.POSTS`, `guard_operator`) vivent dans `xprobe.py` ; `web.py` ne fait
   que le câblage.
 - **Lecture opérateur** : `sudo /opt/opentv/bin/opentv-pi x-probe` → `GET /admin/x-probe` réservé à **root** (UID du
   pair TCP ; contrôle indisponible ⇒ refus ; jamais le kiosque, une page ou un agent) : `pages.tv` / `pages.x` avec
   `present`, `age_s`, `mode`, `event`, `doc_focus`, `visible`, `keys {move, ok, other}`, `repeat`, `synthetic`,
-  `last`, `ext`, `sw_s`, compteurs `accepted` / `rate_limited` ; `rejected` ; et `evdev` (ci-dessous).
+  `last`, `ext`, `sw_s`, compteurs `accepted` / `rate_limited` ; `rejected` ; `http` ; et `evdev` (ci-dessous).
+  La commande vérifie d'abord que l'écoute TCP appartient au **compte du service** (UID du côté serveur dans
+  `/proc/net/tcp`, sinon `listener` sans rien demander), puis revalide la réponse sur un **schéma fermé** identique à
+  la vue du service (sinon `invalid_response`, rien recopié ; refus du service : code d'une liste fermée, jamais son
+  texte) : une écoute usurpée ou un service altéré ne fournit jamais de « preuve ».
 - **Côté evdev** (`opentv-x-escape`) : pendant que le témoin « X ouvert » est valide, l'aide compte aussi les **appuis**
   (`value=1`, jamais les répétitions) `move` (↑ ↓ ← →, sans direction) et `ok` (Entrée/KEY_OK/KEY_SELECT) du **même**
   périphérique `vc4-hdmi`, **en mémoire seulement** : jamais journalisés (aucune trace d'activité ni de rythme dans
   journald), jamais écrits sur disque. Lecture **root seule** par un socket Unix `/run/opentv-x-escape/nav.sock`
   (tmpfs, 0600, pair vérifié par `SO_PEERCRED` = UID 0 ; contrôle indisponible ⇒ refus ; une ligne JSON fermée, rien
-  lu du client), joint par `sudo opentv-pi x-probe` sous `evdev {present, armed, move, ok, age_s}` ; vivant tant que
+  lu du client ; côté lecteur, l'UID du processus **serveur** doit être `opentv-keys` — `SO_PEERCRED` après connexion,
+  avant toute lecture, sinon `peer`), joint par `sudo opentv-pi x-probe` sous `evdev {present, armed, move, ok,
+  age_s}` ; arrêt ordonné (signal, réveil, attente du thread, fermeture, retrait du seul socket lié par l'aide) ;
+  thread refusé (`TasksMax`) ou démarrage partiel : socket retiré, KEY_EXIT continue ; vivant tant que
   l'aide est armée et 120 s après le dernier armement/appui/désarmement, puis oublié. Aucun droit ni capacité ajouté
   à l'unité (`RestrictAddressFamilies=AF_UNIX` déjà en place). **Seule KEY_EXIT** produit une demande.
   Lecture croisée : `evdev.move` monte mais `pages.x.keys.move` ne bouge pas ⇒ la touche atteint le Pi mais pas la
@@ -1565,12 +1582,28 @@ contrôle que pendant une touche **réelle** (`isTrusted`).
   comme en mode « contrôles ». L'**anneau** et la consigne viennent de `nav.css` (feuille de l'extension, hors CSP de
   la page) : plus aucun `<style>` injecté ; repli CSSOM en ligne seulement si la feuille manquait.
 
-**Gates terrain (canari 0.7.8)** : sur la Pi, `/tv` puis `sudo opentv-pi x-probe` ⇒ `pages.tv.present` ; X ouvert ⇒
-`pages.x.present`, `mode` attendu ; chaque touche physique ↑ ↓ ← → OK **séparément** : `keys` incrémenté de la bonne
-classe, `last.trusted` vrai, `handled` vrai pour ↑ ↓ (fil ou fenêtre), anneau visible (photo), exactement une
-activation pour OK ; `evdev.move`/`evdev.ok` égaux aux appuis physiques et à `pages.x.keys` (1:1) ; mot de passe
-tapé : `other` inchangé ; `journalctl -u opentv-x-escape` sans aucune ligne par touche ; tuile X gardée en canari
-tant qu'une touche échoue.
+**Gates terrain (canari 0.7.8)** — toujours des **différences par appui** (Δ entre une lecture `x-probe` AVANT et une
+APRÈS), jamais des valeurs absolues (les compteurs de la page repartent de zéro à chaque chargement, ceux d'evdev à
+chaque armement) :
+
+1. **Page stable** : `/tv` puis `sudo opentv-pi x-probe` ⇒ `pages.tv.present`. Ouvrir X et attendre : `pages.x.present`,
+   `mode` attendu, `evdev.armed: true`. L'aide relit le témoin « X ouvert » toutes les 0,5 s : un appui juste après
+   l'ouverture peut manquer côté evdev — attendre **≥ 2 s après `armed: true`** avant la première lecture.
+2. **Une touche physique à la fois** (↑ ↓ ← → OK, CEC) : lecture A ; **un** appui court (jamais tenu) ; attendre
+   **≥ 1 s** (envoi ≥ 400 ms puis aller-retour) ; lecture B. Attendu : Δ`pages.x.keys.<classe>` = 1, Δ des autres
+   classes = 0, Δ`pages.x.repeat` = 0, Δ`evdev.<classe>` = 1 ; `last.trusted` vrai, `handled` vrai pour ↑ ↓ (fil ou
+   fenêtre), anneau visible (photo), exactement une activation pour OK. Pour OK, choisir un contrôle qui ne change pas
+   de page ; si OK navigue, le Δ de la page n'est pas mesurable (rechargement) — seuls Δ`evdev.ok` = 1 et la photo
+   valent.
+3. **Paire A/B invalide** (recommencer, jamais conclure) si entre A et B : `pages.x.event` = `load` ou `pages.x.seq` a
+   diminué (page rechargée), `pages.x.sw_s` a diminué (service de l'extension relancé), `evdev.armed` faux ou
+   `evdev.move`/`evdev.ok` ont diminué (aide désarmée puis réarmée), `ext`/`version` changés, `present` faux ou
+   `age_s` ≥ 120 (instantané expiré), ou `http.403` a augmenté (clé périmée : revenir à `/tv`).
+4. **Clavier USB — gate séparée**, jamais entre les mêmes lectures que la CEC : l'aide ne lit que `vc4-hdmi`, donc
+   un appui clavier donne Δ`pages.x.keys` = 1 et Δ`evdev` = 0 — attendu, pas un échec.
+5. Mot de passe tapé : Δ`other` = 0 ; `journalctl -u opentv-x-escape` sans aucune ligne par touche et
+   `journalctl -u opentv` sans aucune ligne `http` de `/api/tv/x/probe` ; tuile X gardée en canari tant qu'une touche
+   échoue.
 
 ## 7. Retour arrière
 
@@ -1745,7 +1778,7 @@ sauvegardes OpenTV, jamais un paquet.
 | **Catalogue quotidien** | `systemctl list-timers opentv-catalogue-refresh.timer` : prochain passage planifié ; `sudo /opt/opentv/bin/opentv-pi catalogue refresh` → `updated` (ou `unchanged`), puis `catalogue status` : nombre attendu, `snapshot` présent, SHA-256 lu ; second passage → `unchanged` sans réécriture ; `catalogue rollback` → `rolled_back`, `hold.held: true`, puis `catalogue refresh` → `held` et SHA-256 inchangé ; `catalogue resume` → `resumed`, passage suivant `updated`/`unchanged` ; fiche ouverte ou lecture pendant un remplacement ⇒ Retour sur la même carte (photo) ; `ls -l /var/lib/opentv/catalogue.json*` : tout `opentv` ; Wi-Fi coupé → `discovery_failed` et SHA-256 inchangé ; accueil peuplé avec le nouveau catalogue en ≤ 120 s (attendu ≤ ~62 s) sans redémarrage de service ; `journalctl -u opentv-catalogue-refresh` sans hôte, préfixe, jeton ni URL ; `systemd-analyze security opentv-catalogue-refresh` relu |
 | **Notes TMDb quotidiennes** | `ls -ld /etc/opentv/tmdb` = `root opentv` `drwxr-x---` dès l'installation ; `getent group opentv` sans membre supplémentaire ; `sudo /opt/opentv/bin/opentv-pi catalogue ratings-credential` (jeton depuis le trousseau, jamais affiché) puis `ls -l /etc/opentv/tmdb/token` = `root opentv` `-rw-r-----` ; pour `opentv`, `opentv-cec` (pendant un passage) et le rafraîchissement : `grep ' /etc/opentv/tmdb ' /proc/<MainPID>/mountinfo` présent et `sudo nsenter -t <MainPID> -m ls /etc/opentv/tmdb` refusé ; jeton remplacé une 2e fois ⇒ masque toujours présent dans `opentv` sans redémarrage ; `catalogue refresh` puis `systemctl show -p ActiveEnterTimestamp,Result opentv-catalogue-ratings` (déclenchée après le rafraîchissement) ; `catalogue status` : `ratings.last.result` `updated`/`unchanged`, `coverage.pending` = 0, `rated` cohérent (aujourd'hui 110/116 : un spécial TV sans vote TMDb reste « indisponible », jamais 0) ; second `catalogue ratings` → `unchanged`, SHA-256 inchangé ; `IPAddressDeny` et DNS : passage réel réussi sous le bac à sable ; panne simulée (réseau coupé pendant le seul passage des notes) → `provider_unavailable`, unité `failed`, `health.warnings` = `ratings_enrichment_failed`, catalogue du rafraîchissement inchangé (SHA-256), puis réseau rétabli ⇒ `systemctl list-timers opentv-catalogue-ratings-retry.timer` et reprise réussie dans ≤ ~1 h 30 (`ratings.retry.attempts` 1, résultat `updated`), et heure suivante : reprise sans requête ; `journalctl -u opentv-catalogue-ratings*` et `-u opentv-catalogue-refresh` sans jeton, titre, hôte ni URL ; `systemd-analyze verify` et `security` des deux unités des notes relus ; `uninstall.sh` pendant un rafraîchissement ⇒ aucun passage des notes démarré (journal), `/run/opentv-uninstalling` retiré à la fin ; nouvelle note visible à l'accueil en ≤ 120 s sans redémarrage |
 | **Ambiance (Canvas)** | les 7 contrôles terrain du §6 quinquies : dossier `opentv:opentv 0700`, masques réels (`mountinfo`), photo/vidéo 1920×1080 des styles et mouvements, proposition d'un assistant autorisé refusée puis acceptée sur la TV (« Non » au focus), assistant sans permission refusé, mouvement réduit, budget (CPU/RSS, température, `get_throttled=0x0`, `hvs_underrun` stable), ambiance figée pendant « Regarder » et même carte au retour, ambiance conservée après redémarrage/réinstallation ; photo d'Alex |
-| **X TV canari (0.7.8)** | `sudo opentv-pi x-probe` : `pages.tv.present` sur `/tv`, `pages.x.present` sur X ; ↑ ↓ ← → OK physiques un par un : classe incrémentée, `last.trusted` vrai, `handled` vrai pour ↑ ↓, anneau visible (photo), une seule activation pour OK ; fenêtre modale de X au-dessus du fil : anneau dans la fenêtre, fil immobile ; `evdev.move`/`evdev.ok` = appuis physiques = `pages.x.keys` (1:1) ; mot de passe tapé : `other` inchangé ; `journalctl -u opentv-x-escape` sans ligne par touche ; aucune valeur de touche, texte ni URL dans la sortie ni le journal |
+| **X TV canari (0.7.8)** | `sudo opentv-pi x-probe` : `pages.tv.present` sur `/tv`, `pages.x.present` sur X ; page stable et `evdev.armed` depuis ≥ 2 s ; ↑ ↓ ← → OK physiques un par un, **Δ par appui** entre une lecture avant et une après (≥ 1 s) : Δ`pages.x.keys.<classe>` = Δ`evdev.<classe>` = 1, autres Δ = 0, paire rejetée si rechargement/réarmement (`load`, `seq`/`sw_s`/evdev en baisse) ; `last.trusted` vrai, `handled` vrai pour ↑ ↓, anneau visible (photo), une seule activation pour OK ; fenêtre modale de X au-dessus du fil : anneau dans la fenêtre, fil immobile ; clavier USB à part (Δ`evdev` = 0 attendu) ; mot de passe tapé : Δ`other` = 0 ; ni `journalctl -u opentv-x-escape` ni `journalctl -u opentv` n'ont de ligne par touche ou de `/api/tv/x/probe` ; aucune valeur de touche, texte ni URL dans la sortie ni le journal |
 | **X TV Mode (0.7.7)** | accueil : tuile X visible sans défiler (rangée « Applications » en tête, au focus) ; page de connexion X et fil **sombres** ; Retour Samsung depuis la connexion ⇒ `/tv` ; tuile X ⇒ `https://x.com/home` dans le kiosque ; OK du téléphone sur la tuile ⇒ « Utilise la télécommande de la télé pour ouvrir X. », rien ne s'ouvre ; connexion faite par Alex lui-même ; fil : anneau jaune, colonne unique, bandeau d'aide ; ↑ ↓ OK ← Retour Accueil à la télécommande CEC ; ← ⇒ « Prêt pour Hermit ou Muse… », puis Hermit/Muse `x_context` résume le post ; Retour racine/Accueil ⇒ `/tv` ; `systemctl restart opentv` ⇒ partage refusé puis accepté après retour à /tv ; `journalctl -u opentv` sans texte de post ; `OPENTV_X_TV=0` + restart ⇒ tuile absente ; photo d'Alex |
 | **Agent** | `opentv-mcp` depuis le compte de l'agent : `tools/list` filtré par scopes, `recommend` sans URL, scope refusé, audit présent sans secret |
 

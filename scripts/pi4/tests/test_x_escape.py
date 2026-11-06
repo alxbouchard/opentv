@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from tests._common import PI4
 from tests.test_service import make_app, Servers
@@ -332,6 +333,8 @@ class TestHelper(unittest.TestCase):
         AUCUN journal (ni compteurs, ni activité par touche), aucune demande ; vue opérateur vivante tant qu'armée et
         NAV_TTL_S après le dernier armement/appui/désarmement, puis oubliée ; jamais une direction ni un code."""
         self.assertEqual(xescape.NAV_TTL_S, 120.0)
+        from opentv_pi import xprobe
+        self.assertEqual(xescape.NAV_TTL_S, xprobe.TTL_S)        # commentaire « même TTL que la sonde » exact
         self.assertEqual(self.h.nav_view(), {"present": False, "armed": False})   # jamais armée : rien
         xescape.set_marker(self.rdir, True, boot_id="b")
         self.h.tick()
@@ -624,6 +627,16 @@ class TestNavServer(unittest.TestCase):
         self.d = tempfile.mkdtemp(prefix="otvn", dir="/tmp")     # chemin court (sun_path ≤ 104 octets sur macOS)
         self.addCleanup(shutil.rmtree, self.d, True)
         self.path = os.path.join(self.d, xescape.NAV_SOCK)
+        # côté CLIENT (read_nav) : UID du serveur simulé = compte courant (hors Linux, SO_PEERCRED absent) ; les
+        # tests du contrôle réel l'arrêtent (self.real_client_peer())
+        self._client_peer = mock.patch.object(xescape, "_peer_uid", lambda c: os.getuid())
+        self._client_peer.start()
+        self.addCleanup(self._client_peer.stop)
+
+    def real_client_peer(self):
+        self._client_peer.stop()
+        self._client_peer = mock.patch.object(xescape, "_peer_uid", xescape._peer_uid)   # rien à rétablir
+        self._client_peer.start()
 
     def serve(self, view=None, peer=0, **kw):
         srv = xescape.NavServer(self.d, view or (lambda: dict(self.VIEW)), peer_uid=lambda c: peer, **kw).start()
@@ -655,9 +668,117 @@ class TestNavServer(unittest.TestCase):
 
     @unittest.skipUnless(hasattr(__import__("socket"), "SO_PEERCRED"), "SO_PEERCRED (Linux)")
     def test_real_peercred_uid(self):
+        self.real_client_peer()
         srv = xescape.NavServer(self.d, lambda: dict(self.VIEW), allowed=frozenset({os.getuid()})).start()
         self.addCleanup(srv.stop)
+        self.assertEqual(xescape.read_nav(self.d, os.getuid()), self.VIEW)   # vrai SO_PEERCRED des DEUX côtés
+        import socket as so
+        with so.socket(so.AF_UNIX, so.SOCK_STREAM) as c:        # côté client : UID de CELUI QUI ÉCOUTE
+            c.connect(self.path)
+            self.assertEqual(xescape._peer_uid(c), os.getuid())
+        # serveur d'un autre compte (simulé : le vrai contrôle rend l'UID courant, attendu UID+1) : refus, rien lu
+        real = xescape._peer_uid
+        self.assertEqual(xescape.read_nav(self.d, os.getuid(), peer_uid=lambda c: real(c) + 1),
+                         {"present": False, "error": "peer"})
+
+    @unittest.skipIf(hasattr(__import__("socket"), "SO_PEERCRED"), "hors Linux seulement")
+    def test_client_peer_check_unavailable_fails_closed(self):
+        self.real_client_peer()
+        self.serve()
+        self.assertEqual(xescape.read_nav(self.d, os.getuid()), {"present": False, "error": "peer"})
+
+    def test_client_requires_server_uid_keys_uid_before_reading(self):
+        """L2 : read_nav vérifie l'UID du processus SERVEUR (SO_PEERCRED après connect) = compte de l'aide AVANT
+        toute lecture ; autre compte (root compris) ou inconnu : refus `peer`, la vue n'est jamais lue."""
+        self.serve()
+        seen = []
+
+        def peer(uid):
+            def f(c):
+                seen.append(uid)
+                return uid
+            return f
+        for uid in (os.getuid() + 1, 0 if os.getuid() else 1, None):
+            with self.subTest(uid=uid):
+                self.assertEqual(xescape.read_nav(self.d, os.getuid(), peer_uid=peer(uid)),
+                                 {"present": False, "error": "peer"})
+        self.assertEqual(len(seen), 3)
+        self.assertEqual(xescape.read_nav(self.d, os.getuid(), peer_uid=peer(os.getuid())), self.VIEW)
+        with mock.patch.object(xescape.socket.socket, "recv", side_effect=AssertionError("lu avant contrôle")):
+            self.assertEqual(xescape.read_nav(self.d, os.getuid(), peer_uid=lambda c: None),
+                             {"present": False, "error": "peer"})
+
+    # ------------------------------------------------------------------------------- cycle de vie (L4)
+    def nav_threads(self):
+        import threading
+        return [t for t in threading.enumerate() if t.name == "x-escape-nav" and t.is_alive()]
+
+    def test_stop_ordered_signal_wake_join_close_unlink(self):
+        srv = xescape.NavServer(self.d, lambda: dict(self.VIEW), peer_uid=lambda c: 0).start()
+        real_sock, real_thread = srv.sock, srv.thread
+        order = []
+
+        class S:
+            def shutdown(self, how):
+                order.append(("wake", srv.stopping.is_set()))
+                real_sock.shutdown(how)
+
+            def close(self):
+                order.append(("close", real_thread.is_alive()))
+                real_sock.close()
+
+        class T:
+            def join(self, timeout=None):
+                order.append(("join", timeout))
+                real_thread.join(timeout)
+        srv.sock, srv.thread = S(), T()
+        real_unlink = os.unlink
+
+        def unlink(p, *a, **k):
+            order.append(("unlink", p == self.path))
+            return real_unlink(p, *a, **k)
+        with mock.patch.object(xescape.os, "unlink", unlink):
+            srv.stop()
+        self.assertEqual(order, [("wake", True), ("join", xescape.NAV_STOP_JOIN_S), ("close", False),
+                                 ("unlink", True)])
+        self.assertFalse(real_thread.is_alive())
+        self.assertFalse(os.path.exists(self.path))
+        self.assertGreater(xescape.NAV_STOP_JOIN_S, xescape.NAV_SOCK_TIMEOUT_S + xescape.POLL_S)
+        srv.stop()                                                # idempotent
+        xescape.NavServer(self.d, lambda: {}).stop()              # jamais démarré : rien
+        with self.assertRaises(OSError):
+            srv.start()                                           # démarrage unique
+
+    def test_partial_start_failure_cleans_socket(self):
+        """chmod, listen ou thread refusé (TasksMax de l'unité) : socket fermé, fichier lié retiré, aucun thread,
+        OSError (l'aide continue sans lecture opérateur)."""
+        import threading
+        before = len(self.nav_threads())
+        fails = (("chmod", mock.patch.object(xescape.os, "chmod", side_effect=PermissionError("chmod"))),
+                 ("listen", mock.patch.object(xescape.socket.socket, "listen", side_effect=OSError("listen"))),
+                 ("thread", mock.patch.object(threading.Thread, "start",
+                                              side_effect=RuntimeError("can't start new thread"))))
+        for name, patch in fails:
+            with self.subTest(name=name):
+                srv = xescape.NavServer(self.d, lambda: dict(self.VIEW), peer_uid=lambda c: 0)
+                with patch, self.assertRaises(OSError):
+                    srv.start()
+                self.assertFalse(os.path.lexists(self.path), name)
+                self.assertEqual((srv.sock, srv.thread), (None, None))
+                self.assertEqual(len(self.nav_threads()), before)
+                srv.stop()
+        self.serve()                                              # puis un démarrage normal réussit
         self.assertEqual(xescape.read_nav(self.d, os.getuid()), self.VIEW)
+
+    def test_stop_never_removes_a_successor_socket(self):
+        old = xescape.NavServer(self.d, lambda: {"present": False, "armed": False}, peer_uid=lambda c: 0).start()
+        self.serve()                                              # successeur : remplace le socket orphelin
+        old.stop()
+        self.assertTrue(os.path.exists(self.path))
+        self.assertEqual(xescape.read_nav(self.d, os.getuid()), self.VIEW)
+
+    def test_unit_keeps_tasks_max(self):
+        self.assertRegex(unit("opentv-x-escape.service"), r"(?m)^TasksMax=[1-9][0-9]?$")
 
     def test_read_nav_refuses_link_owner_and_invalid_views(self):
         self.assertEqual(xescape.read_nav(self.d, os.getuid()), {"present": False, "error": "unavailable"})

@@ -109,8 +109,8 @@ LEVEL_LABELS = (("none", "Aucun accès"), ("read", "Voir seulement"), ("feedback
                 ("control", "Piloter OpenTV : proposer et lancer des films"))
 
 
-# Journal HTTP : erreurs et non-2xx toujours ; navigations de page (/tv, /setup) toujours (rares, bornées) ; succès
-# des requêtes répétitives (poll /api/tv/*, /static/*, /healthz) non journalisés, un échantillon agrégé tous les N.
+# Journal HTTP : erreurs et non-2xx toujours (sauf sonde X : jamais, xprobe.quiet_log) ; pages /tv, /setup toujours ;
+# succès des requêtes répétitives (poll /api/tv/*, /static/*, /healthz) non journalisés, un échantillon tous les N.
 QUIET_OK_PREFIXES = ("/api/tv/", "/static/", "/r/cmd", "/muse/status")
 QUIET_OK_PATHS = ("/healthz",)
 HTTP_OK_SAMPLE = 600
@@ -200,6 +200,8 @@ class _Base(http.server.BaseHTTPRequestHandler):
     def log_request(self, code="-", size="-"):   # chemin sans requête : le jeton ne fuit jamais
         path = urllib.parse.urlsplit(self.path).path[:64]
         status = int(code) if str(code).isdigit() else 0
+        if path == xprobe.PROBE_PATH:   # sonde X : AUCUNE ligne, quel que soit le statut (xprobe.quiet_log)
+            return xprobe.quiet_log(self, status)
         if 200 <= status < 400 and (path.startswith(QUIET_OK_PREFIXES) or path in QUIET_OK_PATHS):
             with self.server.log_lock:
                 self.server.quiet_ok += 1
@@ -264,6 +266,7 @@ class _Base(http.server.BaseHTTPRequestHandler):
 
 class TVHandler(_Base):
     csp = TV_CSP
+    probe_route = True   # statuts de la sonde X comptés en mémoire (xprobe.quiet_log), jamais journalisés
 
     def _guard(self):
         try:

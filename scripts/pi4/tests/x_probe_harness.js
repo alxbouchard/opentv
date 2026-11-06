@@ -1,7 +1,7 @@
 /* Harnais Node (sans navigateur) de la sonde canari X : exécute le VRAI nav.js / tvkey.js / background.js de
  * l'extension dans un contexte vm minimal (DOM factice, minuteries et horloge manuelles, chrome.* espionné) et rejoue
  * un scénario de touches. Sortie : UNE ligne JSON (messages envoyés au service de l'extension / corps POSTés).
- * Usage : node x_probe_harness.js <dossier extension> <nav|tvkey|background> */
+ * Usage : node x_probe_harness.js <dossier extension> <nav|nav_long|nav_pagehide|tvkey|background|background_stale> */
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -37,6 +37,7 @@ function el(tag, type) {
 
 function baseContext(clock) {
   const sent = [];
+  const times = [];
   const listeners = {};
   const body = el("BODY");
   const doc = {
@@ -52,7 +53,7 @@ function baseContext(clock) {
     innerWidth: 1920, scrollY: 0,
     addEventListener(type, fn, capture) { (listeners[type] = listeners[type] || []).push({ fn, capture: !!capture }); }
   };
-  const chrome = { runtime: { id: "ext", lastError: undefined, sendMessage(msg, cb) { sent.push(JSON.parse(JSON.stringify(msg))); if (cb) { cb(); } } } };
+  const chrome = { runtime: { id: "ext", lastError: undefined, sendMessage(msg, cb) { sent.push(JSON.parse(JSON.stringify(msg))); times.push(clock.t); if (cb) { cb(); } } } };
   const ctx = {
     window: win, document: doc, chrome, console,
     location: { protocol: "https:", hostname: "x.com", pathname: "/home", href: "https://x.com/home" },
@@ -68,7 +69,7 @@ function baseContext(clock) {
   ctx.window = ctx;   // window === globalThis du contexte (window.top === window)
   Object.assign(ctx, { addEventListener: win.addEventListener, top: ctx });
   vm.runInContext("Date.now = () => __now();", Object.assign(ctx, { __now: () => clock.t }));
-  return { ctx, doc, sent, listeners };
+  return { ctx, doc, sent, times, listeners };
 }
 
 function key(k, opts) {
@@ -106,6 +107,58 @@ function runNav() {
   doc.visibilityState = "hidden"; doc.focused = false;
   clock.advance(30000);
   return { sent, steps };
+}
+
+// document x.com ouvert TRÈS longtemps : bien plus d'envois que l'ancien plafond par document (3000), puis le
+// battement doit continuer ; jamais deux envois à moins de PROBE_MIN_MS
+function runNavLong() {
+  const clock = makeClock();
+  const { ctx, sent, times, listeners } = baseContext(clock);
+  vm.runInContext(fs.readFileSync(path.join(extDir, "nav.js"), "utf8"), ctx);
+  const press = (e) => { for (const l of listeners.keydown || []) { l.fn(e); } };
+  clock.advance(1000);
+  for (let i = 0; i < 4000; i++) { press(key(i % 2 ? "ArrowDown" : "Enter")); clock.advance(450); }
+  const after_keys = sent.length;
+  clock.advance(12 * 3600 * 1000);   // 12 h sans touche : battements toutes les 30 s
+  let min_gap = Infinity;
+  for (let i = 1; i < times.length; i++) { min_gap = Math.min(min_gap, times[i] - times[i - 1]); }
+  const beats = sent.slice(after_keys).filter((m) => m.event === "beat").length;
+  return { total: sent.length, after_keys, beats, min_gap, last: sent[sent.length - 1] };
+}
+
+// pagehide : l'instantané EN ATTENTE part tout de suite ; rien en attente : aucun envoi ; jamais de donnée nouvelle
+function runNavPagehide() {
+  const clock = makeClock();
+  const { ctx, sent, times, listeners } = baseContext(clock);
+  vm.runInContext(fs.readFileSync(path.join(extDir, "nav.js"), "utf8"), ctx);
+  const press = (e) => { for (const l of listeners.keydown || []) { l.fn(e); } };
+  const hide = () => { for (const l of listeners.pagehide || []) { l.fn({ persisted: false }); } };
+  clock.advance(1000);
+  const steps = { load: sent.length };
+  hide();                                     // rien en attente
+  steps.idle_hide = sent.length;
+  press(key("ArrowDown")); clock.advance(1);  // envoi de la touche programmé (≥ 400 ms après le précédent)
+  press(key("Enter")); clock.advance(1);
+  steps.before_hide = sent.length;
+  const t0 = clock.t;
+  hide();
+  steps.after_hide = sent.length;
+  steps.hide_at = times[times.length - 1] - t0;
+  clock.advance(5000);                        // plus rien d'autre (minuterie annulée, pas de doublon)
+  steps.end = sent.length;
+  hide();
+  steps.second_hide = sent.length;
+  // page restaurée (bfcache) : appui juste après un envoi au pagehide ; la minuterie annulée ne doit jamais
+  // vider ce NOUVEL instantané avant PROBE_MIN_MS
+  press(key("ArrowUp")); clock.advance(1);
+  press(key("ArrowUp")); clock.advance(1);    // envoi programmé (≥ 400 ms après le précédent)
+  const t1 = clock.t;
+  hide();
+  press(key("ArrowDown")); clock.advance(1);  // restaurée : nouvel instantané en attente
+  clock.advance(2000);
+  steps.restored_gap = times[times.length - 1] - t1;
+  steps.restored_sends = sent.length;
+  return { sent, steps, listeners: Object.keys(listeners).sort() };
 }
 
 function runTvkey() {
@@ -168,7 +221,105 @@ async function runBackground() {
   return { before_key, posts };
 }
 
+// Service redémarré pendant que X est ouvert : premier 403 « tv_key » -> clé retirée, PLUS AUCUN envoi (instantané
+// ni battement) ; l'ancienne clé n'est jamais reprise ; une clé NEUVE de /tv rouvre la sonde. Course : 403 tardif de
+// l'ancienne clé pendant qu'une clé neuve arrive : la neuve reste.
+async function runBackgroundStale() {
+  const clock = makeClock();
+  const posts = [];
+  const server = { key: "a".repeat(43), defer: false };
+  const held = [];
+  let onMessage = null;
+  const store = {};
+  const later = (v) => new Promise((r) => setImmediate(() => r(v)));
+  const reply = (key) => (key === server.key ?
+    { ok: true, status: 200, json: async () => ({ ok: true }) } :
+    { ok: false, status: 403, json: async () => ({ ok: false, error: "tv_key" }) });
+  const ctx = {
+    console, URL, AbortController, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+    setInterval: clock.setInterval, Promise,
+    chrome: {
+      runtime: { id: "ext", getManifest: () => ({ version: "0.7.8" }), onMessage: { addListener(f) { onMessage = f; } } },
+      storage: { session: {
+        get: (keys) => { const o = {}; for (const k of keys) { if (k in store) { o[k] = store[k]; } } return later(o); },
+        set: (o) => { Object.assign(store, o); return later(undefined); },
+        remove: (ks) => { for (const k of ks) { delete store[k]; } return later(undefined); } } },
+      tabs: { update: async () => undefined }
+    },
+    fetch: (url, init) => {
+      const key = init.headers["X-OpenTV-TV"];
+      posts.push({ path: new URL(url).pathname, key, body: JSON.parse(init.body) });
+      if (server.defer) { return new Promise((r) => held.push(() => r(reply(key)))); }
+      return Promise.resolve(reply(key));
+    }
+  };
+  vm.createContext(ctx);
+  vm.runInContext("Date.now = () => __now();", Object.assign(ctx, { __now: () => clock.t }));
+  vm.runInContext(fs.readFileSync(path.join(extDir, "background.js"), "utf8"), ctx);
+  const tv = { id: "ext", frameId: 0, url: "http://127.0.0.1:8080/tv" };
+  const x = { id: "ext", frameId: 0, url: "https://x.com/home" };
+  const flush = () => new Promise((r) => setImmediate(r));
+  const settle = async () => { for (let i = 0; i < 80; i++) { await flush(); } };
+  const xprobe = (seq) => ({ type: "probe", mode: "feed", event: "key", seq, move: seq, ok: 0, other: 0, repeat: 0,
+                             synthetic: 0, doc_focus: true, visible: true, last: null });
+  const marks = {};
+  const K1 = "a".repeat(43), K2 = "b".repeat(43), K3 = "c".repeat(43);
+  onMessage({ type: "tvkey", key: K1, doc_focus: true, visible: true }, tv, () => {});
+  await settle();
+  onMessage(xprobe(1), x, () => {});
+  await settle();
+  marks.fresh = posts.length;                         // 2 envois acceptés avec K1
+  server.key = K2;                                    // redémarrage du service : K1 morte
+  onMessage({ type: "tvbeat", doc_focus: true, visible: true }, tv, () => {});
+  await settle();
+  marks.first_403 = posts.length;                     // UN envoi refusé (403)
+  marks.key_after_403 = store.tvkey === undefined ? null : store.tvkey;
+  for (let i = 0; i < 20; i++) {                      // touches, battements x.com et /tv : plus rien ne part
+    clock.advance(500);
+    onMessage(xprobe(10 + i), x, () => {});
+    onMessage({ type: "tvbeat", doc_focus: true, visible: true }, tv, () => {});
+    await settle();
+  }
+  marks.after_stale = posts.length;
+  let shareMsg = null;
+  onMessage({ type: "share", author: "a", text: "t" }, x, (r) => { shareMsg = r; });
+  await settle();
+  marks.share = shareMsg;
+  marks.after_share = posts.length;                   // partage : aucun appel réseau sans clé
+  onMessage({ type: "tvkey", key: K1, doc_focus: true, visible: true }, tv, () => {});   // ancienne page /tv
+  await settle();
+  onMessage({ type: "tvbeat", doc_focus: true, visible: true }, tv, () => {});
+  await settle();
+  marks.dead_key_refused = posts.length;
+  marks.key_after_dead = store.tvkey === undefined ? null : store.tvkey;
+  onMessage({ type: "tvkey", key: K2, doc_focus: true, visible: true }, tv, () => {});   // /tv de CE démarrage
+  await settle();
+  onMessage({ type: "tvbeat", doc_focus: true, visible: true }, tv, () => {});
+  await settle();
+  marks.reopened = posts.length;
+  // course : redémarrage (K3) ; battement envoyé avec K2 et retenu ; K3 capturée ; puis 403 tardif de K2
+  server.key = K3;
+  server.defer = true;
+  clock.advance(1000);
+  onMessage({ type: "tvbeat", doc_focus: true, visible: true }, tv, () => {});
+  await settle();
+  server.defer = false;
+  marks.held = held.length;
+  // MÊME tour : clé neuve K3 remise par /tv ET 403 tardif de K2 (écritures de clé concurrentes)
+  onMessage({ type: "tvkey", key: K3, doc_focus: true, visible: true }, tv, () => {});
+  while (held.length) { held.shift()(); }
+  await settle();
+  marks.key_after_race = store.tvkey === undefined ? null : store.tvkey;
+  clock.advance(1000);
+  onMessage({ type: "tvbeat", doc_focus: true, visible: true }, tv, () => {});
+  await settle();
+  marks.end = posts.length;
+  return { marks, posts, K1, K2, K3 };
+}
+
 (async () => {
-  const out = which === "nav" ? runNav() : which === "tvkey" ? runTvkey() : await runBackground();
+  const runs = { nav: runNav, nav_long: runNavLong, nav_pagehide: runNavPagehide, tvkey: runTvkey,
+                 background: runBackground, background_stale: runBackgroundStale };
+  const out = await runs[which]();
   process.stdout.write(JSON.stringify(out) + "\n");
 })().catch((e) => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });

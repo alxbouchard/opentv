@@ -1,8 +1,10 @@
 /* OpenTV X TV Mode — service de l'extension locale du kiosque (Manifest V3).
  *
- * Trois messages, chacun vérifié (expéditeur = CETTE extension, cadre principal, page attendue) :
+ * Messages, chacun vérifié (expéditeur = CETTE extension, cadre principal, page attendue) :
  *  - tvkey : envoyé par tvkey.js depuis la page /tv de la boucle locale ; clé TV + port gardés dans
  *    chrome.storage.session (mémoire, jamais sur disque, jamais lisible par les pages ni les scripts de contenu) ;
+ *    une clé déjà déclarée morte (403 « tv_key ») n'est jamais reprise ;
+ *  - tvbeat : battement de tvkey.js sur /tv (deux booléens) ;
  *  - share : envoyé par x.js depuis x.com quand Alex appuie sur ← ; auteur et texte VISIBLES du post au focus, déjà
  *    bornés, re-bornés ici ; un seul appel réseau : POST /api/tv/x/context sur 127.0.0.1 avec la clé TV ;
  *  - home : envoyé par nav.js (toute page x.com) : retour explicite à la page OpenTV /tv (Accueil, ou Retour) ;
@@ -10,10 +12,12 @@
  *    move/ok/other/repeat/synthetic, doc_focus/visible, booléens de la dernière touche réelle), page source DÉDUITE de
  *    l'expéditeur (jamais du message) ; + instantané « tv » quand tvkey.js remet la clé, puis à chaque « tvbeat »
  *    (tvkey.js, toutes les 30 s < TTL 120 s du service). Au plus un envoi en vol (coalescé, le dernier instantané
- *    gagne), ≤ PROBE_MAX par PROBE_WINDOW_MS ; POST PROBE_PATH sur 127.0.0.1 avec la clé TV ; échec ignoré (jamais la
- *    clé effacée : le partage garde son message « OpenTV a redémarré »). Service OpenTV redémarré pendant que X est
- *    ouvert : clé périmée, sonde refusée (403) jusqu'au prochain /tv — par conception, la clé n'est reprise QUE sur
- *    /tv (tvkey.js), gardée en stockage de SESSION seulement, jamais persistée ni obtenue autrement.
+ *    gagne), ≤ PROBE_MAX par PROBE_WINDOW_MS ; POST PROBE_PATH sur 127.0.0.1 avec la clé TV ; échec réseau ignoré.
+ *    Service OpenTV redémarré pendant que X est ouvert : au PREMIER 403 « tv_key », la clé est retirée (si c'est
+ *    toujours elle) et retenue comme morte (« tvdead », le partage dit alors « OpenTV a redémarré ») ; plus AUCUN envoi
+ *    — ni instantané ni battement — jusqu'à une clé NEUVE validée remise par tvkey.js sur /tv. Par conception, la clé
+ *    n'est reprise QUE sur /tv, gardée en stockage de SESSION seulement, jamais persistée ni obtenue autrement.
+ *    Écritures de la clé sérialisées (keyLocked) : un 403 tardif de l'ancienne clé n'efface jamais une clé neuve.
  * Une page x.com ne peut jamais forger ces messages : aucun externally_connectable, aucun écouteur postMessage ;
  * seuls les scripts de contenu de CETTE extension (monde isolé) atteignent ce service.
  * Aucune API X, aucun cookie, aucune lecture d'onglet, aucun autre hôte contacté, aucun envoi vers un agent.
@@ -70,9 +74,27 @@ function clean(s, cap) {
 }
 
 async function tvSession() {
-  const s = await chrome.storage.session.get(["tvkey", "tvport"]);
+  const s = await chrome.storage.session.get(["tvkey", "tvport", "tvdead"]);
   const port = Number.isInteger(s.tvport) && s.tvport >= 1024 && s.tvport <= 65535 ? s.tvport : DEFAULT_PORT;
-  return { key: typeof s.tvkey === "string" && KEY_RE.test(s.tvkey) ? s.tvkey : null, port: port };
+  return { key: typeof s.tvkey === "string" && KEY_RE.test(s.tvkey) ? s.tvkey : null, port: port,
+           dead: typeof s.tvdead === "string" };
+}
+
+// Écritures de la clé TV sérialisées : capture (/tv) et retrait (403 « tv_key ») jamais entrelacés.
+let keyOps = Promise.resolve();
+function keyLocked(fn) {
+  const p = keyOps.then(fn);
+  keyOps = p.catch(() => undefined);
+  return p;
+}
+// 403 « tv_key » : `key` est morte (service redémarré). Retirée SEULEMENT si c'est toujours la clé gardée (une clé
+// neuve arrivée entre-temps reste) ; retenue comme morte pour ne jamais être reprise d'une ancienne page /tv.
+function markDead(key) {
+  return keyLocked(async () => {
+    const s = await chrome.storage.session.get(["tvkey"]);
+    if (s.tvkey === key) { await chrome.storage.session.remove(["tvkey"]); }
+    await chrome.storage.session.set({ tvdead: key });
+  });
 }
 
 async function share(msg) {
@@ -80,7 +102,7 @@ async function share(msg) {
   const author = clean(typeof msg.author === "string" ? msg.author.replace(/\s+/g, " ") : "", AUTHOR_MAX);
   if (!text) { return { ok: false, message: MSG.empty }; }
   const tv = await tvSession();
-  if (!tv.key) { return { ok: false, message: MSG.nokey }; }
+  if (!tv.key) { return { ok: false, message: tv.dead ? MSG.stale : MSG.nokey }; }
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
   let r = null;
@@ -104,7 +126,7 @@ async function share(msg) {
   }
   if (r.ok && j && j.ok === true && typeof j.message === "string") { return { ok: true, message: j.message.slice(0, 200) }; }
   if (r.status === 403 && j && j.error === "tv_key") {   // service redémarré : clé périmée, jamais réessayée
-    await chrome.storage.session.remove(["tvkey"]);
+    await markDead(tv.key);
     return { ok: false, message: MSG.stale };
   }
   if (j && j.error === "empty_text") { return { ok: false, message: MSG.empty }; }
@@ -136,18 +158,19 @@ async function pumpProbe() {
   probeQ.busy = true;
   try {
     while (probeQ.pending) {
+      const tv = await tvSession();
+      if (!tv.key) { probeQ.pending = null; break; }   // aucune clé (jamais reçue, ou morte) : rien n'est envoyé
       const now = Date.now();
       probeQ.sent = probeQ.sent.filter((t) => now - t < PROBE_WINDOW_MS);
       if (probeQ.sent.length >= PROBE_MAX) { probeQ.pending = null; break; }   // débit dépassé : abandonné
       const body = probeQ.pending;
       probeQ.pending = null;
       probeQ.sent.push(now);
-      const tv = await tvSession();
-      if (!tv.key) { continue; }
       const ctl = new AbortController();
       const timer = setTimeout(() => ctl.abort(), PROBE_TIMEOUT_MS);
+      let stale = false;
       try {
-        await fetch(`http://127.0.0.1:${tv.port}${PROBE_PATH}`, {
+        const r = await fetch(`http://127.0.0.1:${tv.port}${PROBE_PATH}`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-OpenTV-TV": tv.key },
           body: JSON.stringify(body),
@@ -157,11 +180,17 @@ async function pumpProbe() {
           redirect: "error",
           signal: ctl.signal
         });
+        if (r.status === 403) {
+          let j = null;
+          try { j = await r.json(); } catch (e) { j = null; }
+          stale = !!j && j.error === "tv_key";
+        }
       } catch (e) {
-        /* service absent ou clé périmée : la sonde se tait, rien d'autre ne change */
+        /* service absent : cet instantané est perdu, rien d'autre ne change */
       } finally {
         clearTimeout(timer);
       }
+      if (stale) { await markDead(tv.key); }   // plus aucun envoi avant une clé neuve (tvSession ci-dessus)
     }
   } finally {
     probeQ.busy = false;
@@ -180,11 +209,15 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
     if (typeof msg.key === "string" && KEY_RE.test(msg.key) && port) {
       // port épinglé pour la session du navigateur : le kiosque démarre toujours sur le vrai /tv ; une autre page
       // « /tv » d'un autre port local ne peut jamais détourner la clé ni le retour à OpenTV
-      chrome.storage.session.get(["tvport"]).then((s) => {
-        if (s.tvport === undefined || s.tvport === port) { return chrome.storage.session.set({ tvkey: msg.key, tvport: port }); }
-        return undefined;
-      }).then(() => queueProbe(probeBody("tv", { event: "load", doc_focus: msg.doc_focus, visible: msg.visible })))
-        .catch(() => undefined);
+      // clé morte (403 « tv_key », ancienne page /tv) : jamais reprise ; seule une clé NEUVE rouvre la sonde
+      keyLocked(async () => {
+        const s = await chrome.storage.session.get(["tvport", "tvdead"]);
+        if (!(s.tvport === undefined || s.tvport === port) || s.tvdead === msg.key) { return false; }
+        await chrome.storage.session.set({ tvkey: msg.key, tvport: port });
+        return true;
+      }).then((fresh) => {
+        if (fresh) { queueProbe(probeBody("tv", { event: "load", doc_focus: msg.doc_focus, visible: msg.visible })); }
+      }).catch(() => undefined);
     }
     return false;
   }

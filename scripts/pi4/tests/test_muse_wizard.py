@@ -2048,7 +2048,14 @@ class TestUnits(unittest.TestCase):
             ins = f.read()
         with open(os.path.join(PI4, "uninstall.sh"), encoding="utf-8") as f:
             uni = f.read()
-        self.assertIn("opentv-muse-setup.path opentv-muse-setup.service; do", ins)
+        # boucle d'installation des unités : l'assistant y figure (les unités X TV x-escape la terminent depuis 0.7.7)
+        loop = re.search(r"for u in opentv\.service ([^;]*); do", ins)
+        assert loop is not None
+        units = loop.group(1).replace("\\\n", " ").split()
+        self.assertIn("opentv-muse-setup.path", units)
+        self.assertIn("opentv-muse-setup.service", units)
+        self.assertIn("opentv-muse-setup.path opentv-muse-setup.service \\\n         opentv-x-escape.service "
+                      "opentv-x-escape.path opentv-x-escape-action.service; do", ins)
         self.assertIn("remote.js muse.js fallback.html", ins)
         self.assertRegex(ins, r"post systemctl enable [^\n]*(\\\n[^\n]*)*opentv-muse-setup\.path")
         # mise à jour : ancien emplacement sur la carte SD (jobs pouvant porter un jeton) vidé puis retiré, APRÈS
@@ -2058,7 +2065,9 @@ class TestUnits(unittest.TestCase):
         self.assertLess(ins.index("post systemd-tmpfiles --create"), legacy)
         self.assertLess(ins.index("post systemctl restart opentv-net-helper.path"), legacy)
         self.assertIn("host systemctl stop opentv-muse-setup.path opentv-muse-setup.service", uni)
-        self.assertIn("opentv-muse-pair.service opentv-muse-setup.path opentv-muse-setup.service\n", uni)
+        # liste « disable --now » : l'assistant y figure, suivi des unités X TV x-escape (0.7.7)
+        self.assertIn("opentv-muse-pair.service opentv-muse-setup.path opentv-muse-setup.service \\\n"
+                      "  opentv-x-escape.path opentv-x-escape.service opentv-x-escape-action.service\n", uni)
         self.assertLess(uni.index("systemctl stop opentv-muse-setup.path"), uni.index("-type f -delete"))
         self.assertIn("for d in /run/opentv-musejobs/queue /run/opentv-musejobs/tmp /var/lib/opentv/musejobs "
                       "/var/lib/opentv/musejobs-tmp; do", uni)
