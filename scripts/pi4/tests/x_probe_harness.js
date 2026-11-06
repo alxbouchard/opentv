@@ -1,7 +1,7 @@
 /* Harnais Node (sans navigateur) de la sonde canari X : exécute le VRAI nav.js / tvkey.js / background.js de
  * l'extension dans un contexte vm minimal (DOM factice, minuteries et horloge manuelles, chrome.* espionné) et rejoue
  * un scénario de touches. Sortie : UNE ligne JSON (messages envoyés au service de l'extension / corps POSTés).
- * Usage : node x_probe_harness.js <dossier extension> <nav|nav_long|nav_pagehide|tvkey|background|background_stale> */
+ * Usage : node x_probe_harness.js <dossier extension> <nav|nav_long|nav_pagehide|tvkey|background|background_stale|background_restarts> */
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -317,9 +317,95 @@ async function runBackgroundStale() {
   return { marks, posts, K1, K2, K3 };
 }
 
+// Trois redémarrages (K1 -> K2 -> K3 -> K4), le dernier en course (403 tardif de K3 ET clé neuve K4 au même tour) :
+// chaque ancienne page /tv (K1, K2, K3) est refusée SANS aucun envoi ; K4 reste et envoie. Puis 10 redémarrages de
+// plus : la liste des clés mortes reste bornée (DEAD_MAX), les plus récentes retenues.
+async function runBackgroundRestarts() {
+  const clock = makeClock();
+  const posts = [];
+  const K = "abcdefghijklmnopqrstuvwxyz".split("").map((c) => c.repeat(43));
+  const server = { key: K[0], defer: false };
+  const held = [];
+  let onMessage = null;
+  const store = {};
+  const logs = [];
+  const later = (v) => new Promise((r) => setImmediate(() => r(v)));
+  const reply = (key) => (key === server.key ?
+    { ok: true, status: 200, json: async () => ({ ok: true }) } :
+    { ok: false, status: 403, json: async () => ({ ok: false, error: "tv_key" }) });
+  const spy = (...a) => { logs.push(a.map(String).join(" ")); };
+  const ctx = {
+    console: { log: spy, info: spy, warn: spy, error: spy, debug: spy }, URL, AbortController,
+    setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, setInterval: clock.setInterval, Promise,
+    chrome: {
+      runtime: { id: "ext", getManifest: () => ({ version: "0.7.8" }), onMessage: { addListener(f) { onMessage = f; } } },
+      storage: { session: {
+        get: (keys) => { const o = {}; for (const k of keys) { if (k in store) { o[k] = JSON.parse(JSON.stringify(store[k])); } } return later(o); },
+        set: (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); return later(undefined); },
+        remove: (ks) => { for (const k of ks) { delete store[k]; } return later(undefined); } } },
+      tabs: { update: async () => undefined }
+    },
+    fetch: (url, init) => {
+      const key = init.headers["X-OpenTV-TV"];
+      posts.push({ path: new URL(url).pathname, key, body: JSON.parse(init.body) });
+      if (server.defer) { return new Promise((r) => held.push(() => r(reply(key)))); }
+      return Promise.resolve(reply(key));
+    }
+  };
+  vm.createContext(ctx);
+  vm.runInContext("Date.now = () => __now();", Object.assign(ctx, { __now: () => clock.t }));
+  vm.runInContext(fs.readFileSync(path.join(extDir, "background.js"), "utf8"), ctx);
+  const tv = { id: "ext", frameId: 0, url: "http://127.0.0.1:8080/tv" };
+  const flush = () => new Promise((r) => setImmediate(r));
+  const settle = async () => { for (let i = 0; i < 80; i++) { await flush(); } };
+  const tvkey = async (k) => { onMessage({ type: "tvkey", key: k, doc_focus: true, visible: true }, tv, () => {}); await settle(); };
+  const beat = async () => { clock.advance(1000); onMessage({ type: "tvbeat", doc_focus: true, visible: true }, tv, () => {}); await settle(); };
+  const cur = () => (store.tvkey === undefined ? null : store.tvkey);
+  const marks = { cycles: [] };
+  await tvkey(K[0]);
+  marks.start = posts.length;                               // K1 : instantané « load » accepté
+  for (let i = 1; i <= 2; i++) {                            // redémarrages 1 et 2 : 403 puis clé neuve
+    server.key = K[i];
+    await beat();
+    const died = posts.length;
+    await tvkey(K[i]);
+    marks.cycles.push({ died, key_after: cur(), fresh: posts.length });
+  }
+  // redémarrage 3 en course : battement K3 retenu, clé neuve K4 et 403 tardif de K3 au MÊME tour
+  server.key = K[3];
+  server.defer = true;
+  await beat();
+  server.defer = false;
+  marks.held = held.length;
+  onMessage({ type: "tvkey", key: K[3], doc_focus: true, visible: true }, tv, () => {});
+  while (held.length) { held.shift()(); }
+  await settle();
+  marks.key_after_race = cur();
+  marks.before_old_pages = posts.length;
+  marks.old_pages = [];
+  for (const old of [K[0], K[1], K[2], K[0], K[2]]) {       // anciennes pages /tv, dans le désordre : toutes refusées
+    await tvkey(old);
+    marks.old_pages.push({ key_after: cur(), posts: posts.length });
+  }
+  await beat();
+  marks.after_beat = posts.length;
+  marks.dead_after_3 = (store.tvdead || []).slice();
+  // 10 redémarrages de plus : liste bornée
+  for (let i = 4; i < 14; i++) {
+    server.key = K[i];
+    await beat();
+    await tvkey(K[i]);
+  }
+  marks.dead_after_13 = (store.tvdead || []).slice();
+  marks.key_final = cur();
+  marks.end = posts.length;
+  return { marks, posts, K: K.slice(0, 14), logs };
+}
+
 (async () => {
   const runs = { nav: runNav, nav_long: runNavLong, nav_pagehide: runNavPagehide, tvkey: runTvkey,
-                 background: runBackground, background_stale: runBackgroundStale };
+                 background: runBackground, background_stale: runBackgroundStale,
+                 background_restarts: runBackgroundRestarts };
   const out = await runs[which]();
   process.stdout.write(JSON.stringify(out) + "\n");
 })().catch((e) => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });

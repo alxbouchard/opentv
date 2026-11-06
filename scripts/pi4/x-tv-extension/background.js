@@ -14,7 +14,8 @@
  *    (tvkey.js, toutes les 30 s < TTL 120 s du service). Au plus un envoi en vol (coalescé, le dernier instantané
  *    gagne), ≤ PROBE_MAX par PROBE_WINDOW_MS ; POST PROBE_PATH sur 127.0.0.1 avec la clé TV ; échec réseau ignoré.
  *    Service OpenTV redémarré pendant que X est ouvert : au PREMIER 403 « tv_key », la clé est retirée (si c'est
- *    toujours elle) et retenue comme morte (« tvdead », le partage dit alors « OpenTV a redémarré ») ; plus AUCUN envoi
+ *    toujours elle) et retenue comme morte (« tvdead » : les DEAD_MAX dernières clés mortes, en session seulement,
+ *    jamais journalisées ni exposées ; le partage dit alors « OpenTV a redémarré ») ; plus AUCUN envoi
  *    — ni instantané ni battement — jusqu'à une clé NEUVE validée remise par tvkey.js sur /tv. Par conception, la clé
  *    n'est reprise QUE sur /tv, gardée en stockage de SESSION seulement, jamais persistée ni obtenue autrement.
  *    Écritures de la clé sérialisées (keyLocked) : un 403 tardif de l'ancienne clé n'efface jamais une clé neuve.
@@ -39,6 +40,7 @@ const AUTHOR_MAX = 120;
 const DEFAULT_PORT = 8080;
 const FETCH_TIMEOUT_MS = 5000;
 const KEY_RE = /^[A-Za-z0-9_-]{32,128}$/;
+const DEAD_MAX = 8;   // clés mortes retenues (plusieurs redémarrages : une ancienne page /tv n'en reprend aucune)
 const X_HOSTS = new Set(["x.com", "twitter.com"]);
 // contrôles, bidi et largeur nulle : jamais transmis (le service OpenTV les retire aussi)
 const STRIP_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]/g;
@@ -73,11 +75,16 @@ function clean(s, cap) {
   return Array.from(s.replace(STRIP_RE, "")).slice(0, cap).join("").trim();
 }
 
+function deadKeys(v) {   // liste bornée ; ancienne forme (une seule clé, chaîne) acceptée
+  const a = Array.isArray(v) ? v : (typeof v === "string" ? [v] : []);
+  return a.filter((k) => typeof k === "string").slice(-DEAD_MAX);
+}
+
 async function tvSession() {
   const s = await chrome.storage.session.get(["tvkey", "tvport", "tvdead"]);
   const port = Number.isInteger(s.tvport) && s.tvport >= 1024 && s.tvport <= 65535 ? s.tvport : DEFAULT_PORT;
   return { key: typeof s.tvkey === "string" && KEY_RE.test(s.tvkey) ? s.tvkey : null, port: port,
-           dead: typeof s.tvdead === "string" };
+           dead: deadKeys(s.tvdead).length > 0 };
 }
 
 // Écritures de la clé TV sérialisées : capture (/tv) et retrait (403 « tv_key ») jamais entrelacés.
@@ -88,12 +95,15 @@ function keyLocked(fn) {
   return p;
 }
 // 403 « tv_key » : `key` est morte (service redémarré). Retirée SEULEMENT si c'est toujours la clé gardée (une clé
-// neuve arrivée entre-temps reste) ; retenue comme morte pour ne jamais être reprise d'une ancienne page /tv.
+// neuve arrivée entre-temps reste) ; ajoutée aux DEAD_MAX dernières clés mortes pour ne jamais être reprise d'une
+// ancienne page /tv, même après plusieurs redémarrages.
 function markDead(key) {
   return keyLocked(async () => {
-    const s = await chrome.storage.session.get(["tvkey"]);
+    const s = await chrome.storage.session.get(["tvkey", "tvdead"]);
     if (s.tvkey === key) { await chrome.storage.session.remove(["tvkey"]); }
-    await chrome.storage.session.set({ tvdead: key });
+    const dead = deadKeys(s.tvdead).filter((k) => k !== key);
+    dead.push(key);
+    await chrome.storage.session.set({ tvdead: dead.slice(-DEAD_MAX) });
   });
 }
 
@@ -212,7 +222,7 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
       // clé morte (403 « tv_key », ancienne page /tv) : jamais reprise ; seule une clé NEUVE rouvre la sonde
       keyLocked(async () => {
         const s = await chrome.storage.session.get(["tvport", "tvdead"]);
-        if (!(s.tvport === undefined || s.tvport === port) || s.tvdead === msg.key) { return false; }
+        if (!(s.tvport === undefined || s.tvport === port) || deadKeys(s.tvdead).includes(msg.key)) { return false; }
         await chrome.storage.session.set({ tvkey: msg.key, tvport: port });
         return true;
       }).then((fresh) => {

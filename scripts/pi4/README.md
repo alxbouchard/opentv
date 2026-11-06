@@ -1539,9 +1539,11 @@ contrôle que pendant une touche **réelle** (`isTrusted`).
   `postMessage`).
 - **Redémarrage du service pendant que X est ouvert** : la clé TV gardée par l'extension (stockage de **session** du
   navigateur, jamais sur disque) est périmée. Au **premier** 403 `tv_key`, `background.js` la retire (seulement si
-  c'est encore elle : une clé neuve arrivée entre-temps reste) et la retient comme morte ; ensuite **plus aucun
+  c'est encore elle : une clé neuve arrivée entre-temps reste) et la retient comme morte (les **8 dernières** clés
+  mortes, en session seulement, jamais journalisées) ; ensuite **plus aucun
   envoi** — ni instantané, ni battement x.com ou `/tv` — jusqu'à une clé **neuve** validée ; une ancienne page `/tv`
-  qui remettrait la clé morte est ignorée ; le partage dit « OpenTV a redémarré ». `pages.x` disparaît après 120 s.
+  qui remettrait l'une de ces clés mortes, même après plusieurs redémarrages, est ignorée sans aucun envoi ; le
+  partage dit « OpenTV a redémarré ». `pages.x` disparaît après 120 s (`age_s` tronqué au dixième : toujours < 120).
   **Par conception**, l'extension ne reprend une clé **que sur `/tv`** (`tvkey.js` lit la page de CE démarrage) :
   revenir à `/tv` (Retour/Accueil) et la sonde revient. Aucune autre voie d'acquisition ni persistance de la clé.
 - **Route** : portes TV complètes (loopback, Host, UID du pair = kiosque, clé TV) + `Origin` **obligatoire** et

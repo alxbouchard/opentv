@@ -528,6 +528,39 @@ class TestStatusSchema(unittest.TestCase):
         off = json.loads(json.dumps(xprobe.status_view(b)))
         self.assertEqual(xstatus.status_clean(off), off)
 
+    def test_age_just_before_ttl_round_trips_then_absent(self):
+        """L4 : âge publié TRONQUÉ (jamais arrondi à TTL_S) : à 119.95–<120 s l'instantané vivant reste lisible par
+        l'opérateur (age_s < TTL_S, lecture entière acceptée) ; TTL effectif inchangé : à TTL_S il est absent."""
+        clock = Clock()
+        self.a.x_probe = xprobe.XProbe(mono=clock)
+        self.assertLess(xprobe.AGE_MAX_S, xprobe.TTL_S)
+        for age in (119.0, 119.9, 119.94, 119.95, 119.96, 119.99, 119.999999, xprobe.TTL_S - 1e-9):
+            with self.subTest(age=age):
+                self.a.x_probe.clear()
+                t0 = clock.t
+                self.a.x_probe.record(body())
+                clock.t = t0 + age
+                v = json.loads(json.dumps(xprobe.status_view(self.a)))
+                x = v["pages"]["x"]
+                self.assertIs(x["present"], True)
+                self.assertLessEqual(x["age_s"], age)                  # jamais arrondi vers le haut
+                self.assertLess(x["age_s"], xprobe.TTL_S)
+                self.assertGreater(x["age_s"], age - 0.1 - 1e-9)       # tronqué au dixième, rien de plus
+                self.assertEqual(xstatus.status_clean(v), v)           # lecture opérateur entière acceptée
+        for late in (0.0, 1e-9, 0.05, 5.0):                            # expiré : absent, jamais un faux « vivant »
+            with self.subTest(late=late):
+                self.a.x_probe.clear()
+                t0 = clock.t
+                self.a.x_probe.record(body())
+                clock.t = t0 + xprobe.TTL_S + late
+                v = json.loads(json.dumps(xprobe.status_view(self.a)))
+                self.assertEqual(set(v["pages"]["x"]), {"present", "accepted", "rate_limited"})
+                self.assertIs(v["pages"]["x"]["present"], False)
+                self.assertEqual(xstatus.status_clean(v), v)
+        g = self.good()                                                # un âge >= TTL_S forgé reste refusé
+        for bad in (xprobe.TTL_S, 120.05, 121):
+            self.assertIsNone(xstatus.status_clean(dict(g, pages=dict(g["pages"], x=dict(g["pages"]["x"], age_s=bad)))))
+
     def test_every_deviation_refused(self):
         g = self.good()
         x = g["pages"]["x"]
@@ -721,8 +754,11 @@ class TestExtensionProbeSource(unittest.TestCase):
         self.assertEqual(self.bg.count('storage.session.remove(["tvkey"])'), 1)
         md = self.bg[self.bg.index("function markDead(key)"):self.bg.index("async function share(")]
         self.assertIn('if (s.tvkey === key) { await chrome.storage.session.remove(["tvkey"]); }', md)
-        self.assertIn("await chrome.storage.session.set({ tvdead: key });", md)
-        self.assertIn("s.tvdead === msg.key", self.bg)
+        self.assertIn("await chrome.storage.session.set({ tvdead: dead.slice(-DEAD_MAX) });", md)
+        self.assertIn("deadKeys(s.tvdead).includes(msg.key)", self.bg)
+        dmax = int(re.search(r"const DEAD_MAX = (\d+);", self.bg).group(1))
+        self.assertTrue(2 <= dmax <= 16)                                # plusieurs redémarrages, borné
+        self.assertNotIn("console.", self.bg)                          # aucune clé (vive ou morte) journalisée
         for src in (self.bg, tvkey, self.nav):
             for bad in ("storage.local", "storage.sync", "localStorage", "indexedDB", "document.cookie"):
                 self.assertNotIn(bad, src)
@@ -844,6 +880,34 @@ class TestExtensionProbeRuntime(unittest.TestCase):
         self.assertEqual(m["end"], len(posts))
         self.assertTrue(all(p["path"] == xprobe.PROBE_PATH for p in posts))
         self.assertEqual([p["key"] for p in posts].count(k1), 3)  # K1 : 2 acceptés + 1 refusé, plus jamais
+
+    def test_background_three_restarts_every_old_key_refused(self):
+        """L5 : trois redémarrages (K1 -> K2 -> K3 -> K4, le dernier en course : 403 tardif de K3 et clé neuve K4 au
+        même tour) : K4 reste ; chaque ancienne page /tv (K1, K2, K3, dans le désordre) est refusée SANS aucun envoi
+        (aucun 403 muet) ; K4 envoie ensuite. Liste des clés mortes bornée, jamais journalisée."""
+        r = self.run_harness("background_restarts")
+        m, posts, K = r["marks"], r["posts"], r["K"]
+        self.assertEqual(m["start"], 1)
+        self.assertEqual(m["cycles"], [{"died": 2, "key_after": K[1], "fresh": 3},
+                                       {"died": 4, "key_after": K[2], "fresh": 5}])   # 1 seul 403 par redémarrage
+        self.assertEqual(m["held"], 1)
+        self.assertEqual(m["key_after_race"], K[3])                     # 403 tardif de K3 : K4 jamais effacée
+        self.assertEqual(m["before_old_pages"], 7)
+        self.assertEqual(m["old_pages"], [{"key_after": K[3], "posts": 7}] * 5)   # K1/K2/K3 : refusées, aucun envoi
+        self.assertEqual(m["after_beat"], 8)
+        self.assertEqual(posts[7]["key"], K[3])
+        self.assertEqual(m["dead_after_3"], K[0:3])
+        dmax = int(re.search(r"const DEAD_MAX = (\d+);", read(os.path.join(EXT, "background.js"))).group(1))
+        self.assertEqual(m["dead_after_13"], K[13 - dmax:13])           # bornée : les plus récentes
+        self.assertEqual(m["key_final"], K[13])
+        self.assertEqual(m["end"], len(posts))
+        self.assertEqual(r["logs"], [])
+        # chaque clé morte : exactement un envoi refusé, plus jamais ; jamais une clé dans un corps
+        for i in range(13):
+            self.assertEqual([p["key"] for p in posts].count(K[i]), 2 + (i == 3), i)
+        self.assertTrue(all(p["path"] == xprobe.PROBE_PATH for p in posts))
+        dump = json.dumps([p["body"] for p in posts])
+        self.assertFalse(any(k in dump for k in K))
 
     def test_tvkey_periodic_beat_booleans_only(self):
         sent = self.run_harness("tvkey")["sent"]

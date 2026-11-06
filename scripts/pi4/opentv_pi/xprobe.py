@@ -18,9 +18,10 @@ Chaîne, sans disque ni journal de contenu :
    envoi en vol, coalescé ; POST PROBE_PATH sur la boucle locale avec la clé TV éphémère de ce démarrage. Sur /tv :
    instantané « tv » à la capture de la clé puis battement toutes les 30 s (< TTL_S) envoyé par tvkey.js.
    Redémarrage du service pendant que X est ouvert : la clé gardée par l'extension (stockage de SESSION du navigateur,
-   jamais sur disque) est périmée ; au PREMIER 403 « tv_key », background.js la retire (et retient la clé morte pour
-   ne jamais la reprendre) et n'envoie PLUS RIEN — ni instantané ni battement — jusqu'à une clé NEUVE validée remise
-   par tvkey.js sur /tv (seule voie d'acquisition, aucune persistance) ; la sonde disparaît de la vue après TTL_S.
+   jamais sur disque) est périmée ; au PREMIER 403 « tv_key », background.js la retire (et retient ses DEAD_MAX
+   dernières clés mortes pour n'en reprendre aucune, même après plusieurs redémarrages) et n'envoie PLUS RIEN — ni
+   instantané ni battement — jusqu'à une clé NEUVE validée remise par tvkey.js sur /tv (seule voie d'acquisition,
+   aucune persistance) ; la sonde disparaît de la vue après TTL_S.
 3. ce module : portes TV complètes déjà passées (loopback, Host exact, UID du pair = kiosque, clé TV), puis Origin
    EXACTEMENT chrome-extension://<ID> (obligatoire), Referer absent ou de l'extension, JSON ≤ BODY_MAX, champs fermés,
    débit ≤ RATE_MAX par RATE_WINDOW_S et par page (429 au-delà). Dernier instantané par page en MÉMOIRE seulement,
@@ -38,6 +39,7 @@ témoin « X ouvert » de xescape) et la lecture opérateur avec sa porte root (
 """
 import ipaddress
 import json
+import math
 import re
 import threading
 import time
@@ -48,6 +50,9 @@ PROBE_PATH = "/api/tv/x/probe"
 STATUS_PATH = "/admin/x-probe"
 OPERATOR_UIDS = frozenset({0})
 TTL_S = 120.0
+# âge publié TRONQUÉ au dixième, jamais arrondi vers le haut : un instantané vivant (âge < TTL_S) publie au plus
+# AGE_MAX_S < TTL_S, que xstatus accepte ; l'arrondi ferait 120.0 à 119.95 s et refuserait toute la lecture opérateur.
+AGE_MAX_S = (math.ceil(TTL_S * 10) - 1) / 10
 RATE_WINDOW_S = 10.0
 RATE_MAX = 40
 BODY_MAX = 1024
@@ -164,7 +169,7 @@ class XProbe:
                         entry["last"] = dict(entry["last"]) if entry["last"] else None
                         entry.pop("page", None)
                         entry["present"] = True
-                        entry["age_s"] = round(age, 1)
+                        entry["age_s"] = min(math.floor(age * 10) / 10, AGE_MAX_S)   # < TTL_S, TTL effectif inchangé
                     else:
                         del self._last[p]
                 entry["accepted"] = self._stats[p]["accepted"]
