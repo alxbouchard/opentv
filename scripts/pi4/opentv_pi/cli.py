@@ -469,6 +469,7 @@ def cmd_player_keys(a):
 
 
 def _uid_of(user):
+    import pwd
     try:
         return pwd.getpwnam(user).pw_uid
     except KeyError:

@@ -461,6 +461,57 @@ class TestUnitsAndPackaging(unittest.TestCase):
         self.assertEqual(p.parse_args(["x-escape-action"]).cmd, "x-escape-action")
 
 
+class TestCliRuntime(unittest.TestCase):
+    """Régression terrain (crash en boucle de opentv-x-escape.service : NameError `pwd` dans _uid_of) : les VRAIES
+    commandes x-escape-helper / x-escape-action sont exécutées par le VRAI binaire (python3 -I, sous-processus), avec
+    le compte courant comme comptes du service et des touches — chemin pwd.getpwnam réellement parcouru."""
+
+    def setUp(self):
+        import pwd
+        self.d = tmp(self)
+        self.user = pwd.getpwuid(os.getuid()).pw_name
+        self.env = os.path.join(self.d, "opentv.env")
+        with open(self.env, "w") as f:
+            f.write("OPENTV_SERVICE_USER=%s\nOPENTV_PLAYER_KEYS_USER=%s\nOPENTV_RUN_DIR=%s\n"
+                    % (self.user, self.user, os.path.join(self.d, "run")))
+        self.argv = [sys.executable, "-I", os.path.join(PI4, "bin", "opentv-pi"), "--env", self.env]
+
+    def test_helper_starts_resolves_uid_and_stops_cleanly(self):
+        p = subprocess.Popen(self.argv + ["x-escape-helper"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True)
+        try:
+            line = p.stdout.readline()   # première ligne : prête (après _uid_of), sinon traceback et sortie
+            if not line:
+                self.fail("aide terminée sans x_escape_ready : %s" % p.stderr.read()[-2000:])
+            self.assertEqual(json.loads(line)["event"], "x_escape_ready", line)
+            self.assertIsNone(p.poll())
+            p.terminate()
+            out, err = p.communicate(timeout=10)
+        finally:
+            if p.poll() is None:
+                p.kill()
+                p.communicate()
+        self.assertEqual(p.returncode, 0, err)
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("x_escape_no_service_user", line + out)
+
+    def test_action_resolves_accounts_and_noops_without_request(self):
+        p = subprocess.run(self.argv + ["x-escape-action"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
+        out = json.loads(p.stdout)
+        self.assertNotEqual(out.get("reason"), "accounts", out)   # comptes résolus par pwd, pas refusés
+        self.assertTrue(out["ok"], out)
+
+    def test_unknown_service_user_never_crashes(self):
+        with open(self.env, "w") as f:
+            f.write("OPENTV_SERVICE_USER=opentv-absent-zz\nOPENTV_PLAYER_KEYS_USER=opentv-absent-zz\n"
+                    "OPENTV_RUN_DIR=%s\n" % os.path.join(self.d, "run"))
+        p = subprocess.run(self.argv + ["x-escape-action"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(json.loads(p.stdout)["reason"], "accounts")
+
+
 NODE = shutil.which("node")
 INSTALL = os.path.join(PI4, "install.sh")
 
