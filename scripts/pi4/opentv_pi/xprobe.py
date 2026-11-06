@@ -141,15 +141,13 @@ class XProbe:
             now = self.mono()
             page = snap["page"]
             hits = [t for t in self._hits[page] if 0 <= now - t < RATE_WINDOW_S]
+            self._hits[page] = hits   # même liste : l'ajout ci-dessous y reste visible
+            st = self._stats[page]
             if len(hits) >= RATE_MAX:
-                self._hits[page] = hits
-                st = self._stats[page]
                 st["rate_limited"] = min(st["rate_limited"] + 1, COUNT_MAX)
                 return 429, {"ok": False, "error": "rate_limited"}
             hits.append(now)
-            self._hits[page] = hits
             self._last[page] = (now, snap)
-            st = self._stats[page]
             st["accepted"] = min(st["accepted"] + 1, COUNT_MAX)
         return 200, {"ok": True}
 
@@ -172,8 +170,7 @@ class XProbe:
                         entry["age_s"] = min(math.floor(age * 10) / 10, AGE_MAX_S)   # < TTL_S, TTL effectif inchangé
                     else:
                         del self._last[p]
-                entry["accepted"] = self._stats[p]["accepted"]
-                entry["rate_limited"] = self._stats[p]["rate_limited"]
+                entry.update(self._stats[p])   # exactement accepted puis rate_limited (copie des valeurs)
                 pages[p] = entry
             return {"ttl_s": int(TTL_S), "pages": pages, "rejected": self._rejected, "http": dict(self._http)}
 
