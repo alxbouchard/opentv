@@ -27,11 +27,15 @@
  *           comprise) ; champ d'une ligne : ↑ ↓ en sortent toujours ; après une saisie réelle, zone multiligne native.
  *  Anneau et consigne : feuille de l'extension nav.css (hors CSP de la page) ; repli CSSOM en ligne (jamais bloqué
  *           par la CSP) seulement si la feuille manquait ; jamais de <style> injecté.
- *  Sonde canari (0.7.8) : au chargement, à chaque changement de mode, à chaque touche RÉELLE et toutes les BEAT_MS,
- *           instantané borné (≥ PROBE_MIN_MS entre deux envois, ≤ PROBE_MAX par page) au service de l'extension :
- *           mode, compteurs par classe move/ok/other, compteur de touches synthétiques, et booléens de la dernière
- *           touche réelle (fiable, champ au focus, document au focus, traitée par OpenTV). Jamais une valeur ni un code
- *           de touche, un texte, une URL ni la valeur d'un champ.
+ *  Sonde canari (0.7.8) : au chargement, à chaque changement de mode, à chaque APPUI réel et toutes les BEAT_MS
+ *           (page visible ou non : l'état est dans l'instantané), instantané borné (≥ PROBE_MIN_MS entre deux envois,
+ *           ≤ PROBE_MAX par page) au service de l'extension : mode, document au focus, page visible, compteurs
+ *           d'APPUIS par classe move/ok/other (répétitions d'une touche tenue à part dans « repeat », jamais
+ *           envoyées seules : move/ok se comparent 1:1 aux appuis evdev), compteur de touches synthétiques, et
+ *           booléens du dernier appui réel (fiable, champ au focus, document au focus, traitée par OpenTV). Champ
+ *           éditable au focus : une touche de saisie (« other ») n'est NI comptée NI envoyée (longueur et rythme d'un
+ *           mot de passe jamais observables). Jamais une valeur ni un code de touche, un texte, une URL ni la valeur
+ *           d'un champ.
  * Touches synthétiques (non fiables) : jamais d'action. Aucune lecture de contenu hors libellés des contrôles.
  */
 (() => {
@@ -299,8 +303,8 @@
   const BEAT_MS = 30000;
   const COUNT_MAX = 1000000;
   const PROBE_RANK = { load: 0, mode: 1, key: 2, beat: 3 };
-  const probe = { mode: "loading", seq: 0, move: 0, ok: 0, other: 0, synthetic: 0, last: null, sent: 0, at: 0,
-                  pending: null, timer: 0, loaded: false };
+  const probe = { mode: "loading", seq: 0, move: 0, ok: 0, other: 0, repeat: 0, synthetic: 0, last: null, sent: 0,
+                  at: 0, pending: null, timer: 0, loaded: false };
   function bump(k) { probe[k] = Math.min(probe[k] + 1, COUNT_MAX); }
   function probeFlush() {
     probe.timer = 0;
@@ -311,7 +315,8 @@
     probe.at = Date.now();
     probe.seq = Math.min(probe.seq + 1, COUNT_MAX);
     const msg = { type: "probe", mode: probe.mode, event: ev, seq: probe.seq, move: probe.move, ok: probe.ok,
-                  other: probe.other, synthetic: probe.synthetic, last: probe.last };
+                  other: probe.other, repeat: probe.repeat, synthetic: probe.synthetic, last: probe.last,
+                  doc_focus: document.hasFocus(), visible: document.visibilityState === "visible" };
     try { chrome.runtime.sendMessage(msg, () => void chrome.runtime.lastError); } catch (err) { /* rechargée */ }
   }
   function probeSend(ev) {
@@ -328,8 +333,10 @@
   function probeKey(e) {
     if (!e.isTrusted) { bump("synthetic"); return; }   // compté seulement : jamais un envoi déclenché par la page
     const cls = keyClass(e);
-    bump(cls);
     const ed = editable(document.activeElement);
+    if (ed && cls === "other") { return; }   // saisie dans un champ : ni comptée ni envoyée (mot de passe : ni longueur ni rythme)
+    if (e.repeat) { bump("repeat"); return; }   // touche tenue : à part, jamais envoyée seule ; move/ok = appuis (1:1 evdev)
+    bump(cls);
     setTimeout(() => {   // après la distribution complète : la touche a-t-elle été traitée par OpenTV ?
       probe.last = { cls: cls, trusted: true, editable: ed, doc_focus: document.hasFocus(), handled: handledKeys.has(e) };
       probeSend("key");
@@ -373,5 +380,5 @@
   new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });
   if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule); } else { schedule(); }
   window.addEventListener("load", schedule);
-  setInterval(() => { if (document.visibilityState === "visible") { probeSend("beat"); } }, BEAT_MS);
+  setInterval(() => probeSend("beat"), BEAT_MS);   // toujours (< TTL 120 s) : doc_focus/visible expliquent un silence
 })();

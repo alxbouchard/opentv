@@ -1008,7 +1008,15 @@ class TestXEndToEnd(unittest.TestCase):
             self.assertEqual(b["ext"], VERSION)
         tvp = [b for b in probes if b["page"] == "tv"]
         xp = [b for b in probes if b["page"] == "x"]
-        self.assertTrue(tvp and all(b["mode"] == "tv" and b["event"] == "load" for b in tvp), tvp)
+        self.assertTrue(tvp and all(b["mode"] == "tv" and b["event"] in ("load", "beat") for b in tvp), tvp)
+        self.assertIn("load", {b["event"] for b in tvp})
+        # chaque instantané dit si le document a le focus et si la page est visible (absence de touches explicable)
+        self.assertTrue(all(isinstance(b["doc_focus"], bool) and isinstance(b["visible"], bool) for b in probes))
+        # appuis seulement (aucune touche tenue ici) ; saisie dans un champ (« alice », « alice@example.com », « abc »,
+        # Retour arrière) jamais comptée ni envoyée : longueur et rythme d'un mot de passe jamais observables
+        self.assertTrue(all(b["repeat"] == 0 for b in probes))
+        self.assertLess(max(b["other"] for b in xp), 5, [b["other"] for b in xp])
+        self.assertFalse([b for b in xp if b["last"] and b["last"]["editable"] and b["last"]["cls"] == "other"])
         self.assertGreaterEqual({b["mode"] for b in xp}, {"feed", "dialog"})
         self.assertIn("load", {b["event"] for b in xp})
         self.assertIn("mode", {b["event"] for b in xp})          # fenêtre fermée : changement de mode signalé

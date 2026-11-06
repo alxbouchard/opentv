@@ -16,7 +16,11 @@ Contrat vérifié ici :
 import io
 import json
 import os
+import pwd
 import re
+import shutil
+import subprocess
+import tempfile
 import types
 import unittest
 from contextlib import redirect_stdout
@@ -24,10 +28,12 @@ from unittest import mock
 
 from tests._common import PI4
 from tests.test_service import make_app, Servers
-from opentv_pi import VERSION, cli, xcontext, xprobe
+from opentv_pi import VERSION, cli, xcontext, xescape, xprobe
 
 EXT = os.path.join(PI4, "x-tv-extension")
 ORIGIN = xcontext.EXTENSION_ORIGIN
+NODE = shutil.which("node")
+HARNESS = os.path.join(PI4, "tests", "x_probe_harness.js")
 
 
 def read(p):
@@ -46,9 +52,9 @@ def code_only(text):
 
 
 def body(**kw):
-    b = {"v": 1, "page": "x", "mode": "feed", "event": "key", "seq": 3, "move": 2, "ok": 1, "other": 0,
-         "synthetic": 0, "last": {"cls": "move", "trusted": True, "editable": False, "doc_focus": True,
-                                  "handled": True},
+    b = {"v": 1, "page": "x", "mode": "feed", "event": "key", "seq": 3, "move": 2, "ok": 1, "other": 0, "repeat": 0,
+         "synthetic": 0, "doc_focus": True, "visible": True,
+         "last": {"cls": "move", "trusted": True, "editable": False, "doc_focus": True, "handled": True},
          "ext": VERSION, "sw_s": 12}
     b.update(kw)
     return b
@@ -73,8 +79,8 @@ class TestProbeStore(unittest.TestCase):
         v = self.p.view()
         self.assertEqual(set(v), {"ttl_s", "pages", "rejected"})
         x = v["pages"]["x"]
-        self.assertEqual(set(x), {"present", "mode", "event", "seq", "keys", "synthetic", "last", "ext", "sw_s",
-                                  "age_s", "accepted", "rate_limited"})
+        self.assertEqual(set(x), {"present", "mode", "event", "seq", "keys", "repeat", "synthetic", "doc_focus",
+                                  "visible", "last", "ext", "sw_s", "age_s", "accepted", "rate_limited"})
         self.assertEqual((x["present"], x["mode"], x["keys"], x["ext"]), (True, "feed", {"move": 2, "ok": 1,
                                                                                          "other": 0}, VERSION))
         self.assertEqual(x["last"], {"cls": "move", "trusted": True, "editable": False, "doc_focus": True,
@@ -85,6 +91,11 @@ class TestProbeStore(unittest.TestCase):
     def test_tv_heartbeat(self):
         self.assertEqual(self.p.record(body(page="tv", mode="tv", event="load", move=0, ok=0, last=None))[0], 200)
         self.assertTrue(self.p.view()["pages"]["tv"]["present"])
+        # battement : focus du document et visibilité toujours rapportés (absence de touches explicable)
+        self.assertEqual(self.p.record(body(page="tv", mode="tv", event="beat", move=0, ok=0, last=None,
+                                            doc_focus=False, visible=False))[0], 200)
+        tv = self.p.view()["pages"]["tv"]
+        self.assertEqual((tv["event"], tv["doc_focus"], tv["visible"]), ("beat", False, False))
 
     def test_closed_fields_types_enums_ranges(self):
         bad = [
@@ -100,6 +111,13 @@ class TestProbeStore(unittest.TestCase):
                        "key": "a"}),
             body(last={"cls": "move", "trusted": True, "editable": False, "doc_focus": True}),
             [body()], "x", None,
+            # types malformés (liste/dict non hachables, flottant égal à 1) : refus 400, jamais une exception
+            body(page=["x"]), body(page={"x": 1}), body(mode=["feed"]), body(mode={"feed": 1}), body(event=["key"]),
+            body(event={"key": 1}), body(v=1.0), body(v="1"), body(ext=["0.7.8"]), body(repeat=-1), body(repeat=True),
+            body(doc_focus="yes"), body(doc_focus=None), body(visible=1), body(last="move"),
+            body(last={"cls": ["move"], "trusted": True, "editable": False, "doc_focus": True, "handled": True}),
+            body(last={"cls": {"move": 1}, "trusted": True, "editable": False, "doc_focus": True, "handled": True}),
+            {k: v for k, v in body().items() if k != "repeat"}, {k: v for k, v in body().items() if k != "visible"},
         ]
         for b in bad:
             with self.subTest(b=b):
@@ -107,6 +125,14 @@ class TestProbeStore(unittest.TestCase):
         v = self.p.view()
         self.assertEqual(v["rejected"], len(bad))
         self.assertFalse(v["pages"]["x"]["present"])              # refus : rien enregistré
+        self.assertEqual((v["pages"]["x"]["accepted"], v["pages"]["x"]["rate_limited"]), (0, 0))
+
+    def test_rejected_counter_bounded(self):
+        self.p._rejected = xprobe.COUNT_MAX - 1
+        for _ in range(3):
+            self.assertEqual(self.p.record(body(mode=["feed"]))[0], 400)
+        self.assertEqual(self.p.view()["rejected"], xprobe.COUNT_MAX)
+        self.assertEqual(self.p.record(body())[0], 200)          # refus antérieurs : aucune incidence
 
     def test_rate_limit_per_page_window(self):
         for i in range(xprobe.RATE_MAX):
@@ -204,6 +230,27 @@ class TestProbeRoute(unittest.TestCase):
         st, _, b = self.post(body(seq=10_000))
         self.assertEqual((st, json.loads(b)["error"]), (429, "rate_limited"))
 
+    def test_malformed_types_400_counted_no_traceback(self):
+        """Liste/dict à la place d'un mode, d'un événement, d'une page ou de last.cls : 400 bad_fields, compté dans
+        `rejected`, jamais un 500 ni une trace ; les refus AVANT lecture du corps (Origin, type, taille, JSON) ne
+        comptent pas : `rejected` = instantanés refusés par la liste fermée seulement."""
+        import contextlib
+        err = io.StringIO()
+        bad = [body(mode=["feed"]), body(event={"key": 1}), body(page=["x"]),
+               body(last={"cls": ["ok"], "trusted": True, "editable": False, "doc_focus": True, "handled": True}),
+               body(v=1.0), [1, 2], {"v": [1]}]
+        with contextlib.redirect_stderr(err):
+            for b in bad:
+                st, _, raw = self.post(b)
+                self.assertEqual((st, json.loads(raw)), (400, {"ok": False, "error": "bad_fields"}), b)
+            self.assertEqual(self.post(body(), origin="https://x.com")[0], 403)
+            self.assertEqual(self.post(body(), ctype="text/plain")[0], 415)
+            self.assertEqual(self.post(None, raw="{")[0], 400)
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assertEqual(self.a.x_probe.view()["rejected"], len(bad))
+        self.assertFalse(self.present())
+        self.assertEqual(self.post(body())[0], 200)                # la route reste saine
+
     def test_memory_only_no_log_no_disk(self):
         def files():
             out = set()
@@ -246,13 +293,34 @@ class TestOperatorStatus(unittest.TestCase):
 
     def as_linux(self, peer):
         self.a.tv_client_uids = frozenset({4242})
-        self.a.operator_uids = xprobe.OPERATOR_UIDS
         self.a.peer_uid_fn = lambda ip, port, sport: peer
 
     def test_unavailable_peer_check_refused(self):
-        self.assertIsNone(self.a.operator_uids)                  # hors Linux : pas de /proc/net/tcp
+        self.assertIsNone(self.a.tv_client_uids)                 # hors Linux : pas de /proc/net/tcp
+        self.a.peer_uid_fn = lambda ip, port, sport: 0           # même un « root » annoncé : refus sans contrôle
         st, b = self.get()
         self.assertEqual((st, json.loads(b)["error"]), (403, "operator_only"))
+
+    def test_guard_operator_loopback_and_host(self):
+        """Porte opérateur (xprobe.guard_operator, hors web.py) : adresse non locale ou illisible, Host étranger,
+        contrôle du pair indisponible ou pair non root : refus ; root local : autorisé."""
+        self.as_linux(0)
+
+        def h(addr, host="127.0.0.1:8080"):
+            return types.SimpleNamespace(client_address=(addr, 5555), headers={"Host": host},
+                                         server=types.SimpleNamespace(server_address=("127.0.0.1", 8080)))
+        g = xprobe.guard_operator
+        self.assertIsNone(g(h("127.0.0.1"), self.a))
+        self.assertIsNone(g(h("::1", "localhost:8080"), self.a))
+        self.assertEqual(g(h("192.168.1.20"), self.a), (403, {"ok": False, "error": "forbidden"}))
+        self.assertEqual(g(h("pas-une-ip"), self.a), (403, {"ok": False, "error": "forbidden"}))
+        self.assertEqual(g(h("127.0.0.1", "evil:8080"), self.a), (421, {"ok": False, "error": "host"}))
+        self.assertEqual(g(h("127.0.0.1", None), self.a)[0], 421)
+        self.as_linux(1000)
+        self.assertEqual(g(h("127.0.0.1"), self.a), (403, {"ok": False, "error": "operator_only"}))
+        self.a.tv_client_uids = None
+        self.a.peer_uid_fn = lambda ip, port, sport: 0
+        self.assertEqual(g(h("127.0.0.1"), self.a)[0], 403)
 
     def test_root_only(self):
         self.a.x_probe.record(body())
@@ -270,23 +338,32 @@ class TestOperatorStatus(unittest.TestCase):
         self.assertNotIn(self.a.tv_key, b)                        # jamais la clé TV
         self.assertEqual(self.get({"Host": "evil.example:%d" % self.s.web.tv_port()})[0], 421)
 
-    def test_cli_reads_status(self):
+    def cli(self, nav_dir):
+        port, user = self.s.web.tv_port(), pwd.getpwuid(os.getuid()).pw_name
+        out = io.StringIO()
+        with mock.patch.object(cli.config.Config, "load",
+                               lambda env: types.SimpleNamespace(tv_port=port, player_keys_user=user)), \
+                mock.patch.object(xescape, "REQUEST_DIR", nav_dir), redirect_stdout(out):
+            rc = cli.main(["x-probe"])
+        return rc, json.loads(out.getvalue())
+
+    def test_cli_reads_status_and_evdev_counters(self):
         self.as_linux(0)
         self.a.x_probe.record(body(page="tv", mode="tv", event="load", last=None))
-        port = self.s.web.tv_port()
-        out = io.StringIO()
-        with mock.patch.object(cli.config.Config, "load", lambda env: types.SimpleNamespace(tv_port=port)), \
-                redirect_stdout(out):
-            rc = cli.main(["x-probe"])
+        d = tempfile.mkdtemp(prefix="otvn", dir="/tmp")           # chemin court (sun_path)
+        self.addCleanup(shutil.rmtree, d, True)
+        rc, v = self.cli(d)                                       # aide absente : honnête, jamais une erreur
         self.assertEqual(rc, 0)
-        v = json.loads(out.getvalue())
         self.assertTrue(v["pages"]["tv"]["present"])
+        self.assertEqual(v["evdev"], {"present": False, "error": "unavailable"})
+        view = {"present": True, "armed": True, "move": 4, "ok": 1, "age_s": 2.5}
+        srv = xescape.NavServer(d, lambda: view, peer_uid=lambda c: 0).start()
+        self.addCleanup(srv.stop)
+        rc, v = self.cli(d)
+        self.assertEqual((rc, v["evdev"]), (0, view))             # compteurs evdev EN MÉMOIRE de l'aide, joints
         self.as_linux(4242)                                       # non root : refus honnête, code 1
-        out = io.StringIO()
-        with mock.patch.object(cli.config.Config, "load", lambda env: types.SimpleNamespace(tv_port=port)), \
-                redirect_stdout(out):
-            rc = cli.main(["x-probe"])
-        self.assertEqual((rc, json.loads(out.getvalue())["error"]), (1, "operator_only"))
+        rc, v = self.cli(d)
+        self.assertEqual((rc, v["error"]), (1, "operator_only"))
 
 
 # --------------------------------------------------------------------------------------------- rollback
@@ -302,7 +379,7 @@ class TestXTvRollback(unittest.TestCase):
                          headers={"X-OpenTV-TV": b.tv_key, "Content-Type": "application/json", "Origin": ORIGIN})
         self.assertEqual(st, 404)
         self.assertFalse(b.x_probe.view()["pages"]["x"]["present"])
-        b.tv_client_uids, b.operator_uids = frozenset({4242}), xprobe.OPERATOR_UIDS
+        b.tv_client_uids = frozenset({4242})
         b.peer_uid_fn = lambda ip, port, sport: 0
         st, _, raw = s.req("GET", xprobe.STATUS_PATH)
         self.assertEqual(st, 200)
@@ -331,7 +408,8 @@ class TestExtensionProbeSource(unittest.TestCase):
         m = re.search(r"const msg = \{([^}]*)\};", self.nav)
         self.assertTrue(m)
         keys = sorted(k.strip().split(":")[0] for k in m.group(1).replace("\n", " ").split(",") if k.strip())
-        self.assertEqual(keys, sorted(["type", "mode", "event", "seq", "move", "ok", "other", "synthetic", "last"]))
+        self.assertEqual(keys, sorted(["type", "mode", "event", "seq", "move", "ok", "other", "repeat", "synthetic",
+                                       "last", "doc_focus", "visible"]))
         last = re.search(r"probe\.last = \{([^}]*)\};", self.nav).group(1)
         self.assertEqual(sorted(k.strip().split(":")[0] for k in last.split(",")),
                          ["cls", "doc_focus", "editable", "handled", "trusted"])
@@ -340,6 +418,12 @@ class TestExtensionProbeSource(unittest.TestCase):
         self.assertLessEqual(int(re.search(r"PROBE_MAX = (\d+);", self.nav).group(1)), 5000)
         pk = self.nav[self.nav.index("function probeKey(e)"):self.nav.index("function noteTyping(e)")]
         self.assertLess(pk.index('if (!e.isTrusted) { bump("synthetic"); return; }'), pk.index("probeSend("))
+        # saisie dans un champ : ni comptée ni envoyée ; touche tenue : à part, jamais un envoi ; PUIS seulement la classe
+        guard = pk.index('if (ed && cls === "other") { return; }')
+        rep = pk.index('if (e.repeat) { bump("repeat"); return; }')
+        self.assertLess(guard, rep)
+        self.assertLess(rep, pk.index("bump(cls)"))
+        self.assertLess(pk.index("bump(cls)"), pk.index("probeSend("))
         for bad in ("e.key", "e.code", "keyCode", "location", "textContent", "innerText"):
             self.assertNotIn(bad, pk.replace("keyClass(e)", ""), bad)
         nt = self.nav[self.nav.index("function noteTyping(e)"):self.nav.index("function onKey(e)")]
@@ -405,6 +489,82 @@ class TestExtensionProbeSource(unittest.TestCase):
         self.assertIn("if (editable(ae) && !(m.vertical && leaveField(ae))) { return false; }", lk)
         ok = self.x[self.x.index("function onKey(e)"):self.x.index("function refresh()")]
         self.assertIn('if (!((a === "up" || a === "down") && NAV && NAV.leaveField(ae))) { return; }', ok)
+
+    def test_heartbeats_periodic_within_ttl_and_tv_key_only_from_tv(self):
+        """Battements x.com ET /tv périodiques, < TTL du service (au moins 2 par TTL) ; nav.js bat même page cachée
+        (l'instantané dit doc_focus/visible) ; clé TV reprise SEULEMENT par tvkey.js sur /tv, jamais persistée."""
+        tvkey = code_only(read(os.path.join(EXT, "tvkey.js")))
+        for src in (self.nav, tvkey):
+            beat = int(re.search(r"BEAT_MS = (\d+);", src).group(1))
+            self.assertLessEqual(beat * 2, xprobe.TTL_S * 1000)
+        self.assertIn('setInterval(() => probeSend("beat"), BEAT_MS);', self.nav)
+        self.assertIn('setInterval(() => send({ type: "tvbeat" }), BEAT_MS);', tvkey)
+        self.assertIn('if (msg.type === "tvbeat" && fromTv(sender)) {', self.bg)
+        self.assertEqual(self.bg.count("storage.session.set("), 1)   # clé écrite au seul message « tvkey » de /tv
+        self.assertLess(self.bg.index('if (msg.type === "tvkey" && fromTv(sender)) {'),
+                        self.bg.index("storage.session.set("))
+        for src in (self.bg, tvkey, self.nav):
+            for bad in ("storage.local", "storage.sync", "localStorage", "indexedDB", "document.cookie"):
+                self.assertNotIn(bad, src)
+
+
+@unittest.skipUnless(NODE, "node absent")
+class TestExtensionProbeRuntime(unittest.TestCase):
+    """VRAIS nav.js / tvkey.js / background.js exécutés sous Node (tests/x_probe_harness.js : DOM factice, minuteries
+    manuelles, chrome.* espionné) : comportement, pas seulement le texte."""
+
+    def run_harness(self, which, ext=EXT):
+        p = subprocess.run([NODE, HARNESS, ext, which], capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr[-2000:])
+        return json.loads(p.stdout.strip().splitlines()[-1])
+
+    def test_nav_repeat_editable_and_visibility(self):
+        r = self.run_harness("nav")
+        sent, steps = r["sent"], r["steps"]
+        for m in sent:
+            self.assertEqual(set(m), {"type", "mode", "event", "seq", "move", "ok", "other", "repeat", "synthetic",
+                                      "last", "doc_focus", "visible"}, m)
+        # mot de passe : 6 lettres + Retour arrière + lettre tenue -> AUCUN envoi, AUCUN compteur
+        self.assertEqual(steps["load"], steps["after_password"])
+        self.assertTrue(all(m["other"] == 0 and m["repeat"] == 0 for m in sent[:steps["after_password"]]))
+        # ↓ tenu (1 appui + 3 répétitions) : move 1 (comparable 1:1 aux appuis evdev), repeat 3, UN seul envoi
+        self.assertEqual(steps["after_hold"] - steps["after_password"], 1)
+        hold = sent[steps["after_hold"] - 1]
+        self.assertEqual((hold["move"], hold["repeat"], hold["other"], hold["last"]["editable"]), (1, 3, 0, True))
+        last = sent[-1]
+        self.assertEqual((last["move"], last["ok"], last["other"], last["repeat"], last["synthetic"]), (1, 1, 1, 3, 1))
+        # battement page cachée, document sans focus : envoyé quand même, et le dit
+        self.assertEqual((last["event"], last["doc_focus"], last["visible"]), ("beat", False, False))
+        self.assertTrue(all(m["doc_focus"] and m["visible"] for m in sent[:-1]))
+        dump = json.dumps(sent)
+        for bad in ("secret", "Backspace", "ArrowDown", "Enter", "password"):
+            self.assertNotIn(bad, dump)
+
+    def test_tvkey_periodic_beat_booleans_only(self):
+        sent = self.run_harness("tvkey")["sent"]
+        self.assertEqual([m["type"] for m in sent], ["tvkey", "tvbeat", "tvbeat", "tvbeat", "tvbeat"])
+        self.assertEqual(set(sent[0]), {"type", "key", "doc_focus", "visible"})
+        for m in sent[1:]:
+            self.assertEqual(set(m), {"type", "doc_focus", "visible"})   # jamais la clé dans un battement
+        self.assertEqual((sent[-1]["doc_focus"], sent[-1]["visible"]), (False, False))
+
+    def test_background_tv_beat_closed_body_and_sender(self):
+        r = self.run_harness("background")
+        self.assertEqual(r["before_key"], 0)                      # battement avant la clé : rien
+        posts = r["posts"]
+        self.assertEqual([(p["body"]["page"], p["body"]["event"]) for p in posts],
+                         [("tv", "load"), ("tv", "beat"), ("x", "key"), ("x", "beat"), ("tv", "beat")])
+        # (tvbeat de x.com et probe de /tv : refusés ; valeurs non booléennes : jamais « vrai »)
+        for p in posts[3:]:
+            self.assertEqual((p["body"]["doc_focus"], p["body"]["visible"]), (False, False))
+        for p in posts:
+            self.assertEqual(set(p["body"]), set(xprobe.FIELDS))
+            self.assertIsNotNone(xprobe.validate(p["body"]), p["body"])   # le service accepte ce que l'extension envoie
+        self.assertEqual((posts[1]["body"]["doc_focus"], posts[1]["body"]["visible"]), (False, False))
+        self.assertEqual(posts[2]["body"]["repeat"], 5)
+        dump = json.dumps([p["body"] for p in posts])
+        for bad in ("ArrowUp", "secret", "code"):
+            self.assertNotIn(bad, dump)
 
 
 if __name__ == "__main__":

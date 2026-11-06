@@ -177,4 +177,4 @@ def handle_share(handler, app):
         return 400, {"ok": False, "error": "bad_json"}
     if not isinstance(body, dict):
         return 400, {"ok": False, "error": "bad_json"}
-    return app.tv_x_share(body)
+    return share_response(app.cfg.x_tv, app.x_context, body)   # rien journalisé ni audité

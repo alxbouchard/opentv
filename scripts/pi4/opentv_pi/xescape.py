@@ -18,11 +18,15 @@ coincé sur x.com. Relancer opentv-kiosk.service ramène toujours /tv (prouvé t
    (propriétaire opentv, même boot) ; au plus une relance par ACTION_MIN_INTERVAL_S ; puis UNE commande exacte
    RESTART_ARGV. Témoin absent (page /tv) : rien, jamais de relance inconditionnelle.
 
-Canari 0.7.8 (preuve côté evdev, jamais une action) : pendant que le témoin est valide, l'aide compte aussi les appuis
-de navigation du MÊME périphérique CEC par CLASSE seulement — `move` (↑ ↓ ← →, sans direction) et `ok` (OK/Entrée) —
-et journalise ces deux compteurs, bornés, au plus une fois par NAV_LOG_INTERVAL_S (et au désarmement). Aucune
-direction, aucun code de touche n'est journalisé ; seule KEY_EXIT produit une demande. Comparés à la sonde de
-l'extension (`opentv-pi x-probe`), ils séparent « la touche n'arrive pas au Pi » de « elle n'atteint pas la page ».
+Canari 0.7.8 (preuve côté evdev, jamais une action) : pendant que le témoin est valide, l'aide compte aussi les APPUIS
+(value=1, jamais les répétitions : comparables 1:1 aux appuis physiques comptés par la page) de navigation du MÊME
+périphérique CEC par CLASSE seulement — `move` (↑ ↓ ← →, sans direction) et `ok` (OK/Entrée). Ces compteurs restent
+en MÉMOIRE de l'aide : jamais journalisés (aucune trace d'activité ni de rythme dans journald), jamais écrits sur
+disque. Lecture root seulement par NavServer : socket Unix NAV_SOCK dans le dossier d'exécution de l'aide (tmpfs /run,
+0600), pair vérifié par SO_PEERCRED (UID 0 ; contrôle indisponible = refus), une ligne JSON fermée, rien lu du client ;
+vivants NAV_TTL_S après le dernier armement/appui/désarmement, puis oubliés. `sudo opentv-pi x-probe` les joint à la
+sonde de l'extension : ils séparent « la touche n'arrive pas au Pi » de « elle n'atteint pas la page ». Seule
+KEY_EXIT produit une demande.
 
 Fail-safe : tout doute (témoin illisible, lien, propriétaire, boot_id, demande invalide) = aucune action. Rien de
 saisi n'est lu, journalisé ni transmis ; aucun code de touche n'est journalisé.
@@ -31,6 +35,7 @@ import fcntl
 import json
 import os
 import re
+import socket
 import stat
 import struct
 import subprocess
@@ -50,8 +55,12 @@ MAX_FILE = 256
 KEY_EXIT = 174
 NAV_MOVE_CODES = frozenset((103, 105, 106, 108))   # KEY_UP, KEY_LEFT, KEY_RIGHT, KEY_DOWN
 NAV_OK_CODES = frozenset((28, 352, 353))            # KEY_ENTER (Select CEC remappé), KEY_OK, KEY_SELECT
-NAV_LOG_INTERVAL_S = 5.0
 NAV_COUNT_MAX = 1000000
+NAV_TTL_S = 120.0                                   # même TTL que la sonde de l'extension (xprobe.TTL_S)
+NAV_SOCK = "nav.sock"                               # dans REQUEST_DIR (RuntimeDirectory de l'aide, tmpfs)
+NAV_SOCK_UIDS = frozenset({0})                      # lecture opérateur : root seulement
+NAV_SOCK_TIMEOUT_S = 1.0
+NAV_VIEW_MAX = 512
 POLL_S = 0.5
 HELPER_MIN_INTERVAL_S = 3.0
 ACTION_MIN_INTERVAL_S = 10.0
@@ -257,21 +266,20 @@ class Helper:
         self.lock = threading.Lock()
         self.watcher = None
         self.last = None
-        self.nav = {"move": 0, "ok": 0}      # appuis de navigation par classe depuis l'armement (canari, mémoire)
-        self.nav_logged = None               # derniers compteurs journalisés
-        self.nav_log_at = None
+        self.nav = {"move": 0, "ok": 0}      # appuis par classe depuis l'armement : MÉMOIRE seulement, jamais journalisés
+        self.nav_at = None                   # horloge du dernier armement/appui/désarmement (TTL de la vue) ; None = rien
 
-    def _nav_log(self, force=False):
-        """Compteurs `move`/`ok` journalisés s'ils ont changé, au plus une fois par NAV_LOG_INTERVAL_S (sauf force)."""
+    def nav_view(self):
+        """Vue opérateur (NavServer, root) : compteurs de classe depuis l'armement, présents tant que l'aide est armée
+        et NAV_TTL_S après le dernier armement/appui/désarmement ; au-delà : oubliés. Jamais une direction ni un code."""
         with self.lock:
-            snap = dict(self.nav)
-            now = self.mono()
-            if snap == (self.nav_logged or {"move": 0, "ok": 0}):
-                return
-            if not force and self.nav_log_at is not None and 0 <= now - self.nav_log_at < NAV_LOG_INTERVAL_S:
-                return
-            self.nav_logged, self.nav_log_at = snap, now
-        self.log("x_escape_nav", move=snap["move"], ok=snap["ok"])
+            armed = self.watcher is not None
+            age = None if self.nav_at is None else self.mono() - self.nav_at
+            if not armed and (age is None or not 0 <= age < NAV_TTL_S):
+                self.nav, self.nav_at = {"move": 0, "ok": 0}, None
+                return {"present": False, "armed": False}
+            return {"present": True, "armed": armed, "move": self.nav["move"], "ok": self.nav["ok"],
+                    "age_s": round(age, 1) if age is not None and age >= 0 else 0.0}
 
     def active(self):
         return read_marker(self.marker_dir, self.service_uid, boot_id=self.boot_id())
@@ -281,23 +289,20 @@ class Helper:
         w = None
         with self.lock:
             if on and self.watcher is None:
-                self.nav, self.nav_logged, self.nav_log_at = {"move": 0, "ok": 0}, None, None
+                self.nav, self.nav_at = {"move": 0, "ok": 0}, self.mono()
                 self.watcher = self.factory(self._on_key, decoder_factory=NavClassDecoder).start()
                 self.log("x_escape_armed")
             elif not on and self.watcher is not None:
-                w, self.watcher = self.watcher, None
+                w, self.watcher, self.nav_at = self.watcher, None, self.mono()
         if w is not None:   # /tv rechargée : périphériques refermés par le thread de surveillance
             w.stop()
-            self._nav_log(force=True)
             self.log("x_escape_disarmed")
-        elif on:
-            self._nav_log()
 
     def _on_key(self, why):
         if why in ("move", "ok"):   # canari : compteur de classe seulement, jamais une action ni une demande
             with self.lock:
                 if self.watcher is not None:
-                    self.nav[why] = min(self.nav[why] + 1, NAV_COUNT_MAX)
+                    self.nav[why], self.nav_at = min(self.nav[why] + 1, NAV_COUNT_MAX), self.mono()
             return
         if why != "exit":
             return
@@ -333,6 +338,117 @@ class Helper:
                 stop.wait(poll_s)
         finally:
             self.close()
+
+
+def _peer_uid(conn):
+    """UID du pair d'un socket Unix (SO_PEERCRED, Linux) ; None si indisponible (hors Linux) : refus."""
+    so = getattr(socket, "SO_PEERCRED", None)
+    if so is None:
+        return None
+    try:
+        _, uid, _ = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, so, struct.calcsize("3i")))
+    except (OSError, struct.error):
+        return None
+    return uid
+
+
+class NavServer:
+    """Lecture opérateur des compteurs canari de l'aide, sans disque ni journal : socket Unix `sock_dir/NAV_SOCK`
+    (0600 ; /run est un tmpfs), pair vérifié par SO_PEERCRED (UID dans `allowed`, root ; inconnu = refus). Une ligne
+    JSON (`view()`, champs fermés) par connexion, rien n'est lu du client, délai NAV_SOCK_TIMEOUT_S ; jamais une action.
+    Une panne ici n'empêche jamais KEY_EXIT (l'aide continue sans lecture opérateur)."""
+
+    def __init__(self, sock_dir, view, allowed=NAV_SOCK_UIDS, peer_uid=_peer_uid):
+        self.path, self.view, self.allowed, self.peer_uid = os.path.join(sock_dir, NAV_SOCK), view, allowed, peer_uid
+        self.sock, self.thread, self.stopping = None, None, threading.Event()
+
+    def start(self):
+        try:
+            if stat.S_ISSOCK(os.lstat(self.path).st_mode):   # socket d'un démarrage précédent : remplacé
+                os.unlink(self.path)
+        except FileNotFoundError:
+            pass
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.bind(self.path)
+            os.chmod(self.path, 0o600)
+            s.listen(2)
+            s.settimeout(POLL_S)
+        except OSError:
+            s.close()
+            raise
+        self.sock = s
+        self.thread = threading.Thread(target=self._serve, daemon=True, name="x-escape-nav")
+        self.thread.start()
+        return self
+
+    def _serve(self):
+        while not self.stopping.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                if self.stopping.is_set():
+                    return
+                self.stopping.wait(POLL_S)
+                continue
+            try:
+                conn.settimeout(NAV_SOCK_TIMEOUT_S)
+                uid = self.peer_uid(conn)
+                out = self.view() if uid is not None and uid in self.allowed else {"ok": False, "error": "operator_only"}
+                conn.sendall(json.dumps(out, sort_keys=True).encode("utf-8") + b"\n")
+            except Exception:   # client parti, vue en échec : connexion fermée, jamais une sortie du thread
+                pass
+            finally:
+                conn.close()
+
+    def stop(self):
+        self.stopping.set()
+        if self.sock is not None:
+            self.sock.close()
+            try:
+                os.unlink(self.path)
+            except OSError:
+                pass
+        if self.thread is not None:
+            self.thread.join(2.0)
+
+
+def _nav_ok(doc):
+    def n(v):
+        return isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= NAV_COUNT_MAX
+    if doc == {"present": False, "armed": False}:
+        return True
+    return isinstance(doc, dict) and set(doc) == {"present", "armed", "move", "ok", "age_s"} and \
+        doc["present"] is True and isinstance(doc["armed"], bool) and n(doc["move"]) and n(doc["ok"]) and \
+        isinstance(doc["age_s"], (int, float)) and not isinstance(doc["age_s"], bool) and 0 <= doc["age_s"] < 1e9
+
+
+def read_nav(sock_dir, keys_uid, timeout=NAV_SOCK_TIMEOUT_S):
+    """(root, `opentv-pi x-probe`) vue de NavServer, revalidée sur une liste fermée -> dict ; sinon
+    {"present": False, "error": ...}. Le socket doit être un socket appartenant au compte de l'aide (jamais un lien) ;
+    rien n'est envoyé, ≤ NAV_VIEW_MAX octets lus."""
+    path = os.path.join(sock_dir, NAV_SOCK)
+    try:
+        st = os.lstat(path)
+        if not stat.S_ISSOCK(st.st_mode) or st.st_uid != keys_uid:
+            return {"present": False, "error": "unsafe"}
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
+            c.settimeout(timeout)
+            c.connect(path)
+            data = b""
+            while len(data) <= NAV_VIEW_MAX:
+                chunk = c.recv(NAV_VIEW_MAX + 1)
+                if not chunk:
+                    break
+                data += chunk
+        doc = json.loads(data.decode("utf-8")) if len(data) <= NAV_VIEW_MAX else None
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+        return {"present": False, "error": "unavailable"}
+    if isinstance(doc, dict) and doc.get("error") == "operator_only" and set(doc) == {"ok", "error"}:
+        return {"present": False, "error": "operator_only"}
+    return doc if _nav_ok(doc) else {"present": False, "error": "invalid"}
 
 
 # --------------------------------------------------------------------------------------------- action (root)

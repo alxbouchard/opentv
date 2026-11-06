@@ -327,43 +327,59 @@ class TestHelper(unittest.TestCase):
         on_key("exit")
         self.assertIsNone(self.request())
 
-    def test_nav_counters_logged_bounded_never_an_action(self):
-        """Canari : appuis move/ok comptés (classe seulement) pendant que le témoin est valide ; journal borné (au plus
-        une fois par NAV_LOG_INTERVAL_S, et au désarmement) ; jamais une demande, jamais une direction ni un code."""
+    def test_nav_counters_memory_only_ttl_never_logged_never_an_action(self):
+        """Canari : appuis move/ok comptés (classe seulement) pendant que le témoin est valide, en MÉMOIRE seulement :
+        AUCUN journal (ni compteurs, ni activité par touche), aucune demande ; vue opérateur vivante tant qu'armée et
+        NAV_TTL_S après le dernier armement/appui/désarmement, puis oubliée ; jamais une direction ni un code."""
+        self.assertEqual(xescape.NAV_TTL_S, 120.0)
+        self.assertEqual(self.h.nav_view(), {"present": False, "armed": False})   # jamais armée : rien
         xescape.set_marker(self.rdir, True, boot_id="b")
         self.h.tick()
         on_key = FakeWatcher.instances[0].on_key
+        self.assertEqual(self.h.nav_view(), {"present": True, "armed": True, "move": 0, "ok": 0, "age_s": 0.0})
         for why in ("move", "move", "ok", "move"):
+            self.clock.t += 1
             on_key(why)
+        for _ in range(20):
+            self.h.tick()
         self.assertIsNone(self.request())                        # aucune action
-        self.h.tick()
-        nav = [f for e, f in self.events if e == "x_escape_nav"]
-        self.assertEqual(nav, [{"move": 3, "ok": 1}])
-        for _ in range(50):
-            on_key("ok")
-        self.clock.t += 1
-        self.h.tick()                                             # < NAV_LOG_INTERVAL_S : pas de nouvelle ligne
-        self.assertEqual(len([e for e, _ in self.events if e == "x_escape_nav"]), 1)
-        self.clock.t += xescape.NAV_LOG_INTERVAL_S
-        self.h.tick()
-        self.h.tick()                                             # inchangé : rien
-        nav = [f for e, f in self.events if e == "x_escape_nav"]
-        self.assertEqual(nav, [{"move": 3, "ok": 1}, {"move": 3, "ok": 51}])
+        self.assertEqual(self.h.nav_view(), {"present": True, "armed": True, "move": 3, "ok": 1, "age_s": 0.0})
+        self.clock.t += xescape.NAV_TTL_S * 3                      # armée sans appui : toujours présente
+        self.assertEqual(self.h.nav_view()["move"], 3)
         on_key("move")
-        xescape.set_marker(self.rdir, False)                       # /tv : désarmé -> derniers compteurs, puis plus rien
+        xescape.set_marker(self.rdir, False)                       # /tv : désarmé, compteurs gardés NAV_TTL_S
         self.h.tick()
-        self.assertEqual([f for e, f in self.events if e == "x_escape_nav"][-1], {"move": 4, "ok": 51})
+        self.clock.t += 5
+        self.assertEqual(self.h.nav_view(), {"present": True, "armed": False, "move": 4, "ok": 1, "age_s": 5.0})
         on_key("move")                                            # après désarmement : jamais compté
-        self.assertEqual(self.h.nav, {"move": 4, "ok": 51})
+        self.assertEqual(self.h.nav_view()["move"], 4)
+        self.clock.t += xescape.NAV_TTL_S                          # TTL écoulé : oubliés (mémoire remise à zéro)
+        self.assertEqual(self.h.nav_view(), {"present": False, "armed": False})
+        self.assertEqual(self.h.nav, {"move": 0, "ok": 0})
         xescape.set_marker(self.rdir, True, boot_id="b")
         self.h.tick()                                             # réarmé : compteurs repartent de zéro
         self.assertEqual(self.h.nav, {"move": 0, "ok": 0})
-        for e, f in self.events:
-            self.assertTrue(set(f) <= {"reason", "move", "ok"}, (e, f))   # aucun code/direction journalisé
-        self.assertIsNone(self.request())
+        self.clock.t -= 10_000                                     # horloge incohérente : jamais négatif
+        self.assertEqual(self.h.nav_view()["age_s"], 0.0)
         self.h.nav["move"] = xescape.NAV_COUNT_MAX
         FakeWatcher.instances[-1].on_key("move")
         self.assertEqual(self.h.nav["move"], xescape.NAV_COUNT_MAX)       # borné
+        # journal : armement/désarmement seulement — aucune ligne par touche ni aucun compteur
+        self.assertEqual({e for e, _ in self.events}, {"x_escape_armed", "x_escape_disarmed"})
+        self.assertTrue(all(f == {} for _, f in self.events), self.events)
+        self.assertIsNone(self.request())
+        self.assertFalse(hasattr(xescape, "NAV_LOG_INTERVAL_S"))
+
+    def test_only_key_exit_writes_a_request(self):
+        """Seule « exit » (KEY_EXIT décodée) produit une demande ; move/ok et toute autre raison : jamais."""
+        xescape.set_marker(self.rdir, True, boot_id="b")
+        self.h.tick()
+        on_key = FakeWatcher.instances[0].on_key
+        for why in ("move", "ok", "close", "back", "home", "", None, "EXIT"):
+            on_key(why)
+        self.assertIsNone(self.request())
+        on_key("exit")
+        self.assertEqual(self.request(), xescape.REQUEST_BODY)
 
     def test_pending_request_not_rewritten_and_unsafe_dir_refused(self):
         xescape.set_marker(self.rdir, True, boot_id="b")
@@ -595,6 +611,118 @@ class TestUnitsAndPackaging(unittest.TestCase):
         p = cli.build_parser()
         self.assertEqual(p.parse_args(["x-escape-helper"]).cmd, "x-escape-helper")
         self.assertEqual(p.parse_args(["x-escape-action"]).cmd, "x-escape-action")
+
+
+class TestNavServer(unittest.TestCase):
+    """Lecture opérateur des compteurs evdev : socket Unix dans le dossier d'exécution de l'aide (tmpfs /run), 0600,
+    pair vérifié (root seulement ; SO_PEERCRED indisponible = refus), une ligne JSON fermée, rien lu du client, aucun
+    disque ni journal ; read_nav (root) refuse un lien, un autre propriétaire, une vue hors liste fermée."""
+
+    VIEW = {"present": True, "armed": True, "move": 2, "ok": 1, "age_s": 1.5}
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="otvn", dir="/tmp")     # chemin court (sun_path ≤ 104 octets sur macOS)
+        self.addCleanup(shutil.rmtree, self.d, True)
+        self.path = os.path.join(self.d, xescape.NAV_SOCK)
+
+    def serve(self, view=None, peer=0, **kw):
+        srv = xescape.NavServer(self.d, view or (lambda: dict(self.VIEW)), peer_uid=lambda c: peer, **kw).start()
+        self.addCleanup(srv.stop)
+        return srv
+
+    def test_root_reads_closed_view(self):
+        self.serve()
+        self.assertEqual(oct(os.stat(self.path).st_mode & 0o777), "0o600")
+        self.assertEqual(xescape.read_nav(self.d, os.getuid()), self.VIEW)
+        self.assertEqual(xescape.read_nav(self.d, os.getuid()), self.VIEW)   # plusieurs lectures : serveur vivant
+        self.assertEqual(os.listdir(self.d), [xescape.NAV_SOCK])  # rien d'autre écrit
+
+    def test_non_root_or_unknown_peer_refused(self):
+        for peer in (1000, os.getuid() if os.getuid() else 1, None):
+            with self.subTest(peer=peer):
+                srv = xescape.NavServer(self.d, lambda: dict(self.VIEW), peer_uid=lambda c, p=peer: p).start()
+                try:
+                    self.assertEqual(xescape.read_nav(self.d, os.getuid()),
+                                     {"present": False, "error": "operator_only"})
+                finally:
+                    srv.stop()
+
+    @unittest.skipIf(hasattr(__import__("socket"), "SO_PEERCRED"), "hors Linux seulement")
+    def test_default_peer_check_unavailable_fails_closed(self):
+        srv = xescape.NavServer(self.d, lambda: dict(self.VIEW)).start()
+        self.addCleanup(srv.stop)
+        self.assertEqual(xescape.read_nav(self.d, os.getuid()), {"present": False, "error": "operator_only"})
+
+    @unittest.skipUnless(hasattr(__import__("socket"), "SO_PEERCRED"), "SO_PEERCRED (Linux)")
+    def test_real_peercred_uid(self):
+        srv = xescape.NavServer(self.d, lambda: dict(self.VIEW), allowed=frozenset({os.getuid()})).start()
+        self.addCleanup(srv.stop)
+        self.assertEqual(xescape.read_nav(self.d, os.getuid()), self.VIEW)
+
+    def test_read_nav_refuses_link_owner_and_invalid_views(self):
+        self.assertEqual(xescape.read_nav(self.d, os.getuid()), {"present": False, "error": "unavailable"})
+        self.serve()
+        self.assertEqual(xescape.read_nav(self.d, os.getuid() + 1), {"present": False, "error": "unsafe"})
+        other = tempfile.mkdtemp(prefix="otvl", dir="/tmp")
+        self.addCleanup(shutil.rmtree, other, True)
+        os.symlink(self.path, os.path.join(other, xescape.NAV_SOCK))   # lien vers un vrai socket : jamais suivi
+        self.assertEqual(xescape.read_nav(other, os.getuid()), {"present": False, "error": "unsafe"})
+        for bad in ({"present": True, "armed": True, "move": 2, "ok": 1, "age_s": 1, "key": "up"},
+                    {"present": True, "armed": "yes", "move": 2, "ok": 1, "age_s": 1},
+                    {"present": True, "armed": True, "move": -1, "ok": 1, "age_s": 1},
+                    {"present": True, "armed": True, "move": True, "ok": 1, "age_s": 1}, [1], "x" * 600):
+            with self.subTest(bad=bad):
+                d2 = tempfile.mkdtemp(prefix="otvb", dir="/tmp")
+                self.addCleanup(shutil.rmtree, d2, True)
+                srv = xescape.NavServer(d2, lambda b=bad: b, peer_uid=lambda c: 0).start()
+                try:
+                    self.assertEqual(xescape.read_nav(d2, os.getuid())["present"], False)
+                    self.assertIn(xescape.read_nav(d2, os.getuid())["error"], ("invalid", "unavailable"))
+                finally:
+                    srv.stop()
+
+    def test_view_failure_keeps_serving_and_stale_socket_replaced(self):
+        calls = []
+
+        def view():
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("boom")
+            return dict(self.VIEW)
+        srv = self.serve(view=view)
+        self.assertEqual(xescape.read_nav(self.d, os.getuid())["present"], False)   # échec : connexion fermée
+        self.assertEqual(xescape.read_nav(self.d, os.getuid()), self.VIEW)          # puis servie
+        srv.stop()
+        self.assertFalse(os.path.exists(self.path))               # arrêt : socket retiré
+        import socket as so
+        stale = so.socket(so.AF_UNIX, so.SOCK_STREAM)              # socket orphelin d'un démarrage précédent
+        stale.bind(self.path)
+        stale.close()
+        self.serve()
+        self.assertEqual(xescape.read_nav(self.d, os.getuid()), self.VIEW)
+
+    def test_regular_file_never_unlinked(self):
+        with open(self.path, "w") as f:
+            f.write("x")
+        with self.assertRaises(OSError):
+            xescape.NavServer(self.d, lambda: dict(self.VIEW), peer_uid=lambda c: 0).start()
+        with open(self.path) as f:
+            self.assertEqual(f.read(), "x")
+
+    def test_helper_view_end_to_end_via_socket(self):
+        rdir, req = tmp(self), tmp(self)
+        FakeWatcher.instances = []
+        clock = Clock()
+        h = xescape.Helper(rdir, req, UID, watcher_factory=FakeWatcher, mono=clock, boot_id=lambda: "b")
+        self.serve(view=h.nav_view)
+        self.assertEqual(xescape.read_nav(self.d, os.getuid()), {"present": False, "armed": False})
+        xescape.set_marker(rdir, True, boot_id="b")
+        h.tick()
+        FakeWatcher.instances[0].on_key("move")
+        FakeWatcher.instances[0].on_key("ok")
+        self.assertEqual(xescape.read_nav(self.d, os.getuid()),
+                         {"present": True, "armed": True, "move": 1, "ok": 1, "age_s": 0.0})
+        self.assertFalse(os.path.exists(os.path.join(req, xescape.REQUEST)))
 
 
 class TestCliRuntime(unittest.TestCase):

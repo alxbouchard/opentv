@@ -7,10 +7,13 @@
  *    bornés, re-bornés ici ; un seul appel réseau : POST /api/tv/x/context sur 127.0.0.1 avec la clé TV ;
  *  - home : envoyé par nav.js (toute page x.com) : retour explicite à la page OpenTV /tv (Accueil, ou Retour) ;
  *  - probe (canari 0.7.8) : envoyé par nav.js (x.com) ; instantané reconstruit sur une liste FERMÉE (mode, compteurs
- *    move/ok/other/synthetic, booléens de la dernière touche réelle), page source DÉDUITE de l'expéditeur (jamais du
- *    message) ; + battement « tv » quand tvkey.js a remis la clé. Au plus un envoi en vol (coalescé, le dernier
- *    instantané gagne), ≤ PROBE_MAX par PROBE_WINDOW_MS ; POST PROBE_PATH sur 127.0.0.1 avec la clé TV ; échec ignoré
- *    (jamais la clé effacée : le partage garde son message « OpenTV a redémarré »).
+ *    move/ok/other/repeat/synthetic, doc_focus/visible, booléens de la dernière touche réelle), page source DÉDUITE de
+ *    l'expéditeur (jamais du message) ; + instantané « tv » quand tvkey.js remet la clé, puis à chaque « tvbeat »
+ *    (tvkey.js, toutes les 30 s < TTL 120 s du service). Au plus un envoi en vol (coalescé, le dernier instantané
+ *    gagne), ≤ PROBE_MAX par PROBE_WINDOW_MS ; POST PROBE_PATH sur 127.0.0.1 avec la clé TV ; échec ignoré (jamais la
+ *    clé effacée : le partage garde son message « OpenTV a redémarré »). Service OpenTV redémarré pendant que X est
+ *    ouvert : clé périmée, sonde refusée (403) jusqu'au prochain /tv — par conception, la clé n'est reprise QUE sur
+ *    /tv (tvkey.js), gardée en stockage de SESSION seulement, jamais persistée ni obtenue autrement.
  * Une page x.com ne peut jamais forger ces messages : aucun externally_connectable, aucun écouteur postMessage ;
  * seuls les scripts de contenu de CETTE extension (monde isolé) atteignent ce service.
  * Aucune API X, aucun cookie, aucune lecture d'onglet, aucun autre hôte contacté, aucun envoi vers un agent.
@@ -119,7 +122,8 @@ function probeBody(page, msg) {
     { cls: l.cls, trusted: l.trusted === true, editable: l.editable === true, doc_focus: l.doc_focus === true,
       handled: l.handled === true } : null;
   return { v: 1, page: page, mode: mode, event: event, seq: count(msg.seq), move: count(msg.move), ok: count(msg.ok),
-           other: count(msg.other), synthetic: count(msg.synthetic), last: last,
+           other: count(msg.other), repeat: count(msg.repeat), synthetic: count(msg.synthetic),
+           doc_focus: msg.doc_focus === true, visible: msg.visible === true, last: last,
            ext: chrome.runtime.getManifest().version, sw_s: count(Math.floor((Date.now() - STARTED) / 1000)) };
 }
 const probeQ = { pending: null, busy: false, sent: [] };
@@ -179,8 +183,13 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
       chrome.storage.session.get(["tvport"]).then((s) => {
         if (s.tvport === undefined || s.tvport === port) { return chrome.storage.session.set({ tvkey: msg.key, tvport: port }); }
         return undefined;
-      }).then(() => queueProbe(probeBody("tv", { event: "load" }))).catch(() => undefined);
+      }).then(() => queueProbe(probeBody("tv", { event: "load", doc_focus: msg.doc_focus, visible: msg.visible })))
+        .catch(() => undefined);
     }
+    return false;
+  }
+  if (msg.type === "tvbeat" && fromTv(sender)) {   // battement /tv : seulement avec la clé déjà capturée (pumpProbe)
+    queueProbe(probeBody("tv", { event: "beat", doc_focus: msg.doc_focus, visible: msg.visible }));
     return false;
   }
   if (msg.type === "share" && fromX(sender)) {

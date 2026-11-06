@@ -489,7 +489,16 @@ def cmd_x_escape_helper(a):
         signal.signal(s, lambda *_: stop.set())
     h = xescape.Helper(cfg.run_dir, xescape.REQUEST_DIR, uid if uid is not None else -1, log=log)
     log("x_escape_ready")
-    h.run(stop)
+    try:   # compteurs canari en mémoire, lecture root seule ; une panne ici n'empêche jamais KEY_EXIT
+        nav = xescape.NavServer(xescape.REQUEST_DIR, h.nav_view).start()
+    except OSError:
+        nav = None
+        log("x_escape_nav_unavailable")
+    try:
+        h.run(stop)
+    finally:
+        if nav is not None:
+            nav.stop()
     return 0
 
 
@@ -507,11 +516,15 @@ def cmd_x_escape_action(a):
 
 
 def cmd_x_probe(a, timeout=3.0):
-    """Lecture opérateur de la sonde canari X (root) : GET xprobe.STATUS_PATH sur la boucle locale du service. Le service
-    vérifie lui-même l'UID du pair (root) ; rien n'est écrit. Vue fermée : battements/modes et compteurs seulement."""
+    """Lecture opérateur de la sonde canari X (root) : GET xprobe.STATUS_PATH sur la boucle locale du service (le service
+    vérifie lui-même l'UID du pair : root) + `evdev` : compteurs move/ok EN MÉMOIRE de l'aide x-escape (socket Unix
+    root seulement, xescape.NavServer, même TTL). Rien n'est écrit ni journalisé ; vue fermée."""
     import http.client
-    from . import xprobe
+    from . import xescape, xprobe
     cfg = config.Config.load(a.env)
+    keys = _uid_of(cfg.player_keys_user)
+    evdev = xescape.read_nav(xescape.REQUEST_DIR, keys) if keys is not None else \
+        {"present": False, "error": "accounts"}
     try:
         c = http.client.HTTPConnection("127.0.0.1", cfg.tv_port, timeout=timeout)
         c.request("GET", xprobe.STATUS_PATH, headers={"Host": "127.0.0.1:%d" % cfg.tv_port})
@@ -520,10 +533,11 @@ def cmd_x_probe(a, timeout=3.0):
         c.close()
         body = json.loads(raw.decode("utf-8"))
     except (OSError, ValueError, http.client.HTTPException):
-        return _out({"ok": False, "error": "service_unreachable"}, 1)
+        return _out({"ok": False, "error": "service_unreachable", "evdev": evdev}, 1)
     if r.status != 200 or not isinstance(body, dict):
         return _out({"ok": False, "error": body.get("error") if isinstance(body, dict) else "refused",
-                     "status": r.status}, 1)
+                     "status": r.status, "evdev": evdev}, 1)
+    body["evdev"] = evdev
     return _out(body, 0)
 
 

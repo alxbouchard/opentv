@@ -1188,11 +1188,16 @@ class TestModule(unittest.TestCase):
     def test_line_caps_and_imports(self):
         import ast
         import sys
-        # web : + 2 lignes en 0.7.7 (délégation de la route X ; sa logique vit dans xcontext.py)
-        for name, cap in (("canvas_tv", 320), ("app", 1400), ("web", 1532)):
+        # web : + 2 lignes en 0.7.7 (délégation de la route X ; sa logique vit dans xcontext.py) ; + 3 en 0.7.8 : retrait
+        # du témoin « X ouvert » au chargement de /tv (1) et lecture opérateur root de la sonde (2), AVANT les portes du
+        # kiosque — toute la logique X (portes, validation, routes POST) vit dans xprobe/xcontext/xescape
+        over = []   # tous les dépassements d'un coup (jamais seulement le premier)
+        for name, cap in (("canvas_tv", 320), ("app", 1400), ("web", 1535), ("xprobe", 260)):
             with open(os.path.join(PI4, "opentv_pi", name + ".py"), encoding="utf-8") as f:
                 n = len(f.read().splitlines())
-            self.assertLessEqual(n, cap, name)
+            if n > cap:
+                over.append("%s.py : %d lignes > %d" % (name, n, cap))
+        self.assertEqual(over, [])
         with open(os.path.join(PI4, "opentv_pi", "canvas_tv.py"), "rb") as f:
             tree = ast.parse(f.read())
         for node in ast.walk(tree):

@@ -177,15 +177,12 @@ class App:
         self.lock = threading.RLock()
         self.fy_lock = threading.Lock()   # « Pour toi » (SQLite, catalogue) : jamais sous self.lock, que tick() prend
         self.tv_key = secrets.token_urlsafe(32)
-        # X TV : témoin « X ouvert » (sortie KEY_EXIT de l'appareil, xescape) toujours retiré au démarrage du service
-        xescape.set_marker(cfg.run_dir, False)
+        xescape.set_marker(cfg.run_dir, False)   # X TV : témoin « X ouvert » (KEY_EXIT, xescape) retiré au démarrage
         # page TV et API réservées au compte du kiosque (UID du pair TCP) ; None = contrôle indisponible (hors Linux)
         self.tv_client_uids = peeruid.allowed_uids(cfg.tv_client_user, proc_root)
         self.peer_uid_fn = lambda ip, port, sport: peeruid.tcp_peer_uid(ip, port, sport, proc_root)
         if self.tv_client_uids is None:
             log("tv_peer_check_unavailable")
-        # lecture opérateur de la sonde X (GET xprobe.STATUS_PATH) : root seulement, refus sans contrôle du pair
-        self.operator_uids = xprobe.OPERATOR_UIDS if self.tv_client_uids is not None else None
         self.token = SetupToken(clock=mono, ttl=cfg.token_ttl_s)
         self.wifi_scan = wifiscan.Scanner(runner, mono)   # réseaux proches (assistant QR) : borné, mis en cache
         self.registry = agents.Registry(cfg.registry_file)
@@ -252,9 +249,8 @@ class App:
         self.ap_stop_at = -1e9
         self.playback = self._make_playback(cfg, log, mono)
         self.tv_actions = tvcontrol.TvActions(mono=mono, log=log)   # pilotage par assistant (scope control)
-        # X TV Mode : UN post X partagé par Alex (← sur x.com), mémoire seulement, TTL 10 min, jamais journalisé
-        self.x_context = xcontext.XContext(mono=mono)
-        self.x_probe = xprobe.XProbe(mono=mono)   # sonde canari X : mémoire seulement, TTL court, aucun journal
+        # X TV : UN post partagé par Alex (← sur x.com, TTL 10 min) + sonde canari (xprobe, TTL court) ; mémoire seule
+        self.x_context, self.x_probe = xcontext.XContext(mono=mono), xprobe.XProbe(mono=mono)
         if self.remote is not None:
             self.remote.interceptor = self._remote_intercept
         self.boot_id = _boot_id(proc_root)
@@ -1211,26 +1207,6 @@ class App:
                     "cec": {"adapters": len(self.cec["adapters"]), "discovery_only": True},
                     "agent": {"id": agent, "scopes": list(scopes)}, "relay": {"status": "not_implemented"},
                     "version": VERSION, "control": self._control_view(scopes)}
-
-    def tv_x_share(self, body):   # POST /api/tv/x/context, portes du kiosque passées : rien journalisé ni audité
-        return xcontext.share_response(self.cfg.x_tv, self.x_context, body)
-
-    def x_presence(self, body):
-        """POST /api/tv/x/presence (page /tv, portes TV déjà passées) : {"active": bool} exactement. Pose le témoin
-        « X ouvert » juste avant l'ouverture de X (sortie KEY_EXIT de l'appareil) ; -> (code, réponse)."""
-        if not isinstance(body, dict) or set(body) != {"active"} or not isinstance(body.get("active"), bool):
-            return 400, {"ok": False, "error": "bad_request"}
-        if body["active"] and not self.cfg.x_tv:
-            return 409, {"ok": False, "error": "x_tv_disabled"}
-        ok = xescape.set_marker(self.cfg.run_dir, body["active"])
-        if not ok:
-            self.log("x_presence_failed")
-            return 503, {"ok": False, "error": "marker"}
-        return 200, {"ok": True, "active": body["active"]}
-
-    def x_presence_clear(self):
-        """Chargement de /tv : jamais « X ouvert » (aucune relance du kiosque par KEY_EXIT sur /tv)."""
-        xescape.set_marker(self.cfg.run_dir, False)
 
     def agent_x_context(self):   # outil x_context (read) : dernier post partagé, contenu NON FIABLE (untrusted:true)
         return self.x_context.view() if self.cfg.x_tv else {"available": False}

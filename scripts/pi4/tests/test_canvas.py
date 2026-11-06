@@ -1301,10 +1301,13 @@ class TestModuleSplit(unittest.TestCase):
 
     def test_line_caps(self):
         pkg = os.path.join(PI4, "opentv_pi")
+        over = []   # tous les dépassements d'un coup (jamais seulement le premier)
         for name, cap in self.MODULES.items():
             with open(os.path.join(pkg, name + ".py"), encoding="utf-8") as f:
                 n = len(f.read().splitlines())
-            self.assertLessEqual(n, cap, "%s.py : %d lignes > %d" % (name, n, cap))
+            if n > cap:
+                over.append("%s.py : %d lignes > %d" % (name, n, cap))
+        self.assertEqual(over, [])
 
     def test_stdlib_only_and_acyclic(self):
         import ast
