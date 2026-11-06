@@ -50,6 +50,15 @@ RESTART_ARGV = ("systemctl", "restart", "--no-block", "opentv-kiosk.service")
 DEVICE_NAME_RE = re.compile(r"vc4-hdmi(-[0-9])?")
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+# Témoin lu par l'aide (opentv-keys) dans /run/opentv 0751 : « autres » = exécution SEULE (traversée, pas de listing).
+# open(O_RDONLY) du dossier exige la lecture -> EACCES terrain, l'aide ne s'armait jamais. Linux : fd de CHEMIN
+# (O_PATH) = aucune lecture/écriture/listing possible par ce fd, seulement openat du nom connu (exécution suffit).
+# Hors Linux (tests macOS) : repli O_RDONLY, comportement inchangé. Jamais d'élargissement du mode ni du groupe.
+def _marker_dir_flags(o_path):
+    return (o_path if o_path else os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+_MARKER_DIR_FLAGS = _marker_dir_flags(getattr(os, "O_PATH", 0))
 
 
 def _noop(event, **fields):
@@ -130,11 +139,16 @@ def set_marker(run_dir, active, boot_id=None):
 def read_marker(run_dir, owner_uid, boot_id=None):
     """Témoin valide ? (régulier, lien unique, propriétaire `owner_uid`, ≤ MAX_FILE, JSON v=1, même boot_id)."""
     try:
-        dfd = os.open(run_dir, _DIR_FLAGS)
+        dfd = os.open(run_dir, _MARKER_DIR_FLAGS)
     except OSError:
         return False
     try:
-        data = _read_small(dfd, MARKER, owner_uid)
+        try:
+            if not stat.S_ISDIR(os.fstat(dfd).st_mode):   # O_PATH|O_NOFOLLOW : un lien ne passe jamais
+                return False
+        except OSError:
+            return False
+        data = _read_small(dfd, MARKER, owner_uid)   # openat O_RDONLY du nom connu ; rien n'est écrit via dfd
     finally:
         os.close(dfd)
     if data is None:

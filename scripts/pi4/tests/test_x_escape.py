@@ -126,6 +126,88 @@ class TestMarker(unittest.TestCase):
         self.assertFalse(xescape.read_marker(os.path.join(self.d, "absent"), UID))
 
 
+class TestMarkerExecuteOnlyDir(unittest.TestCase):
+    """Régression terrain : /run/opentv est 0751 (opentv:opentv) ; opentv-keys n'a que l'EXÉCUTION. L'ancien
+    open(O_RDONLY|O_DIRECTORY) du dossier levait EACCES : l'aide ne s'armait jamais. Correctif : fd de chemin O_PATH
+    (Linux) puis openat du nom connu ; jamais d'élargissement du mode ni du groupe."""
+    FAKE_O_PATH = 0x40000000
+
+    def setUp(self):
+        self.d = tmp(self)
+        self.assertTrue(xescape.set_marker(self.d, True, boot_id="b1"))
+
+    def test_flags_path_fd_no_read_write_follow(self):
+        f = xescape._marker_dir_flags(self.FAKE_O_PATH)
+        self.assertTrue(f & self.FAKE_O_PATH)
+        self.assertEqual(f & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND), 0)
+        for want in (os.O_DIRECTORY, os.O_NOFOLLOW, os.O_CLOEXEC):
+            self.assertTrue(f & want)
+        fb = xescape._marker_dir_flags(0)                          # repli hors Linux : lecture seule, inchangé
+        self.assertEqual(fb, xescape._DIR_FLAGS)
+        if hasattr(os, "O_PATH"):
+            self.assertTrue(xescape._MARKER_DIR_FLAGS & getattr(os, "O_PATH"))
+            self.assertEqual(xescape._MARKER_DIR_FLAGS & (os.O_WRONLY | os.O_RDWR), 0)
+
+    def test_simulated_execute_only_dir(self):
+        """Noyau simulé : ouvrir le dossier sans O_PATH = EACCES (exécution seule) ; openat du nom connu permis."""
+        real_open, d, bit = os.open, self.d, self.FAKE_O_PATH
+        seen = []
+
+        def fake_open(path, flags, mode=0o777, *, dir_fd=None):
+            if dir_fd is None and os.path.abspath(path) == d:
+                seen.append(flags)
+                if not flags & bit:
+                    raise PermissionError(13, "Permission denied", path)
+                flags &= ~bit
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        old = xescape._MARKER_DIR_FLAGS
+        xescape._MARKER_DIR_FLAGS = xescape._marker_dir_flags(0)
+        xescape.os.open = fake_open
+        try:
+            self.assertFalse(xescape.read_marker(d, UID, boot_id="b1"))      # ancien chemin O_RDONLY : jamais armé
+            xescape._MARKER_DIR_FLAGS = xescape._marker_dir_flags(bit)
+            self.assertTrue(xescape.read_marker(d, UID, boot_id="b1"))       # fd de chemin : témoin lu
+            self.assertFalse(xescape.read_marker(d, UID, boot_id="b2"))      # contrôles inchangés
+            self.assertFalse(xescape.read_marker(d, UID + 1, boot_id="b1"))
+        finally:
+            xescape.os.open = real_open
+            xescape._MARKER_DIR_FLAGS = old
+        self.assertTrue(all(f & os.O_NOFOLLOW and not f & (os.O_WRONLY | os.O_RDWR) for f in seen))
+
+    @unittest.skipUnless(hasattr(os, "O_PATH") and os.geteuid() != 0, "Linux O_PATH, non-root (droits réels)")
+    def test_real_execute_only_dir_linux(self):
+        os.chmod(self.d, 0o311)                                    # -wx : traversée sans lecture (comme « autres » 0751)
+        self.addCleanup(os.chmod, self.d, 0o755)
+        with self.assertRaises(PermissionError):
+            os.open(self.d, xescape._DIR_FLAGS)                    # preuve : l'ancien open échoue
+        self.assertTrue(xescape.read_marker(self.d, UID, boot_id="b1"))
+        self.assertFalse(xescape.read_marker(self.d, UID, boot_id="b2"))
+        link = self.d + ".lnk"
+        os.symlink(self.d, link)
+        self.addCleanup(os.unlink, link)
+        self.assertFalse(xescape.read_marker(link, UID, boot_id="b1"))      # dossier lien : refusé (O_NOFOLLOW)
+
+    def test_symlinked_run_dir_refused(self):
+        link = self.d + ".lnk"
+        os.symlink(self.d, link)
+        self.addCleanup(os.unlink, link)
+        self.assertFalse(xescape.read_marker(link, UID, boot_id="b1"))
+
+    def test_permissions_never_widened(self):
+        svc = unit("opentv.service")
+        self.assertIn("RuntimeDirectory=opentv\n", svc)
+        self.assertIn("RuntimeDirectoryMode=0751\n", svc)         # listing toujours fermé aux autres comptes
+        helper = unit("opentv-x-escape.service")
+        self.assertIn("Group=opentv-keys\n", helper)
+        self.assertIn("SupplementaryGroups=input\n", helper)      # jamais le groupe opentv
+        self.assertNotRegex(helper, r"(?m)^(Group|SupplementaryGroups)=.*\bopentv\b(?!-)")
+        self.assertNotIn("ReadWritePaths=/run/opentv\n", helper)
+        with open(os.path.join(PI4, "system", "sysusers-opentv.conf")) as f:
+            su = [l.split() for l in f if l.strip() and not l.startswith("#")]
+        self.assertFalse(any(w[0] == "m" and w[1] == "opentv-keys" for w in su))   # opentv-keys hors groupe opentv
+
+
 class TestDecoderAndDevices(unittest.TestCase):
     def test_exit_press_only(self):
         d = xescape.ExitDecoder()
