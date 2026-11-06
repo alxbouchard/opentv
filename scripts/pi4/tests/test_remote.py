@@ -2303,7 +2303,8 @@ class TestPhoneRemoteHttp(unittest.TestCase):
                          "bout en bout : OPENTV_TEST_PLAYWRIGHT=<module playwright> + Chromium + node")
     def test_end_to_end_hid_and_phone_drive_real_tv_page(self):
         """Service réel + page /tv réelle (temps réel) : clavier HID puis téléphone appairé (→, OK, Retour)."""
-        a, s = self.configured()
+        # parcours chiffré des rangées de FILMS (rangée Applications/X en tête : couverte par test_x_tv)
+        a, s = self.configured(OPENTV_X_TV="0")
         host = self.host(s, MDNS)
         tok = self.pair(a, s, host=host)
         shots = os.environ.get("OPENTV_TEST_SHOTS") or tmpdir(self, "otvshots")

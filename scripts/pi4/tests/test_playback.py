@@ -403,7 +403,7 @@ class TestStartupResetAndDemotion(unittest.TestCase):
 
 
 class TestAppIntegration(unittest.TestCase):
-    def app(self):
+    def app(self, **extra):
         d = tempfile.mkdtemp(prefix="otvenv", dir="/tmp")
         self.addCleanup(shutil.rmtree, d, True)
         env = write_env(d, OK_ENV)
@@ -412,7 +412,7 @@ class TestAppIntegration(unittest.TestCase):
         man = install_delivery(os.path.join(d, "root"))
         promotion.write(marker, manifest=man)   # promotion terrain simulée (livraison réelle du dépôt, compte du test)
         a = make_app(self, OPENTV_SOURCE_FILE=env, OPENTV_PLAYER_SOCKET=os.path.join(d, "none.sock"),
-                     OPENTV_PLAYBACK_MARKER=marker, OPENTV_INSTALL_MANIFEST=man)
+                     OPENTV_PLAYBACK_MARKER=marker, OPENTV_INSTALL_MANIFEST=man, **extra)
         self.assertTrue(a.playback.ready.wait(5))   # remise à zéro de démarrage terminée
         from opentv_pi import config
         config.save_device(a.cfg, {"name": "Salon"})
@@ -697,7 +697,7 @@ class TestRealTvPage(unittest.TestCase):
         node = _sh.which("node")
         if not (node and find_chromium()):
             self.skipTest("node/Chromium absents")
-        a = TestAppIntegration.app(self)
+        a = TestAppIntegration.app(self, OPENTV_X_TV="0")   # parcours chiffré des FILMS (X en tête : test_x_tv)
         c = self.client
         s = Servers(self, a)
         shots = os.environ.get("OPENTV_TEST_SHOTS") or tempfile.mkdtemp(prefix="otvplay", dir="/tmp")

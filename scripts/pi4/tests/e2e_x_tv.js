@@ -2,7 +2,9 @@
    qu'installée par install.sh dans une racine temporaire, vrai service OpenTV (page /tv réelle, route de partage
    réelle) et pages X SYNTHÉTIQUES (aucun accès réseau : https://x.com/* est servi par Playwright depuis des fixtures
    qui imitent les data-testid de X). Instrumentation de la page : chaque clic et chaque « J'aime » est compté.
-   argv[2] = chemin du module playwright ; argv[3] = JSON {chrome, ext, ext_id, tv, port, ctl, shots}.
+   Les pages synthétiques suivent prefers-color-scheme comme X (claires par défaut, sombres si l'appareil l'est) :
+   le kiosque lance Chromium avec les arguments X de opentv-kiosk-browser (cfg.args : --force-dark-mode).
+   argv[2] = chemin du module playwright ; argv[3] = JSON {chrome, chrome_light, ext, ext_id, tv, port, ctl, shots, args}.
    Sortie : une ligne JSON {steps, film_api_calls}. */
 "use strict";
 const fs = require("fs");
@@ -15,7 +17,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const STYLE = "<style>body{margin:0;font:16px sans-serif;background:#fff;color:#000}main{display:flex}" +
   "header{width:280px}[data-testid=sidebarColumn]{display:block;width:340px}[data-testid=primaryColumn]{width:600px}" +
-  "article{display:block;min-height:420px;border:1px solid #ccc;margin:4px}</style>";
+  "article{display:block;min-height:420px;border:1px solid #ccc;margin:4px}" +
+  "@media (prefers-color-scheme: dark){body{background:#000;color:#e7e9ea}}</style>";
 const INSTR = "<script>window.__clicks=0;window.__likes=0;" +
   "document.addEventListener('click',function(){window.__clicks++;},true);</script>";
 
@@ -42,9 +45,12 @@ const STATUS = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><titl
   `<div id="react-root"><main role="main"><div data-testid="primaryColumn">${P2}</div></main>` +
   `<div role="dialog" aria-modal="true" id="viewer">Photo</div></div>${INSTR}</body></html>`;
 const LOGIN = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Connexion / X</title>${STYLE}</head>` +
-  `<body><div role="dialog" aria-modal="true"><h1>Connexion à X</h1><input id="user" name="text" ` +
+  `<body><div role="dialog" aria-modal="true"><h1>Connexion à X</h1><input id="user" name="text" autofocus ` +
   `autocomplete="username"><button id="next">Suivant</button></div><div data-testid="sidebarColumn" id="sb">Pied</div>` +
   `${INSTR}</body></html>`;
+// connexion bloquée en chargement (script de tête jamais servi) : le script du fil (document_idle) n'y tourne jamais
+const STALL = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Connexion / X</title>${STYLE}` +
+  `<script src="https://x.com/stall.js"></script></head><body>Connexion…</body></html>`;
 
 function ctl(p) {
   return new Promise((res, rej) => {
@@ -59,9 +65,9 @@ function ctl(p) {
   const out = { steps: {}, film_api_calls: [] };
   const prof = fs.mkdtempSync(path.join(os.tmpdir(), "otvxprof"));
   const ctx = await pw.chromium.launchPersistentContext(prof, {
-    executablePath: cfg.chrome, headless: true, viewport: { width: 1920, height: 1080 },
+    executablePath: cfg.chrome, headless: true, viewport: { width: 1920, height: 1080 }, colorScheme: null,   // kiosque : aucune émulation
     ignoreDefaultArgs: ["--disable-extensions"],
-    args: ["--disable-extensions-except=" + cfg.ext, "--load-extension=" + cfg.ext]
+    args: ["--disable-extensions-except=" + cfg.ext, "--load-extension=" + cfg.ext].concat(cfg.args || [])
   });
   try {
     let sw = ctx.serviceWorkers()[0];
@@ -69,10 +75,21 @@ function ctl(p) {
     if (sw.url().indexOf("chrome-extension://" + cfg.ext_id + "/") !== 0) { throw new Error("ID inattendu " + sw.url()); }
     await ctx.route(/^https:\/\/(x|twitter)\.com\//, (route) => {
       const u = new URL(route.request().url());
-      const body = u.pathname.indexOf("/i/flow/login") === 0 ? LOGIN : /\/status\/\d+$/.test(u.pathname) ? STATUS : FEED;
+      if (u.pathname === "/stall.js") { return undefined; }              // jamais servi : page en chargement
+      const body = u.pathname === "/i/flow/stall" ? STALL :
+        (u.pathname.indexOf("/i/flow/login") === 0 || u.pathname.indexOf("/account/") === 0) ? LOGIN :
+        /\/status\/\d+$/.test(u.pathname) ? STATUS : FEED;
       return route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: body });
     });
     const page = ctx.pages()[0] || await ctx.newPage();
+    const cdp = await ctx.newCDPSession(page);
+    // touche RÉELLE (fiable) sans équivalent Playwright : Close (Exit CEC -> XF86Close), BrowserBack, BrowserHome
+    const rawKey = async (key, code) => {
+      await cdp.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: key, windowsVirtualKeyCode: code || 0 });
+      await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: key, windowsVirtualKeyCode: code || 0 });
+    };
+    const look = () => page.evaluate(() => ({
+      dark: matchMedia("(prefers-color-scheme: dark)").matches, bg: getComputedStyle(document.body).backgroundColor }));
     page.on("request", (r) => {
       const u = new URL(r.url());
       if (u.hostname === "127.0.0.1" && /^\/api\/tv\/(play|feedback)/.test(u.pathname) && r.method() === "POST") {
@@ -120,6 +137,13 @@ function ctl(p) {
     // 1) /tv : clé capturée par l'extension ; tuile X ; OK d'assistant refusé ; OK humain ouvre X
     await page.goto(cfg.tv);
     out.steps.tv = { key_captured: await waitKey() };
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    out.steps.tv.initial = await page.evaluate(() => {   // accueil : X au focus, rangée de tête, tuile entière à l'écran
+      const f = document.querySelector(".card.focused"), r = f.getBoundingClientRect();
+      return { focus: f.querySelector(".t").textContent, row: document.querySelector("#rowsin .row h2").textContent,
+               in_view: r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth };
+    });
+    if (cfg.shots) { await page.screenshot({ path: path.join(cfg.shots, "x-home.png") }); }
     const onTile = await toTile();
     const hero = await page.evaluate(() => ({ kicker: document.getElementById("hkicker").textContent,
                                               title: document.getElementById("htitle").textContent,
@@ -135,6 +159,7 @@ function ctl(p) {
 
     // 2) fil X : CSS TV, colonnes masquées, aide
     await waitFeed();
+    out.steps.feed_look = await look();
     out.steps.feed = await page.evaluate(() => ({
       tv_class: document.documentElement.classList.contains("otvx-tv"),
       sidebar: getComputedStyle(document.querySelector('[data-testid="sidebarColumn"]')).display,
@@ -190,23 +215,40 @@ function ctl(p) {
     await page.keyboard.press("Home");
     out.steps.home = { url: await waitUrl((u) => u === cfg.tv) };
 
-    // 7) connexion : page intacte, saisie native, Retour quitte d'abord le champ, puis revient à OpenTV
+    // 7) connexion : page intacte et SOMBRE (prefers-color-scheme), saisie native ; Retour (même depuis le champ
+    //    au focus) revient DIRECTEMENT à OpenTV ; Close (CEC), BrowserBack, Alt+←, BrowserHome aussi
     await page.goto("https://x.com/i/flow/login");
     await sleep(700);
     const lg = await page.evaluate(() => ({
       tv_class: document.documentElement.classList.contains("otvx-tv"), help: !!document.querySelector(".otvx-help"),
-      sidebar: getComputedStyle(document.getElementById("sb")).display }));
-    await page.focus("#user");
+      sidebar: getComputedStyle(document.getElementById("sb")).display,
+      autofocus: document.activeElement && document.activeElement.id }));
+    Object.assign(lg, await look());
     await page.keyboard.type("alice");
     await page.keyboard.press("Backspace");
     await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Home");                                    // Début dans le champ : natif, on reste
+    await sleep(300);
     lg.typed = await page.evaluate(() => document.getElementById("user").value);
+    lg.url_after_text_keys = page.url();
     if (cfg.shots) { await page.screenshot({ path: path.join(cfg.shots, "x-login.png") }); }
     await page.keyboard.press("Escape");
-    await sleep(500);
-    lg.url_after_escape = page.url();
-    await page.keyboard.press("Escape");
     lg.url_after_back = await waitUrl((u) => u === cfg.tv);
+    const viaKey = async (url, press) => {
+      await page.waitForSelector(".card.focused", { timeout: 10000 });
+      await page.goto(url, { waitUntil: url.indexOf("/stall") > 0 ? "commit" : "load" });
+      await sleep(700);
+      const ready = await page.evaluate(() => document.readyState);
+      await press();
+      return { url: await waitUrl((u) => u === cfg.tv), ready: ready };
+    };
+    lg.close = await viaKey("https://x.com/i/flow/login", () => rawKey("Close"));
+    lg.browser_back = await viaKey("https://x.com/account/access", () => rawKey("BrowserBack", 166));
+    lg.alt_left = await viaKey("https://x.com/i/flow/login", () => page.keyboard.press("Alt+ArrowLeft"));
+    lg.browser_home = await viaKey("https://x.com/i/flow/login", () => rawKey("BrowserHome", 172));
+    lg.stalled = await viaKey("https://x.com/i/flow/stall", () => page.keyboard.press("Escape"));
+    // post ouvert directement (aucune page x.com avant lui) : rien à fermer de détectable -> OpenTV
+    lg.thread_direct = await viaKey("https://x.com/alice_m/status/2", () => page.keyboard.press("Escape"));
     out.steps.login = lg;
 
     // 8) service redémarré (clé tournée) : refus honnête ; /tv recapture la nouvelle clé ; le partage repasse
@@ -232,6 +274,22 @@ function ctl(p) {
   } finally {
     await ctx.close();
     fs.rmSync(prof, { recursive: true, force: true });
+  }
+  // témoin A/B : même Chromium en apparence claire (cfg.chrome_light), même page de connexion, SANS puis AVEC les
+  // arguments X du kiosque -> claire puis sombre : le sombre vient du signal natif, pas de l'hôte ni d'un recoloriage
+  out.steps.control = [];
+  for (const args of [[], cfg.args || []]) {
+    const bare = await pw.chromium.launch({ executablePath: cfg.chrome_light || cfg.chrome, headless: true, args: args });
+    try {
+      const c = await bare.newContext({ colorScheme: null });
+      await c.route(/^https:\/\/x\.com\//, (r) => r.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: LOGIN }));
+      const pg = await c.newPage();
+      await pg.goto("https://x.com/i/flow/login");
+      out.steps.control.push(await pg.evaluate(() => ({
+        dark: matchMedia("(prefers-color-scheme: dark)").matches, bg: getComputedStyle(document.body).backgroundColor })));
+    } finally {
+      await bare.close();
+    }
   }
   process.stdout.write(JSON.stringify(out) + "\n");
 })().catch((e) => { process.stderr.write(String(e && e.stack || e) + "\n"); process.exit(1); });

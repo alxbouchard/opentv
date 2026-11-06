@@ -23,6 +23,17 @@
         "https://twitter.com/*"
       ],
       "js": [
+        "nav.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": [
         "x.js"
       ],
       "css": [

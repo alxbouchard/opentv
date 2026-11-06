@@ -214,7 +214,7 @@ class TestTvSameCardAcrossHotReload(unittest.TestCase):
     @unittest.skipUnless(find_chromium() and shutil.which("node") and os.environ.get("OPENTV_TEST_PLAYWRIGHT"),
                          "bout en bout : OPENTV_TEST_PLAYWRIGHT=<module playwright> + Chromium + node")
     def test_same_card_across_reload_panel_playback_and_removal(self):
-        a = tp.TestAppIntegration.app(self)
+        a = tp.TestAppIntegration.app(self, OPENTV_X_TV="0")   # parcours chiffré des FILMS (X en tête : test_x_tv)
         c = self.client
         base = catalogue_items()
         cats = {"A": catalogue_doc(base), "B": catalogue_doc(EXTRA + base),

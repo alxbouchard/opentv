@@ -7,12 +7,10 @@
  *           action native ;
  *  ←        partage le post au focus à « Hermit ou Muse » : SEULEMENT son texte visible (≤ 2400) et son auteur visible
  *           (≤ 120) — jamais une URL, un lien, un média, un cookie ni du HTML ; geste humain uniquement ;
- *  Retour   champ de saisie au focus : il le quitte ; vue de post/modale : page précédente ; racine (accueil, connexion) :
- *           retour explicite à OpenTV /tv ;
- *  Accueil  retour à OpenTV /tv.
+ *  Retour / Accueil : nav.js (script autonome, toute page x.com dès document_start, connexion comprise) — jamais
+ *           ici, pour qu'aucune page ne dépende du fil.
  * Mode fil seulement (colonne principale présente) : classe html.otvx-tv (CSS TV, x.css) + bandeau d'aide. Page de
- * connexion ou sans fil : rien n'est stylé ni rempli (Alex se connecte lui-même) ; seuls Retour/Accueil ramènent à
- * OpenTV. DOM dynamique de X : MutationObserver regroupé (une passe au plus toutes les REFRESH_MS). Jamais de clic,
+ * connexion ou sans fil : rien n'est stylé ni rempli (Alex se connecte lui-même). DOM dynamique de X : MutationObserver regroupé (une passe au plus toutes les REFRESH_MS). Jamais de clic,
  * de « J'aime », de repartage, de réponse ni de publication.
  */
 (() => {
@@ -22,19 +20,14 @@
   const AUTHOR_MAX = 120;
   const POSTS_MAX = 200;
   const REFRESH_MS = 250;
-  const BACK_FAILSAFE_MS = 1200;
   const TOAST_MS = 6000;
   const POST_SEL = 'article[data-testid="tweet"]';
   const COLUMN_SEL = '[data-testid="primaryColumn"]';
-  const ROOT_PATHS = new Set(["/", "/home", "/login", "/logout", "/explore", "/notifications", "/messages"]);
   const KEYS = {
     ArrowUp: "up", Up: "up", ArrowDown: "down", Down: "down", ArrowLeft: "left", Left: "left",
-    ArrowRight: "right", Right: "right", Enter: "ok", Accept: "ok", Select: "ok",
-    Escape: "back", Esc: "back", Backspace: "back", BrowserBack: "back", GoBack: "back", Close: "back", Exit: "back",
-    BrowserHome: "home", Home: "home", GoHome: "home"
+    ArrowRight: "right", Right: "right", Enter: "ok", Accept: "ok", Select: "ok"
   };
-  const KEYCODES = { 38: "up", 40: "down", 37: "left", 39: "right", 13: "ok", 27: "back", 8: "back", 166: "back",
-                     172: "home", 36: "home" };
+  const KEYCODES = { 38: "up", 40: "down", 37: "left", 39: "right", 13: "ok" };   // Retour/Accueil : nav.js
   const STRIP_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]/g;
   const HANDLE_RE = /@[A-Za-z0-9_]{1,15}/;
   const PERMALINK_RE = /^\/[A-Za-z0-9_]{1,15}\/status\/[0-9]{1,25}$/;
@@ -48,7 +41,6 @@
   let toastEl = null;
   let toastTimer = 0;
   let refreshTimer = 0;
-  let backTimer = 0;
   let sharing = false;
 
   function keyAction(e) {
@@ -185,40 +177,15 @@
     }
   }
 
-  // ---- Retour / Accueil
-  function goHome() {
-    try { chrome.runtime.sendMessage({ type: "home" }); } catch (e) { /* extension rechargée : rien */ }
-  }
-  function isRoot() {
-    const p = location.pathname.replace(/\/+$/, "") || "/";
-    return ROOT_PATHS.has(p) || p.indexOf("/i/flow/") === 0;
-  }
-  function back() {
-    if (isRoot()) { goHome(); return; }
-    const before = location.href;
-    clearTimeout(backTimer);
-    history.back();   // ferme la vue de post / la modale routée de X
-    backTimer = setTimeout(() => { if (location.href === before) { goHome(); } }, BACK_FAILSAFE_MS);
-  }
-
   function onKey(e) {
     if (!e.isTrusted) { return; }   // touche synthétique d'une page (script de X ou injecté) : jamais d'action OpenTV
     const a = keyAction(e);
     if (!a) { return; }
     const ae = document.activeElement;
-    if (editable(ae)) {   // saisie (connexion, recherche) : touches natives ; Retour (hors Effacement) quitte le champ
-      if (a === "back" && e.key !== "Backspace" && e.keyCode !== 8) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        ae.blur();
-      }
-      return;
-    }
+    if (editable(ae)) { return; }   // saisie (connexion, recherche) : touches natives
     const feed = feedMode();
     let used = false;
-    if (a === "home") { if (!e.repeat) { goHome(); } used = true; }
-    else if (a === "back") { if (!e.repeat) { back(); } used = true; }
-    else if (feed && a === "up") { move(-1); used = true; }
+    if (feed && a === "up") { move(-1); used = true; }
     else if (feed && a === "down") { move(1); used = true; }
     else if (feed && a === "left") { if (!e.repeat) { shareFocused(); } used = true; }
     else if (feed && a === "ok") { used = !e.repeat && open(); }

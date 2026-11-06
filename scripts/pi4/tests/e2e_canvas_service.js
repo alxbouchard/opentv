@@ -126,6 +126,8 @@ async function until(fn, ms) {
     out.steps.no = { revision: st.revision, preview: st.preview, shown: await q.sheet() };
 
     // « Oui » : publication réelle, rangées réordonnées après la feuille, focus réancré sur le même film
+    // (rangée Applications/X en tête, hors de l'ordre Canvas : ↓ ↓ = 2e rangée de films)
+    await key("ArrowDown");
     await key("ArrowDown");
     await key("ArrowRight", QUIET_MS);
     const focusBefore = await q.focus();

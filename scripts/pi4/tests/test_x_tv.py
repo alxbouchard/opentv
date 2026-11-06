@@ -22,6 +22,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -31,7 +32,7 @@ from tests.test_service import make_app, Servers, find_chromium
 from opentv_pi import VERSION, agentport, agents, config, mcp, musebridge, tools, web, xcontext
 
 EXT = os.path.join(PI4, "x-tv-extension")
-EXT_FILES = ("manifest.json", "background.js", "x.js", "x.css", "tvkey.js")
+EXT_FILES = ("manifest.json", "background.js", "nav.js", "x.js", "x.css", "tvkey.js")
 EXT_DST = "/opt/opentv/share/x-tv-extension"
 INSTALL = os.path.join(PI4, "install.sh")
 UNINSTALL = os.path.join(PI4, "uninstall.sh")
@@ -392,8 +393,8 @@ class TestXTileKeySource(unittest.TestCase):
 
     def test_phone_ok_on_x_tile_is_refused_with_message(self):
         remote = [{"seq": 1, "events": []},                                       # synchronisation
-                  {"seq": 2, "events": [{"seq": 2, "a": "down"}]},               # téléphone : ↓ vers la tuile X
-                  {"seq": 3, "events": [{"seq": 3, "a": "ok"}]}]                 # téléphone : OK
+                  {"seq": 2, "events": [{"seq": 2, "a": "right"}, {"seq": 3, "a": "left"}]},   # téléphone navigue
+                  {"seq": 4, "events": [{"seq": 4, "a": "ok"}]}]                 # téléphone : OK sur X (1re rangée)
         res = self.render([], remote=remote)
         self.assertTrue(res["extra"]["spy"])
         self.assertEqual(res["focus"], "X")                                       # le téléphone a bien navigué
@@ -406,14 +407,56 @@ class TestXTileKeySource(unittest.TestCase):
     def test_tv_remote_or_keyboard_ok_opens_x(self):
         for ok in (["Enter"], ["Select"], ["Accept"]):                            # CEC Select/OK -> touches clavier
             with self.subTest(ok=ok[0]):
-                res = self.render([["ArrowDown"], ok])
+                res = self.render([ok])                                           # X : 1re rangée, au focus
                 self.assertEqual(res["steps"][0]["focus"], "X")
                 self.assertEqual(res["extra"]["nav"], ["https://x.com/home"])
                 self.assertEqual(res["toast"], "Ouverture de X…")
                 self.assertFalse(res["panel"])
 
-    def test_phone_ok_elsewhere_unchanged(self):
+    # accueil réel : plusieurs rangées de films ; la rangée « Applications » doit être ENTIÈREMENT sur l'écran 1080p
+    # dès l'ouverture (photo d'Alex : en dernier, X tombait sous la dernière rangée, hors de l'écran)
+    FY_MANY = {"note": "", "marks": {}, "rows": [
+        {"id": rid, "title": t, "items": [{"id": rid + str(i), "title": t[:3] + str(i)} for i in range(6)]}
+        for rid, t in (("tonight", "Le choix de ce soir"), ("new", "Nouveautés"), ("top", "Les mieux notés"),
+                       ("watchlist", "À voir plus tard"), ("because", "Parce que tu as aimé"))]}
+    FILMS = ["Le choix de ce soir", "Nouveautés", "Les mieux notés", "À voir plus tard", "Parce que tu as aimé"]
+    VISIBLE = ("<script>window.__EXTRA__=function(){var rs=[].slice.call(document.querySelectorAll('#rowsin .row'));"
+               "var x=null;[].slice.call(document.querySelectorAll('#rowsin .card')).forEach(function(c){"
+               "if(c.querySelector('.t').textContent==='X'){x=c.getBoundingClientRect();}});"
+               "var b=document.getElementById('rows').getBoundingClientRect();"
+               "return {rows:rs.map(function(r){return r.querySelector('h2').textContent;}),"
+               "x_visible:x?Math.round(Math.min(x.bottom,b.bottom,innerHeight)-Math.max(x.top,b.top,0)):null,"
+               "x_height:x?Math.round(x.height):null,hero:document.getElementById('htitle').textContent};};</script>")
+
+    def harness(self):
+        from tests.test_remote import TestTvKeysInChromium
+        return vars(TestTvKeysInChromium)["render"]
+
+    def test_x_fully_visible_on_initial_home_with_many_film_rows(self):
+        res = self.harness()(self, self.STATE, [], fy=self.FY_MANY, inject=self.VISIBLE)
+        ex = res["extra"]
+        self.assertEqual(ex["rows"], ["Applications"] + self.FILMS)               # rangée de tête ; films dans l'ordre
+        self.assertEqual((res["focus"], ex["hero"]), ("X", "X"))
+        self.assertIsNotNone(ex["x_visible"])
+        self.assertEqual(ex["x_visible"], ex["x_height"], ex)                     # tuile X entière à l'écran
+        # ↓ : 1re rangée de films (focus et héros film), puis la suivante — navigation des films inchangée
+        res = self.harness()(self, self.STATE, [["ArrowDown"], ["ArrowDown"], ["ArrowUp"]], fy=self.FY_MANY)
+        self.assertEqual([s["focus"] for s in res["steps"]], ["Le 0", "Nou0", "Le 0"])
+        self.assertFalse(any(s["panel"] for s in res["steps"]))
+
+    def test_x_leading_row_phone_refused_tv_ok_opens_with_many_rows(self):
         remote = [{"seq": 1, "events": []}, {"seq": 2, "events": [{"seq": 2, "a": "ok"}]}]
+        res = self.harness()(self, self.STATE, [], remote=remote, fy=self.FY_MANY, inject=NAV_SPY)
+        self.assertEqual((res["focus"], res["toast"], res["extra"]["nav"], res["panel"]), ("X", PHONE_REFUSED, [], False))
+        res = self.harness()(self, self.STATE, [["Enter"]], fy=self.FY_MANY, inject=NAV_SPY)
+        self.assertEqual((res["steps"][0]["focus"], res["extra"]["nav"]), ("X", ["https://x.com/home"]))
+        # sans titres : aucune rangée Applications (écran d'attente écrit, Réglages au focus) — inchangé
+        res = self.harness()(self, self.STATE, [], fy={"note": "", "marks": {}, "rows": []}, inject=NAV_SPY)
+        self.assertIsNone(res["focus"])
+
+    def test_phone_ok_elsewhere_unchanged(self):
+        remote = [{"seq": 1, "events": []}, {"seq": 2, "events": [{"seq": 2, "a": "down"}]},
+                  {"seq": 3, "events": [{"seq": 3, "a": "ok"}]}]
         res = self.render([], remote=remote)
         self.assertEqual((res["focus"], res["panel"]), ("Alpha", True))          # fiche film : comme avant
         self.assertEqual(res["extra"]["nav"], [])
@@ -439,7 +482,12 @@ class TestXExtensionStatic(unittest.TestCase):
             self.assertNotIn(k, m)
         self.assertEqual(m["background"], {"service_worker": "background.js"})
         cs = m["content_scripts"]
-        self.assertEqual(len(cs), 2)
+        self.assertEqual(len(cs), 3)
+        nv = [c for c in cs if "nav.js" in c["js"]][0]                  # Retour/Accueil : autonome, dès le début
+        self.assertEqual(sorted(nv["matches"]), ["https://twitter.com/*", "https://x.com/*"])
+        self.assertEqual((nv["js"], nv["run_at"], nv.get("all_frames", False)), (["nav.js"], "document_start", False))
+        self.assertNotIn("css", nv)
+        self.assertEqual(cs[0]["js"], ["nav.js"])                         # écouteur posé avant celui du fil
         xs = [c for c in cs if "x.js" in c["js"]][0]
         self.assertEqual(sorted(xs["matches"]), ["https://twitter.com/*", "https://x.com/*"])
         self.assertEqual((xs["js"], xs["css"], xs.get("all_frames", False)), (["x.js"], ["x.css"], False))
@@ -449,7 +497,7 @@ class TestXExtensionStatic(unittest.TestCase):
         self.assertNotIn("css", tv)
 
     def test_no_sensitive_api_no_click_no_write_action(self):
-        for f in ("background.js", "x.js", "tvkey.js"):
+        for f in ("background.js", "nav.js", "x.js", "tvkey.js"):
             src = code_only(read(os.path.join(EXT, f)))
             for bad in ("chrome.cookies", "document.cookie", "webRequest", "chrome.debugger", "chrome.scripting",
                         "eval(", "new Function", ".click(", "dispatchEvent", "innerHTML", "outerHTML",
@@ -481,6 +529,25 @@ class TestXExtensionStatic(unittest.TestCase):
         self.assertIn("2400", x)
         self.assertIn("120", x)
 
+    def test_back_home_owned_by_nav_js_never_by_feed_script(self):
+        nav = code_only(read(os.path.join(EXT, "nav.js")))
+        x = code_only(read(os.path.join(EXT, "x.js")))
+        for k in ("Escape", "BrowserBack", "GoBack", "Close", "Exit", "Backspace", "BrowserHome", "GoHome"):
+            self.assertIn(k + ":", nav)                                   # même table que ui/keys.js
+            self.assertNotIn(k + ":", x)
+        for k in ("27:", "8:", "166:", "172:", "36:"):
+            self.assertIn(k, nav)
+        self.assertIn('e.key === "ArrowLeft"', nav)                       # Alt+← (Chromium) : même contrat
+        self.assertIn("if (!e.isTrusted) { return; }", nav)
+        self.assertIn("i\\/flow\\/", nav)                                  # connexion / vérifications : direct
+        self.assertIn("account\\/", nav)
+        self.assertIn("n.entries()", nav)                                 # retour dans X seulement s'il existe
+        self.assertIn('type: "home"', nav)
+        self.assertNotIn("history.back", x)
+        self.assertNotIn('type: "home"', x)
+        self.assertNotIn("COLUMN_SEL", nav)                               # aucune dépendance au fil
+        self.assertNotIn("primaryColumn", nav)
+
     def test_css_inert_outside_feed_mode(self):
         css = read(os.path.join(EXT, "x.css"))
         body = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
@@ -495,7 +562,7 @@ class TestXExtensionStatic(unittest.TestCase):
 
     @unittest.skipUnless(NODE and os.environ.get("OPENTV_TEST_ACORN"), "acorn absent (OPENTV_TEST_ACORN)")
     def test_extension_scripts_parse_es2020(self):
-        for f in ("background.js", "x.js", "tvkey.js"):
+        for f in ("background.js", "nav.js", "x.js", "tvkey.js"):
             js = ("const a=require(process.argv[1]);a.parse(require('fs').readFileSync(process.argv[2],'utf8'),"
                   "{ecmaVersion:2020,sourceType:'script'});")
             p = subprocess.run([NODE, "-e", js, os.environ["OPENTV_TEST_ACORN"], os.path.join(EXT, f)],
@@ -516,6 +583,32 @@ class TestKioskAndPolicy(unittest.TestCase):
             self.assertNotIn(bad, text)
         p = subprocess.run(["bash", "-n", KIOSK], capture_output=True)
         self.assertEqual(p.returncode, 0, p.stderr)
+
+    def kiosk_x_args(self, env, ext_present=True):
+        """Bloc X TV réel du script du kiosque, exécuté seul (Chromium jamais lancé) -> arguments X de Chromium."""
+        text = read(KIOSK)
+        block = text[text.index('XEXT="/opt/opentv/share/x-tv-extension"'):text.index('exec "$CHROMIUM_BIN"')]
+        d = tempfile.mkdtemp(prefix="otvxk", dir="/tmp")
+        self.addCleanup(shutil.rmtree, d, True)
+        if ext_present:
+            open(os.path.join(d, "manifest.json"), "w").close()
+        block = block.replace("/opt/opentv/share/x-tv-extension", d)
+        script = "set -euo pipefail\n" + block + 'printf "%s\\n" ${X_ARGS[@]+"${X_ARGS[@]}"}\n'
+        p = subprocess.run(["bash", "-c", script], capture_output=True, env=dict({"PATH": "/usr/bin:/bin"}, **env))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return [a.replace(d, "$XEXT") for a in p.stdout.decode().split()]
+
+    def test_kiosk_force_dark_mode_only_when_x_tv_enabled(self):
+        ext = ["--disable-extensions-except=$XEXT", "--load-extension=$XEXT"]
+        self.assertEqual(self.kiosk_x_args({}), ["--force-dark-mode"] + ext)                 # défaut : X actif
+        self.assertEqual(self.kiosk_x_args({"OPENTV_X_TV": "1"}), ["--force-dark-mode"] + ext)
+        self.assertEqual(self.kiosk_x_args({"OPENTV_X_TV": "1"}, ext_present=False), ["--force-dark-mode"])
+        self.assertEqual(self.kiosk_x_args({"OPENTV_X_TV": "0"}), [])                         # désactivé : rien
+        text = code_only(read(KIOSK), "#")
+        for bad in ("force-dark-mode=", "forceDarkModeEnabled", "blink-settings", "enable-features=WebContentsForceDark",
+                    "WebContentsForceDark"):
+            self.assertNotIn(bad, text)                                   # jamais de recoloriage forcé des pages
+        self.assertEqual(text.count("--force-dark-mode"), 1)
 
     def test_policy_allows_x_and_only_this_extension(self):
         pol = json.loads(read(POLICY))
@@ -609,9 +702,19 @@ class TestXEndToEnd(unittest.TestCase):
             return r
         a.x_context.set = spy
         shots = os.environ.get("OPENTV_TEST_SHOTS") or tempfile.mkdtemp(prefix="otvxshots", dir="/tmp")
-        cfg = {"chrome": full_chrome(), "ext": ext, "port": s.web.tv_port(),
+        light = full_chrome()
+        if sys.platform == "darwin":   # hôte macOS peut-être sombre : témoin lancé en apparence claire (Cocoa)
+            light = os.path.join(root, "chrome-light")
+            with open(light, "w") as f:
+                f.write('#!/bin/bash\nexec "%s" -NSRequiresAquaSystemAppearance YES "$@"\n' % full_chrome())
+            os.chmod(light, 0o755)
+        cfg = {"chrome": full_chrome(), "chrome_light": light, "ext": ext, "port": s.web.tv_port(),
                "tv": "http://127.0.0.1:%d/tv" % s.web.tv_port(), "ctl": "http://127.0.0.1:%d" % ctl.server_port,
-               "ext_id": xcontext.EXTENSION_ID, "shots": shots}
+               "ext_id": xcontext.EXTENSION_ID, "shots": shots,
+               # arguments X du VRAI script du kiosque (hors extension, déjà chargée ci-dessus) : --force-dark-mode
+               "args": [x for x in TestKioskAndPolicy.kiosk_x_args(self, {})
+                        if not x.startswith(("--load-extension", "--disable-extensions-except"))]}
+        self.assertEqual(cfg["args"], ["--force-dark-mode"])
         p = subprocess.run([NODE, os.path.join(PI4, "tests", "e2e_x_tv.js"), os.environ["OPENTV_TEST_PLAYWRIGHT"],
                             json.dumps(cfg)], capture_output=True, timeout=240)
         self.assertEqual(p.returncode, 0, p.stdout.decode()[-3000:] + p.stderr.decode()[-3000:])
@@ -619,6 +722,8 @@ class TestXEndToEnd(unittest.TestCase):
         st = res["steps"]
         # clé de page capturée par l'extension sur /tv (stockage de session de l'extension)
         self.assertTrue(st["tv"]["key_captured"])
+        # accueil : X au focus dans la rangée de tête, tuile entière à l'écran 1080p, sans aucune touche
+        self.assertEqual(st["tv"]["initial"], {"focus": "X", "row": "Applications", "in_view": True})
         # tuile X : rangée « Applications », héros X, jamais une fiche film, jamais Regarder ni avis
         self.assertEqual(st["tile"]["focus"], "X")
         self.assertEqual(st["tile"]["kicker"], "Applications")
@@ -628,6 +733,7 @@ class TestXEndToEnd(unittest.TestCase):
         self.assertTrue(st["open"]["url"].startswith("https://x.com/home"), st["open"])
         # fil : CSS TV active, colonnes masquées, aide française visible
         self.assertTrue(st["feed"]["tv_class"])
+        self.assertEqual(st["feed_look"], {"dark": True, "bg": "rgb(0, 0, 0)"})   # fil sombre (signal natif)
         self.assertEqual(st["feed"]["sidebar"], "none")
         self.assertIn("Partager à Hermit ou Muse", st["feed"]["help"])
         # ↑ ↓ : post suivant / précédent, ajout dynamique atteint
@@ -652,13 +758,26 @@ class TestXEndToEnd(unittest.TestCase):
         self.assertTrue(st["back1"]["url"].startswith("https://x.com/home"), st["back1"])
         self.assertEqual(st["back_root"]["url"], cfg["tv"])
         self.assertEqual(st["home"]["url"], cfg["tv"])
-        # page de connexion : intacte (aucune classe, aucune aide, Retour arrière natif dans un champ)
-        self.assertFalse(st["login"]["tv_class"])
-        self.assertFalse(st["login"]["help"])
-        self.assertEqual(st["login"]["sidebar"], "block")
-        self.assertEqual(st["login"]["typed"], "alic")
-        self.assertTrue(st["login"]["url_after_escape"].startswith("https://x.com/i/flow/login"))
-        self.assertEqual(st["login"]["url_after_back"], cfg["tv"])
+        # connexion : intacte (aucune classe, aucune aide), SOMBRE par le signal natif, saisie native (Retour arrière,
+        # ↓, Début) ; Retour depuis le champ au focus : DIRECTEMENT /tv
+        lg = st["login"]
+        self.assertFalse(lg["tv_class"])
+        self.assertFalse(lg["help"])
+        self.assertEqual(lg["sidebar"], "block")
+        self.assertEqual(lg["autofocus"], "user")
+        self.assertEqual((lg["dark"], lg["bg"]), (True, "rgb(0, 0, 0)"))
+        self.assertEqual(lg["typed"], "alic")
+        self.assertTrue(lg["url_after_text_keys"].startswith("https://x.com/i/flow/login"), lg)
+        self.assertEqual(lg["url_after_back"], cfg["tv"])
+        # Close (Exit CEC), BrowserBack (vérification /account/), Alt+←, BrowserHome : toujours /tv
+        for k in ("close", "browser_back", "alt_left", "browser_home", "thread_direct"):
+            self.assertEqual(lg[k]["url"], cfg["tv"], (k, lg[k]))
+        # connexion encore en chargement (script du fil jamais injecté) : Retour ramène quand même à /tv
+        self.assertEqual(lg["stalled"], {"url": cfg["tv"], "ready": "loading"})
+        # témoin A/B (Chromium en apparence claire) : sans les arguments X du kiosque la connexion reste claire, avec
+        # --force-dark-mode elle est sombre — le sombre vient du signal natif
+        self.assertEqual(st["control"], [{"dark": False, "bg": "rgb(255, 255, 255)"},
+                                         {"dark": True, "bg": "rgb(0, 0, 0)"}])
         # clé tournée (service redémarré) : refus honnête, puis /tv recapture la nouvelle clé et le partage repasse
         self.assertIn("OpenTV a redémarré", st["rotate"]["toast_stale"])
         self.assertEqual(st["rotate"]["toast_after"], READY)

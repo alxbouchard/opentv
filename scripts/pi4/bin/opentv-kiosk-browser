@@ -39,15 +39,20 @@ rm -f -- "${PROFILE:?}/SingletonLock" "${PROFILE:?}/SingletonSocket" "${PROFILE:
 # X TV Mode (0.7.7) : extension locale livrée par install.sh (root, manifestée), ID fixe autorisé par la politique
 # gérée (ExtensionInstallAllowlist) ; aucune autre extension. Même profil persistant (connexion X faite par Alex
 # lui-même, jamais remplie). Sandbox et sécurité web inchangés. OPENTV_X_TV=0 : extension jamais chargée.
+# Mode sombre NATIF (--force-dark-mode : prefers-color-scheme: dark, comme un appareil réglé en sombre) : X s'affiche
+# sombre dès la connexion et dans le fil, sans recoloriage forcé des pages ; /tv (aucun color-scheme déclaré) inchangé.
 XEXT="/opt/opentv/share/x-tv-extension"
-EXT_ARGS=()
-if [[ "${OPENTV_X_TV:-1}" != "0" && -f "$XEXT/manifest.json" ]]; then
-  EXT_ARGS=(--disable-extensions-except="$XEXT" --load-extension="$XEXT")
+X_ARGS=()
+if [[ "${OPENTV_X_TV:-1}" != "0" ]]; then
+  X_ARGS=(--force-dark-mode)
+  if [[ -f "$XEXT/manifest.json" ]]; then
+    X_ARGS+=(--disable-extensions-except="$XEXT" --load-extension="$XEXT")
+  fi
 fi
 
 exec "$CHROMIUM_BIN" \
   --kiosk --ozone-platform=wayland --noerrdialogs --disable-infobars --no-first-run \
   --disable-session-crashed-bubble --disable-features=Translate,MediaRouter --password-store=basic \
   --check-for-update-interval=31536000 --overscroll-history-navigation=0 --disable-pinch \
-  ${EXT_ARGS[@]+"${EXT_ARGS[@]}"} \
+  ${X_ARGS[@]+"${X_ARGS[@]}"} \
   --user-data-dir="$PROFILE" "$target"

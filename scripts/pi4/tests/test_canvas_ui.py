@@ -1329,7 +1329,9 @@ class TestCanvasRealService(unittest.TestCase):
         self.assertEqual(st["yes"]["revision"], 1)
         self.assertEqual(st["yes"]["scene"]["wallpaper"], "affiche")
         self.assertIn("cv-wp-affiche", st["yes"]["body"])
-        self.assertEqual(st["yes"]["rows"][:2], ["Le choix de ce soir", "Les mieux notés que tu n'as pas vus"])
+        # Applications (X) en tête, hors de l'ordre Canvas ; rangées de films dans l'ordre publié juste en dessous
+        self.assertEqual(st["yes"]["rows"][:3], ["Applications", "Le choix de ce soir",
+                                                 "Les mieux notés que tu n'as pas vus"])
         self.assertEqual(st["yes"]["focus"], st["yes"]["focusBefore"])
         self.assertIsNone(st["human_cancel"]["preview"])                   # touche humaine : aperçu annulé AVANT
         self.assertFalse(st["human_cancel"]["sheet_seen"])

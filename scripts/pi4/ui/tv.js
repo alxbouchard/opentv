@@ -291,7 +291,8 @@
   }
   function isApp(it) { return !!(it && it.kind === "app"); }
   // rangée « Applications » : seulement à côté de vrais titres (l'accueil vide garde son état écrit, Réglages au
-  // focus), toujours en dernier, hors de l'ordre Canvas des rangées
+  // focus), hors de l'ordre Canvas des rangées (réordonnées entre elles en dessous), toujours en PREMIER : visible
+  // en entier sur l'écran 1080p dès l'accueil (en dernier, elle tombait sous l'écran) ; les films sont à un ↓
   function appsRow(films) {
     var items = [];
     ((state && state.apps) || []).forEach(function (a) {
@@ -304,7 +305,7 @@
     ((fy && fy.rows) || []).forEach(function (r) { if (r && r.items && r.items.length) { out.push(r); } });
     out = orderRows(out);
     var apps = appsRow(out);
-    if (apps) { out.push(apps); }
+    if (apps) { out.unshift(apps); }
     return out;
   }
   function renderEmpty(box) {

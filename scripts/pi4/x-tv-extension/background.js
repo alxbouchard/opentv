@@ -5,7 +5,7 @@
  *    chrome.storage.session (mémoire, jamais sur disque, jamais lisible par les pages ni les scripts de contenu) ;
  *  - share : envoyé par x.js depuis x.com quand Alex appuie sur ← ; auteur et texte VISIBLES du post au focus, déjà
  *    bornés, re-bornés ici ; un seul appel réseau : POST /api/tv/x/context sur 127.0.0.1 avec la clé TV ;
- *  - home : retour explicite à la page OpenTV /tv (touche Accueil, ou Retour à la racine de X).
+ *  - home : envoyé par nav.js (toute page x.com) : retour explicite à la page OpenTV /tv (Accueil, ou Retour).
  * Aucune API X, aucun cookie, aucune lecture d'onglet, aucun autre hôte contacté, aucun envoi vers un agent.
  */
 "use strict";

@@ -1396,14 +1396,19 @@ du lecteur. « Vivant » doit tenir le même budget, sinon il reste un choix du 
 (`https://x.com/home`) dans le **même Chromium du kiosque** et son **profil persistant**
 (`/var/lib/opentv-kiosk/chromium`).
 
-- **Tuile** : rangée « Applications » après les titres (`state.apps` du service), tuile **X**. OK (humain seulement)
+- **Tuile** : rangée « Applications » **en tête** de l'accueil (`state.apps` du service ; hors de l'ordre Canvas des
+  rangées de films, réordonnées entre elles en dessous), tuile **X** entière à l'écran 1080p dès l'ouverture, au focus ;
+  les films sont à un ↓ (en dernier, X tombait sous la dernière rangée, hors écran). OK (humain seulement)
   ouvre X ; une application n'est jamais un film : ni fiche, ni « Regarder », ni avis ; une touche OK d'assistant sur la
   tuile est refusée (`app_human_only`). OK du **téléphone** sur la tuile : refusé, rien ne s'ouvre, message « Utilise la
   télécommande de la télé pour ouvrir X. » (sur x.com, la télécommande téléphone de /tv ne fonctionne plus : ni Retour
   ni Accueil ; seule la télécommande de la télé (CEC) ou un clavier ouvre X). Accueil sans catalogue : état écrit
   inchangé, pas de rangée Applications.
 - **Connexion (propriétaire)** : la première fois, X affiche sa page de connexion ; **connecte-toi toi-même** avec la
-  télécommande ou un clavier USB. OpenTV et l'extension ne lisent, ne remplissent et ne stockent jamais identifiant,
+  télécommande ou un clavier USB. **Mode sombre natif** : avec X actif, `opentv-kiosk-browser` lance Chromium avec
+  `--force-dark-mode` (`prefers-color-scheme: dark`, comme un appareil réglé en sombre ; aucun recoloriage forcé) :
+  connexion et fil X sombres ; `/tv` ne déclare aucun `color-scheme` et reste identique ; `OPENTV_X_TV=0` : flag absent.
+  Si le compte X impose le thème clair (Paramètres X › Affichage), le choisir sombre une fois. OpenTV et l'extension ne lisent, ne remplissent et ne stockent jamais identifiant,
   mot de passe, cookie ni code ; la page de connexion n'est pas restylée. La session reste dans le profil du kiosque
   (déconnexion depuis X ; `uninstall.sh --purge` efface tout le profil du kiosque, donc aussi cette session).
 - **Extension locale** `/opt/opentv/share/x-tv-extension` (Manifest V3, ID fixe `mmoccejphjkmbhejebkbhkbbmmocfafi`
@@ -1416,9 +1421,13 @@ du lecteur. « Vivant » doit tenir le même budget, sinon il reste un choix du 
   gros texte, médias entiers, anneau jaune très visible, bandeau d'aide en français. DOM dynamique suivi par un
   `MutationObserver` regroupé (une passe ≤ 250 ms), sélecteurs `data-testid` de X avec repli inerte.
 - **Télécommande sur X** : ↑ ↓ post précédent/suivant ; OK ouvre le post au focus (son permalien) ou l'action native
-  du bouton/lien au focus ; **← partage le post au focus à « Hermit ou Muse »** ; Retour quitte d'abord un champ, puis
-  ferme la vue/modale (page précédente), puis à la racine revient explicitement à `http://127.0.0.1:<port>/tv` ;
-  Accueil revient à OpenTV. Aucun clic automatique, aucun « J'aime », repartage, réponse ni publication (publication
+  du bouton/lien au focus ; **← partage le post au focus à « Hermit ou Muse »**. **Retour / Accueil** : script
+  autonome `nav.js` injecté dès `document_start` sur TOUTE page x.com (connexion, vérifications `/account/…`,
+  `/i/flow/…`, page encore en chargement : aucune dépendance au fil `x.js`) ; touches réelles du kiosque (Exit CEC ⇒
+  `Close`, Échap, BrowserBack/GoBack, Retour arrière hors champ, Alt+←). Racine (accueil, explorer…), connexion ou
+  vérification : **retour direct** à `http://127.0.0.1:<port>/tv`, même depuis le champ au focus (Retour arrière y
+  efface toujours un caractère) ; post/fil/modale routée : page précédente seulement si une entrée x.com précédente
+  existe (API Navigation), sinon `/tv` ; filet 1,2 s ⇒ `/tv`. Accueil (BrowserHome/GoHome ; Début hors champ) ⇒ `/tv`. Aucun clic automatique, aucun « J'aime », repartage, réponse ni publication (publication
   hors MVP).
 - **Partage** (← seulement, geste humain) : l'extension lit SEULEMENT le texte visible (≤ 2400) et l'auteur visible
   (≤ 120) du post au focus — jamais une URL, un lien, un média, un cookie ni du HTML — puis appelle
@@ -1616,7 +1625,7 @@ sauvegardes OpenTV, jamais un paquet.
 | **Catalogue quotidien** | `systemctl list-timers opentv-catalogue-refresh.timer` : prochain passage planifié ; `sudo /opt/opentv/bin/opentv-pi catalogue refresh` → `updated` (ou `unchanged`), puis `catalogue status` : nombre attendu, `snapshot` présent, SHA-256 lu ; second passage → `unchanged` sans réécriture ; `catalogue rollback` → `rolled_back`, `hold.held: true`, puis `catalogue refresh` → `held` et SHA-256 inchangé ; `catalogue resume` → `resumed`, passage suivant `updated`/`unchanged` ; fiche ouverte ou lecture pendant un remplacement ⇒ Retour sur la même carte (photo) ; `ls -l /var/lib/opentv/catalogue.json*` : tout `opentv` ; Wi-Fi coupé → `discovery_failed` et SHA-256 inchangé ; accueil peuplé avec le nouveau catalogue en ≤ 120 s (attendu ≤ ~62 s) sans redémarrage de service ; `journalctl -u opentv-catalogue-refresh` sans hôte, préfixe, jeton ni URL ; `systemd-analyze security opentv-catalogue-refresh` relu |
 | **Notes TMDb quotidiennes** | `ls -ld /etc/opentv/tmdb` = `root opentv` `drwxr-x---` dès l'installation ; `getent group opentv` sans membre supplémentaire ; `sudo /opt/opentv/bin/opentv-pi catalogue ratings-credential` (jeton depuis le trousseau, jamais affiché) puis `ls -l /etc/opentv/tmdb/token` = `root opentv` `-rw-r-----` ; pour `opentv`, `opentv-cec` (pendant un passage) et le rafraîchissement : `grep ' /etc/opentv/tmdb ' /proc/<MainPID>/mountinfo` présent et `sudo nsenter -t <MainPID> -m ls /etc/opentv/tmdb` refusé ; jeton remplacé une 2e fois ⇒ masque toujours présent dans `opentv` sans redémarrage ; `catalogue refresh` puis `systemctl show -p ActiveEnterTimestamp,Result opentv-catalogue-ratings` (déclenchée après le rafraîchissement) ; `catalogue status` : `ratings.last.result` `updated`/`unchanged`, `coverage.pending` = 0, `rated` cohérent (aujourd'hui 110/116 : un spécial TV sans vote TMDb reste « indisponible », jamais 0) ; second `catalogue ratings` → `unchanged`, SHA-256 inchangé ; `IPAddressDeny` et DNS : passage réel réussi sous le bac à sable ; panne simulée (réseau coupé pendant le seul passage des notes) → `provider_unavailable`, unité `failed`, `health.warnings` = `ratings_enrichment_failed`, catalogue du rafraîchissement inchangé (SHA-256), puis réseau rétabli ⇒ `systemctl list-timers opentv-catalogue-ratings-retry.timer` et reprise réussie dans ≤ ~1 h 30 (`ratings.retry.attempts` 1, résultat `updated`), et heure suivante : reprise sans requête ; `journalctl -u opentv-catalogue-ratings*` et `-u opentv-catalogue-refresh` sans jeton, titre, hôte ni URL ; `systemd-analyze verify` et `security` des deux unités des notes relus ; `uninstall.sh` pendant un rafraîchissement ⇒ aucun passage des notes démarré (journal), `/run/opentv-uninstalling` retiré à la fin ; nouvelle note visible à l'accueil en ≤ 120 s sans redémarrage |
 | **Ambiance (Canvas)** | les 7 contrôles terrain du §6 quinquies : dossier `opentv:opentv 0700`, masques réels (`mountinfo`), photo/vidéo 1920×1080 des styles et mouvements, proposition d'un assistant autorisé refusée puis acceptée sur la TV (« Non » au focus), assistant sans permission refusé, mouvement réduit, budget (CPU/RSS, température, `get_throttled=0x0`, `hvs_underrun` stable), ambiance figée pendant « Regarder » et même carte au retour, ambiance conservée après redémarrage/réinstallation ; photo d'Alex |
-| **X TV Mode (0.7.7)** | tuile X (rangée « Applications ») ⇒ `https://x.com/home` dans le kiosque ; OK du téléphone sur la tuile ⇒ « Utilise la télécommande de la télé pour ouvrir X. », rien ne s'ouvre ; connexion faite par Alex lui-même ; fil : anneau jaune, colonne unique, bandeau d'aide ; ↑ ↓ OK ← Retour Accueil à la télécommande CEC ; ← ⇒ « Prêt pour Hermit ou Muse… », puis Hermit/Muse `x_context` résume le post ; Retour racine/Accueil ⇒ `/tv` ; `systemctl restart opentv` ⇒ partage refusé puis accepté après retour à /tv ; `journalctl -u opentv` sans texte de post ; `OPENTV_X_TV=0` + restart ⇒ tuile absente ; photo d'Alex |
+| **X TV Mode (0.7.7)** | accueil : tuile X visible sans défiler (rangée « Applications » en tête, au focus) ; page de connexion X et fil **sombres** ; Retour Samsung depuis la connexion ⇒ `/tv` ; tuile X ⇒ `https://x.com/home` dans le kiosque ; OK du téléphone sur la tuile ⇒ « Utilise la télécommande de la télé pour ouvrir X. », rien ne s'ouvre ; connexion faite par Alex lui-même ; fil : anneau jaune, colonne unique, bandeau d'aide ; ↑ ↓ OK ← Retour Accueil à la télécommande CEC ; ← ⇒ « Prêt pour Hermit ou Muse… », puis Hermit/Muse `x_context` résume le post ; Retour racine/Accueil ⇒ `/tv` ; `systemctl restart opentv` ⇒ partage refusé puis accepté après retour à /tv ; `journalctl -u opentv` sans texte de post ; `OPENTV_X_TV=0` + restart ⇒ tuile absente ; photo d'Alex |
 | **Agent** | `opentv-mcp` depuis le compte de l'agent : `tools/list` filtré par scopes, `recommend` sans URL, scope refusé, audit présent sans secret |
 
 ## 10. Développement
