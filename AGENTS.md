@@ -374,7 +374,8 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   est coupé tant que `OPENTV_CEC_FOLLOWER≠0` ; repli/rollback `OPENTV_CEC_FOLLOWER=0` ; gate `OPENTV_CEC_FOLLOWER=canary`. Santé `cec_follower_failed`. Tests
   `scripts/pi4/tests/test_cec_follower.py` (faux noyau `tests/_cecfake.py`). Vérifié hors matériel seulement.
 - **X TV Mode (0.7.7)** : tuile X (rangée « Applications » de `tv.js`, jamais un film) ⇒ `https://x.com/home` en page
-  de premier niveau dans le même Chromium/profil du kiosque ; extension locale MV3 `scripts/pi4/x-tv-extension/`
+  de premier niveau dans le même Chromium/profil du kiosque, par CEC/clavier seulement (OK du téléphone refusé :
+  sur x.com la boucle téléphone de /tv n'existe plus) ; extension locale MV3 `scripts/pi4/x-tv-extension/`
   (ID fixe autorisé par la politique gérée, `storage` + hôtes x.com/twitter.com/127.0.0.1) : CSS TV du fil, ↑ ↓ OK ←
   Retour Accueil, ← partage texte+auteur visibles du post au focus vers `POST /api/tv/x/context` (portes du kiosque +
   clé TV recapturée sur /tv, corps borné, champs fermés). `opentv_pi/xcontext.py` : UN contexte mémoire 10 min, jamais

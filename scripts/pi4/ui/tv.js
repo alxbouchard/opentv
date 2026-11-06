@@ -53,6 +53,7 @@
   // n'est JAMAIS un film : ni fiche, ni « Regarder », ni avis, jamais ouverte par un assistant. OK = navigation de premier
   // niveau dans ce même Chromium (profil persistant ; connexion faite par Alex lui-même, rien n'est rempli).
   var APPS = { x: { id: "app:x", app: "x", kind: "app", title: "X", url: "https://x.com/home" } };
+  var MSG_APP_PHONE = "Utilise la télécommande de la télé pour ouvrir X.";
   // Reprise après redémarrage du service : la clé de page change à chaque démarrage. Un 403 explicite « tv_key »
   // recharge /tv (qui porte la nouvelle clé) après une attente croissante, au plus RELOAD_MAX fois par fenêtre,
   // journal tenu dans sessionStorage (survit au rechargement). Sans stockage : aucun rechargement (pas de boucle).
@@ -1387,6 +1388,13 @@
   function remoteKey(a) {   // téléphone appairé : même règle, événement « remote » (le service ne le voit pas)
     if (offlineShown()) { lastHumanAt = Date.now(); return; }   // voile « Reconnexion… » : rien d'invisible
     if (cvSheet) { lastHumanAt = Date.now(); sheetKey(a); return; }
+    // X TV Mode : sur x.com, la boucle téléphone de /tv n'existe plus (ni Retour ni Accueil depuis le téléphone).
+    // Ouvrir une application exige donc la télécommande de la télé (CEC) ou le clavier : refusé, rien ne bouge.
+    if (a === "ok" && !panel && !play && isApp(current())) {
+      lastHumanAt = Date.now();
+      toast(MSG_APP_PHONE);
+      return;
+    }
     humanKey("remote", a, false);
   }
   // ---- scène publiée et rendu

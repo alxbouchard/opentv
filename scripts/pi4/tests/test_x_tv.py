@@ -365,6 +365,61 @@ class TestMuseBridgeXContext(unittest.TestCase):
         self.assertIs(r["payload"]["untrusted"], True)
 
 
+# --------------------------------------------------------------------------------------------- tuile X : source
+# Une fois sur x.com, la boucle téléphone de /tv n'existe plus : un téléphone qui ouvrirait X ne pourrait plus faire
+# Retour/Accueil (Alex coincé si CEC échoue). OK du téléphone sur la tuile : refusé avec un message ; OK de la
+# télécommande de la télé (CEC -> clavier) ou du clavier : ouvre X. Navigation observée par l'API Navigation du
+# harnais (annulée : aucun accès réseau), jamais par un crochet du produit.
+NAV_SPY = ("<script>window.__NAV__=[];if(window.navigation){navigation.addEventListener('navigate',function(e){"
+           "window.__NAV__.push(e.destination.url);if(e.cancelable){e.preventDefault();}});}"
+           "window.__EXTRA__=function(){return {nav:window.__NAV__,spy:!!window.navigation};};</script>")
+PHONE_REFUSED = "Utilise la télécommande de la télé pour ouvrir X."
+
+
+@unittest.skipUnless(find_chromium(), "Chromium introuvable")
+class TestXTileKeySource(unittest.TestCase):
+    FY = {"note": "", "marks": {}, "rows": [{"id": "r1", "title": "Le choix de ce soir",
+                                             "items": [{"id": "a", "title": "Alpha"}, {"id": "b", "title": "Bravo"}]}]}
+    STATE = {"device": "Salon", "network": {"mode": "ethernet"}, "agents": [], "message": None,
+             "setup": {"active": False}, "apps": [{"id": "x", "title": "X"}],
+             "remote": {"enabled": True, "url": "http://opentv-salon.local:8082/r?p=" + "x" * 43,
+                        "expires_in": 300, "phones": 1}}
+
+    def render(self, steps, remote=None):
+        from tests.test_remote import TestTvKeysInChromium   # même harnais /tv (import local : jamais découvert ici)
+        harness = vars(TestTvKeysInChromium)["render"]
+        return harness(self, self.STATE, steps, remote=remote, fy=self.FY, inject=NAV_SPY)
+
+    def test_phone_ok_on_x_tile_is_refused_with_message(self):
+        remote = [{"seq": 1, "events": []},                                       # synchronisation
+                  {"seq": 2, "events": [{"seq": 2, "a": "down"}]},               # téléphone : ↓ vers la tuile X
+                  {"seq": 3, "events": [{"seq": 3, "a": "ok"}]}]                 # téléphone : OK
+        res = self.render([], remote=remote)
+        self.assertTrue(res["extra"]["spy"])
+        self.assertEqual(res["focus"], "X")                                       # le téléphone a bien navigué
+        self.assertEqual(res["extra"]["nav"], [])                                 # mais X n'est jamais ouvert
+        self.assertFalse(res["panel"])
+        self.assertEqual(res["toast"], PHONE_REFUSED)
+        self.assertFalse(any(c.startswith("POST /api/tv/feedback") or c.startswith("POST /api/tv/play")
+                             for c in res["calls"]))
+
+    def test_tv_remote_or_keyboard_ok_opens_x(self):
+        for ok in (["Enter"], ["Select"], ["Accept"]):                            # CEC Select/OK -> touches clavier
+            with self.subTest(ok=ok[0]):
+                res = self.render([["ArrowDown"], ok])
+                self.assertEqual(res["steps"][0]["focus"], "X")
+                self.assertEqual(res["extra"]["nav"], ["https://x.com/home"])
+                self.assertEqual(res["toast"], "Ouverture de X…")
+                self.assertFalse(res["panel"])
+
+    def test_phone_ok_elsewhere_unchanged(self):
+        remote = [{"seq": 1, "events": []}, {"seq": 2, "events": [{"seq": 2, "a": "ok"}]}]
+        res = self.render([], remote=remote)
+        self.assertEqual((res["focus"], res["panel"]), ("Alpha", True))          # fiche film : comme avant
+        self.assertEqual(res["extra"]["nav"], [])
+        self.assertNotEqual(res["toast"], PHONE_REFUSED)
+
+
 # --------------------------------------------------------------------------------------------- extension (statique)
 class TestXExtensionStatic(unittest.TestCase):
     def manifest(self):
