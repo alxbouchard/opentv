@@ -1490,16 +1490,28 @@ connexion réelle** reçoit le focus UNE fois (OK direct, zéro flèche) si rien
 (0.7.9). Correction 0.7.9, d'après le **DOM réel** de `https://x.com/` déconnecté (SSR relevé le 2026-11-06, EN/FR) :
 `<a>Continue with phone</a>` → `/i/jf/onboarding/web?mode=signup` (**INSCRIPTION**), Google/Apple → `?mode=login`,
 champ identifiant + « Continue », puis `<a>Sign in</a>` / `Se connecter` → `?mode=login` ; aucun « Log in with username
-or email » sur cet accueil. `preferRank` de `nav.js` : href **analysé comme URL** (même origine X en https, chemin
-exact, paramètre `mode` EXACTEMENT `login`, sans `start` ; `/login` et `/i/flow/login` gardés) ET libellé générique
-ancré en entier (« Sign in », « Log in », « Se connecter », « Connexion »… jamais « Déconnexion ») ⇒ rang 0 ; passkey
-native de X (bouton « Continue with passkey » / « Use passkey » / « clé d'accès ») ⇒ rang 1 ; Google/Apple, inscription,
-libellé inconnu ⇒ **rien n'est préféré** (fail closed). L'inscription (`mode=signup`, `start=phone`, « Sign up »,
-« Continue with phone ») est **retirée de ↑ ↓** : le premier ↓ ne peut jamais y atterrir. X ouvre sa fenêtre de
+or email » sur cet accueil. `preferRank` de `nav.js` : href **analysé comme URL** (https, hôte EXACTEMENT `x.com`,
+`www.x.com`, `mobile.x.com`, `twitter.com`, `www.twitter.com` ou `mobile.twitter.com` — aucun autre sous-domaine —, sans
+port ni identifiants, chemin exact, paramètre `mode` EXACTEMENT `login`, sans `start` ; `/login` et `/i/flow/login`
+gardés) ET libellé générique ancré en entier (« Sign in », « Log in », « Se connecter », « Connexion »… jamais
+« Déconnexion ») ⇒ rang 0 ; passkey native de X (bouton « Continue with passkey » / « Use passkey » / « clé d'accès »)
+⇒ rang 1 ; Google/Apple, inscription, libellé inconnu ⇒ **rien n'est préféré** (fail closed). **Sens négatif jamais
+préféré** : « Continue without passkey », « Sign in without a passkey », « Use password instead of passkey », « Continue
+sans clé d'accès », « Utiliser le mot de passe au lieu de la clé d'accès », « Use a different / another passkey »,
+« Utiliser une autre clé d'accès » (sans / au lieu de / autre / différente / mot de passe, EN/FR, ES/DE/IT au mieux) —
+atteignables à la main seulement. L'inscription est **retirée de ↑ ↓** par href d'inscription STRICT (`mode=signup`,
+`start=phone`, `/signup`, `/i/flow/signup`), mots d'inscription explicites (« Sign up », « Create account »,
+« S'inscrire »…) ou libellé EXACT connu (« Continue with phone », « Continuer avec le téléphone »…) — jamais une
+tournure large : « Use your phone », « Use phone to verify » d'une vérification restent atteignables. Si X **met
+lui-même le focus** sur une inscription connue, il passe à l'entrée préférée (« Sign in » / passkey) ; à défaut il est
+**retiré** (blur) pour qu'un OK réel ne puisse rien ouvrir ; jamais un clic. X ouvre sa fenêtre de
 connexion **dans la page** (preventDefault + routeur) : **un seul réarmement** par document, posé seulement par un clic
-de confiance (OK réel ou pointeur ; jamais un clic de script) sur ce « Sign in », borné à 15 s, annulé par toute touche
-ou tout geste réel suivant, consommé par la première passkey **visible et nouvelle** (absente au clic) : focus
-seulement, aucun clic, aucune valeur lue. Préférer = focus seulement ; après
+de confiance (OK réel ou pointeur ; jamais un clic de script) sur ce « Sign in », borné à 15 s **monotones**
+(`performance.now`, insensible aux recalages NTP ; minuterie explicite qui libère l'instantané même sans mutation),
+annulé par toute touche ou tout geste réel suivant (pointerdown compris), consommé par la **meilleure** passkey sûre
+(canonique « Continue with passkey » avant une variante plus libre), **visible et absente du document au clic** :
+l'instantané couvre TOUS les contrôles présents au clic, visibles ou non (une passkey masquée puis révélée n'est jamais
+« nouvelle » ; aucune valeur de champ lue). Focus seulement, aucun clic. Préférer = focus seulement ; après
 une touche réelle le focus n'est plus jamais déplacé seul (repli manuel identifiant/e-mail intact) ; consigne à l'écran « ↑ ↓ choisir · OK
 valider · Retour : OpenTV · Identifiant et mot de passe : au clavier ». **OK réel** : activation native de Chromium
 sur un bouton/lien natif (geste humain) ; pour un `role="button"` non natif seulement, UN clic de repli sur CE

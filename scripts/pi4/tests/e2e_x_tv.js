@@ -54,7 +54,7 @@ const LOGIN = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title
 // formulaire identifiant + « Continue », puis « Already have an account? » + lien générique « Sign in » (mode=login).
 // Seules simulations (X rend le reste côté client, rien dans le SSR) : l'autofocus du champ vu sur la photo terrain
 // (sauf ?nofocus) et la fenêtre de connexion DANS la page (clic intercepté : preventDefault + pushState, fenêtre
-// modale ajoutée 300 ms plus tard — 1500 ms avec ?slow — après un indicateur de chargement, champ autofocusé) ;
+// modale ajoutée 300 ms plus tard — 1500 ms avec ?slow, options lues AU CHARGEMENT (avant pushState) — après un indicateur de chargement, champ autofocusé) ;
 // ?oldpk : leurre SYNTHÉTIQUE, une passkey déjà présente avant le clic. Chaque activation est comptée par id (__hits).
 const ONB = "/i/jf/onboarding/web";
 const SIGNIN_A = `<a id="signin" href="${ONB}?mode=login&amp;redirect_after_login=%2F">Sign in</a>`;
@@ -73,6 +73,14 @@ const LOGIN_WINDOW = `<div id="layers"><div role="dialog" aria-modal="true" id="
   `<div id="forgot" role="button" tabindex="0" onclick="__hits.push('forgot')"><span>Forgot password?</span></div>` +
   `<span>Don't have an account? <a id="dlgsignup" href="${ONB}?mode=signup&amp;redirect_after_login=%2F">Sign up</a>` +
   `</span></div></div>`;
+// ?negpk : leurres SYNTHÉTIQUES de sens négatif (sans / au lieu de / autre / différente, EN + FR) et passkey libre,
+// visibles et NOUVEAUX, placés AVANT la passkey canonique de la fenêtre : seule la canonique reçoit le focus
+const NEG_DECOYS = [["neg1", "Continue without passkey"], ["neg2", "Sign in without a passkey"],
+  ["neg3", "Use password instead of passkey"], ["neg4", "Continue sans clé d'accès"],
+  ["neg5", "Utiliser le mot de passe au lieu de la clé d'accès"], ["neg6", "Use a different passkey"],
+  ["neg7", "Utiliser une autre clé d'accès"], ["loose", "Use passkey on this device"]]
+  .map(([id, t]) => `<button id="${id}" type="button" onclick="__hits.push('${id}')">${t}</button>`).join("");
+const LOGIN_WINDOW_NEG = LOGIN_WINDOW.replace('<button id="passkey"', NEG_DECOYS + '<button id="passkey"');
 const LANDING_BODY = `<div id="react-root"><div><h1>Happening now.</h1><div>` +
   `<a id="phone" href="${ONB}?mode=signup&amp;redirect_after_login=%2F"><span><svg width="20" height="20"></svg></span>` +
   `<span>Continue with phone</span></a><div><div><a id="google" href="${ONB}?mode=login&amp;redirect_after_login=%2F">` +
@@ -88,22 +96,28 @@ const LANDING_BODY = `<div id="react-root"><div><h1>Happening now.</h1><div>` +
   `</div></div><div><h1>See what’s happening</h1><p>Already have an account?</p>${SIGNIN_A}</div>` +
   `<footer><nav><a id="about" target="_blank" rel="noopener noreferrer nofollow" href="https://about.x.com">About</a>` +
   `</nav></footer></div>`;
-const LANDING_JS = `<script>window.__hits=[];window.__pkFocus=0;window.__doc=String(Math.random());(function(){` +
-  `var W=${JSON.stringify(LOGIN_WINDOW)};` +
+const LANDING_JS = `<script>window.__hits=[];window.__pkFocus=0;window.__doc=String(Math.random());(function(){var Q=location.search;` +
+  `var W=/negpk/.test(Q)?${JSON.stringify(LOGIN_WINDOW_NEG)}:${JSON.stringify(LOGIN_WINDOW)};` +
+  `window.__f={};document.addEventListener('focusin',function(e){var i=e.target&&e.target.id;if(i){__f[i]=(__f[i]||0)+1;}},true);` +
   `document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('a[href^="${ONB}"]');` +
   `if(!a){return;}e.preventDefault();__hits.push(a.id);var u=new URL(a.href);` +
   `if(u.searchParams.get('mode')!=='login'){return;}` +
   `if(location.pathname!==u.pathname){history.pushState({otv:1},'',u.pathname+u.search);}` +
   `if(!document.getElementById('spinner')){document.body.insertAdjacentHTML('beforeend','<div id="spinner" role="progressbar">Loading…</div>');}` +
   `setTimeout(function(){var sp=document.getElementById('spinner');if(sp){sp.remove();}` +
+  `if(/hidpk/.test(Q)){if(!document.getElementById('newpk')){document.getElementById('hidpk').style.display='block';` +
+  `document.body.insertAdjacentHTML('beforeend','<div id="inlinepk"><button id="newpk" type="button">Continue with passkey</button></div>');}return;}` +
   `if(document.getElementById('logindlg')){return;}document.body.insertAdjacentHTML('beforeend',W);` +
   `document.getElementById('passkey').addEventListener('focus',function(){__pkFocus++;});` +
-  `document.getElementById('dlguser').focus();},/slow/.test(location.search)?1500:300);});` +
+  `document.getElementById('dlguser').focus();},/slow/.test(Q)?1500:300);});` +
   `addEventListener('popstate',function(){var d=document.getElementById('layers');if(d){d.remove();}});` +
-  `if(/oldpk/.test(location.search)){document.getElementById('signin').insertAdjacentHTML('afterend',` +
+  `if(/oldpk/.test(Q)){document.getElementById('signin').insertAdjacentHTML('afterend',` +
   `'<button id="oldpk" type="button">Continue with passkey</button>');window.__oldFocus=0;` +
   `document.getElementById('oldpk').addEventListener('focus',function(){__oldFocus++;});}` +
-  `if(!/nofocus/.test(location.search)){document.getElementById('landing-identifier').focus();window.__autofocused=true;}` +
+  `if(/hidpk/.test(Q)){document.getElementById('signin').insertAdjacentHTML('afterend',` +
+  `'<button id="hidpk" type="button" style="display:none">Continue with passkey</button>');}` +
+  `if(/phonefocus/.test(Q)){document.getElementById('phone').focus();window.__phonefocused=true;}` +
+  `else if(!/nofocus/.test(Q)){document.getElementById('landing-identifier').focus();window.__autofocused=true;}` +
   `})();</script>`;
 const LANDING = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>X. It’s what’s happening / X</title>` +
   `${STYLE}<style>a,button,[role=button],input{display:block;margin:10px auto;width:300px;height:40px}</style></head>` +
@@ -127,6 +141,17 @@ const PHONE_ONLY = `<!doctype html><html lang="en"><head><meta charset="utf-8"><
   `<button id="phone" type="button" onclick="__hits.push('phone')">Continue with phone</button>` +
   `<input id="user" name="text" autofocus autocomplete="username" type="text">` +
   `<div id="next" role="button" tabindex="0" onclick="__hits.push('next')"><span>Next</span></div></div>` +
+  `<script>window.__hits=[];</script>${INSTR}</body></html>`;
+// vérification de compte (SYNTHÉTIQUE) : options légitimes par téléphone atteignables à la main ; l'inscription exacte
+// connue (« Continue with phone ») et le href d'inscription restent retirés de ↑ ↓
+const VERIFY = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Verify / X</title>` +
+  `${STYLE}<style>a,button,[role=button],input{display:block;margin:12px auto;width:300px;height:40px}</style></head>` +
+  `<body><div role="dialog" aria-modal="true"><h1>Verify your identity</h1>` +
+  `<button id="usephone" type="button" onclick="__hits.push('usephone')">Use your phone</button>` +
+  `<button id="phoneverify" type="button" onclick="__hits.push('phoneverify')">Use phone to verify</button>` +
+  `<button id="vfr" type="button" onclick="__hits.push('vfr')">Utiliser votre téléphone pour vérifier</button>` +
+  `<button id="phonesignup" type="button" onclick="__hits.push('phonesignup')">Continue with phone</button>` +
+  `<a id="signuplink" href="${ONB}?mode=signup" onclick="__hits.push('signuplink');return false">Get started</a></div>` +
   `<script>window.__hits=[];</script>${INSTR}</body></html>`;
 // 0.7.8 — fenêtre modale VISIBLE de X au-dessus du fil (colonne principale PRÉSENTE) : invite de notifications réaliste
 // (calque fixe, bouton natif <button role=button> comme X + rôle « button » non natif qui ferme la fenêtre) ; le fil derrière ne doit jamais bouger
@@ -187,6 +212,7 @@ function ctl(p) {
       const body = u.pathname === "/i/flow/stall" ? STALL :
         u.pathname === "/" ? (u.searchParams.has("nosignin") ? LANDING_NOSIGNIN : LANDING) :
         u.pathname === "/i/flow/passkey" ? PASSKEY_LOGIN : u.pathname === "/i/flow/phoneonly" ? PHONE_ONLY :
+        u.pathname === "/i/flow/verify" ? VERIFY :
         u.pathname === "/settings/dialog" ? FEED_DIALOG : u.pathname === "/compose/home" ? FEED_COMPOSE :
         (u.pathname.indexOf("/i/flow/login") === 0 || u.pathname.indexOf("/account/") === 0) ? LOGIN :
         /\/status\/\d+$/.test(u.pathname) ? STATUS : FEED;
@@ -497,6 +523,118 @@ function ctl(p) {
     if (page.url() !== cfg.tv) { await page.keyboard.press("Escape"); }
     op.url_after_back = await waitUrl((u) => u === cfg.tv);
     out.steps.old_passkey = op;
+
+    const backToTv = async (here) => {
+      await page.keyboard.press("Escape");
+      await waitUrl((u) => u === here || u === cfg.tv);
+      await sleep(300);
+      if (page.url() !== cfg.tv) { await page.keyboard.press("Escape"); }
+      return waitUrl((u) => u === cfg.tv);
+    };
+    const focusCounts = () => page.evaluate(() => Object.assign({}, window.__f || {}));
+    // 7 bis-e) leurres négatifs (sans / au lieu de / autre / différente) et passkey libre AVANT la canonique : le
+    //          réarmement choisit la MEILLEURE passkey sûre, jamais la première du document
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    await page.goto("https://x.com/?negpk=1");
+    await page.waitForFunction(() => document.activeElement && document.activeElement.id === "signin", null, { timeout: 5000 });
+    const ng = {};
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => document.getElementById("logindlg"), null, { timeout: 5000 });
+    await sleep(900);
+    ng.after = Object.assign(await st(), { f: await focusCounts() });
+    ng.url_after_back = await backToTv("https://x.com/?negpk=1");
+    out.steps.negative_passkeys = ng;
+
+    // 7 bis-f) passkey DÉJÀ dans le document au clic mais MASQUÉE, révélée par X avec une passkey réellement nouvelle
+    //          (fenêtre en ligne, sans modale) : seule la nouvelle reçoit le focus
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    await page.goto("https://x.com/?hidpk=1");
+    await page.waitForFunction(() => document.activeElement && document.activeElement.id === "signin", null, { timeout: 5000 });
+    const hp = {};
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => document.getElementById("newpk"), null, { timeout: 5000 });
+    await sleep(900);
+    hp.after = Object.assign(await st(), { f: await focusCounts(),
+      hid_visible: await page.evaluate(() => getComputedStyle(document.getElementById("hidpk")).display) });
+    hp.url_after_back = await backToTv("https://x.com/?hidpk=1");
+    out.steps.hidden_passkey = hp;
+
+    // 7 bis-g) clic au POINTEUR (souris réelle, pointerdown + click de confiance) sur « Sign in » : arme ; puis
+    //          pointerdown réel AVANT la fenêtre (lente) : annule
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    await page.goto("https://x.com/");
+    await page.waitForFunction(() => document.activeElement && document.activeElement.id === "signin", null, { timeout: 5000 });
+    const pt = {};
+    const center = (id) => page.evaluate((i) => {
+      const r = document.getElementById(i).getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }, id);
+    let c0 = await center("signin");
+    await page.mouse.click(c0.x, c0.y);
+    await page.waitForFunction(() => document.getElementById("logindlg"), null, { timeout: 5000 });
+    await sleep(900);
+    pt.click = await st();
+    pt.click_back = await backToTv("https://x.com/");
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    await page.goto("https://x.com/?slow=1");
+    await page.waitForFunction(() => document.activeElement && document.activeElement.id === "signin", null, { timeout: 5000 });
+    c0 = await center("signin");
+    await page.mouse.click(c0.x, c0.y);
+    await sleep(200);
+    await page.mouse.click(5, 5);                              // geste réel hors contrôle, avant la fenêtre
+    await page.waitForFunction(() => document.getElementById("logindlg"), null, { timeout: 5000 });
+    await sleep(900);
+    pt.cancel = await st();
+    pt.cancel_back = await backToTv("https://x.com/?slow=1");
+    out.steps.pointer = pt;
+
+    // 7 bis-h) X focalise l'INSCRIPTION (« Continue with phone ») : sans « Sign in », focus retiré (blur) — un OK réel
+    //          n'ouvre rien ; ↓ : Google ; X la refocalise après une touche réelle : retirée encore ; avec « Sign in » :
+    //          focus vers « Sign in », même après une touche réelle ; jamais un clic
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    await page.goto("https://x.com/?nosignin=1&phonefocus=1");
+    await page.waitForFunction(() => window.__phonefocused === true, null, { timeout: 5000 });
+    await sleep(900);
+    const sf = { initial: await st() };
+    await page.keyboard.press("Enter"); await sleep(400);
+    sf.ok = await st();
+    await page.keyboard.press("ArrowDown"); await sleep(100);
+    sf.down = await st();
+    await page.evaluate(() => document.getElementById("phone").focus());
+    await sleep(700);
+    sf.refocus = await st();
+    await page.keyboard.press("Enter"); await sleep(400);
+    sf.refocus_ok = await st();
+    await page.keyboard.press("Escape");
+    sf.url_after_back = await waitUrl((u) => u === cfg.tv);
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    await page.goto("https://x.com/?phonefocus=1");
+    await page.waitForFunction(() => window.__phonefocused === true, null, { timeout: 5000 });
+    await sleep(900);
+    sf.pref_initial = await st();
+    await page.keyboard.press("ArrowDown"); await sleep(100);
+    sf.pref_down = await st();
+    await page.evaluate(() => document.getElementById("phone").focus());
+    await sleep(700);
+    sf.pref_refocus = await st();
+    await page.keyboard.press("Escape");
+    sf.pref_url_after_back = await waitUrl((u) => u === cfg.tv);
+    out.steps.signup_focus = sf;
+
+    // 7 bis-i) vérification : « Use your phone » / « Use phone to verify » atteignables, OK réel : UNE activation ;
+    //          « Continue with phone » (inscription exacte connue) et le href d'inscription jamais atteints
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    await page.goto("https://x.com/i/flow/verify");
+    await page.waitForSelector("#usephone");
+    await sleep(900);
+    const vf = { initial: await st() };
+    const vseq = [];
+    for (let i = 0; i < 4; i++) { await page.keyboard.press("ArrowDown"); await sleep(60); vseq.push((await st()).active); }
+    vf.seq = vseq;
+    await page.keyboard.press("Enter"); await sleep(300);
+    vf.ok = await st();
+    await page.keyboard.press("Escape");
+    vf.url_after_back = await waitUrl((u) => u === cfg.tv);
+    out.steps.verify = vf;
 
     // 7 bis-n) même accueil réel SANS « Sign in » ni autofocus : rien n'est préféré ni déplacé (fail closed) ; le
     //          premier ↓ réel va au premier contrôle permis (Google), JAMAIS à « Continue with phone » (inscription)

@@ -18,10 +18,15 @@
  *           réel, le lien générique « Sign in » / « Se connecter » (href /i/jf/onboarding/web?mode=login analysé)
  *           reçoit le focus UNE fois, même si X a autofocusé le champ identifiant ; à défaut la passkey native de X
  *           (« Continue with passkey ») ; JAMAIS Google/Apple ; JAMAIS « Continue with phone » (inscription, mode=signup :
- *           retirée de ↑ ↓) ; rien de reconnu : rien n'est déplacé. Ensuite le focus n'est jamais déplacé seul (sinon
- *           ↓ : même préférence, ou premier contrôle permis), sauf UN réarmement : après un clic de confiance sur ce
- *           « Sign in », la première passkey visible NOUVELLE de la fenêtre que X ouvre dans la page reçoit le focus
- *           une fois (borné, annulé par toute touche/geste réel).
+ *           retirée de ↑ ↓ ; href d'inscription strict ou libellé exact connu, jamais « Use your phone » d'une
+ *           vérification) ; jamais un sens négatif (« without / instead / different / other passkey », « sans », « au
+ *           lieu de », « autre », mot de passe) ; hôtes de href acceptés EXACTEMENT : x.com, www.x.com, mobile.x.com,
+ *           twitter.com, www.twitter.com, mobile.twitter.com (https, sans port ni identifiants) ; rien de reconnu :
+ *           rien n'est déplacé. Ensuite le focus n'est jamais déplacé seul (sinon ↓ : même préférence, ou premier
+ *           contrôle permis), sauf UN réarmement : après un clic de confiance sur ce « Sign in », la MEILLEURE passkey
+ *           sûre, visible et ABSENTE du document au clic, de la fenêtre que X ouvre dans la page, reçoit le focus une
+ *           fois (15 s monotones, minuterie explicite, annulé par toute touche/geste réel). Inscription au focus posée
+ *           par X : focus vers l'entrée préférée, sinon retiré (blur) ; jamais un clic.
  *           OK/Entrée RÉELLE : activation native du bouton/lien au focus (geste humain) ; repli pour un rôle
  *           « button » non natif seulement. Champ au focus :
  *           saisie au clavier physique 100 % native (← → Entrée Retour arrière natifs) ; aucune valeur n'est lue,
@@ -124,7 +129,15 @@
   const GENERIC_LOGIN_RE = /^(sign ?in|log ?in|se connecter|connexion|connecte-toi|iniciar sesi[oó]n|anmelden|einloggen|accedi|entrar)$/i;
   const PASSKEY_RE = /\bpass ?keys?\b|cl[ée]s? d['’](acc[eè]s|identification)|llaves? de acceso|chiavi? d['’]accesso/i;
   const PASSKEY_VERB_RE = /^(continue|use|sign ?in|log ?in|continuer|utiliser|se connecter|connexion|continuar|usar|iniciar sesi[oó]n|weiter|verwenden|mit|anmelden|continua|usa|accedi)\b/i;
-  const SIGNUP_RE = /\bsign ?up\b|\bcreate (an |your |a new )?account\b|s['’]inscrire|\binscri(s|ption)\b|cr[ée]er (un |ton |votre )?compte|^(continue|continuer|continuar|weiter|continua|use|utiliser|usar) (with |avec |con |mit )?(le |la |ton |votre |un |une |a |your |el |tu |dem |deinem |il )?(num[ée]ro (de )?)?(phone|t[ée]l[ée]phone|tel[ée]fono|telefon|num[ée]ro)/i;
+  const SIGNUP_RE = /\bsign ?up\b|\bcreate (an |your |a new )?account\b|s['’]inscrire|\binscri(s|ption)\b|cr[ée]er (un |ton |votre )?compte/i;
+  // libellés EXACTS (ancrés en entier) de l'inscription par téléphone de X (« Continue with phone » : mode=signup) ;
+  // jamais une tournure large (« Use your phone », « Use phone to verify » : vérifications légitimes, atteignables)
+  const SIGNUP_PHONE_RE = /^(continue with phone( number)?|sign up with phone( number)?|continuer avec (le |un |ton |votre )?(num[ée]ro (de )?)?t[ée]l[ée]phone|continuar con (el |tu )?(n[uú]mero de )?tel[ée]fono|weiter mit (der |deiner )?telefon(nummer)?|mit telefon(nummer)? fortfahren|continua con (il )?(numero di )?telefono)$/i;
+  // sens NÉGATIF ou détourné : « sans », « au lieu de », « autre / différente », mot de passe (libellé seulement,
+  // jamais un champ) — jamais préféré
+  const NEGATED_RE = /\b(without|instead|different|another|other|not|no)\b|\bsans\b|au lieu|\bplut[ôo]t\b|\bautres?\b|diff[ée]rente?s?\b|\bpas\b|\bsin\b|en (lugar|vez)|\botr[oa]s?\b|\bohne\b|\bstatt\b|\bandere[nmrs]?\b|\bsenza\b|invece|\baltr[oa]\b|\bdivers[oa]\b|pass ?wor[dt]|mot de passe|contrase[ñn]a/i;
+  // passkey CANONIQUE de X (libellé entier : verbe + « with/avec » + passkey) : préférée aux variantes plus libres
+  const PASSKEY_EXACT_RE = /^((continue|sign ?in|log ?in|continuer|se connecter|connexion|continuar|iniciar sesi[oó]n|weiter|anmelden|continua|accedi) (with|avec|con|mit) |(use|utiliser|usar|verwenden|usa) )(a |an |your |une |ta |votre |una |tu |il |la )?(pass ?key|cl[ée] d['’](acc[eè]s|identification)|llave de acceso|chiave d['’]accesso)$/i;
   const NOT_LOGIN_RE = /learn|about|en savoir|[àa] propos|\badd\b|ajouter|create|cr[ée]er|regist|reg[ií]str|d[ée]connex|d[ée]connect|log ?out|sign ?out/i;
   // href analysé comme URL (jamais une sous-chaîne) : « login » | « signup » | « other » ; null sans href
   function hrefKind(href) {
@@ -145,16 +158,24 @@
     if (path === ONBOARDING_PATH) { return modes.length === 1 && modes[0] === "login" ? "login" : "other"; }
     return modes.length === 0 || (modes.length === 1 && modes[0] === "login") ? "login" : "other";
   }
-  function signupLike(text, href) {   // inscription (téléphone compris) : retirée de la navigation aux flèches
-    return hrefKind(href) === "signup" || SIGNUP_RE.test(typeof text === "string" ? text : "");
+  function signupLike(text, href) {   // inscription (href strict ou libellé exact connu) : retirée des flèches
+    const t = (typeof text === "string" ? text : "").trim();
+    return hrefKind(href) === "signup" || SIGNUP_RE.test(t) || SIGNUP_PHONE_RE.test(t);
   }
   function preferRank(text, href) {
     const t = (typeof text === "string" ? text : "").trim();
     const k = hrefKind(href);
-    if (signupLike(t, href) || NOT_LOGIN_RE.test(t)) { return -1; }
+    if (signupLike(t, href) || NOT_LOGIN_RE.test(t) || NEGATED_RE.test(t)) { return -1; }
     if (k === "login" && GENERIC_LOGIN_RE.test(t)) { return RANK_LOGIN; }   // « Sign in » générique, jamais un fournisseur
     if (k === null && PASSKEY_RE.test(t) && PASSKEY_VERB_RE.test(t)) { return RANK_PASSKEY; }
     return -1;
+  }
+  // score de préférence (plus grand = meilleur ; 0 = jamais) : « Sign in » générique > passkey canonique > autre passkey
+  function preferScore(text, href) {
+    const r = preferRank(text, href);
+    if (r === RANK_LOGIN) { return 3; }
+    if (r === RANK_PASSKEY) { return PASSKEY_EXACT_RE.test(String(text).trim()) ? 2 : 1; }
+    return 0;
   }
   const MOVE_KEYS = { ArrowUp: -1, Up: -1, ArrowDown: 1, Down: 1, ArrowLeft: -1, Left: -1, ArrowRight: 1, Right: 1 };
   const MOVE_CODES = { 38: -1, 40: 1, 37: -1, 39: 1 };
@@ -178,10 +199,13 @@
   let autoFocused = false;
   let userActed = false;   // touche ou geste RÉEL sur cette page : le focus n'est plus jamais déplacé seul
   // Réarmement UNIQUE (0.7.9) : X ouvre sa fenêtre de connexion DANS la page (preventDefault + routeur). Seul un clic
-  // de confiance (OK réel ou pointeur) sur l'entrée générique reconnue l'arme, une fois par document, REARM_MS au plus ;
-  // toute touche/geste réel suivant l'annule ; consommé par la première passkey VISIBLE absente au moment du clic.
+  // de confiance (OK réel ou pointeur) sur l'entrée générique reconnue l'arme, une fois par document, REARM_MS au plus
+  // (horloge MONOTONE performance.now : un recalage NTP de la Pi ne l'allonge ni ne l'abrège ; minuterie explicite :
+  // références libérées même sans aucune mutation) ; toute touche/geste réel suivant l'annule ; consommé par la
+  // MEILLEURE passkey sûre et visible ABSENTE du document au moment du clic.
   const REARM_MS = 15000;
-  let loginArm = null;   // { until, seen } : seen = contrôles visibles au moment du clic (jamais une valeur)
+  const SEEN_MAX = 2000;   // contrôles instantanés au clic ; au-delà : rien d'armé (fail closed)
+  let loginArm = null;   // { until, seen, timer } : seen = TOUS les contrôles présents au clic, visibles ou non
   let armSpent = false;
 
   // fenêtre modale VISIBLE la plus récente (X l'ajoute à la fin de ses calques) ; null sinon
@@ -238,12 +262,23 @@
     return t.slice(0, LABEL_MAX);
   }
   function hrefOf(el) { return el && el.tagName === "A" ? el.getAttribute("href") : null; }
-  function preferred(list) {   // meilleur rang, puis ordre du document ; null si rien (fail closed)
+  function preferred(list) {   // meilleur score, puis ordre du document ; null si rien (fail closed)
     let best = null;
-    let rank = 3;
+    let score = 0;
     for (const el of list) {
-      const r = preferRank(label(el), hrefOf(el));
-      if (r >= 0 && r < rank) { best = el; rank = r; }
+      const sc = preferScore(label(el), hrefOf(el));
+      if (sc > score) { best = el; score = sc; }
+    }
+    return best;
+  }
+  // réarmement : MEILLEURE passkey sûre (score) parmi les contrôles ABSENTS au clic ; null sinon
+  function newPasskey(list, seen) {
+    let best = null;
+    let score = 0;
+    for (const el of list) {
+      if (seen.has(el) || preferRank(label(el), hrefOf(el)) !== RANK_PASSKEY) { continue; }
+      const sc = preferScore(label(el), hrefOf(el));
+      if (sc > score) { best = el; score = sc; }
     }
     return best;
   }
@@ -351,10 +386,27 @@
     if (!e.isTrusted || armSpent || e.button !== 0 || !loginMode()) { return; }
     const t = e.target instanceof Element ? e.target.closest(CONTROL_SEL) : null;
     if (!t || preferRank(label(t), hrefOf(t)) !== RANK_LOGIN) { return; }
-    const list = controls();
-    if (!list.includes(t)) { return; }
+    if (!controls().includes(t)) { return; }
     armSpent = true;
-    loginArm = { until: Date.now() + REARM_MS, seen: new Set(list) };
+    // TOUS les contrôles présents au clic (une passkey masquée puis révélée n'est jamais « nouvelle ») ; aucune valeur
+    const all = document.querySelectorAll(CONTROL_SEL);
+    if (all.length > SEEN_MAX) { return; }
+    disarm();
+    loginArm = { until: performance.now() + REARM_MS, seen: new Set(all), timer: setTimeout(disarm, REARM_MS) };
+  }
+  function disarm() {   // expiration, consommation ou entrée réelle : minuterie et références libérées
+    if (!loginArm) { return; }
+    clearTimeout(loginArm.timer);
+    loginArm = null;
+  }
+  // X a mis le focus sur une INSCRIPTION connue (jamais atteinte par ↑ ↓) : un OK réel l'ouvrirait. Focus déplacé vers
+  // l'entrée de connexion préférée ; à défaut retiré (blur). Jamais un clic.
+  function leaveSignup(ae) {
+    autoFocused = true;
+    const p = preferred(controls());
+    if (p) { setFocus(p); return; }
+    if (tvFocus === ae) { dropRing(ae); tvFocus = null; }
+    try { ae.blur(); } catch (err) { /* élément retiré */ }
   }
   function refresh() {
     refreshTimer = 0;
@@ -369,12 +421,13 @@
     if (tvFocus && !tvFocus.isConnected) { tvFocus = null; }
     const ae = document.activeElement;
     const none = !ae || ae === document.body || ae === document.documentElement;
-    if (loginArm && Date.now() > loginArm.until) { loginArm = null; }
+    if (loginArm && performance.now() >= loginArm.until) { disarm(); }
     if (loginArm) {   // fenêtre de connexion ouverte DANS la page après le clic humain : passkey nouvelle et visible
-      const pk = controls().find((el) => !loginArm.seen.has(el) && preferRank(label(el), hrefOf(el)) === RANK_PASSKEY);
-      if (pk) { loginArm = null; autoFocused = true; setFocus(pk); }   // UNE fois, focus seulement
-      return;
+      const pk = newPasskey(controls(), loginArm.seen);
+      if (pk) { disarm(); autoFocused = true; setFocus(pk); return; }   // UNE fois, focus seulement
     }
+    if (!none && signupLike(label(ae), hrefOf(ae))) { leaveSignup(ae); return; }   // inscription au focus : jamais
+    if (loginArm) { return; }
     if (!autoFocused && !userActed && (none || editable(ae) || signupLike(label(ae), hrefOf(ae)))) {   // champ de X
       const p = preferred(controls());
       if (p) { autoFocused = true; setFocus(p); }   // « Sign in » générique (ou passkey) : OK direct, UNE fois
@@ -444,7 +497,7 @@
     probeKey(e);
     if (!e.isTrusted) { return; }   // touche synthétique d'une page (script de X ou injecté) : jamais d'action OpenTV
     userActed = true;
-    loginArm = null;   // touche réelle après le clic : le réarmement ne déplace plus rien
+    disarm();   // touche réelle après le clic : le réarmement ne déplace plus rien
     noteTyping(e);
     const a = keyAction(e);
     if (!a) { loginKey(e); return; }
@@ -467,8 +520,9 @@
   } catch (err) { /* déjà posé (réinjection) : les écouteurs ci-dessous restent installés */ }
   window.addEventListener("keydown", onKey, true);
   window.addEventListener("keydown", onKeyLate, false);   // phase de remontée : après les gestionnaires de X
-  window.addEventListener("pointerdown", (e) => { if (e.isTrusted) { userActed = true; loginArm = null; } }, true);
+  window.addEventListener("pointerdown", (e) => { if (e.isTrusted) { userActed = true; disarm(); } }, true);
   window.addEventListener("click", onActivate, true);   // clic de confiance seulement (OK réel ou pointeur) : arme
+  window.addEventListener("focusin", schedule, true);   // focus posé par X (inscription comprise) : revérifié
   new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });
   if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule); } else { schedule(); }
   window.addEventListener("load", schedule);

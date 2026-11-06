@@ -619,6 +619,10 @@ class TestXExtensionStatic(unittest.TestCase):
                       rf)
         self.assertIn("if (p) { autoFocused = true; setFocus(p); }", rf)
         self.assertEqual(rf.count("setFocus("), 2)                        # initial + réarmement passkey (UNE fois)
+        ls = nav[nav.index("function leaveSignup(ae)"):nav.index("function refresh()")]
+        self.assertEqual(ls.count("setFocus("), 1)                        # inscription au focus : vers l'entrée préférée
+        self.assertIn("ae.blur();", ls)                                    # sinon retirée ; jamais un clic
+        self.assertNotIn("click", ls)
         ok = nav[nav.index("function onKey(e)"):nav.index('window.addEventListener("keydown", onKey, true);')]
         self.assertLess(ok.index("if (!e.isTrusted) { return; }"), ok.index("userActed = true;"))   # réelle seulement
         self.assertLess(ok.index("userActed = true;"), ok.index("const a = keyAction(e);"))         # TOUTE touche
@@ -648,6 +652,12 @@ class TestXExtensionStatic(unittest.TestCase):
             (on + "?mode=login&redirect_after_login=%2F", "login"), ("https://x.com" + on + "?mode=login", "login"),
             ("https://twitter.com" + on + "?mode=login", "login"), ("https://mobile.x.com" + on + "/?mode=login", "login"),
             (on + "?mode=login&redirect_after_login=%2F%3Flang%3Dfr", "login"), ("/login", "login"),
+            # hôtes acceptés EXACTEMENT : x.com, twitter.com et leurs www./mobile. (casse normalisée par URL)
+            ("https://www.x.com" + on + "?mode=login", "login"), ("https://www.twitter.com" + on + "?mode=login", "login"),
+            ("https://mobile.twitter.com" + on + "?mode=login", "login"), ("https://X.COM" + on + "?mode=login", "login"),
+            ("https://m.x.com" + on + "?mode=login", "other"), ("https://api.x.com" + on + "?mode=login", "other"),
+            ("https://www.mobile.x.com" + on + "?mode=login", "other"), ("https://x.co" + on + "?mode=login", "other"),
+            ("https://x.com." + on + "?mode=login", "other"), ("https://twitter.com.evil.example" + on + "?mode=login", "other"),
             ("/i/flow/login", "login"), ("https://x.com/login?redirect_after_login=%2F", "login"),
             (on + "?mode=signup&redirect_after_login=%2F", "signup"), (on + "?mode=login&mode=signup", "signup"),
             (on + "?mode=login&start=phone", "signup"), (on + "?start=phone", "signup"), ("/i/flow/signup", "signup"),
@@ -697,14 +707,33 @@ class TestXExtensionStatic(unittest.TestCase):
             ("Sign out", L, -1), ("Reconnexion", L, -1), ("Connexion impossible", L, -1), ("Already signed in", L, -1),
             ("Déconnexion avec une clé d'accès", None, -1), ("Se déconnecter de la clé d'accès", None, -1),
             ("Learn more about passkeys", None, -1), ("Create a passkey", None, -1), ("Add a passkey", None, -1),
+            # sens NÉGATIF ou détourné (EN/FR, ES/DE/IT au mieux) : jamais préféré
+            ("Continue without passkey", None, -1), ("Sign in without a passkey", None, -1),
+            ("Use password instead of passkey", None, -1), ("Use a password instead", None, -1),
+            ("Continue sans clé d'accès", None, -1), ("Continuer sans clé d’accès", None, -1),
+            ("Utiliser le mot de passe au lieu de la clé d'accès", None, -1), ("Use a different passkey", None, -1),
+            ("Use another passkey", None, -1), ("Use other passkey", None, -1), ("Utiliser une autre clé d'accès", None, -1),
+            ("Utiliser une clé d'accès différente", None, -1), ("Continue with passkey instead", None, -1),
+            ("Not now, use passkey", None, -1), ("Continuer sans passkey", None, -1), ("Continuar sin llave de acceso", None, -1),
+            ("Weiter ohne Passkey", None, -1), ("Continua senza passkey", None, -1),
+            ("Use passkey on this device", None, 1), ("Continuer avec votre clé d'accès", None, 1),
             ("Passkey", None, -1), ("Forgot password?", None, -1), ("Next", None, -1), ("Continue", None, -1),
             ("", None, -1), ("Get the app", "/download", -1),
         ]
         got = self._node_eval(self._pref_src(), "preferRank(x[0], x[1])", [[t, h] for t, h, _ in cases])
         self.assertEqual([(t, h, g) for (t, h, _), g in zip(cases, got)], cases)
         # inscription : retirée de la navigation aux flèches (libellé ou href), jamais un champ (libellé vide)
-        sig = [("Continue with phone", S, True), ("Continue with phone", None, True), ("Sign up", S, True),
-               ("Continuer avec un numéro téléphone", S, True), ("Créer un compte", None, True),
+        # inscription : href STRICT ou libellé EXACT connu (« Continue with phone » : mode=signup) ; jamais une tournure
+        # large de vérification (« Use your phone », « Use phone to verify ») : atteignable à la main
+        sig = [("Continue with phone", S, True), ("Continue with phone", None, True), ("Continue with phone", L, True),
+               ("continue with phone", None, True), ("Continue with phone number", None, True), ("Sign up", S, True),
+               ("Continuer avec un numéro téléphone", S, True), ("Continuer avec le téléphone", None, True),
+               ("Continuer avec un numéro de téléphone", None, True), ("Créer un compte", None, True),
+               ("Get started", S, True), ("Get started", "/i/flow/signup", True),
+               ("Use your phone", None, False), ("Use phone to verify", None, False), ("Use phone", None, False),
+               ("Utiliser votre téléphone pour vérifier", None, False), ("Utiliser le téléphone", None, False),
+               ("Continue with phone to verify", None, False), ("Send a code to your phone", None, False),
+               ("Use your phone", "/account/access", False),
                ("Continue with Google", L, False), ("Sign in", L, False), ("", None, False), ("Next", None, False),
                ("Terms of Service", "https://x.com/tos", False)]
         got = self._node_eval(self._pref_src(), "signupLike(x[0], x[1])", [[t, h] for t, h, _ in sig])
@@ -726,17 +755,67 @@ class TestXExtensionStatic(unittest.TestCase):
         self.assertIn("if (!e.isTrusted || armSpent || e.button !== 0 || !loginMode()) { return; }", act)
         self.assertIn("preferRank(label(t), hrefOf(t)) !== RANK_LOGIN", act)
         self.assertIn("armSpent = true;", act)
-        self.assertIn("until: Date.now() + REARM_MS", act)
+        # horloge MONOTONE + minuterie explicite (références libérées sans mutation) ; instantané de TOUS les contrôles
+        # présents au clic (visibles ou non), borné : au-delà, rien d'armé
+        self.assertIn("until: performance.now() + REARM_MS", act)
+        self.assertIn("timer: setTimeout(disarm, REARM_MS)", act)
+        self.assertIn("seen: new Set(all)", act)
+        self.assertIn("const all = document.querySelectorAll(CONTROL_SEL);", act)
+        self.assertIn("if (all.length > SEEN_MAX) { return; }", act)
+        self.assertNotIn("Date.now", act)
         self.assertNotIn(".click(", act)
+        self.assertNotIn(".value", act)
+        da = nav[nav.index("function disarm()"):nav.index("function leaveSignup(ae)")]
+        self.assertIn("clearTimeout(loginArm.timer);", da)
+        self.assertIn("loginArm = null;", da)
         rf = nav[nav.index("function refresh()"):nav.index("function schedule()")]
-        self.assertIn("!loginArm.seen.has(el) && preferRank(label(el), hrefOf(el)) === RANK_PASSKEY", rf)
-        self.assertIn("loginArm = null; autoFocused = true; setFocus(pk);", rf)
+        self.assertIn("if (loginArm && performance.now() >= loginArm.until) { disarm(); }", rf)
+        self.assertNotIn("Date.now", rf)
+        self.assertIn("const pk = newPasskey(controls(), loginArm.seen);", rf)   # MEILLEURE, pas la première
+        self.assertIn("if (pk) { disarm(); autoFocused = true; setFocus(pk); return; }", rf)
+        np = nav[nav.index("function newPasskey(list, seen)"):nav.index("function applyInline(el, props)")]
+        self.assertIn("seen.has(el) || preferRank(label(el), hrefOf(el)) !== RANK_PASSKEY", np)
+        self.assertIn("preferScore(", np)
+        self.assertNotIn("click", np)
         ok = nav[nav.index("function onKey(e)"):nav.index('window.addEventListener("keydown", onKey, true);')]
-        self.assertLess(ok.index("if (!e.isTrusted) { return; }"), ok.index("loginArm = null;"))
+        self.assertLess(ok.index("if (!e.isTrusted) { return; }"), ok.index("disarm();"))
         self.assertIn('window.addEventListener("click", onActivate, true);', nav)
-        self.assertIn('window.addEventListener("pointerdown", (e) => { if (e.isTrusted) { userActed = true; loginArm = '
-                      'null; } }, true);', nav)
-        self.assertRegex(nav, r"const REARM_MS = \d{4,5};")
+        self.assertIn('window.addEventListener("pointerdown", (e) => { if (e.isTrusted) { userActed = true; disarm(); } }, '
+                      'true);', nav)
+        self.assertIn('window.addEventListener("focusin", schedule, true);', nav)   # focus posé par X : revérifié
+        self.assertEqual(int(re.search(r"const REARM_MS = (\d+);", nav).group(1)), 15000)
+
+    @unittest.skipUnless(NODE, "node absent")
+    def test_login_rearm_and_signup_focus_deterministic_harness(self):
+        """VRAI nav.js sous Node (tests/x_nav_harness.js : DOM factice, minuteries et horloges manuelles ; Date.now et
+        performance.now INDÉPENDANTS). Réarmement : meilleure passkey sûre (jamais « without / instead / different /
+        other passkey », EN/FR ; canonique avant libre), jamais une passkey préexistante masquée puis révélée ; armé par
+        OK réel OU pointeur ; annulé par pointerdown réel ; jamais par un clic synthétique ; expire à 15 s MONOTONES
+        par minuterie explicite, sans mutation, quels que soient les recalages de l'horloge murale. Inscription
+        focalisée par X : vers « Sign in », sinon retirée (blur) ; vérifications « Use your phone » atteignables."""
+        p = subprocess.run([NODE, os.path.join(PI4, "tests", "x_nav_harness.js"), EXT], capture_output=True, text=True,
+                           timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        r = json.loads(p.stdout.strip().splitlines()[-1])
+        b = r["best"]
+        self.assertEqual((b["initial"], b["active"], b["clicks"]), ("signin", "canon", 0), b)
+        self.assertEqual(b["focus"], dict({k: 0 for k in ("hidpk", "neg1", "neg2", "neg3", "neg4", "neg5", "neg6", "neg7",
+                                                          "neg8", "loose")}, canon=1), b)
+        self.assertEqual(r["hidden_only"], {"active": "signin", "hidpk": 0})
+        self.assertEqual(r["negatives_only"], {"active": "signin", "focus": {"neg1": 0, "neg6": 0, "neg8": 0}})
+        self.assertEqual(r["pointer"], {"active": "passkey", "focus": 1, "clicks": 0})
+        self.assertEqual(r["pointer_cancel"], {"active": "signin", "focus": 0, "timers": []})   # minuterie libérée
+        self.assertEqual(r["synthetic_click"], {"active": "signin", "focus": 0})
+        self.assertEqual(r["expiry"], {"arm_timers": 1, "left": 0, "active": "signin", "focus": 0})
+        self.assertEqual(r["before_expiry"], {"active": "passkey", "focus": 1})
+        self.assertEqual(r["wall_jump"], {"active": "passkey", "focus": 1})
+        self.assertEqual(r["signup_focus_pref"], {"initial": "signin", "after_down": "signin", "refocused": "signin",
+                                                  "clicks": 0})
+        sn = r["signup_focus_none"]
+        self.assertEqual((sn["initial"], sn["after_ok"], sn["after_down"], sn["refocused"], sn["ring"], sn["clicks"]),
+                         (None, {"active": None, "clicks": 0}, "google", None, None, 0), sn)
+        self.assertEqual(sn["blurs"], ["phone", "phone"])
+        self.assertEqual(r["verify"], {"seq": [None, "usephone", "phoneverify", "vfr", "vfr"], "clicks": 0})
 
     def test_css_inert_outside_feed_mode(self):
         css = read(os.path.join(EXT, "x.css"))
@@ -1296,6 +1375,47 @@ class TestXEndToEnd(unittest.TestCase):
         self.assertEqual((op["after"]["active"], op["after"]["pk_focus"], op["after"]["old_focus"], op["after"]["hits"]),
                          ("passkey", 1, 0, ["signin"]), op)
         self.assertEqual(op["url_after_back"], cfg["tv"])
+        # leurres négatifs (sans / au lieu de / autre / différente, EN + FR) et passkey libre AVANT la canonique, tous
+        # visibles et nouveaux : seule la passkey canonique reçoit le focus (meilleure, jamais la première du document)
+        ng = st["negative_passkeys"]["after"]
+        self.assertEqual((ng["active"], ng["pk_focus"], ng["hits"], ng["clicks"]), ("passkey", 1, ["signin"], 1), ng)
+        for d in ("neg1", "neg2", "neg3", "neg4", "neg5", "neg6", "neg7", "loose"):
+            self.assertNotIn(d, ng["f"], (d, ng["f"]))
+        self.assertEqual(st["negative_passkeys"]["url_after_back"], cfg["tv"])
+        # passkey présente MAIS masquée au clic, révélée par X : jamais « nouvelle » ; la vraie nouvelle reçoit le focus
+        hp = st["hidden_passkey"]["after"]
+        self.assertEqual((hp["active"], hp["hid_visible"], hp["hits"]), ("newpk", "block", ["signin"]), hp)
+        self.assertNotIn("hidpk", hp["f"], hp["f"])
+        self.assertEqual(hp["f"].get("newpk"), 1, hp["f"])
+        self.assertEqual(st["hidden_passkey"]["url_after_back"], cfg["tv"])
+        # souris réelle : clic sur « Sign in » arme (passkey au focus une fois) ; pointerdown réel suivant : annulé
+        pt = st["pointer"]
+        self.assertEqual((pt["click"]["active"], pt["click"]["pk_focus"], pt["click"]["hits"]), ("passkey", 1, ["signin"]),
+                         pt["click"])
+        self.assertEqual((pt["cancel"]["dialog"], pt["cancel"]["active"], pt["cancel"]["pk_focus"], pt["cancel"]["hits"]),
+                         (True, "dlguser", 0, ["signin"]), pt["cancel"])
+        self.assertEqual((pt["click_back"], pt["cancel_back"]), (cfg["tv"], cfg["tv"]))
+        # X focalise l'inscription : sans « Sign in », retirée (aucun anneau) et un OK réel n'ouvre RIEN ; refocalisée
+        # après une touche réelle : retirée encore ; avec « Sign in » : focus vers « Sign in » ; jamais un clic
+        sf = st["signup_focus"]
+        self.assertEqual((sf["initial"]["active"], sf["initial"]["ring"], sf["initial"]["hits"]), (None, None, []), sf["initial"])
+        self.assertEqual((sf["ok"]["active"], sf["ok"]["hits"], sf["ok"]["clicks"], sf["ok"]["url"]),
+                         (None, [], 0, "https://x.com/?nosignin=1&phonefocus=1"), sf["ok"])
+        self.assertEqual(sf["down"]["active"], "google")
+        self.assertEqual((sf["refocus"]["active"], sf["refocus_ok"]["active"], sf["refocus_ok"]["hits"],
+                          sf["refocus_ok"]["clicks"]), (None, None, [], 0), sf)
+        self.assertEqual(sf["url_after_back"], cfg["tv"])
+        self.assertEqual((sf["pref_initial"]["active"], sf["pref_initial"]["ring"]), ("signin", "signin"), sf["pref_initial"])
+        self.assertEqual(sf["pref_down"]["active"], "about")
+        self.assertEqual((sf["pref_refocus"]["active"], sf["pref_refocus"]["hits"], sf["pref_refocus"]["clicks"]),
+                         ("signin", [], 0), sf["pref_refocus"])
+        self.assertEqual(sf["pref_url_after_back"], cfg["tv"])
+        # vérification : options téléphone légitimes atteignables, OK réel = UNE activation ; inscription jamais atteinte
+        vf = st["verify"]
+        self.assertEqual((vf["initial"]["active"], vf["initial"]["hits"]), (None, []), vf["initial"])
+        self.assertEqual(vf["seq"], ["usephone", "phoneverify", "vfr", "vfr"])
+        self.assertEqual((vf["ok"]["hits"], vf["ok"]["clicks"]), (["vfr"], 1), vf["ok"])
+        self.assertEqual(vf["url_after_back"], cfg["tv"])
         # accueil réel sans « Sign in » ni autofocus : rien n'est préféré ni déplacé ; le premier ↓ réel va à Google
         # (premier contrôle permis), JAMAIS à « Continue with phone »
         ns = st["no_signin"]

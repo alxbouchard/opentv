@@ -389,10 +389,14 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   seulement, KEY_EXIT appui seul, armée seulement pendant le témoin) ; action root `opentv-x-escape-action.service` via
   `.path` (demande vérifiée/retirée, témoin revérifié, 10 s, `systemctl restart --no-block opentv-kiosk.service`).
   Kiosque/Chromium sans groupe input. Connexion X : mode « contrôles » de `nav.js` hors fil (↑ ↓ contrôles visibles,
-  lien générique « Sign in »/« Se connecter » (href `/i/jf/onboarding/web` analysé, `mode` EXACTEMENT `login`) au focus,
-  jamais Google/Apple ; « Continue with phone » = INSCRIPTION (`mode=signup`) retirée de ↑ ↓ (0.7.9) ; UN réarmement
-  après clic de confiance sur « Sign in » : passkey NOUVELLE de la fenêtre in-page ; inconnu ⇒ rien ; OK natif, champs
-  natifs, aucune valeur lue). Passkey téléphone : flux WebAuthn
+  lien générique « Sign in »/« Se connecter » (href `/i/jf/onboarding/web` analysé, hôte EXACT x.com/twitter.com ±
+  www./mobile., `mode` EXACTEMENT `login`) au focus, jamais Google/Apple ni un sens négatif (« without / instead /
+  different / other passkey », « sans », « au lieu de », « autre ») ; « Continue with phone » = INSCRIPTION
+  (`mode=signup`) retirée de ↑ ↓ par href strict ou libellé exact (jamais « Use your phone » d'une vérification) ;
+  inscription focalisée par X ⇒ entrée préférée, sinon blur (0.7.9) ; UN réarmement après clic de confiance sur
+  « Sign in » : MEILLEURE passkey sûre absente du document au clic (15 s monotones, minuterie explicite) ; inconnu ⇒
+  rien ; OK natif, champs natifs, aucune valeur lue). Tests déterministes : `tests/x_nav_harness.js`. Passkey
+  téléphone : flux WebAuthn
   hybride natif seulement, **gate terrain** (kiosque sans groupe bluetooth). Tests `test_x_escape.py` + `e2e_x_escape.js`.
 - **Mode HDMI exact après extinction/rallumage de la TV (0.7.5)** : terrain 2026-11-01, au rallumage wlroots recrée
   la sortie et Cage prend le mode préféré de l'EDID (3840x2160@30) pendant que Chromium reste en 1920x1080 (quart
