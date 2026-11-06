@@ -426,9 +426,11 @@
       const pk = newPasskey(controls(), loginArm.seen);
       if (pk) { disarm(); autoFocused = true; setFocus(pk); return; }   // UNE fois, focus seulement
     }
-    if (!none && signupLike(label(ae), hrefOf(ae))) { leaveSignup(ae); return; }   // inscription au focus : jamais
+    // inscription au focus : jamais — seulement un VRAI contrôle (jamais un conteneur, une fenêtre ou une enveloppe
+    // tabindex=-1 classés par leur texte : focus conservé, aucune oscillation)
+    if (!none && ae.matches(CONTROL_SEL) && signupLike(label(ae), hrefOf(ae))) { leaveSignup(ae); return; }
     if (loginArm) { return; }
-    if (!autoFocused && !userActed && (none || editable(ae) || signupLike(label(ae), hrefOf(ae)))) {   // champ de X
+    if (!autoFocused && !userActed && (none || editable(ae))) {   // champ de X
       const p = preferred(controls());
       if (p) { autoFocused = true; setFocus(p); }   // « Sign in » générique (ou passkey) : OK direct, UNE fois
     } else if (!none) {

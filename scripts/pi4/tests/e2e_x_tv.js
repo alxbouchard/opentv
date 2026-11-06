@@ -153,6 +153,18 @@ const VERIFY = `<!doctype html><html lang="en"><head><meta charset="utf-8"><titl
   `<button id="phonesignup" type="button" onclick="__hits.push('phonesignup')">Continue with phone</button>` +
   `<a id="signuplink" href="${ONB}?mode=signup" onclick="__hits.push('signuplink');return false">Get started</a></div>` +
   `<script>window.__hits=[];</script>${INSTR}</body></html>`;
+// conteneur focalisé par X (SYNTHÉTIQUE) : fenêtre role=dialog tabindex=-1 et enveloppe tabindex=-1 dont le TEXTE
+// mentionne « Create account » / « Sign up » — jamais classés inscription ; seul le vrai lien d'inscription l'est
+const SIGNUP_CONTAINER = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Sign in / X</title>` +
+  `${STYLE}<style>a,button,[role=button],input{display:block;margin:12px auto;width:300px;height:40px}</style></head>` +
+  `<body><div role="dialog" aria-modal="true" id="cdlg" tabindex="-1"><h1>Create account or Sign in</h1>` +
+  `<a id="csignin" href="${ONB}?mode=login&amp;redirect_after_login=%2F" onclick="__hits.push('csignin');return false">Sign in</a>` +
+  `<a id="cgoogle" href="${ONB}?mode=login&amp;redirect_after_login=%2F" onclick="__hits.push('cgoogle');return false">Continue with Google</a>` +
+  `<div id="cwrap" tabindex="-1"><span>Don't have an account? Sign up to create account</span> ` +
+  `<a id="csignup" href="${ONB}?mode=signup&amp;redirect_after_login=%2F" onclick="__hits.push('csignup');return false">Sign up</a>` +
+  `</div></div><script>window.__hits=[];window.__f={};document.addEventListener('focusin',function(e){` +
+  `var i=e.target&&e.target.id;if(i){__f[i]=(__f[i]||0)+1;}},true);document.getElementById('cdlg').focus();` +
+  `window.__cfocused=true;</script>${INSTR}</body></html>`;
 // 0.7.8 — fenêtre modale VISIBLE de X au-dessus du fil (colonne principale PRÉSENTE) : invite de notifications réaliste
 // (calque fixe, bouton natif <button role=button> comme X + rôle « button » non natif qui ferme la fenêtre) ; le fil derrière ne doit jamais bouger
 const DIALOG = `<div id="layers"><div role="dialog" aria-modal="true" id="dlg" style="position:fixed;top:220px;` +
@@ -213,6 +225,7 @@ function ctl(p) {
         u.pathname === "/" ? (u.searchParams.has("nosignin") ? LANDING_NOSIGNIN : LANDING) :
         u.pathname === "/i/flow/passkey" ? PASSKEY_LOGIN : u.pathname === "/i/flow/phoneonly" ? PHONE_ONLY :
         u.pathname === "/i/flow/verify" ? VERIFY :
+        u.pathname === "/i/flow/signupcontainer" ? SIGNUP_CONTAINER :
         u.pathname === "/settings/dialog" ? FEED_DIALOG : u.pathname === "/compose/home" ? FEED_COMPOSE :
         (u.pathname.indexOf("/i/flow/login") === 0 || u.pathname.indexOf("/account/") === 0) ? LOGIN :
         /\/status\/\d+$/.test(u.pathname) ? STATUS : FEED;
@@ -635,6 +648,36 @@ function ctl(p) {
     await page.keyboard.press("Escape");
     vf.url_after_back = await waitUrl((u) => u === cfg.tv);
     out.steps.verify = vf;
+
+    // 7 bis-j) X focalise un CONTENEUR (dialog / enveloppe tabindex=-1) dont le texte mentionne « Create account » /
+    //          « Sign up » : focus conservé, aucun blur, aucune oscillation, avant ET après une touche réelle ; le VRAI
+    //          lien d'inscription focalisé par X reste redirigé vers « Sign in » ; jamais un clic
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    await page.goto("https://x.com/i/flow/signupcontainer");
+    await page.waitForFunction(() => window.__cfocused === true, null, { timeout: 5000 });
+    await sleep(900);
+    const cf = { initial: await st() };
+    const refocusSeq = async (ids) => {
+      const seq = [];
+      for (const id of ids) {
+        await page.evaluate((i) => document.getElementById(i).focus(), id);
+        await sleep(700);
+        seq.push((await st()).active);
+      }
+      return seq;
+    };
+    cf.seq = await refocusSeq(["cdlg", "cdlg", "cdlg"]);
+    cf.before = await focusCounts();
+    await page.keyboard.press("ArrowDown"); await sleep(150);
+    cf.down = await st();
+    cf.user = await refocusSeq(["cdlg", "cwrap", "cdlg"]);
+    cf.after_user = await focusCounts();
+    cf.user_state = await st();
+    cf.signup = await refocusSeq(["csignup"]);
+    cf.final = await st();
+    await page.keyboard.press("Escape");
+    cf.url_after_back = await waitUrl((u) => u === cfg.tv);
+    out.steps.signup_container = cf;
 
     // 7 bis-n) même accueil réel SANS « Sign in » ni autofocus : rien n'est préféré ni déplacé (fail closed) ; le
     //          premier ↓ réel va au premier contrôle permis (Google), JAMAIS à « Continue with phone » (inscription)

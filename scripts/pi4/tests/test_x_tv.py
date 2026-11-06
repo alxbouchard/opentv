@@ -615,8 +615,11 @@ class TestXExtensionStatic(unittest.TestCase):
         fois ; après une touche ou un geste réel, plus jamais de déplacement automatique du focus."""
         nav = code_only(read(os.path.join(EXT, "nav.js")))
         rf = nav[nav.index("function refresh()"):nav.index("function schedule()")]
-        self.assertIn("if (!autoFocused && !userActed && (none || editable(ae) || signupLike(label(ae), hrefOf(ae)))) {",
-                      rf)
+        self.assertIn("if (!autoFocused && !userActed && (none || editable(ae))) {", rf)
+        # inscription au focus : VRAI contrôle seulement (jamais un conteneur classé par son texte), UN seul test
+        self.assertIn("if (!none && ae.matches(CONTROL_SEL) && signupLike(label(ae), hrefOf(ae))) { leaveSignup(ae); "
+                      "return; }", rf)
+        self.assertEqual(rf.count("signupLike("), 1)
         self.assertIn("if (p) { autoFocused = true; setFocus(p); }", rf)
         self.assertEqual(rf.count("setFocus("), 2)                        # initial + réarmement passkey (UNE fois)
         ls = nav[nav.index("function leaveSignup(ae)"):nav.index("function refresh()")]
@@ -816,6 +819,13 @@ class TestXExtensionStatic(unittest.TestCase):
                          (None, {"active": None, "clicks": 0}, "google", None, None, 0), sn)
         self.assertEqual(sn["blurs"], ["phone", "phone"])
         self.assertEqual(r["verify"], {"seq": [None, "usephone", "phoneverify", "vfr", "vfr"], "clicks": 0})
+        # conteneur focalisé (dialog / enveloppe tabindex=-1) mentionnant « Create account » / « Sign up » : jamais
+        # classé inscription par son texte (focus conservé, aucun blur, aucune oscillation, avant et après une entrée
+        # réelle) ; le vrai lien d'inscription focalisé par X reste redirigé vers « Sign in »
+        self.assertEqual(r["container_focus"], {
+            "initial": "dlg", "seq": ["dlg", "dlg", "dlg"], "before": {"signin": 0, "blurs": []},
+            "after_key": "signin", "user": ["dlg", "wrap", "dlg"], "after_user": {"signin": 1, "blurs": []},
+            "signup_redirect": "signin", "clicks": 0})
 
     def test_css_inert_outside_feed_mode(self):
         css = read(os.path.join(EXT, "x.css"))
@@ -1416,6 +1426,19 @@ class TestXEndToEnd(unittest.TestCase):
         self.assertEqual(vf["seq"], ["usephone", "phoneverify", "vfr", "vfr"])
         self.assertEqual((vf["ok"]["hits"], vf["ok"]["clicks"]), (["vfr"], 1), vf["ok"])
         self.assertEqual(vf["url_after_back"], cfg["tv"])
+        # conteneur focalisé par X (dialog / enveloppe tabindex=-1) mentionnant « Create account » / « Sign up » :
+        # focus conservé (aucun blur, aucune oscillation), avant et après une touche réelle ; le vrai lien
+        # d'inscription focalisé par X est redirigé vers « Sign in » ; jamais un clic
+        cf = st["signup_container"]
+        self.assertEqual((cf["initial"]["active"], cf["initial"]["hits"]), ("cdlg", []), cf["initial"])
+        self.assertEqual(cf["seq"], ["cdlg", "cdlg", "cdlg"], cf)
+        self.assertNotIn("csignin", cf["before"], cf["before"])
+        self.assertEqual((cf["down"]["active"], cf["down"]["hits"]), ("csignin", []), cf["down"])
+        self.assertEqual(cf["user"], ["cdlg", "cwrap", "cdlg"], cf)
+        self.assertEqual(cf["after_user"].get("csignin"), 1, cf["after_user"])
+        self.assertEqual(cf["signup"], ["csignin"], cf)
+        self.assertEqual((cf["final"]["hits"], cf["final"]["clicks"]), ([], 0), cf["final"])
+        self.assertEqual(cf["url_after_back"], cfg["tv"])
         # accueil réel sans « Sign in » ni autofocus : rien n'est préféré ni déplacé ; le premier ↓ réel va à Google
         # (premier contrôle permis), JAMAIS à « Continue with phone »
         ns = st["no_signin"]

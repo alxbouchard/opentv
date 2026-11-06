@@ -321,4 +321,33 @@ const R = {};
   for (let i = 0; i < 4; i++) { env.key("ArrowDown"); seq.push(env.active()); }
   R.verify = { seq, clicks: clicks(els) };
 }
+// 7) X focalise un CONTENEUR (fenêtre role=dialog tabindex=-1, enveloppe tabindex=-1) dont le texte mentionne
+//    « Create account » / « Sign up » : jamais classé inscription par son texte — focus conservé, aucun blur, aucune
+//    oscillation, avant ET après une entrée réelle ; le VRAI lien d'inscription focalisé par X reste redirigé
+{
+  const env = makeEnv();
+  const dlg = env.add(null, "div", { id: "dlg", role: "dialog", "aria-modal": "true", tabindex: "-1" },
+    "Create account or Sign up. ");
+  const els = {
+    signin: env.add(dlg, "a", { id: "signin", href: ONB + "?mode=login&redirect_after_login=%2F" }, "Sign in"),
+    google: env.add(dlg, "a", { id: "google", href: ONB + "?mode=login&redirect_after_login=%2F" }, "Continue with Google"),
+    signup: env.add(dlg, "a", { id: "dlgsignup", href: ONB + "?mode=signup&redirect_after_login=%2F" }, "Sign up")
+  };
+  const wrap = env.add(dlg, "div", { id: "wrap", tabindex: "-1" }, "Don't have an account? Sign up to create account");
+  env.doc.activeElement = dlg;   // X focalise sa fenêtre (conteneur) avant le chargement de nav.js
+  env.load();
+  const initial = env.active();
+  const seq = [];
+  for (let i = 0; i < 3; i++) { dlg.focus(); env.clock.advance(400); seq.push(env.active()); }
+  const before = { signin: els.signin.focusCount, blurs: env.doc.blurs.slice() };
+  env.key("ArrowDown");   // entrée réelle
+  const afterKey = env.active();
+  const user = [];
+  for (const el of [dlg, wrap, dlg]) { el.focus(); env.clock.advance(400); user.push(env.active()); }
+  const afterUser = { signin: els.signin.focusCount, blurs: env.doc.blurs.slice() };
+  els.signup.focus();   // VRAI contrôle d'inscription focalisé par X : redirigé vers « Sign in »
+  env.clock.advance(400);
+  R.container_focus = { initial, seq, before, after_key: afterKey, user, after_user: afterUser,
+                        signup_redirect: env.active(), clicks: clicks(els) };
+}
 process.stdout.write(JSON.stringify(R) + "\n");
