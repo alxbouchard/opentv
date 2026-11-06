@@ -14,9 +14,11 @@
  *           (API Navigation), sinon OpenTV /tv ; filet : si rien ne change en BACK_FAILSAFE_MS, OpenTV /tv.
  *  Connexion (mode « contrôles », SEULEMENT hors fil : aucune colonne principale) : ↑ ↓ (et ← → hors champ) parcourent
  *           les contrôles VISIBLES et activables (boutons, liens, champs) dans l'ordre du document, limités à la
- *           fenêtre modale de X s'il y en a une ; anneau TV très visible ; au chargement, le bouton « Continue with
- *           phone » (ou le premier contrôle à ↓) reçoit le focus si rien n'en a. OK/Entrée RÉELLE : activation native
- *           du bouton/lien au focus (geste humain) ; repli pour un rôle « button » non natif seulement. Champ au focus :
+ *           fenêtre modale de X s'il y en a une ; anneau TV très visible ; au chargement, AVANT toute touche ou geste
+ *           réel, le bouton « Continue with phone » reçoit le focus UNE fois, même si X a autofocusé le champ
+ *           identifiant ; ensuite le focus n'est jamais déplacé seul (sinon ↓ : premier contrôle).
+ *           OK/Entrée RÉELLE : activation native du bouton/lien au focus (geste humain) ; repli pour un rôle
+ *           « button » non natif seulement. Champ au focus :
  *           saisie au clavier physique 100 % native (← → Entrée Retour arrière natifs) ; aucune valeur n'est lue,
  *           copiée ni transmise ; ↑ ↓ quittent un champ d'une ligne. Aucun clic automatique, aucun relais d'identifiants.
  * Touches synthétiques (non fiables) : jamais d'action. Aucune lecture de contenu hors libellés des contrôles.
@@ -98,6 +100,7 @@
   let loginHelp = null;
   let refreshTimer = 0;
   let autoFocused = false;
+  let userActed = false;   // touche ou geste RÉEL sur cette page : le focus n'est plus jamais déplacé seul
 
   function loginMode() { return !!document.body && !document.querySelector(COLUMN_SEL); }
   function scope() {
@@ -109,6 +112,9 @@
     if (!el || !el.isConnected || el.closest("[hidden], [inert], [aria-hidden='true']")) { return false; }
     const r = el.getBoundingClientRect();
     if (r.width < 4 || r.height < 4) { return false; }
+    if (r.right <= 0 || r.left >= innerWidth || r.bottom + scrollY <= 0) { return false; }   // hors écran (lien d'évitement)
+    if (typeof el.checkVisibility === "function" &&
+        !el.checkVisibility({ opacityProperty: true, visibilityProperty: true })) { return false; }   // parent opacity:0
     const cs = getComputedStyle(el);
     return cs.visibility === "visible" && cs.display !== "none" && Number(cs.opacity) > 0.05;
   }
@@ -229,12 +235,12 @@
     }
     if (tvFocus && !tvFocus.isConnected) { tvFocus = null; }
     const ae = document.activeElement;
-    if (!autoFocused && (!ae || ae === document.body || ae === document.documentElement)) {
-      const list = controls();
-      const p = preferred(list);
-      if (p) { autoFocused = true; setFocus(p); }   // « Continue with phone » : OK direct, sans aucune flèche
-    } else if (ae && ae !== document.body) {
-      autoFocused = true;   // la page (ou Alex) a déjà placé le focus : jamais volé ensuite
+    const none = !ae || ae === document.body || ae === document.documentElement;
+    if (!autoFocused && !userActed && (none || editable(ae))) {   // rien, ou champ autofocusé par X
+      const p = preferred(controls());
+      if (p) { autoFocused = true; setFocus(p); }   // « Continue with phone » : OK direct, sans aucune flèche, UNE fois
+    } else if (!none) {
+      autoFocused = true;   // contrôle placé par la page, ou touche/geste réel : jamais volé ensuite
     }
   }
   function schedule() { if (!refreshTimer) { refreshTimer = setTimeout(refresh, 200); } }
@@ -242,6 +248,7 @@
   function onKey(e) {
     pendingOk = null;
     if (!e.isTrusted) { return; }   // touche synthétique d'une page (script de X ou injecté) : jamais d'action OpenTV
+    userActed = true;
     const a = keyAction(e);
     if (!a) { loginKey(e); return; }
     if (editable(document.activeElement) && textKey(e)) { return; }   // Retour arrière / Début : édition native
@@ -252,6 +259,7 @@
   }
   window.addEventListener("keydown", onKey, true);
   window.addEventListener("keydown", onKeyLate, false);   // phase de remontée : après les gestionnaires de X
+  window.addEventListener("pointerdown", (e) => { if (e.isTrusted) { userActed = true; } }, true);   // geste réel
   new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });
   if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule); } else { schedule(); }
   window.addEventListener("load", schedule);

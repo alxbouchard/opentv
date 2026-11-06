@@ -598,6 +598,23 @@ class TestXExtensionStatic(unittest.TestCase):
         self.assertIn("Continue with phone".lower(), nav.lower())
         self.assertIn("if (editable(el)) { return \"\"; }", nav)         # libellé : jamais celui d'un champ
 
+    def test_initial_focus_moves_once_before_any_real_input(self):
+        """X autofocus le champ identifiant : avant toute touche/geste RÉEL, « Continue with phone » prend le focus UNE
+        fois ; après une touche ou un geste réel, plus jamais de déplacement automatique du focus."""
+        nav = code_only(read(os.path.join(EXT, "nav.js")))
+        rf = nav[nav.index("function refresh()"):nav.index("function schedule()")]
+        self.assertIn("if (!autoFocused && !userActed && (none || editable(ae))) {", rf)
+        self.assertIn("if (p) { autoFocused = true; setFocus(p); }", rf)
+        self.assertEqual(rf.count("setFocus("), 1)
+        ok = nav[nav.index("function onKey(e)"):nav.index('window.addEventListener("keydown", onKey, true);')]
+        self.assertLess(ok.index("if (!e.isTrusted) { return; }"), ok.index("userActed = true;"))   # réelle seulement
+        self.assertLess(ok.index("userActed = true;"), ok.index("const a = keyAction(e);"))         # TOUTE touche
+        self.assertIn('window.addEventListener("pointerdown", (e) => { if (e.isTrusted) { userActed = true; } }, true);',
+                      nav)
+        vis = nav[nav.index("function visible(el)"):nav.index("function usable(el)")]
+        self.assertIn("opacityProperty: true", vis)                       # parent opacity:0 : invisible
+        self.assertIn("r.right <= 0 || r.left >= innerWidth", vis)        # hors écran : invisible
+
     def test_css_inert_outside_feed_mode(self):
         css = read(os.path.join(EXT, "x.css"))
         body = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
@@ -864,9 +881,12 @@ class TestXEndToEnd(unittest.TestCase):
         # Close (Exit CEC), BrowserBack (vérification /account/), Alt+←, BrowserHome : toujours /tv
         for k in ("close", "browser_back", "alt_left", "browser_home", "thread_direct"):
             self.assertEqual(lg[k]["url"], cfg["tv"], (k, lg[k]))
-        # accueil déconnecté (photo terrain) : « Continue with phone » au focus TV dès le chargement, anneau visible,
-        # consigne à l'écran ; OK synthétique : rien ; OK réel : UN clic, exactement sur ce bouton
+        # accueil déconnecté (photo terrain) : X autofocus le champ identifiant ; avant toute touche, le focus passe
+        # UNE fois à « Continue with phone » (jamais au leurre opacity:0), anneau visible, consigne à l'écran ;
+        # OK synthétique : rien ; OK réel : UN clic, exactement sur ce bouton
         ph = st["phone_login"]
+        self.assertTrue(ph["autofocus_seen"])
+        self.assertTrue(0 <= ph["first_ms"] < 1500, ph["first_ms"])
         self.assertEqual((ph["initial"]["active"], ph["initial"]["ring"]), ("phone", "phone"), ph["initial"])
         self.assertTrue(ph["initial"]["outline"].startswith("solid 6px"), ph["initial"])
         self.assertIn("OK valider", ph["initial"]["help"])
@@ -876,9 +896,10 @@ class TestXEndToEnd(unittest.TestCase):
         self.assertEqual((ph["ok"]["hits"], ph["ok"]["clicks"]), (["phone"], 1))
         self.assertEqual(ph["url_after_ok"], "https://x.com/")
         # ↑ ↓ : contrôles visibles et activables, ordre du document, dans la modale ; jamais l'iframe Google, le
-        # bouton masqué ni le désactivé ; bords : on reste
+        # bouton masqué, le désactivé, le leurre sous parent opacity:0 ni le lien hors écran ; bords : on reste
         self.assertEqual(ph["seq"], ["apple", "apple", "phone", "user", "next", "forgot", "signup", "signup"])
-        # champ : saisie au clavier physique native (← → Retour arrière), aucun clic, ↑ ↓ en sortent
+        # champ : saisie au clavier physique native (← → Retour arrière), aucun clic, ↑ ↓ en sortent ; après une
+        # touche réelle, un nouveau rendu de la page ne vole jamais le focus du champ
         self.assertEqual(ph["field"], "user")
         self.assertEqual(ph["typed"], "alice@example.co")
         self.assertEqual((ph["after_typing"]["active"], ph["after_typing"]["clicks"]), ("user", 1))

@@ -49,17 +49,20 @@ const LOGIN = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title
   `autocomplete="username"><button id="next">Suivant</button></div><div data-testid="sidebarColumn" id="sb">Pied</div>` +
   `${INSTR}</body></html>`;
 // accueil déconnecté RÉALISTE (photo terrain : connexion X sombre, bouton « Continue with phone ») : modale de X,
-// iframe Google (jamais un contrôle), boutons natifs, champ sans autofocus, rôles « button » non natifs (div), un
-// bouton désactivé et un masqué (jamais focalisés). Chaque activation est comptée par id (window.__hits).
+// iframe Google (jamais un contrôle), boutons natifs, champ identifiant AUTOFOCUS (comme le vrai x.com), rôles
+// « button » non natifs (div), un bouton désactivé, un masqué, un leurre « Continue with phone » sous un parent
+// opacity:0 et un lien hors écran (jamais focalisés). Chaque activation est comptée par id (window.__hits).
 const LANDING = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>X. It’s what’s happening / X</title>` +
   `${STYLE}<style>button,[role=button],a,input{display:block;margin:12px auto;width:300px;height:40px}</style></head>` +
   `<body><div id="react-root"><div role="dialog" aria-modal="true" aria-labelledby="h"><h1 id="h">Sign in to X</h1>` +
   `<iframe title="Sign in with Google" srcdoc="<p>Google</p>" style="width:300px;height:40px"></iframe>` +
   `<button id="apple" type="button" onclick="__hits.push('apple')">Sign in with Apple</button>` +
+  `<div style="opacity:0"><button id="ghost" type="button" onclick="__hits.push('ghost')">Continue with phone</button></div>` +
+  `<a id="skip" href="#main" style="position:absolute;left:-9999px;top:0">Skip to content</a>` +
   `<button id="phone" type="button" onclick="__hits.push('phone')"><span>Continue with phone</span></button>` +
   `<button id="gone" type="button" style="display:none" onclick="__hits.push('gone')">Hidden</button>` +
   `<div>or</div><label><span>Phone, email, or username</span>` +
-  `<input id="user" name="text" autocomplete="username" type="text"></label>` +
+  `<input id="user" name="text" autofocus autocomplete="username" type="text"></label>` +
   `<button id="off" type="button" disabled onclick="__hits.push('off')">Disabled</button>` +
   `<div id="next" role="button" tabindex="0" onclick="__hits.push('next')"><span>Next</span></div>` +
   `<div id="forgot" role="button" tabindex="0" onclick="__hits.push('forgot')"><span>Forgot password?</span></div>` +
@@ -274,8 +277,19 @@ function ctl(p) {
     //         par OK réel seulement ; touche OK synthétique : rien
     await page.waitForSelector(".card.focused", { timeout: 10000 });
     await page.goto("https://x.com/");
-    await sleep(900);
     const ph = {};
+    // focus d'autofocus de X (champ) puis transfert UNIQUE vers « Continue with phone », sans aucune touche
+    ph.autofocus_seen = await page.evaluate(() => !!document.querySelector("#user[autofocus]"));
+    ph.first_ms = await page.evaluate(() => new Promise((res) => {
+      const t0 = performance.now();
+      (function poll() {
+        const ae = document.activeElement;
+        if (ae && ae.id === "phone") { res(Math.round(performance.now() - t0)); return; }
+        if (performance.now() - t0 > 3000) { res(-1); return; }
+        setTimeout(poll, 20);
+      })();
+    }));
+    await sleep(600);
     const st = () => page.evaluate(() => {
       const ae = document.activeElement, f = document.querySelector("[data-otvx-focus]");
       const cs = f ? getComputedStyle(f) : null, h = document.querySelector(".otvx-login-help");
@@ -304,6 +318,9 @@ function ctl(p) {
     await page.keyboard.press("ArrowLeft");                  // natif dans le champ
     await page.keyboard.press("ArrowRight");
     await page.keyboard.press("Backspace");
+    // la page change après une saisie réelle (rendu React de X) : le focus n'est JAMAIS repris au champ
+    await page.evaluate(() => { const d = document.createElement("div"); d.textContent = "re-render"; document.body.appendChild(d); });
+    await sleep(500);
     ph.after_typing = await st();
     ph.typed = await page.evaluate(() => document.getElementById("user").value);
     await page.keyboard.press("ArrowDown"); await sleep(60);   // champ d'une ligne : ↓ en sort vers Next
