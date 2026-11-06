@@ -21,6 +21,7 @@ const FEED = "<!doctype html><html><head><meta charset=utf-8><title>Home / X</ti
   "<main><div data-testid=primaryColumn><article data-testid=tweet tabindex=0>Post</article></div></main></body></html>";
 const LANDING = "<!doctype html><html><head><meta charset=utf-8><title>X</title></head><body>" +
   "<div role=dialog aria-modal=true><button id=phone type=button>Continue with phone</button>" +
+  "<button id=login type=button>Log in with username or email</button>" +
   "<input id=user type=text></div></body></html>";
 
 const lines = readline.createInterface({ input: process.stdin });

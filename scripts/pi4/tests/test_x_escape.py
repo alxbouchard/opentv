@@ -996,7 +996,7 @@ class TestXEscapeEndToEnd(unittest.TestCase):
         res = json.loads(out.strip().splitlines()[-1])
         self.assertEqual(res["tile"], "X")
         self.assertTrue(res["opened"].startswith("https://x.com/home"), res)
-        self.assertEqual(res["login_focus"], "phone")             # mode « contrôles » : Continue with phone au focus
+        self.assertEqual(res["login_focus"], "login")             # « contrôles » : connexion réelle, jamais l'inscription
         self.assertEqual(res["before_restart"], "https://x.com/")
 
 

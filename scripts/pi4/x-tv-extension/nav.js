@@ -15,8 +15,11 @@
  *  Connexion (mode « contrôles », SEULEMENT hors fil : aucune colonne principale) : ↑ ↓ (et ← → hors champ) parcourent
  *           les contrôles VISIBLES et activables (boutons, liens, champs) dans l'ordre du document, limités à la
  *           fenêtre modale de X s'il y en a une ; anneau TV très visible ; au chargement, AVANT toute touche ou geste
- *           réel, le bouton « Continue with phone » reçoit le focus UNE fois, même si X a autofocusé le champ
- *           identifiant ; ensuite le focus n'est jamais déplacé seul (sinon ↓ : premier contrôle).
+ *           réel, l'entrée de connexion réelle (« Log in with username or email ») reçoit le focus UNE fois, même si
+ *           X a autofocusé le champ identifiant ; à défaut le lien de connexion, puis la passkey native de X
+ *           (« Continue with passkey ») ; JAMAIS « Continue with phone » (inscription chez X) ; rien de reconnu :
+ *           rien n'est déplacé. Ensuite le focus n'est jamais déplacé seul (sinon ↓ : même préférence, ou premier
+ *           contrôle).
  *           OK/Entrée RÉELLE : activation native du bouton/lien au focus (geste humain) ; repli pour un rôle
  *           « button » non natif seulement. Champ au focus :
  *           saisie au clavier physique 100 % native (← → Entrée Retour arrière natifs) ; aucune valeur n'est lue,
@@ -104,7 +107,25 @@
     '[role="link"], [role="checkbox"], [role="radio"], [role="switch"], [role="tab"], [role="menuitem"], [role="option"]';
   const CONTROLS_MAX = 200;
   const LABEL_MAX = 80;
-  const PREFERRED_RE = /^(continue with phone|continuer avec (le |ton |votre |un )?(t[ée]l[ée]phone|num[ée]ro)|use phone)/i;
+  // Préférence (0.7.9) — « Continue with phone » de X est l'INSCRIPTION (mode signup, start phone) : jamais préféré.
+  // Rang 0 : entrée de connexion réelle (« Log in with username or email » : verbe de connexion + identifiant) ;
+  // 1 : lien de connexion (href /login ou /i/flow/login de x.com, indépendant de la langue) ; 2 : passkey native de X
+  // (« Continue with passkey » / « Use passkey » : verbe d'action en tête) ; inscription, création, aide : -1 (rien de
+  // préféré, fail closed : l'autofocus de X reste). Préférer = focus seulement, jamais une activation.
+  const LOGIN_VERB_RE = /\b(log ?in|sign ?in)\b|connexion|se connecter|connecte-toi|iniciar sesi[oó]n|anmelden|accedi/i;
+  const LOGIN_ID_RE = /user ?name|e-?mail|nom d['’]utilisateur|identifiant|courriel|usuario|correo|benutzername|nome utente/i;
+  const LOGIN_HREF_RE = /^(https:\/\/(www\.|mobile\.)?(x|twitter)\.com)?\/(login|i\/flow\/login)\/?([?#]|$)/i;
+  const PASSKEY_RE = /\bpass ?keys?\b|cl[ée]s? d['’](acc[eè]s|identification)|llaves? de acceso|chiavi? d['’]accesso/i;
+  const PASSKEY_VERB_RE = /^(continue|use|sign ?in|log ?in|continuer|utiliser|se connecter|connexion|continuar|usar|iniciar sesi[oó]n|weiter|verwenden|mit|anmelden|continua|usa|accedi)\b/i;
+  const NOT_LOGIN_RE = /sign ?up|create|regist|reg[ií]str|inscri|cr[ée]er|ajouter|\badd\b|learn|about|en savoir|[àa] propos|^continue with phone|^continuer avec (le |ton |votre |un )?(t[ée]l[ée]phone|num[ée]ro)|^use phone/i;
+  function preferRank(text, href) {
+    const t = typeof text === "string" ? text : "";
+    if (NOT_LOGIN_RE.test(t)) { return -1; }
+    if (LOGIN_VERB_RE.test(t) && LOGIN_ID_RE.test(t)) { return 0; }
+    if (typeof href === "string" && LOGIN_HREF_RE.test(href)) { return 1; }
+    if (PASSKEY_RE.test(t) && PASSKEY_VERB_RE.test(t)) { return 2; }
+    return -1;
+  }
   const MOVE_KEYS = { ArrowUp: -1, Up: -1, ArrowDown: 1, Down: 1, ArrowLeft: -1, Left: -1, ArrowRight: 1, Right: 1 };
   const MOVE_CODES = { 38: -1, 40: 1, 37: -1, 39: 1 };
   const VERTICAL = new Set(["ArrowUp", "Up", "ArrowDown", "Down"]);
@@ -178,7 +199,15 @@
     const t = (el.getAttribute("aria-label") || el.textContent || "").replace(/\s+/g, " ").trim();
     return t.slice(0, LABEL_MAX);
   }
-  function preferred(list) { return list.find((el) => PREFERRED_RE.test(label(el))) || null; }
+  function preferred(list) {   // meilleur rang, puis ordre du document ; null si rien (fail closed)
+    let best = null;
+    let rank = 3;
+    for (const el of list) {
+      const r = preferRank(label(el), el.tagName === "A" ? el.getAttribute("href") : null);
+      if (r >= 0 && r < rank) { best = el; rank = r; }
+    }
+    return best;
+  }
   function applyInline(el, props) {
     for (const [k, v] of props) { el.style.setProperty(k, v, "important"); }
   }
@@ -293,7 +322,7 @@
     const none = !ae || ae === document.body || ae === document.documentElement;
     if (!autoFocused && !userActed && (none || editable(ae))) {   // rien, ou champ autofocusé par X
       const p = preferred(controls());
-      if (p) { autoFocused = true; setFocus(p); }   // « Continue with phone » : OK direct, sans aucune flèche, UNE fois
+      if (p) { autoFocused = true; setFocus(p); }   // connexion réelle (ou passkey) : OK direct, zéro flèche, UNE fois
     } else if (!none) {
       autoFocused = true;   // contrôle placé par la page, ou touche/geste réel : jamais volé ensuite
     }

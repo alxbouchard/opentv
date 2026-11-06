@@ -607,7 +607,7 @@ class TestXExtensionStatic(unittest.TestCase):
         self.assertIn("editable(ae)", lk)                                  # champ : Entrée native
         self.assertIn("!e.repeat", lk)
         self.assertIn('window.addEventListener("keydown", onKeyLate, false);', nav)
-        self.assertIn("Continue with phone".lower(), nav.lower())
+        self.assertIn("function preferRank(text, href)", nav)              # priorité : test_login_entry_*
         self.assertIn("if (editable(el)) { return \"\"; }", nav)         # libellé : jamais celui d'un champ
 
     def test_initial_focus_moves_once_before_any_real_input(self):
@@ -626,6 +626,47 @@ class TestXExtensionStatic(unittest.TestCase):
         vis = nav[nav.index("function visible(el)"):nav.index("function usable(el)")]
         self.assertIn("opacityProperty: true", vis)                       # parent opacity:0 : invisible
         self.assertIn("r.right <= 0 || r.left >= innerWidth", vis)        # hors écran : invisible
+
+    @unittest.skipUnless(NODE, "node absent")
+    def test_login_entry_then_passkey_never_signup_phone(self):
+        """« Continue with phone » de X est l'INSCRIPTION (mode signup, start phone) : jamais préféré. Rang 0 : entrée de
+        connexion réelle (« Log in with username or email », multilingue) ; 1 : lien de connexion (href /login ou
+        /i/flow/login, indépendant de la langue) ; 2 : passkey native de X ; sinon -1 (rien de préféré : fail closed)."""
+        nav = read(os.path.join(EXT, "nav.js"))
+        src = nav[nav.index("const LOGIN_VERB_RE"):nav.index("function preferred(list)")]
+        cases = [
+            ("Log in with username or email", None, 0), ("Log in with email or username", None, 0),
+            ("Sign in with username or email", None, 0), ("Log in with phone, email, or username", None, 0),
+            ("Se connecter avec un nom d'utilisateur ou une adresse e-mail", None, 0),
+            ("Connexion avec nom d’utilisateur ou e-mail", None, 0),
+            ("Iniciar sesión con nombre de usuario o correo electrónico", None, 0),
+            ("Mit Benutzername oder E-Mail anmelden", None, 0),
+            ("Sign in", "/login", 1), ("Se connecter", "/i/flow/login", 1),
+            ("Log in", "https://x.com/login?redirect_after_login=%2F", 1), ("", "/i/flow/login?lang=fr", 1),
+            ("Continue with passkey", None, 2), ("Use passkey", None, 2), ("Use a passkey", None, 2),
+            ("Sign in with a passkey", None, 2), ("Continuer avec une clé d'accès", None, 2),
+            ("Utiliser une clé d’accès", None, 2), ("Continue with Passkey", None, 2),
+            # inscription par téléphone (le bug terrain), inscription, fournisseurs tiers, aide, actions de compte
+            ("Continue with phone", None, -1), ("Continuer avec le téléphone", None, -1), ("Use phone", None, -1),
+            ("Continue with phone", "/login", -1), ("Sign up", "/i/flow/signup", -1), ("Sign up", "/login", -1),
+            ("Create account", None, -1), ("Créer un compte", None, -1), ("S'inscrire", None, -1),
+            ("Sign up with username or email", None, -1), ("Sign in with Google", None, -1),
+            ("Sign in with Apple", None, -1), ("Learn more about passkeys", None, -1), ("Create a passkey", None, -1),
+            ("Add a passkey", None, -1), ("Passkey", None, -1), ("Forgot password?", None, -1), ("Next", None, -1),
+            ("", None, -1), ("Sign in", "/i/flow/signup", -1), ("Sign in", "https://evil.example/login", -1),
+            ("Sign in", "/loginx", -1), ("Get the app", "/download", -1),
+        ]
+        js = (src + "\nconst c = JSON.parse(require('fs').readFileSync(0, 'utf8'));\n" +
+              "process.stdout.write(JSON.stringify(c.map((x) => preferRank(x[0], x[1]))));")
+        p = subprocess.run([NODE, "-e", js], input=json.dumps([[t, h] for t, h, _ in cases]),
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        got = json.loads(p.stdout)
+        self.assertEqual([(t, h, g) for (t, h, _), g in zip(cases, got)], cases)
+        code = code_only(nav)
+        pf = code[code.index("function preferred(list)"):code.index("function applyInline(el, props)")]
+        self.assertIn("preferRank(label(el), el.tagName === \"A\" ? el.getAttribute(\"href\") : null)", pf)
+        self.assertNotIn("click", pf)                                     # préférer = focus seulement, jamais activer
 
     def test_css_inert_outside_feed_mode(self):
         css = read(os.path.join(EXT, "x.css"))
@@ -721,7 +762,7 @@ class TestKioskAndPolicy(unittest.TestCase):
         self.assertIn("#OPENTV_X_TV=1", read(os.path.join(PI4, "opentv-pi.env.example")))
 
     def test_version_and_docs(self):
-        self.assertEqual(VERSION, "0.7.8")
+        self.assertEqual(VERSION, "0.7.9")
         readme = read(os.path.join(PI4, "README.md"))
         for need in ("X TV Mode", "OPENTV_X_TV=0", "x_context", "non fiable", "connecte-toi", xcontext.EXTENSION_ID):
             self.assertTrue(need in readme, "README sans « %s »" % need)
@@ -1128,22 +1169,24 @@ class TestXEndToEnd(unittest.TestCase):
         for k in ("close", "browser_back", "alt_left", "browser_home", "thread_direct"):
             self.assertEqual(lg[k]["url"], cfg["tv"], (k, lg[k]))
         # accueil déconnecté (photo terrain) : X autofocus le champ identifiant ; avant toute touche, le focus passe
-        # UNE fois à « Continue with phone » (jamais au leurre opacity:0), anneau visible, consigne à l'écran ;
+        # UNE fois à « Log in with username or email » (connexion réelle ; jamais « Continue with phone », qui est
+        # l'INSCRIPTION, ni le leurre opacity:0), anneau visible, consigne à l'écran ;
         # OK synthétique : rien ; OK réel : UN clic, exactement sur ce bouton
         ph = st["phone_login"]
         self.assertTrue(ph["autofocus_seen"])
         self.assertTrue(0 <= ph["first_ms"] < 1500, ph["first_ms"])
-        self.assertEqual((ph["initial"]["active"], ph["initial"]["ring"]), ("phone", "phone"), ph["initial"])
+        self.assertEqual((ph["initial"]["active"], ph["initial"]["ring"]), ("login", "login"), ph["initial"])
         self.assertTrue(ph["initial"]["outline"].startswith("solid 6px"), ph["initial"])
         self.assertIn("OK valider", ph["initial"]["help"])
         self.assertIn("au clavier", ph["initial"]["help"])
         self.assertEqual((ph["initial"]["hits"], ph["initial"]["clicks"]), ([], 0))
         self.assertEqual((ph["synthetic"]["hits"], ph["synthetic"]["clicks"]), ([], 0))
-        self.assertEqual((ph["ok"]["hits"], ph["ok"]["clicks"]), (["phone"], 1))
+        self.assertEqual((ph["ok"]["hits"], ph["ok"]["clicks"]), (["login"], 1))
         self.assertEqual(ph["url_after_ok"], "https://x.com/")
         # ↑ ↓ : contrôles visibles et activables, ordre du document, dans la modale ; jamais l'iframe Google, le
         # bouton masqué, le désactivé, le leurre sous parent opacity:0 ni le lien hors écran ; bords : on reste
-        self.assertEqual(ph["seq"], ["apple", "apple", "phone", "user", "next", "forgot", "signup", "signup"])
+        self.assertEqual(ph["seq"], ["phone", "apple", "apple", "phone", "login", "user", "next", "forgot", "signup",
+                                     "signup"])
         # champ : saisie au clavier physique native (← → Retour arrière), aucun clic, ↑ ↓ en sortent ; après une
         # touche réelle, un nouveau rendu de la page ne vole jamais le focus du champ
         self.assertEqual(ph["field"], "user")
@@ -1151,9 +1194,28 @@ class TestXEndToEnd(unittest.TestCase):
         self.assertEqual((ph["after_typing"]["active"], ph["after_typing"]["clicks"]), ("user", 1))
         # rôle « button » non natif : OK réel active CE contrôle seulement (repli), aucun autre
         self.assertEqual(ph["on_forgot"], "forgot")
-        self.assertEqual((ph["forgot"]["hits"], ph["forgot"]["clicks"]), (["phone", "forgot"], 2))
+        self.assertEqual((ph["forgot"]["hits"], ph["forgot"]["clicks"]), (["login", "forgot"], 2))
         self.assertEqual(ph["url_end"], "https://x.com/")
         self.assertEqual(ph["url_after_back"], cfg["tv"])
+        # étape identifiant avec passkey native de X (sans entrée de connexion) : le focus passe UNE fois à « Continue
+        # with passkey » (jamais à « Continue with phone »), aucun clic automatique ; OK synthétique : rien ; OK réel :
+        # UNE activation de CE bouton (le dialogue WebAuthn natif de Chromium reste celui du navigateur) ; repli
+        # manuel : ↑ rejoint le champ identifiant, saisie native ; Retour : /tv
+        pk = st["passkey_login"]
+        self.assertEqual((pk["initial"]["active"], pk["initial"]["ring"]), ("passkey", "passkey"), pk["initial"])
+        self.assertEqual((pk["initial"]["hits"], pk["initial"]["clicks"]), ([], 0))
+        self.assertEqual((pk["synthetic"]["hits"], pk["synthetic"]["clicks"]), ([], 0))
+        self.assertEqual((pk["ok"]["hits"], pk["ok"]["clicks"]), (["passkey"], 1))
+        self.assertEqual((pk["field"], pk["typed"]), ("user", "alice"))
+        self.assertEqual(pk["field_hits"], ["passkey"])
+        self.assertEqual(pk["url_after_back"], cfg["tv"])
+        # seule « Continue with phone » (inscription) : rien n'est préféré (fail closed) — l'autofocus de X reste,
+        # aucun anneau imposé, aucun clic ; ↓ réel : contrôle suivant, jamais l'inscription par téléphone activée
+        po = st["phone_only"]
+        self.assertEqual((po["initial"]["active"], po["initial"]["ring"]), ("user", None), po["initial"])
+        self.assertEqual((po["initial"]["hits"], po["initial"]["clicks"]), ([], 0))
+        self.assertEqual((po["down"]["active"], po["down"]["hits"], po["down"]["clicks"]), ("next", [], 0), po["down"])
+        self.assertEqual(po["url_after_back"], cfg["tv"])
         # connexion encore en chargement (script du fil jamais injecté) : Retour ramène quand même à /tv
         self.assertEqual(lg["stalled"], {"url": cfg["tv"], "ready": "loading"})
         # témoin A/B (Chromium en apparence claire) : sans les arguments X du kiosque la connexion reste claire, avec
@@ -1217,7 +1279,7 @@ class TestXEndToEnd(unittest.TestCase):
         # CSP stricte : anneau et consigne visibles par nav.css (aucun style en ligne), aucune violation CSP causée
         # par l'extension ; le témoin (un <style> de page) est bien bloqué
         cs = st["csp"]
-        self.assertEqual((cs["active"], cs["ring"]), ("phone", "phone"), cs)
+        self.assertEqual((cs["active"], cs["ring"]), ("login", "login"), cs)
         self.assertTrue(cs["outline"].startswith("solid 6px"), cs)
         self.assertEqual((cs["inline"], cs["help_pos"], cs["help_inline"], cs["violations"]), ("", "fixed", "", 0), cs)
         self.assertTrue(cs["moved"]["outline"].startswith("solid 6px"), cs)

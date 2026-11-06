@@ -389,7 +389,8 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   seulement, KEY_EXIT appui seul, armée seulement pendant le témoin) ; action root `opentv-x-escape-action.service` via
   `.path` (demande vérifiée/retirée, témoin revérifié, 10 s, `systemctl restart --no-block opentv-kiosk.service`).
   Kiosque/Chromium sans groupe input. Connexion X : mode « contrôles » de `nav.js` hors fil (↑ ↓ contrôles visibles,
-  « Continue with phone » au focus, OK natif, champs natifs, aucune valeur lue). Passkey téléphone : flux WebAuthn
+  connexion réelle « Log in with username or email » au focus, puis lien /login, puis passkey X ; jamais « Continue
+  with phone » = INSCRIPTION chez X (0.7.9) ; inconnu ⇒ rien ; OK natif, champs natifs, aucune valeur lue). Passkey téléphone : flux WebAuthn
   hybride natif seulement, **gate terrain** (kiosque sans groupe bluetooth). Tests `test_x_escape.py` + `e2e_x_escape.js`.
 - **Mode HDMI exact après extinction/rallumage de la TV (0.7.5)** : terrain 2026-11-01, au rallumage wlroots recrée
   la sortie et Cage prend le mode préféré de l'EDID (3840x2160@30) pendant que Chromium reste en 1920x1080 (quart

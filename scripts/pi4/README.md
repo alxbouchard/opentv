@@ -1485,8 +1485,16 @@ voir, Alex restait coincé sur x.com. Relancer `opentv-kiosk.service` ramène to
 
 **Connexion à la télécommande (mode « contrôles » de `nav.js`, pages sans fil seulement)** : ↑ ↓ (et ← → hors champ)
 parcourent les contrôles **visibles et activables** (boutons, liens, champs ; ordre du document ; limités à la fenêtre
-modale de X ; jamais masqués, désactivés ni l'iframe Google) avec un anneau jaune ; au chargement, **« Continue with
-phone »** reçoit le focus (OK direct, zéro flèche) si rien n'a le focus ; consigne à l'écran « ↑ ↓ choisir · OK
+modale de X ; jamais masqués, désactivés ni l'iframe Google) avec un anneau jaune ; au chargement, l'**entrée de
+connexion réelle** reçoit le focus UNE fois (OK direct, zéro flèche) si rien n'a le focus ou si X a autofocusé le champ
+(0.7.9). Correction 0.7.9 : **« Continue with phone » de X est l'INSCRIPTION** (bundle web déconnecté actuel :
+`mode:'signup', start:'phone'` — d'où le formulaire « numéro de téléphone » vu sur la TV) ; il n'est **plus jamais**
+préféré. Ordre (`preferRank` de `nav.js`, libellé visible + href, multilingue EN/FR, ES/DE/IT au mieux) : 0 « Log in
+with username or email » (verbe de connexion + identifiant/e-mail) ; 1 lien de connexion `href` `/login` ou
+`/i/flow/login` de x.com (indépendant de la langue) ; 2 passkey native de X (« Continue with passkey » / « Use
+passkey » / « clé d'accès », verbe d'action en tête) ; inscription, création, « en savoir plus » ou libellé inconnu ⇒
+**rien n'est préféré** (fail closed : l'autofocus de X reste, ↓ = premier contrôle). Préférer = focus seulement ; après
+une touche réelle le focus n'est plus jamais déplacé seul (repli manuel identifiant/e-mail intact) ; consigne à l'écran « ↑ ↓ choisir · OK
 valider · Retour : OpenTV · Identifiant et mot de passe : au clavier ». **OK réel** : activation native de Chromium
 sur un bouton/lien natif (geste humain) ; pour un `role="button"` non natif seulement, UN clic de repli sur CE
 contrôle si X n'a pas traité l'Entrée. Champ au focus : saisie **100 % native au clavier physique** (← → Entrée Retour
@@ -1496,8 +1504,9 @@ aucun relais d'identifiant ni de texte.
 **Connexion par le téléphone (passkey) — gate terrain, NON prouvé** : le QR affiché par la page de connexion X
 (« Scan to get the app ») **n'est pas** un QR de connexion : il ouvre seulement le magasin d'applications. OpenTV ne
 construit **aucun** relais de mot de passe ou de texte. Le seul chemin téléphone sûr est le flux **WebAuthn hybride
-natif de Chromium** (passkey sur un autre appareil) : passkey X déjà activée sur l'iPhone/Android d'Alex → sur la TV,
-choisir la connexion par passkey (« Sign in with passkey » / « Use a phone or tablet ») → Chromium affiche **son propre
+natif de Chromium** (passkey sur un autre appareil) : passkey X créée au préalable dans l'app X mobile CONNECTÉE
+d'Alex (iPhone/Android) → sur la TV, « Log in with username or email » puis « Continue with passkey » / « Use
+passkey » (focus OpenTV, OK humain ; aucune activation automatique) → Chromium affiche **son propre
 QR d'authentification** (dans une boîte du navigateur, distinct du QR « get the app ») → le téléphone le scanne,
 vérifie la proximité par Bluetooth puis valide. Vérifié hors matériel (`test_x_tv.TestXPasskeyPathAudit`) : le kiosque
 ne désactive ni WebAuthn ni l'interface d'authentification (aucun `--disable-features` WebAuthn, aucune politique
@@ -1511,7 +1520,8 @@ X active sur le téléphone, flux complet réussi sur la TV, photo — sinon con
 **Gates terrain (hotfix)** : sur la Pi, `journalctl -u opentv-x-escape` montre `x_escape_armed` à l'ouverture de X et
 `x_escape_disarmed` au retour ; Retour Samsung sur la connexion X sombre ET sur le fil ⇒ `/tv` (≤ 10 s) ; Retour sur
 `/tv` : comportement inchangé, aucun `x_escape_kiosk_restart` ; TV éteinte/rallumée puis X ⇒ Retour fonctionne encore
-(nouveau périphérique vc4-hdmi) ; ↓/OK sur « Continue with phone » du VRAI DOM de X ; photo d'Alex.
+(nouveau périphérique vc4-hdmi) ; ↓/OK sur « Log in with username or email » du VRAI DOM de X (0.7.9 : jamais
+« Continue with phone », inscription) ; photo d'Alex.
 
 ### 6 sexies-b. Canari instrumenté 0.7.8 : ↑ ↓ ← → OK sur le VRAI X (preuve d'abord, aucune injection de touche)
 

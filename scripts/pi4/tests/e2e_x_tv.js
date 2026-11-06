@@ -48,18 +48,20 @@ const LOGIN = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title
   `<body><div role="dialog" aria-modal="true"><h1>Connexion à X</h1><input id="user" name="text" autofocus ` +
   `autocomplete="username"><button id="next">Suivant</button></div><div data-testid="sidebarColumn" id="sb">Pied</div>` +
   `${INSTR}</body></html>`;
-// accueil déconnecté RÉALISTE (photo terrain : connexion X sombre, bouton « Continue with phone ») : modale de X,
-// iframe Google (jamais un contrôle), boutons natifs, champ identifiant AUTOFOCUS (comme le vrai x.com), rôles
-// « button » non natifs (div), un bouton désactivé, un masqué, un leurre « Continue with phone » sous un parent
-// opacity:0 et un lien hors écran (jamais focalisés). Chaque activation est comptée par id (window.__hits).
+// accueil déconnecté RÉALISTE (photo terrain : connexion X sombre) : modale de X, iframe Google (jamais un contrôle),
+// boutons natifs, « Continue with phone » (INSCRIPTION chez X : mode signup, start phone — jamais préféré) puis
+// « Log in with username or email » (connexion réelle, préférée), champ identifiant AUTOFOCUS (comme le vrai x.com),
+// rôles « button » non natifs (div), un bouton désactivé, un masqué, un leurre « Log in with username or email » sous
+// un parent opacity:0 et un lien hors écran (jamais focalisés). Chaque activation est comptée par id (window.__hits).
 const LANDING = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>X. It’s what’s happening / X</title>` +
   `${STYLE}<style>button,[role=button],a,input{display:block;margin:12px auto;width:300px;height:40px}</style></head>` +
   `<body><div id="react-root"><div role="dialog" aria-modal="true" aria-labelledby="h"><h1 id="h">Sign in to X</h1>` +
   `<iframe title="Sign in with Google" srcdoc="<p>Google</p>" style="width:300px;height:40px"></iframe>` +
   `<button id="apple" type="button" onclick="__hits.push('apple')">Sign in with Apple</button>` +
-  `<div style="opacity:0"><button id="ghost" type="button" onclick="__hits.push('ghost')">Continue with phone</button></div>` +
+  `<div style="opacity:0"><button id="ghost" type="button" onclick="__hits.push('ghost')">Log in with username or email</button></div>` +
   `<a id="skip" href="#main" style="position:absolute;left:-9999px;top:0">Skip to content</a>` +
   `<button id="phone" type="button" onclick="__hits.push('phone')"><span>Continue with phone</span></button>` +
+  `<button id="login" type="button" onclick="__hits.push('login')"><span>Log in with username or email</span></button>` +
   `<button id="gone" type="button" style="display:none" onclick="__hits.push('gone')">Hidden</button>` +
   `<div>or</div><label><span>Phone, email, or username</span>` +
   `<input id="user" name="text" autofocus autocomplete="username" type="text"></label>` +
@@ -67,6 +69,24 @@ const LANDING = `<!doctype html><html lang="en"><head><meta charset="utf-8"><tit
   `<div id="next" role="button" tabindex="0" onclick="__hits.push('next')"><span>Next</span></div>` +
   `<div id="forgot" role="button" tabindex="0" onclick="__hits.push('forgot')"><span>Forgot password?</span></div>` +
   `<span>Don't have an account? <a id="signup" href="/i/flow/signup">Sign up</a></span></div></div>` +
+  `<script>window.__hits=[];</script>${INSTR}</body></html>`;
+// 0.7.9 — étape identifiant avec passkey native de X (libellés du bundle web : « Continue with passkey ») : aucune
+// entrée « Log in with username or email » ici ; « Continue with phone » (inscription) présent mais jamais préféré
+const PASSKEY_LOGIN = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Log in to X / X</title>` +
+  `${STYLE}<style>button,[role=button],input{display:block;margin:12px auto;width:300px;height:40px}</style></head>` +
+  `<body><div role="dialog" aria-modal="true"><h1>Sign in to X</h1>` +
+  `<button id="phone" type="button" onclick="__hits.push('phone')">Continue with phone</button>` +
+  `<input id="user" name="text" autofocus autocomplete="username webauthn" type="text">` +
+  `<button id="passkey" type="button" onclick="__hits.push('passkey')"><span>Continue with passkey</span></button>` +
+  `<div id="next" role="button" tabindex="0" onclick="__hits.push('next')"><span>Next</span></div></div>` +
+  `<script>window.__hits=[];</script>${INSTR}</body></html>`;
+// 0.7.9 — seule l'inscription par téléphone est proposée : rien n'est préféré (fail closed)
+const PHONE_ONLY = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>X</title>` +
+  `${STYLE}<style>button,[role=button],input{display:block;margin:12px auto;width:300px;height:40px}</style></head>` +
+  `<body><div role="dialog" aria-modal="true"><h1>Sign in to X</h1>` +
+  `<button id="phone" type="button" onclick="__hits.push('phone')">Continue with phone</button>` +
+  `<input id="user" name="text" autofocus autocomplete="username" type="text">` +
+  `<div id="next" role="button" tabindex="0" onclick="__hits.push('next')"><span>Next</span></div></div>` +
   `<script>window.__hits=[];</script>${INSTR}</body></html>`;
 // 0.7.8 — fenêtre modale VISIBLE de X au-dessus du fil (colonne principale PRÉSENTE) : invite de notifications réaliste
 // (calque fixe, bouton natif <button role=button> comme X + rôle « button » non natif qui ferme la fenêtre) ; le fil derrière ne doit jamais bouger
@@ -125,6 +145,7 @@ function ctl(p) {
                                headers: { "Content-Security-Policy": CSP } });
       }
       const body = u.pathname === "/i/flow/stall" ? STALL : u.pathname === "/" ? LANDING :
+        u.pathname === "/i/flow/passkey" ? PASSKEY_LOGIN : u.pathname === "/i/flow/phoneonly" ? PHONE_ONLY :
         u.pathname === "/settings/dialog" ? FEED_DIALOG : u.pathname === "/compose/home" ? FEED_COMPOSE :
         (u.pathname.indexOf("/i/flow/login") === 0 || u.pathname.indexOf("/account/") === 0) ? LOGIN :
         /\/status\/\d+$/.test(u.pathname) ? STATUS : FEED;
@@ -300,20 +321,21 @@ function ctl(p) {
     lg.thread_direct = await viaKey("https://x.com/alice_m/status/2", () => page.keyboard.press("Escape"));
     out.steps.login = lg;
 
-    // 7 bis) accueil déconnecté (photo terrain) : focus TV initial sur « Continue with phone », OK = UN clic exact sur
+    // 7 bis) accueil déconnecté (photo terrain) : focus TV initial sur « Log in with username or email » (jamais
+    //         « Continue with phone » : inscription), OK = UN clic exact sur
     //         ce bouton (activation native, geste réel) ; ↑ ↓ parcourent les contrôles visibles/activables dans
     //         l'ordre ; champ : saisie native, aucune valeur lue par l'extension ; rôle « button » non natif activé
     //         par OK réel seulement ; touche OK synthétique : rien
     await page.waitForSelector(".card.focused", { timeout: 10000 });
     await page.goto("https://x.com/");
     const ph = {};
-    // focus d'autofocus de X (champ) puis transfert UNIQUE vers « Continue with phone », sans aucune touche
+    // focus d'autofocus de X (champ) puis transfert UNIQUE vers « Log in with username or email », sans aucune touche
     ph.autofocus_seen = await page.evaluate(() => !!document.querySelector("#user[autofocus]"));
     ph.first_ms = await page.evaluate(() => new Promise((res) => {
       const t0 = performance.now();
       (function poll() {
         const ae = document.activeElement;
-        if (ae && ae.id === "phone") { res(Math.round(performance.now() - t0)); return; }
+        if (ae && ae.id === "login") { res(Math.round(performance.now() - t0)); return; }
         if (performance.now() - t0 > 3000) { res(-1); return; }
         setTimeout(poll, 20);
       })();
@@ -335,9 +357,8 @@ function ctl(p) {
     ph.ok = await st();
     ph.url_after_ok = page.url();
     const order = [];
-    await page.keyboard.press("ArrowUp"); await sleep(60); order.push((await st()).active);
-    await page.keyboard.press("ArrowUp"); await sleep(60); order.push((await st()).active);   // bord : on reste
-    for (let i = 0; i < 6; i++) { await page.keyboard.press("ArrowDown"); await sleep(60); order.push((await st()).active); }
+    for (let i = 0; i < 3; i++) { await page.keyboard.press("ArrowUp"); await sleep(60); order.push((await st()).active); }   // bord : on reste
+    for (let i = 0; i < 7; i++) { await page.keyboard.press("ArrowDown"); await sleep(60); order.push((await st()).active); }
     ph.seq = order;
     await page.keyboard.press("ArrowUp"); await sleep(60);   // signup -> forgot
     await page.keyboard.press("ArrowUp"); await sleep(60);   // forgot -> next
@@ -361,6 +382,47 @@ function ctl(p) {
     await page.keyboard.press("Escape");
     ph.url_after_back = await waitUrl((u) => u === cfg.tv);
     out.steps.phone_login = ph;
+
+    // 7 bis-b) étape identifiant avec passkey native de X : focus UNE fois sur « Continue with passkey », aucun clic
+    //          automatique ; OK synthétique : rien ; OK réel : UNE activation ; repli manuel : ↑ rejoint le champ
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    await page.goto("https://x.com/i/flow/passkey");
+    const pk = {};
+    await page.evaluate(() => new Promise((res) => {
+      const t0 = performance.now();
+      (function poll() {
+        const ae = document.activeElement;
+        if ((ae && ae.id === "passkey") || performance.now() - t0 > 3000) { res(); return; }
+        setTimeout(poll, 20);
+      })();
+    }));
+    await sleep(500);
+    pk.initial = await st();
+    await page.evaluate(() => document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+    await sleep(150);
+    pk.synthetic = await st();
+    await page.keyboard.press("Enter"); await sleep(200);
+    pk.ok = await st();
+    await page.keyboard.press("ArrowUp"); await sleep(60);
+    pk.field = (await st()).active;
+    await page.keyboard.type("alice");
+    pk.typed = await page.evaluate(() => document.getElementById("user").value);
+    pk.field_hits = (await st()).hits;
+    await page.keyboard.press("Escape");
+    pk.url_after_back = await waitUrl((u) => u === cfg.tv);
+    out.steps.passkey_login = pk;
+
+    // 7 bis-c) seule l'inscription par téléphone : rien de préféré (fail closed), l'autofocus de X reste
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    await page.goto("https://x.com/i/flow/phoneonly");
+    await page.waitForSelector("#user");
+    await sleep(900);
+    const po = { initial: await st() };
+    await page.keyboard.press("ArrowDown"); await sleep(100);
+    po.down = await st();
+    await page.keyboard.press("Escape");
+    po.url_after_back = await waitUrl((u) => u === cfg.tv);
+    out.steps.phone_only = po;
 
     // 7 ter) fenêtre modale VISIBLE au-dessus du fil : elle gagne (mode « contrôles » limité à elle), le fil caché ne
     //         bouge jamais ; OK réel sur le rôle « button » : UN clic ; fenêtre fermée : ↓ reprend le fil
@@ -465,7 +527,7 @@ function ctl(p) {
       const t0 = performance.now();
       (function poll() {
         const ae = document.activeElement;
-        if ((ae && ae.id === "phone") || performance.now() - t0 > 3000) { res(); return; }
+        if ((ae && ae.id === "login") || performance.now() - t0 > 3000) { res(); return; }
         setTimeout(poll, 20);
       })();
     }));
