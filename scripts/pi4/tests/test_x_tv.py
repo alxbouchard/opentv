@@ -21,6 +21,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -656,8 +657,9 @@ class TestKioskAndPolicy(unittest.TestCase):
         p = subprocess.run(["bash", "-n", KIOSK], capture_output=True)
         self.assertEqual(p.returncode, 0, p.stderr)
 
-    def kiosk_x_args(self, env, ext_present=True):
-        """Bloc X TV réel du script du kiosque, exécuté seul (Chromium jamais lancé) -> arguments X de Chromium."""
+    def kiosk_x_args(self, env, ext_present=True, kind="direct"):
+        """Bloc X TV réel du script du kiosque, exécuté seul (Chromium jamais lancé) -> arguments X de Chromium.
+        kind : binaire choisi plus haut par le script (« direct » = /usr/lib/chromium/chromium, « wrapper »)."""
         text = read(KIOSK)
         block = text[text.index('XEXT="/opt/opentv/share/x-tv-extension"'):text.index('exec "$CHROMIUM_BIN"')]
         d = tempfile.mkdtemp(prefix="otvxk", dir="/tmp")
@@ -665,7 +667,8 @@ class TestKioskAndPolicy(unittest.TestCase):
         if ext_present:
             open(os.path.join(d, "manifest.json"), "w").close()
         block = block.replace("/opt/opentv/share/x-tv-extension", d)
-        script = "set -euo pipefail\n" + block + 'printf "%s\\n" ${X_ARGS[@]+"${X_ARGS[@]}"}\n'
+        script = ("set -euo pipefail\nlog() { :; }\nCHROMIUM_KIND=%s\nCHROMIUM_BIN=/chromium\n" % kind + block +
+                  'printf "%s\\n" ${X_ARGS[@]+"${X_ARGS[@]}"}\n')
         p = subprocess.run(["bash", "-c", script], capture_output=True, env=dict({"PATH": "/usr/bin:/bin"}, **env))
         self.assertEqual(p.returncode, 0, p.stderr)
         return [a.replace(d, "$XEXT") for a in p.stdout.decode().split()]
@@ -681,6 +684,11 @@ class TestKioskAndPolicy(unittest.TestCase):
                     "WebContentsForceDark"):
             self.assertNotIn(bad, text)                                   # jamais de recoloriage forcé des pages
         self.assertEqual(text.count("--force-dark-mode"), 1)
+
+    def test_kiosk_wrapper_kind_never_loads_extension(self):
+        # wrapper Debian seul : son --load-extension nu préfixé masquerait le nôtre -> extension refusée (diagnostic)
+        self.assertEqual(self.kiosk_x_args({}, kind="wrapper"), ["--force-dark-mode"])
+        self.assertEqual(self.kiosk_x_args({"OPENTV_X_TV": "0"}, kind="wrapper"), [])
 
     def test_policy_allows_x_and_only_this_extension(self):
         pol = json.loads(read(POLICY))
@@ -707,6 +715,144 @@ class TestKioskAndPolicy(unittest.TestCase):
         readme = read(os.path.join(PI4, "README.md"))
         for need in ("X TV Mode", "OPENTV_X_TV=0", "x_context", "non fiable", "connecte-toi", xcontext.EXTENSION_ID):
             self.assertTrue(need in readme, "README sans « %s »" % need)
+
+
+WRAPPER_FLAGS = ["--enable-gpu-rasterization", "--no-default-browser-check", "--disable-pings", "--media-router=0",
+                 "--disable-dev-shm-usage", "--use-angle=gles"]
+KIOSK_BASE_FLAGS = ["--kiosk", "--ozone-platform=wayland", "--noerrdialogs", "--disable-infobars", "--no-first-run",
+                    "--disable-session-crashed-bubble", "--disable-features=Translate,MediaRouter",
+                    "--password-store=basic", "--check-for-update-interval=31536000",
+                    "--overscroll-history-navigation=0", "--disable-pinch"]
+
+
+class TestKioskChromiumBinary(unittest.TestCase):
+    """Script RÉEL du kiosque exécuté en entier sous une racine factice (chemins absolus réécrits, Chromium remplacé par
+    une souche qui recopie son argv) : terrain 0.7.8, le wrapper Debian /usr/bin/chromium préfixait un
+    « --load-extension » nu (/etc/chromium.d/extensions) et l'extension X n'était jamais chargée."""
+
+    DIRECT = "/usr/lib/chromium/chromium"
+    DIRECT_OLD = "/usr/lib/chromium-browser/chromium-browser"
+    WRAP = "/usr/bin/chromium"
+    WRAP_OLD = "/usr/bin/chromium-browser"
+
+    def run_kiosk(self, bins, env=None, ext=True, script_direct=()):
+        d = tempfile.mkdtemp(prefix="otvkb", dir="/tmp")
+        self.addCleanup(shutil.rmtree, d, True)
+        out = os.path.join(d, "argv")
+        for b in bins:
+            path = d + b
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            # souche : les « directs » n'ont PAS de #! (comme un ELF ; bash l'exécute quand même), les wrappers en ont
+            shebang = "#!/bin/bash\n" if (b.startswith("/usr/bin/") or b in script_direct) else ""
+            with open(path, "w") as f:
+                f.write(shebang + 'printf "%%s\\n" "$0" "$@" > "%s"\n' % out)
+            os.chmod(path, 0o755)
+        xext = d + "/opt/opentv/share/x-tv-extension"
+        os.makedirs(xext)
+        if ext:
+            open(os.path.join(xext, "manifest.json"), "w").close()
+        text = re.sub(r"(?<![\w/.])/usr/(lib|bin)/chromium", lambda m: d + m.group(0), read(KIOSK))
+        text = text.replace("/opt/opentv/", d + "/opt/opentv/")
+        script = os.path.join(d, "kiosk")
+        with open(script, "w") as f:
+            f.write(text)
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(8)
+        self.addCleanup(srv.close)
+        port = srv.getsockname()[1]
+        e = {"PATH": "/usr/bin:/bin", "OPENTV_TV_PORT": str(port), "OPENTV_KIOSK_PROFILE": d + "/profile"}
+        e.update(env or {})
+        p = subprocess.run(["bash", script], capture_output=True, env=e, timeout=60)
+        argv = read(out).splitlines() if os.path.exists(out) else None
+        logs = [json.loads(l) for l in p.stderr.decode().replace(d, "").splitlines() if l.startswith("{")]
+        if argv:
+            argv = [a.replace(d, "") for a in argv]
+        return p.returncode, argv, logs, port
+
+    def common(self, argv, port):
+        for f in KIOSK_BASE_FLAGS + WRAPPER_FLAGS:
+            self.assertEqual(argv.count(f), 1, f)
+        self.assertEqual([a for a in argv if a.startswith("--user-data-dir")], ["--user-data-dir=/profile"])
+        self.assertEqual(argv[-1], "http://127.0.0.1:%d/tv" % port)
+        joined = " ".join(argv)
+        for bad in ("--no-sandbox", "--disable-web-security", "remote-debugging", "--disable-gpu ", "--user-agent",
+                    "--disable-site-isolation", "--allow-running-insecure", "--show-component-extension-options",
+                    "--enable-remote-extensions", "--disable-gpu-sandbox", "--test-type"):
+            self.assertNotIn(bad, joined + " ", bad)
+        self.assertNotIn("--disable-gpu", argv)
+
+    def ext_args(self, argv):
+        return [a for a in argv if a.startswith(("--load-extension", "--disable-extensions-except"))]
+
+    def test_direct_binary_preferred_with_exactly_one_nonempty_load_extension(self):
+        rc, argv, logs, port = self.run_kiosk([self.DIRECT, self.DIRECT_OLD, self.WRAP, self.WRAP_OLD])
+        self.assertEqual(rc, 0, logs)
+        self.assertEqual(argv[0], self.DIRECT)                       # binaire direct, jamais le wrapper
+        ext = "/opt/opentv/share/x-tv-extension"
+        self.assertEqual(self.ext_args(argv), ["--disable-extensions-except=" + ext, "--load-extension=" + ext])
+        loads = [a for a in argv if "load-extension" in a]
+        self.assertEqual(loads, ["--load-extension=" + ext])        # UN seul, jamais nu ni vide
+        self.assertEqual(argv.count("--force-dark-mode"), 1)
+        self.common(argv, port)
+        self.assertIn({"event": "kiosk_chromium", "detail": "direct:" + self.DIRECT}, logs)
+        self.assertFalse([l for l in logs if l["event"] == "kiosk_x_tv_unavailable"])
+
+    def test_x_tv_disabled_no_extension_flags_but_wrapper_flags_kept(self):
+        rc, argv, logs, port = self.run_kiosk([self.DIRECT, self.WRAP], env={"OPENTV_X_TV": "0"})
+        self.assertEqual(rc, 0, logs)
+        self.assertEqual(argv[0], self.DIRECT)
+        self.assertEqual(self.ext_args(argv), [])
+        self.assertFalse([a for a in argv if "extension" in a])
+        self.assertNotIn("--force-dark-mode", argv)
+        self.common(argv, port)
+
+    def test_older_direct_path_selected_before_wrappers(self):
+        rc, argv, logs, port = self.run_kiosk([self.DIRECT_OLD, self.WRAP, self.WRAP_OLD])
+        self.assertEqual(rc, 0, logs)
+        self.assertEqual(argv[0], self.DIRECT_OLD)
+        self.assertEqual(len([a for a in argv if a.startswith("--load-extension=")]), 1)
+        self.common(argv, port)
+
+    def test_wrapper_fallback_refuses_extension_with_diagnostic(self):
+        for bins, script_direct in (([self.WRAP], ()), ([self.WRAP_OLD, self.WRAP], ()),
+                                    ([self.DIRECT, self.WRAP], (self.DIRECT,))):   # « direct » en script : refusé
+            rc, argv, logs, port = self.run_kiosk(bins, script_direct=script_direct)
+            self.assertEqual(rc, 0, logs)
+            self.assertTrue(argv[0].startswith("/usr/bin/chromium"), argv[0])
+            self.assertEqual(self.ext_args(argv), [], bins)          # jamais un --load-extension masqué = faux succès
+            self.assertEqual(argv.count("--force-dark-mode"), 1)
+            self.assertEqual([l["event"] for l in logs if l["event"] == "kiosk_x_tv_unavailable"],
+                             ["kiosk_x_tv_unavailable"])
+            self.assertTrue([l for l in logs if l["event"] == "kiosk_chromium" and
+                             l["detail"].startswith("wrapper:")])
+            self.common(argv, port)
+
+    def test_wrapper_fallback_x_disabled_is_silent(self):
+        rc, argv, logs, port = self.run_kiosk([self.WRAP], env={"OPENTV_X_TV": "0"})
+        self.assertEqual(rc, 0, logs)
+        self.assertEqual(self.ext_args(argv), [])
+        self.assertFalse([l for l in logs if l["event"] == "kiosk_x_tv_unavailable"])
+
+    def test_extension_missing_no_load_extension(self):
+        rc, argv, logs, port = self.run_kiosk([self.DIRECT], ext=False)
+        self.assertEqual(rc, 0, logs)
+        self.assertEqual(self.ext_args(argv), [])
+        self.assertEqual(argv.count("--force-dark-mode"), 1)
+
+    def test_no_chromium_fails_closed(self):
+        rc, argv, logs, port = self.run_kiosk([])
+        self.assertEqual(rc, 1)
+        self.assertIsNone(argv)
+        self.assertIn({"event": "kiosk_error", "detail": "chromium_missing"}, logs)
+
+    def test_source_order_and_single_load_extension(self):
+        text = code_only(read(KIOSK), "#")
+        self.assertLess(text.index(self.DIRECT), text.index("/usr/bin/chromium"))
+        self.assertLess(text.index(self.DIRECT_OLD), text.index("/usr/bin/chromium"))
+        self.assertEqual(text.count("--load-extension"), 1)
+        self.assertNotRegex(text, r"--load-extension(\s|$|\\)")      # jamais nu
+        self.assertNotIn("CHROMIUM_FLAGS", text)
 
 
 class TestXPasskeyPathAudit(unittest.TestCase):

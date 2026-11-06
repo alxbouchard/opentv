@@ -1,6 +1,7 @@
 #!/bin/bash
 # OpenTV Pi : navigateur du kiosque, lancé par Cage (opentv-kiosk.service).
-# Chromium de Raspberry Pi OS en Wayland, sandbox conservé, profil dédié. Aucun flag ni périphérique Rockchip.
+# Chromium de Raspberry Pi OS en Wayland (binaire direct /usr/lib/chromium/chromium d'abord), sandbox conservé, profil
+# dédié. Aucun flag ni périphérique Rockchip.
 set -euo pipefail
 
 PORT="${OPENTV_TV_PORT:-8080}"
@@ -11,11 +12,34 @@ FALLBACK="file:///opt/opentv/share/ui/fallback.html#${PORT}"
 
 log() { printf '{"event":"%s","detail":"%s"}\n' "$1" "${2:-}" >&2; }
 
+# Binaire Chromium DIRECT d'abord (Debian / Raspberry Pi OS : /usr/lib/chromium/chromium). Le wrapper /usr/bin/chromium
+# source /etc/chromium.d/* et PRÉFIXE ses flags ; terrain 0.7.8 : /etc/chromium.d/extensions y met un
+# « --load-extension » NU (dossier /usr/share/chromium/extensions vide) AVANT le nôtre, si bien que l'extension X n'est
+# jamais chargée (x-probe : pages.tv absent, accepted=0). Le binaire direct ne reçoit que NOS flags ; les flags utiles du
+# wrapper sont repris explicitement plus bas (WRAPPER_ARGS). Un « direct » qui serait un script (#!) est refusé.
+# Wrappers seulement si aucun binaire direct n'existe : alors JAMAIS d'extension (aucun faux succès, diagnostic au journal).
 CHROMIUM_BIN=""
-for c in /usr/bin/chromium-browser /usr/bin/chromium; do
-  if [[ -x "$c" ]]; then CHROMIUM_BIN="$c"; break; fi
+CHROMIUM_KIND=""
+for c in /usr/lib/chromium/chromium /usr/lib/chromium-browser/chromium-browser; do
+  if [[ -f "$c" && -x "$c" ]]; then
+    head2=""
+    IFS= read -r -n 2 head2 < "$c" 2>/dev/null || true
+    if [[ "$head2" != "#!" ]]; then CHROMIUM_BIN="$c"; CHROMIUM_KIND=direct; break; fi
+  fi
 done
+if [[ -z "$CHROMIUM_BIN" ]]; then
+  for c in /usr/bin/chromium-browser /usr/bin/chromium; do
+    if [[ -x "$c" ]]; then CHROMIUM_BIN="$c"; CHROMIUM_KIND=wrapper; break; fi
+  done
+fi
 [[ -n "$CHROMIUM_BIN" ]] || { log kiosk_error chromium_missing; exit 1; }
+log kiosk_chromium "${CHROMIUM_KIND}:${CHROMIUM_BIN}"
+
+# Flags du wrapper Debian / Raspberry Pi OS repris tels quels pour le binaire direct (jamais son --load-extension nu,
+# ni --show-component-extension-options : chrome://extensions est bloqué par la politique, inutile au kiosque).
+# --disable-dev-shm-usage : /dev/shm de la Pi est petit (le wrapper RPi l'ajoute aussi) ; --use-angle=gles : GPU V3D.
+WRAPPER_ARGS=(--enable-gpu-rasterization --no-default-browser-check --disable-pings --media-router=0
+  --disable-dev-shm-usage --use-angle=gles)
 
 # Mode HDMI EXACT (OPENTV_HDMI_OUTPUT / OPENTV_HDMI_MODE, défaut HDMI-A-1 1920x1080@60) avant Chromium : jamais un
 # « 1920x1080 » ambigu (le premier annoncé peut être 23,976 Hz), jamais le mode préféré 4K de l'EDID, jamais un mode
@@ -46,7 +70,12 @@ X_ARGS=()
 if [[ "${OPENTV_X_TV:-1}" != "0" ]]; then
   X_ARGS=(--force-dark-mode)
   if [[ -f "$XEXT/manifest.json" ]]; then
-    X_ARGS+=(--disable-extensions-except="$XEXT" --load-extension="$XEXT")
+    if [[ "$CHROMIUM_KIND" == "direct" ]]; then
+      X_ARGS+=(--disable-extensions-except="$XEXT" --load-extension="$XEXT")
+    else
+      # wrapper seul : son --load-extension préfixé masquerait le nôtre ; extension refusée, jamais un faux succès
+      log kiosk_x_tv_unavailable "wrapper_only:${CHROMIUM_BIN}"
+    fi
   fi
 fi
 
@@ -54,5 +83,6 @@ exec "$CHROMIUM_BIN" \
   --kiosk --ozone-platform=wayland --noerrdialogs --disable-infobars --no-first-run \
   --disable-session-crashed-bubble --disable-features=Translate,MediaRouter --password-store=basic \
   --check-for-update-interval=31536000 --overscroll-history-navigation=0 --disable-pinch \
+  "${WRAPPER_ARGS[@]}" \
   ${X_ARGS[@]+"${X_ARGS[@]}"} \
   --user-data-dir="$PROFILE" "$target"

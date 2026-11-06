@@ -1413,7 +1413,8 @@ du lecteur. « Vivant » doit tenir le même budget, sinon il reste un choix du 
   (déconnexion depuis X ; `uninstall.sh --purge` efface tout le profil du kiosque, donc aussi cette session).
 - **Extension locale** `/opt/opentv/share/x-tv-extension` (Manifest V3, ID fixe `mmoccejphjkmbhejebkbhkbbmmocfafi`
   dérivé de la seule clé publique du manifest ; aucune clé privée n'existe), chargée par `opentv-kiosk-browser`
-  (`--disable-extensions-except` + `--load-extension`) ; la politique gérée garde `ExtensionInstallBlocklist: *` et
+  (`--disable-extensions-except` + `--load-extension`, **binaire direct** `/usr/lib/chromium/chromium` seulement,
+  voir le piège terrain du §6 sexies-b) ; la politique gérée garde `ExtensionInstallBlocklist: *` et
   n'autorise que cet ID (`ExtensionInstallAllowlist`) ; `URLAllowlist` ajoute `https://x.com` et `https://twitter.com`.
   Permissions : `storage` (stockage de **session** seulement) + hôtes `x.com`, `twitter.com`, `127.0.0.1`. Sandbox,
   sécurité web et DevTools bloqués inchangés ; aucun débogage distant, aucune API cookies/webRequest/scripting.
@@ -1583,6 +1584,22 @@ contrôle que pendant une touche **réelle** (`isTrusted`).
   ↑ ↓ en sortent (champ d'une ligne toujours ; zone multiligne/éditable tant qu'Alex n'y a rien tapé), dans le fil
   comme en mode « contrôles ». L'**anneau** et la consigne viennent de `nav.css` (feuille de l'extension, hors CSP de
   la page) : plus aucun `<style>` injecté ; repli CSSOM en ligne seulement si la feuille manquait.
+
+**Piège terrain (0.7.8) : le wrapper `/usr/bin/chromium` masque l'extension.** Relecture réelle sur la Pi : `x-probe`
+sans `pages.tv`, `accepted: 0`, extension **jamais chargée**. Le wrapper Debian / Raspberry Pi OS source
+`/etc/chromium.d/*` et **préfixe** ses flags ; `/etc/chromium.d/extensions` y met un `--load-extension` **nu**
+(`/usr/share/chromium/extensions` vide) **avant** le `--load-extension=/opt/opentv/share/x-tv-extension` du kiosque.
+Correctif : `opentv-kiosk-browser` lance le **binaire direct** `/usr/lib/chromium/chromium` (sinon
+`/usr/lib/chromium-browser/chromium-browser` ; un « direct » qui serait un script `#!` est refusé) avec **un seul**
+`--load-extension=` non vide, et reprend explicitement les flags utiles du wrapper : `--enable-gpu-rasterization`,
+`--no-default-browser-check`, `--disable-pings`, `--media-router=0`, `--disable-dev-shm-usage` (`/dev/shm` de la Pi est
+petit), `--use-angle=gles` (jamais `--show-component-extension-options` : `chrome://extensions` est bloqué par la
+politique). Sandbox, profil, politique et flags kiosque inchangés. **Wrapper seul** (aucun binaire direct) : extension
+**refusée** (jamais de faux succès), journal `kiosk_x_tv_unavailable` ; le kiosque démarre quand même. Vérifier sur la Pi :
+`journalctl -u opentv-kiosk -b | grep kiosk_chromium` ⇒ `direct:/usr/lib/chromium/chromium` ;
+`tr '\0' ' ' < /proc/$(pgrep -o -u opentv-kiosk -f /usr/lib/chromium/chromium)/cmdline` ⇒ exactement un
+`--load-extension=/opt/opentv/share/x-tv-extension`, aucun `--load-extension` nu ; puis `/tv` et `sudo opentv-pi x-probe`
+⇒ `pages.tv.present`. Le lecteur (`opentv-player`, sans extension) garde le wrapper.
 
 **Gates terrain (canari 0.7.8)** — toujours des **différences par appui** (Δ entre une lecture `x-probe` AVANT et une
 APRÈS), jamais des valeurs absolues (les compteurs de la page repartent de zéro à chaque chargement, ceux d'evdev à
