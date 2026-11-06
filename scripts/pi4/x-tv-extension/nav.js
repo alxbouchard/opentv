@@ -21,6 +21,17 @@
  *           « button » non natif seulement. Champ au focus :
  *           saisie au clavier physique 100 % native (← → Entrée Retour arrière natifs) ; aucune valeur n'est lue,
  *           copiée ni transmise ; ↑ ↓ quittent un champ d'une ligne. Aucun clic automatique, aucun relais d'identifiants.
+ *  Fenêtre modale VISIBLE de X (0.7.8) : elle gagne TOUJOURS, même au-dessus du fil (colonne principale présente) —
+ *           mode « contrôles » limité à la fenêtre ; x.js ne déplace jamais le fil caché derrière.
+ *  Champ autofocusé par X (0.7.8) : ↑ ↓ en sortent tant qu'Alex n'y a rien tapé (zone multiligne ou éditable
+ *           comprise) ; champ d'une ligne : ↑ ↓ en sortent toujours ; après une saisie réelle, zone multiligne native.
+ *  Anneau et consigne : feuille de l'extension nav.css (hors CSP de la page) ; repli CSSOM en ligne (jamais bloqué
+ *           par la CSP) seulement si la feuille manquait ; jamais de <style> injecté.
+ *  Sonde canari (0.7.8) : au chargement, à chaque changement de mode, à chaque touche RÉELLE et toutes les BEAT_MS,
+ *           instantané borné (≥ PROBE_MIN_MS entre deux envois, ≤ PROBE_MAX par page) au service de l'extension :
+ *           mode, compteurs par classe move/ok/other, compteur de touches synthétiques, et booléens de la dernière
+ *           touche réelle (fiable, champ au focus, document au focus, traitée par OpenTV). Jamais une valeur ni un code
+ *           de touche, un texte, une URL ni la valeur d'un champ.
  * Touches synthétiques (non fiables) : jamais d'action. Aucune lecture de contenu hors libellés des contrôles.
  */
 (() => {
@@ -37,6 +48,10 @@
   const KEYCODES = { 27: "back", 8: "back", 166: "back", 172: "home", 36: "home" };
   const TEXT_KEYS = new Set(["Backspace", "Home"]);   // dans un champ : édition native, jamais une navigation
   let backTimer = 0;
+  // Partagé avec x.js (MÊME monde isolé de l'extension, invisible pour la page) : fenêtre modale visible, touches
+  // traitées par OpenTV, champs où Alex a réellement tapé. Objet figé, non réinscriptible.
+  const handledKeys = new WeakSet();
+  const typedFields = new WeakSet();
 
   function keyAction(e) {
     if (!e || e.isComposing) { return null; }
@@ -53,6 +68,7 @@
   function editable(el) {
     return !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
   }
+  function markHandled(e) { handledKeys.add(e); }
   function goHome() {
     try { chrome.runtime.sendMessage({ type: "home" }, () => void chrome.runtime.lastError); } catch (e) { /* rechargée */ }
   }
@@ -89,25 +105,39 @@
   const NATIVE_RE = /^(A|BUTTON|SUMMARY)$/;
   const LINE_INPUT_RE = /^(text|email|tel|password|search|url|number|)$/;
   const FOCUS_ATTR = "data-otvx-focus";
-  const RING_CSS = "[" + FOCUS_ATTR + "]{outline:6px solid #ffd400!important;outline-offset:4px!important;" +
-    "box-shadow:0 0 0 12px rgba(255,212,0,.35)!important}" +
-    ".otvx-login-help{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:2147483647;" +
-    "pointer-events:none;background:rgba(0,0,0,.88);color:#fff;border:2px solid #ffd400;border-radius:14px;" +
-    "padding:10px 22px;font:600 22px/1.3 system-ui,sans-serif;white-space:nowrap}";
+  const DIALOG_SEL = '[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"], dialog[open]';
+  // repli seulement si nav.css manquait (jamais attendu) : CSSOM en ligne, que la CSP de la page ne bloque pas
+  const RING_FALLBACK = [["outline", "6px solid #ffd400"], ["outline-offset", "4px"]];
+  const HELP_FALLBACK = [["position", "fixed"], ["bottom", "24px"], ["left", "50%"], ["transform", "translateX(-50%)"],
+    ["z-index", "2147483647"], ["pointer-events", "none"], ["background", "rgba(0,0,0,.88)"], ["color", "#fff"],
+    ["border", "2px solid #ffd400"], ["border-radius", "14px"], ["padding", "10px 22px"],
+    ["font", "600 22px/1.3 system-ui,sans-serif"], ["white-space", "nowrap"]];
   const HELP_TEXT = "↑ ↓ choisir · OK valider · Retour : OpenTV · Identifiant et mot de passe : au clavier";
   let tvFocus = null;
-  let ringStyle = null;
+  let inlineRing = null;   // { el, prev } : repli en ligne posé (rétabli tel quel au départ du focus)
   let loginHelp = null;
   let refreshTimer = 0;
   let autoFocused = false;
   let userActed = false;   // touche ou geste RÉEL sur cette page : le focus n'est plus jamais déplacé seul
 
-  function loginMode() { return !!document.body && !document.querySelector(COLUMN_SEL); }
-  function scope() {
-    const dialogs = Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"], dialog[open]'));
+  // fenêtre modale VISIBLE la plus récente (X l'ajoute à la fin de ses calques) ; null sinon
+  function modalDialog() {
+    if (!document.body) { return null; }
+    const dialogs = Array.from(document.querySelectorAll(DIALOG_SEL)).slice(-20);
     for (let i = dialogs.length - 1; i >= 0; i--) { if (visible(dialogs[i])) { return dialogs[i]; } }
-    return document.body;
+    return null;
   }
+  // « dialog » (fenêtre modale visible, même au-dessus du fil) > « feed » (colonne principale) > « controls »
+  function pageMode() {
+    if (!document.body) { return "loading"; }
+    if (modalDialog()) { return "dialog"; }
+    return document.querySelector(COLUMN_SEL) ? "feed" : "controls";
+  }
+  function loginMode() { const m = pageMode(); return m === "dialog" || m === "controls"; }
+  function scope() { return modalDialog() || document.body; }
+  // champ quitté par ↑ ↓ : champ d'une ligne toujours ; autre champ (zone multiligne, éditable) tant qu'Alex n'y a
+  // rien tapé (autofocus de X) — jamais une valeur lue, seulement « une touche de saisie réelle a eu lieu ici »
+  function leaveField(el) { return lineInput(el) || (el.tagName !== "SELECT" && !typedFields.has(el)); }
   function visible(el) {
     if (!el || !el.isConnected || el.closest("[hidden], [inert], [aria-hidden='true']")) { return false; }
     const r = el.getBoundingClientRect();
@@ -142,11 +172,25 @@
     return t.slice(0, LABEL_MAX);
   }
   function preferred(list) { return list.find((el) => PREFERRED_RE.test(label(el))) || null; }
-  function ensureRing() {
-    if (ringStyle && ringStyle.isConnected) { return; }
-    ringStyle = document.createElement("style");
-    ringStyle.textContent = RING_CSS;
-    (document.head || document.documentElement).appendChild(ringStyle);
+  function applyInline(el, props) {
+    for (const [k, v] of props) { el.style.setProperty(k, v, "important"); }
+  }
+  function dropRing(el) {
+    if (!el) { return; }
+    el.removeAttribute(FOCUS_ATTR);
+    if (inlineRing && inlineRing.el === el) {   // repli : valeurs en ligne d'origine de la page rétablies
+      for (const [k, v, prio] of inlineRing.prev) {
+        if (v) { el.style.setProperty(k, v, prio); } else { el.style.removeProperty(k); }
+      }
+      inlineRing = null;
+    }
+  }
+  function ringFallback(el) {
+    let cs = null;
+    try { cs = getComputedStyle(el); } catch (err) { return; }
+    if (cs.outlineStyle === "solid" && parseFloat(cs.outlineWidth) >= 4) { return; }   // nav.css appliquée
+    inlineRing = { el: el, prev: RING_FALLBACK.map(([k]) => [k, el.style.getPropertyValue(k), el.style.getPropertyPriority(k)]) };
+    applyInline(el, RING_FALLBACK);
   }
   function ensureHelp(on) {
     if (!on) {
@@ -154,19 +198,19 @@
       return;
     }
     if (loginHelp && loginHelp.isConnected) { return; }
-    ensureRing();
     loginHelp = document.createElement("div");
     loginHelp.className = "otvx-login-help";
     loginHelp.setAttribute("aria-hidden", "true");
     loginHelp.textContent = HELP_TEXT;
     document.documentElement.appendChild(loginHelp);
+    if (getComputedStyle(loginHelp).position !== "fixed") { applyInline(loginHelp, HELP_FALLBACK); }   // repli
   }
   function setFocus(el) {
-    if (tvFocus && tvFocus !== el) { tvFocus.removeAttribute(FOCUS_ATTR); }
+    if (tvFocus && tvFocus !== el) { dropRing(tvFocus); }
     tvFocus = el;
     if (!el) { return; }
-    ensureRing();
     el.setAttribute(FOCUS_ATTR, "");
+    ringFallback(el);
     try { el.focus({ preventScroll: true }); } catch (err) { /* élément retiré */ }
     try { el.scrollIntoView({ block: "center", inline: "nearest" }); } catch (err) { /* ancien moteur */ }
   }
@@ -205,6 +249,7 @@
     pendingOk = null;
     if (!p || p.ev !== e || e.defaultPrevented || !e.isTrusted) { return; }   // même touche réelle seulement
     if (document.activeElement !== p.el || !p.el.isConnected) { return; }
+    markHandled(e);
     p.el.click();
   }
   function loginKey(e) {
@@ -212,9 +257,10 @@
     const ae = document.activeElement;
     const m = moveDir(e);
     if (m) {
-      if (editable(ae) && !(m.vertical && lineInput(ae))) { return false; }   // ← → et zones multilignes : natifs
+      if (editable(ae) && !(m.vertical && leaveField(ae))) { return false; }   // ← →, zone où Alex tape : natifs
       e.preventDefault();
       e.stopImmediatePropagation();
+      markHandled(e);
       move(m.dir);
       return true;
     }
@@ -227,10 +273,12 @@
   }
   function refresh() {
     refreshTimer = 0;
-    const on = loginMode();
+    const mode = pageMode();
+    probeMode(mode);
+    const on = mode === "dialog" || mode === "controls";
     ensureHelp(on);
     if (!on) {
-      if (tvFocus) { tvFocus.removeAttribute(FOCUS_ATTR); tvFocus = null; }
+      if (tvFocus) { dropRing(tvFocus); tvFocus = null; }
       return;
     }
     if (tvFocus && !tvFocus.isConnected) { tvFocus = null; }
@@ -245,22 +293,85 @@
   }
   function schedule() { if (!refreshTimer) { refreshTimer = setTimeout(refresh, 200); } }
 
+  // ---------------------------------------------------------------- sonde canari (0.7.8) : preuve, jamais une action
+  const PROBE_MIN_MS = 400;
+  const PROBE_MAX = 3000;
+  const BEAT_MS = 30000;
+  const COUNT_MAX = 1000000;
+  const PROBE_RANK = { load: 0, mode: 1, key: 2, beat: 3 };
+  const probe = { mode: "loading", seq: 0, move: 0, ok: 0, other: 0, synthetic: 0, last: null, sent: 0, at: 0,
+                  pending: null, timer: 0, loaded: false };
+  function bump(k) { probe[k] = Math.min(probe[k] + 1, COUNT_MAX); }
+  function probeFlush() {
+    probe.timer = 0;
+    const ev = probe.pending;
+    probe.pending = null;
+    if (!ev || probe.sent >= PROBE_MAX) { return; }
+    probe.sent += 1;
+    probe.at = Date.now();
+    probe.seq = Math.min(probe.seq + 1, COUNT_MAX);
+    const msg = { type: "probe", mode: probe.mode, event: ev, seq: probe.seq, move: probe.move, ok: probe.ok,
+                  other: probe.other, synthetic: probe.synthetic, last: probe.last };
+    try { chrome.runtime.sendMessage(msg, () => void chrome.runtime.lastError); } catch (err) { /* rechargée */ }
+  }
+  function probeSend(ev) {
+    if (probe.sent >= PROBE_MAX) { return; }
+    if (probe.pending === null || PROBE_RANK[ev] < PROBE_RANK[probe.pending]) { probe.pending = ev; }
+    if (probe.timer) { return; }
+    probe.timer = setTimeout(probeFlush, Math.max(0, PROBE_MIN_MS - (Date.now() - probe.at)));
+  }
+  function probeMode(mode) {
+    if (!probe.loaded) { probe.loaded = true; probe.mode = mode; probeSend("load"); return; }
+    if (mode !== probe.mode) { probe.mode = mode; probeSend("mode"); }
+  }
+  function keyClass(e) { return moveDir(e) ? "move" : (okKey(e) || e.code === "NumpadEnter") ? "ok" : "other"; }
+  function probeKey(e) {
+    if (!e.isTrusted) { bump("synthetic"); return; }   // compté seulement : jamais un envoi déclenché par la page
+    const cls = keyClass(e);
+    bump(cls);
+    const ed = editable(document.activeElement);
+    setTimeout(() => {   // après la distribution complète : la touche a-t-elle été traitée par OpenTV ?
+      probe.last = { cls: cls, trusted: true, editable: ed, doc_focus: document.hasFocus(), handled: handledKeys.has(e) };
+      probeSend("key");
+    }, 0);
+  }
+  function noteTyping(e) {   // saisie réelle dans le champ au focus : « tapé ici » (jamais la valeur ni la touche)
+    const ae = document.activeElement;
+    if (!editable(ae) || e.altKey || e.ctrlKey || e.metaKey) { return; }
+    const k = typeof e.key === "string" ? e.key : "";
+    if (k.length === 1 || k === "Backspace" || k === "Delete" || e.isComposing) { typedFields.add(ae); }
+  }
+
   function onKey(e) {
     pendingOk = null;
+    probeKey(e);
     if (!e.isTrusted) { return; }   // touche synthétique d'une page (script de X ou injecté) : jamais d'action OpenTV
     userActed = true;
+    noteTyping(e);
     const a = keyAction(e);
     if (!a) { loginKey(e); return; }
     if (editable(document.activeElement) && textKey(e)) { return; }   // Retour arrière / Début : édition native
     e.preventDefault();
     e.stopImmediatePropagation();
+    markHandled(e);
     if (e.repeat) { return; }
     if (a === "home") { goHome(); } else { back(); }
   }
+  try {
+    Object.defineProperty(window, "__otvxNav", {   // monde isolé de l'extension seulement (x.js) ; figé
+      value: Object.freeze({
+        dialog: () => !!modalDialog(),
+        leaveField: (el) => leaveField(el),
+        markHandled: (e) => markHandled(e)
+      }),
+      writable: false, configurable: false, enumerable: false
+    });
+  } catch (err) { /* déjà posé (réinjection) : les écouteurs ci-dessous restent installés */ }
   window.addEventListener("keydown", onKey, true);
   window.addEventListener("keydown", onKeyLate, false);   // phase de remontée : après les gestionnaires de X
   window.addEventListener("pointerdown", (e) => { if (e.isTrusted) { userActed = true; } }, true);   // geste réel
   new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });
   if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule); } else { schedule(); }
   window.addEventListener("load", schedule);
+  setInterval(() => { if (document.visibilityState === "visible") { probeSend("beat"); } }, BEAT_MS);
 })();

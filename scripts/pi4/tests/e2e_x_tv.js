@@ -68,6 +68,30 @@ const LANDING = `<!doctype html><html lang="en"><head><meta charset="utf-8"><tit
   `<div id="forgot" role="button" tabindex="0" onclick="__hits.push('forgot')"><span>Forgot password?</span></div>` +
   `<span>Don't have an account? <a id="signup" href="/i/flow/signup">Sign up</a></span></div></div>` +
   `<script>window.__hits=[];</script>${INSTR}</body></html>`;
+// 0.7.8 — fenêtre modale VISIBLE de X au-dessus du fil (colonne principale PRÉSENTE) : invite de notifications réaliste
+// (calque fixe, bouton natif <button role=button> comme X + rôle « button » non natif qui ferme la fenêtre) ; le fil derrière ne doit jamais bouger
+const DIALOG = `<div id="layers"><div role="dialog" aria-modal="true" id="dlg" style="position:fixed;top:220px;` +
+  `left:610px;width:700px;height:360px;background:#202327;color:#fff;z-index:10;padding:20px">` +
+  `<h2>Turn on notifications</h2><button id="allow" type="button" role="button" onclick="__hits.push('allow')">Allow</button>` +
+  `<div id="notnow" role="button" tabindex="0" style="display:block;width:300px;height:40px" ` +
+  `onclick="__hits.push('notnow');document.getElementById('dlg').remove()"><span>Not now</span></div></div></div>`;
+const FEED_DIALOG = FEED.replace("</body>", `${DIALOG}<script>window.__hits=[];</script></body>`);
+// 0.7.8 — X autofocuse sa zone de rédaction (éditable multiligne) dans le fil : ↑ ↓ ne doivent pas être morts
+const FEED_COMPOSE = FEED.replace('<div id="tl">', '<div id="compose" contenteditable="true" role="textbox" ' +
+  'style="min-height:60px;border:1px solid #888"></div><div id="tl">')
+  .replace("</body>", "<script>document.getElementById('compose').focus();</script></body>");
+// 0.7.8 — CSP stricte (style-src par nonce, sans 'unsafe-inline') : un <style> injecté serait bloqué ; la feuille de
+// l'extension (nav.css) ne l'est pas. Chaque violation CSP de la page est comptée (window.__csp).
+const CSP = "style-src 'nonce-n0nce'; script-src 'unsafe-inline'";
+// (attributs style de la fixture convertis en classes d'une feuille à nonce : la page elle-même ne viole rien)
+const CSP_RULES = [];
+const LANDING_CSP = LANDING.replace(/ style="([^"]*)"/g, (m, css) => {
+  CSP_RULES.push(`.otvcsp${CSP_RULES.length}{${css}}`);
+  return ` class="otvcsp${CSP_RULES.length - 1}"`;
+}).split("<style>").join('<style nonce="n0nce">')
+  .replace("</head>", `<style nonce="n0nce">${CSP_RULES.join("")}</style></head>`)
+  .replace("<body>", "<body><script>window.__csp=0;document.addEventListener('securitypolicyviolation'," +
+    "function(){window.__csp++;});</script>");
 // connexion bloquée en chargement (script de tête jamais servi) : le script du fil (document_idle) n'y tourne jamais
 const STALL = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Connexion / X</title>${STYLE}` +
   `<script src="https://x.com/stall.js"></script></head><body>Connexion…</body></html>`;
@@ -96,7 +120,12 @@ function ctl(p) {
     await ctx.route(/^https:\/\/(x|twitter)\.com\//, (route) => {
       const u = new URL(route.request().url());
       if (u.pathname === "/stall.js") { return undefined; }              // jamais servi : page en chargement
+      if (u.pathname === "/csp/landing") {
+        return route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: LANDING_CSP,
+                               headers: { "Content-Security-Policy": CSP } });
+      }
       const body = u.pathname === "/i/flow/stall" ? STALL : u.pathname === "/" ? LANDING :
+        u.pathname === "/settings/dialog" ? FEED_DIALOG : u.pathname === "/compose/home" ? FEED_COMPOSE :
         (u.pathname.indexOf("/i/flow/login") === 0 || u.pathname.indexOf("/account/") === 0) ? LOGIN :
         /\/status\/\d+$/.test(u.pathname) ? STATUS : FEED;
       return route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: body });
@@ -332,6 +361,140 @@ function ctl(p) {
     await page.keyboard.press("Escape");
     ph.url_after_back = await waitUrl((u) => u === cfg.tv);
     out.steps.phone_login = ph;
+
+    // 7 ter) fenêtre modale VISIBLE au-dessus du fil : elle gagne (mode « contrôles » limité à elle), le fil caché ne
+    //         bouge jamais ; OK réel sur le rôle « button » : UN clic ; fenêtre fermée : ↓ reprend le fil
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    await page.goto("https://x.com/settings/dialog");
+    await waitFeed();
+    await sleep(700);
+    const dstate = () => page.evaluate(() => {
+      const ae = document.activeElement, f = document.querySelector("[data-otvx-focus]"), cs = f ? getComputedStyle(f) : null;
+      const post = document.querySelector("article.otvx-focus");
+      return { active: ae && ae.id || null, ring: f ? f.id : null, outline: cs ? cs.outlineStyle + " " + cs.outlineWidth : "",
+               post: post ? post.getAttribute("data-otv-id") : null, scroll: Math.round(scrollY),
+               dialog: !!document.getElementById("dlg"), feed_help: !!document.querySelector(".otvx-help"),
+               login_help: !!document.querySelector(".otvx-login-help"), hits: (window.__hits || []).slice(),
+               clicks: window.__clicks };
+    });
+    const dg = { initial: await dstate() };
+    if (cfg.shots) { await page.screenshot({ path: path.join(cfg.shots, "x-dialog-over-feed.png") }); }
+    await page.keyboard.press("ArrowDown"); await sleep(150); dg.down1 = await dstate();
+    await page.keyboard.press("ArrowDown"); await sleep(150); dg.down2 = await dstate();
+    await page.keyboard.press("ArrowDown"); await sleep(150); dg.edge = await dstate();
+    await page.keyboard.press("Enter"); await sleep(700); dg.ok = await dstate();
+    await page.keyboard.press("ArrowDown"); await sleep(200); dg.after = await dstate();
+    // X rouvre une fenêtre modale PAR-DESSUS un post au focus : OK n'ouvre jamais le post caché, ↓ va à la fenêtre
+    await page.evaluate((html) => { document.body.insertAdjacentHTML("beforeend", html); }, DIALOG);
+    await sleep(500);
+    dg.late = await dstate();
+    dg.late.url = page.url();
+    await page.keyboard.press("Enter"); await sleep(700);
+    dg.late_ok = await dstate();
+    dg.late_ok.url = page.url();
+    await page.keyboard.press("ArrowDown"); await sleep(150); dg.late_down = await dstate();
+    await page.keyboard.press("Enter"); await sleep(400); dg.late_enter = await dstate();   // bouton natif : UNE fois
+    out.steps.dialog = dg;
+
+    // 7 bis-forge) une page x.com HOSTILE tente de forger la sonde et les actions : chrome.runtime vers l'extension,
+    //   postMessage, objet partagé du monde isolé, fetch direct vers la route (clé devinée), touches synthétiques.
+    //   Encadré par deux repères (ctl /mark) ; puis UNE touche réelle ↓ : comptée une fois, synthétiques à part.
+    await page.goto("https://x.com/home");
+    await waitFeed();
+    await sleep(900);                                        // instantané « load » parti
+    await ctl("/mark");
+    const fg = await page.evaluate(async (a) => {
+      const r = { runtime: typeof (window.chrome && window.chrome.runtime && window.chrome.runtime.sendMessage),
+                  shared: typeof window.__otvxNav, threw: 0, fetch: "" };
+      const forged = { type: "probe", mode: "feed", event: "key", seq: 777777, move: 4242, ok: 4242, other: 0,
+                       synthetic: 0, last: { cls: "ok", trusted: true, editable: false, doc_focus: true, handled: true } };
+      try { window.chrome.runtime.sendMessage(a.ext, forged, () => undefined); } catch (e) { r.threw += 1; }
+      try { window.chrome.runtime.sendMessage(forged); } catch (e) { r.threw += 1; }
+      window.postMessage(forged, "*");
+      window.postMessage({ type: "home" }, "*");
+      try {
+        const x = await fetch("http://127.0.0.1:" + a.port + "/api/tv/x/probe", { method: "POST",
+          headers: { "Content-Type": "application/json", "X-OpenTV-TV": "A".repeat(43) },
+          body: JSON.stringify(Object.assign({ v: 1, page: "x", ext: "0.7.8", sw_s: 1 }, forged)) });
+        r.fetch = "status " + x.status;
+      } catch (e) { r.fetch = "blocked"; }
+      for (let i = 0; i < 6; i++) {
+        document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", keyCode: 40, bubbles: true, cancelable: true }));
+      }
+      for (let i = 0; i < 3; i++) {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, bubbles: true, cancelable: true }));
+      }
+      return r;
+    }, { ext: cfg.ext_id, port: cfg.port });
+    await sleep(900);
+    fg.after_forge = { url: page.url(), post: await focusedPost(),
+                       clicks: await page.evaluate(() => window.__clicks) };
+    await page.keyboard.press("ArrowDown");
+    await sleep(1200);                                       // ≥ PROBE_MIN_MS + aller-retour
+    fg.after_real = { url: page.url(), post: await focusedPost() };
+    await ctl("/mark");
+    out.steps.forge = fg;
+    await page.keyboard.press("Home");
+    await waitUrl((u) => u === cfg.tv);
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    await waitKey();
+
+    // 7 quater) zone de rédaction autofocusée par X dans le fil : ↓ en sort et parcourt le fil ; après une saisie
+    //            réelle d'Alex dans la zone, ↓ y reste natif
+    await page.goto("https://x.com/compose/home");
+    await waitFeed();
+    await sleep(500);
+    const cstate = () => page.evaluate(() => {
+      const post = document.querySelector("article.otvx-focus");
+      return { active: document.activeElement && document.activeElement.id || null,
+               post: post ? post.getAttribute("data-otv-id") : null };
+    });
+    const cp = { initial: await cstate() };
+    await page.keyboard.press("ArrowDown"); await sleep(150); cp.leave = await cstate();
+    await page.keyboard.press("ArrowDown"); await sleep(150); cp.next = await cstate();
+    await page.focus("#compose");
+    await page.keyboard.type("abc");
+    await page.keyboard.press("ArrowDown"); await sleep(150); cp.typed = await cstate();
+    cp.typed.text = await page.evaluate(() => document.getElementById("compose").textContent);
+    out.steps.compose = cp;
+
+    // 7 quinquies) CSP stricte de la page : anneau et consigne visibles par la feuille de l'extension (aucun style en
+    //              ligne, aucune violation CSP causée par l'extension) ; témoin : un <style> de page EST bloqué
+    await page.goto("https://x.com/csp/landing");
+    await page.evaluate(() => new Promise((res) => {
+      const t0 = performance.now();
+      (function poll() {
+        const ae = document.activeElement;
+        if ((ae && ae.id === "phone") || performance.now() - t0 > 3000) { res(); return; }
+        setTimeout(poll, 20);
+      })();
+    }));
+    await sleep(500);
+    const csp = await page.evaluate(() => {
+      const f = document.querySelector("[data-otvx-focus]"), c = f ? getComputedStyle(f) : null;
+      const h = document.querySelector(".otvx-login-help");
+      return { active: document.activeElement && document.activeElement.id || null, ring: f ? f.id : null,
+               outline: c ? c.outlineStyle + " " + c.outlineWidth : "", inline: f ? f.getAttribute("style") || "" : "?",
+               help_pos: h ? getComputedStyle(h).position : "", help_inline: h ? h.getAttribute("style") || "" : "?",
+               violations: window.__csp };
+    });
+    if (cfg.shots) { await page.screenshot({ path: path.join(cfg.shots, "x-login-csp.png") }); }
+    await page.keyboard.press("ArrowDown"); await sleep(150);
+    csp.moved = await page.evaluate(() => {
+      const f = document.querySelector("[data-otvx-focus]"), c = getComputedStyle(f);
+      return { ring: f.id, outline: c.outlineStyle + " " + c.outlineWidth, inline: f.getAttribute("style") || "" };
+    });
+    csp.violations_after_keys = await page.evaluate(() => window.__csp);
+    csp.control_blocked = await page.evaluate(() => new Promise((res) => {
+      const s = document.createElement("style");
+      s.textContent = "#apple{color:rgb(1, 2, 3) !important}";
+      document.head.appendChild(s);
+      setTimeout(() => res({ applied: getComputedStyle(document.getElementById("apple")).color === "rgb(1, 2, 3)",
+                             violations: window.__csp }), 200);
+    }));
+    out.steps.csp = csp;
+    await rawKey("BrowserHome", 172);                         // champ au focus : Début y reste natif, Accueil non
+    await waitUrl((u) => u === cfg.tv);
 
     // 8) service redémarré (clé tournée) : refus honnête ; /tv recapture la nouvelle clé ; le partage repasse
     await page.waitForSelector(".card.focused", { timeout: 10000 });

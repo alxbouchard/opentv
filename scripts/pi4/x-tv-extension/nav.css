@@ -1,0 +1,26 @@
+/* OpenTV X TV Mode — anneau de focus TV et consigne du mode « contrôles » (connexion, fenêtre modale de X).
+ * Feuille de l'EXTENSION (manifest, avec nav.js) : injectée par Chromium hors CSP de la page — une CSP stricte de X
+ * (style-src sans 'unsafe-inline') ne peut jamais rendre le focus invisible. Inerte ailleurs : chaque sélecteur vise
+ * SEULEMENT l'attribut data-otvx-focus ou la consigne .otvx-login-help, posés par nav.js. Aucune ressource externe. */
+
+:root [data-otvx-focus][data-otvx-focus] {
+  outline: 6px solid #ffd400 !important;
+  outline-offset: 4px !important;
+  box-shadow: 0 0 0 12px rgba(255, 212, 0, 0.35) !important;
+}
+
+:root .otvx-login-help.otvx-login-help {
+  position: fixed !important;
+  bottom: 24px !important;
+  left: 50% !important;
+  transform: translateX(-50%) !important;
+  z-index: 2147483647 !important;
+  pointer-events: none !important;
+  background: rgba(0, 0, 0, 0.88) !important;
+  color: #fff !important;
+  border: 2px solid #ffd400 !important;
+  border-radius: 14px !important;
+  padding: 10px 22px !important;
+  font: 600 22px/1.3 system-ui, sans-serif !important;
+  white-space: nowrap !important;
+}

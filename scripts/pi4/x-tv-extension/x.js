@@ -9,6 +9,10 @@
  *           (≤ 120) — jamais une URL, un lien, un média, un cookie ni du HTML ; geste humain uniquement ;
  *  Retour / Accueil : nav.js (script autonome, toute page x.com dès document_start, connexion comprise) — jamais
  *           ici, pour qu'aucune page ne dépende du fil.
+ * Fenêtre modale VISIBLE de X au-dessus du fil (0.7.8) : elle gagne — nav.js la parcourt (mode « contrôles »), ce
+ * script n'agit plus (jamais de fil caché déplacé ni de post ouvert derrière) et masque son bandeau d'aide.
+ * Champ autofocusé par X dans le fil (0.7.8) : ↑ ↓ en sortent (champ d'une ligne, ou zone où Alex n'a rien tapé) ;
+ * ← → OK y restent natifs. Toute touche traitée ici est signalée à la sonde canari de nav.js (jamais sa valeur).
  * Mode fil seulement (colonne principale présente) : classe html.otvx-tv (CSS TV, x.css) + bandeau d'aide. Page de
  * connexion ou sans fil : rien n'est stylé ni rempli (Alex se connecte lui-même). DOM dynamique de X : MutationObserver regroupé (une passe au plus toutes les REFRESH_MS). Jamais de clic,
  * de « J'aime », de repartage, de réponse ni de publication.
@@ -42,6 +46,9 @@
   let toastTimer = 0;
   let refreshTimer = 0;
   let sharing = false;
+  // nav.js (document_start, MÊME monde isolé de l'extension) : fenêtre modale, champs quittables, sonde
+  const NAV = window.__otvxNav || null;
+  function dialogOpen() { return !!NAV && NAV.dialog(); }
 
   function keyAction(e) {
     if (!e || e.isComposing || e.altKey || e.ctrlKey || e.metaKey) { return null; }
@@ -181,9 +188,13 @@
     if (!e.isTrusted) { return; }   // touche synthétique d'une page (script de X ou injecté) : jamais d'action OpenTV
     const a = keyAction(e);
     if (!a) { return; }
-    const ae = document.activeElement;
-    if (editable(ae)) { return; }   // saisie (connexion, recherche) : touches natives
     const feed = feedMode();
+    if (!feed || dialogOpen()) { return; }   // fenêtre modale visible : nav.js la gère, jamais le fil caché
+    const ae = document.activeElement;
+    if (editable(ae)) {   // saisie : touches natives, sauf ↑ ↓ qui quittent un champ autofocusé / d'une ligne
+      if (!((a === "up" || a === "down") && NAV && NAV.leaveField(ae))) { return; }
+      ae.blur();
+    }
     let used = false;
     if (feed && a === "up") { move(-1); used = true; }
     else if (feed && a === "down") { move(1); used = true; }
@@ -192,6 +203,7 @@
     if (used) {
       e.preventDefault();
       e.stopImmediatePropagation();
+      if (NAV) { NAV.markHandled(e); }
     }
   }
 
@@ -199,7 +211,7 @@
     refreshTimer = 0;
     const on = feedMode();
     document.documentElement.classList.toggle("otvx-tv", on);
-    ensureHelp(on);
+    ensureHelp(on && !dialogOpen());
     if (focused && !focused.isConnected) { focused = null; }   // post retiré par X : prochain ↑ ↓ repart de l'écran
   }
   const observer = new MutationObserver(() => {

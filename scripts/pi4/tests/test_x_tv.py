@@ -25,14 +25,15 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 from tests._common import PI4
 from tests.test_service import make_app, Servers, find_chromium
-from opentv_pi import VERSION, agentport, agents, config, mcp, musebridge, tools, web, xcontext
+from opentv_pi import VERSION, agentport, agents, config, mcp, musebridge, tools, web, xcontext, xprobe
 
 EXT = os.path.join(PI4, "x-tv-extension")
-EXT_FILES = ("manifest.json", "background.js", "nav.js", "x.js", "x.css", "tvkey.js")
+EXT_FILES = ("manifest.json", "background.js", "nav.js", "nav.css", "x.js", "x.css", "tvkey.js")
 EXT_DST = "/opt/opentv/share/x-tv-extension"
 INSTALL = os.path.join(PI4, "install.sh")
 UNINSTALL = os.path.join(PI4, "uninstall.sh")
@@ -503,7 +504,7 @@ class TestXExtensionStatic(unittest.TestCase):
         nv = [c for c in cs if "nav.js" in c["js"]][0]                  # Retour/Accueil : autonome, dès le début
         self.assertEqual(sorted(nv["matches"]), ["https://twitter.com/*", "https://x.com/*"])
         self.assertEqual((nv["js"], nv["run_at"], nv.get("all_frames", False)), (["nav.js"], "document_start", False))
-        self.assertNotIn("css", nv)
+        self.assertEqual(nv["css"], ["nav.css"])                           # anneau/consigne : feuille de l'extension
         self.assertEqual(cs[0]["js"], ["nav.js"])                         # écouteur posé avant celui du fil
         xs = [c for c in cs if "x.js" in c["js"]][0]
         self.assertEqual(sorted(xs["matches"]), ["https://twitter.com/*", "https://x.com/*"])
@@ -531,7 +532,10 @@ class TestXExtensionStatic(unittest.TestCase):
         self.assertIn('credentials: "omit"', bg)
         self.assertIn('referrerPolicy: "no-referrer"', bg)
         self.assertIn(xcontext.SHARE_PATH, bg)
-        self.assertEqual(re.findall(r"fetch\(", bg), ["fetch("])          # un seul appel réseau : la route loopback
+        self.assertIn(xprobe.PROBE_PATH, bg)
+        # deux appels réseau seulement, tous deux vers la boucle locale : partage (←) et sonde canari
+        self.assertEqual(re.findall(r"fetch\(([^,]*),", bg), ["`http://127.0.0.1:${tv.port}${SHARE_PATH}`",
+                                                               "`http://127.0.0.1:${tv.port}${PROBE_PATH}`"])
         self.assertNotRegex(bg, r"https?://(?!127\.0\.0\.1)[a-z]")          # jamais d'autre hôte contacté
 
     def test_share_payload_is_closed_author_text(self):
@@ -568,7 +572,8 @@ class TestXExtensionStatic(unittest.TestCase):
         # Retour/Accueil : aucune dépendance au fil ; la colonne principale ne sert QU'À borner le mode « contrôles »
         # de la connexion (loginMode), jamais à Retour/Accueil
         self.assertEqual(nav.count("COLUMN_SEL"), 2)
-        self.assertIn("function loginMode() { return !!document.body && !document.querySelector(COLUMN_SEL); }", nav)
+        self.assertIn('return document.querySelector(COLUMN_SEL) ? "feed" : "controls";', nav)
+        self.assertIn('if (modalDialog()) { return "dialog"; }', nav)     # fenêtre modale visible : gagne sur le fil
         for fn in ("function back()", "function goHome()", "function keyAction(", "function direct()"):
             body = nav[nav.index(fn):nav.index("\n  }\n", nav.index(fn))]
             self.assertNotIn("COLUMN_SEL", body, fn)
@@ -582,7 +587,7 @@ class TestXExtensionStatic(unittest.TestCase):
                     "type=password", "chrome.storage", "fetch(", "postMessage", "localStorage", "dispatchEvent",
                     "requestSubmit", ".submit("):
             self.assertNotIn(bad, nav, bad)
-        self.assertEqual(nav.count("sendMessage("), 1)                    # « home » seulement (goHome)
+        self.assertEqual(nav.count("sendMessage("), 2)                    # « home » (goHome) et sonde canari
         self.assertEqual(nav.count(".click("), 1)
         late = nav[nav.index("function onKeyLate(e)"):nav.index("function loginKey(e)")]
         self.assertIn("p.el.click();", late)
@@ -698,7 +703,7 @@ class TestKioskAndPolicy(unittest.TestCase):
         self.assertIn("#OPENTV_X_TV=1", read(os.path.join(PI4, "opentv-pi.env.example")))
 
     def test_version_and_docs(self):
-        self.assertEqual(VERSION, "0.7.7")
+        self.assertEqual(VERSION, "0.7.8")
         readme = read(os.path.join(PI4, "README.md"))
         for need in ("X TV Mode", "OPENTV_X_TV=0", "x_context", "non fiable", "connecte-toi", xcontext.EXTENSION_ID):
             self.assertTrue(need in readme, "README sans « %s »" % need)
@@ -735,8 +740,10 @@ class TestXPasskeyPathAudit(unittest.TestCase):
     def test_no_credential_or_text_relay_route(self):
         web_src = read(os.path.join(PI4, "opentv_pi", "web.py"))
         x_routes = set(re.findall(r"/api/tv/x/[a-z_]+", web_src + read(os.path.join(PI4, "opentv_pi", "xcontext.py")) +
-                                  read(os.path.join(PI4, "opentv_pi", "xescape.py"))))
-        self.assertEqual(x_routes, {"/api/tv/x/context", "/api/tv/x/presence"})   # aucune route de saisie/relais
+                                  read(os.path.join(PI4, "opentv_pi", "xescape.py")) +
+                                  read(os.path.join(PI4, "opentv_pi", "xprobe.py"))))
+        # aucune route de saisie/relais ; la sonde canari n'accepte que des champs fermés (test_x_probe)
+        self.assertEqual(x_routes, {"/api/tv/x/context", "/api/tv/x/presence", "/api/tv/x/probe"})
         for f in ("nav.js", "x.js", "background.js"):
             src = code_only(read(os.path.join(EXT, f))).lower()
             # seul usage permis : type de champ d'une ligne (↑ ↓ quittent aussi un champ mot de passe ; valeur jamais lue)
@@ -776,6 +783,8 @@ class _Control(http.server.BaseHTTPRequestHandler):
             app.x_context.clear()
         elif self.path == "/agent-ok":
             self.server.pushed.append(app.tv_actions.push("key", "hermit", {"key": "ok"})["seq"])
+        elif self.path == "/mark":   # repère : nombre de sondes ACCEPTÉES à cet instant
+            self.server.marks.append(len(self.server.probes))
         self.send_response(204)
         self.end_headers()
 
@@ -797,7 +806,7 @@ class TestXEndToEnd(unittest.TestCase):
         a.reload_device()
         s = Servers(self, a)
         ctl = http.server.HTTPServer(("127.0.0.1", 0), _Control)
-        ctl.app, ctl.pushed = a, []
+        ctl.app, ctl.pushed, ctl.marks, ctl.probes = a, [], [], []
         threading.Thread(target=ctl.serve_forever, daemon=True).start()
         self.addCleanup(ctl.server_close)
         self.addCleanup(ctl.shutdown)
@@ -810,6 +819,18 @@ class TestXEndToEnd(unittest.TestCase):
             views.append(a.x_context.view())
             return r
         a.x_context.set = spy
+        # sonde canari réelle (horloge réelle : débit/TTL vrais) ; chaque instantané ACCEPTÉ par la route (Origin de
+        # l'extension, clé TV, champs fermés) est gardé pour les assertions
+        a.x_probe = xprobe.XProbe(mono=time.monotonic)
+        probes = ctl.probes
+        orig_rec = a.x_probe.record
+
+        def prec(body):
+            r = orig_rec(body)
+            if r[0] == 200:
+                probes.append(body)
+            return r
+        a.x_probe.record = prec
         shots = os.environ.get("OPENTV_TEST_SHOTS") or tempfile.mkdtemp(prefix="otvxshots", dir="/tmp")
         light = full_chrome()
         if sys.platform == "darwin":   # hôte macOS peut-être sombre : témoin lancé en apparence claire (Cocoa)
@@ -921,6 +942,96 @@ class TestXEndToEnd(unittest.TestCase):
         self.assertEqual(a.agent_x_context()["text"], "Premier post.")    # UN seul contexte : le dernier partagé
         self.assertEqual(len(ctl.pushed), 1)
         self.assertEqual(a.tv_actions.get(ctl.pushed[0])["reason"], "app_human_only")
+        # 0.7.8 — fenêtre modale visible AU-DESSUS du fil : nav.js la parcourt (anneau visible), le fil caché ne bouge
+        # jamais, l'aide du fil s'efface ; OK réel sur « Not now » (rôle button) : UN clic ; puis ↓ reprend le fil
+        dg = st["dialog"]
+        self.assertEqual((dg["initial"]["dialog"], dg["initial"]["feed_help"], dg["initial"]["login_help"],
+                          dg["initial"]["post"]), (True, False, True, None), dg["initial"])
+        self.assertEqual([dg[k]["active"] for k in ("down1", "down2", "edge")], ["allow", "notnow", "notnow"])
+        self.assertEqual([dg[k]["ring"] for k in ("down1", "down2")], ["allow", "notnow"])
+        self.assertTrue(dg["down1"]["outline"].startswith("solid 6px"), dg["down1"])
+        for k in ("down1", "down2", "edge", "ok"):
+            self.assertIsNone(dg[k]["post"], k)                   # fil caché : jamais déplacé
+            self.assertEqual(dg[k]["scroll"], dg["initial"]["scroll"], k)
+        self.assertEqual((dg["edge"]["hits"], dg["edge"]["clicks"]), ([], 0))
+        self.assertEqual((dg["ok"]["hits"], dg["ok"]["clicks"], dg["ok"]["dialog"]), (["notnow"], 1, False))
+        self.assertEqual((dg["after"]["post"], dg["after"]["feed_help"], dg["after"]["login_help"]), ("p1", True, False))
+        self.assertEqual((dg["late"]["dialog"], dg["late"]["post"], dg["late"]["feed_help"]), (True, "p1", False))
+        self.assertEqual((dg["late_ok"]["url"], dg["late_ok"]["post"], dg["late_ok"]["hits"]),
+                         (dg["late"]["url"], "p1", ["notnow"]))  # OK : jamais le permalien du post caché
+        self.assertEqual((dg["late_down"]["active"], dg["late_down"]["post"]), ("allow", "p1"))
+        # OK réel sur un bouton NATIF de la fenêtre : exactement UNE activation (jamais de repli en plus)
+        self.assertEqual((dg["late_enter"]["hits"], dg["late_enter"]["clicks"] - dg["late_down"]["clicks"],
+                          dg["late_enter"]["post"]), (["notnow", "allow"], 1, "p1"))
+        # page hostile : aucune voie vers l'extension ni la route ; rien d'accepté entre les repères sauf l'instantané
+        # de la touche RÉELLE (move +1 exactement, synthétiques comptées à part, jamais une action)
+        fg = st["forge"]
+        self.assertEqual((fg["runtime"], fg["shared"]), ("undefined", "undefined"), fg)
+        self.assertNotEqual(fg["fetch"], "status 200", fg)
+        self.assertEqual((fg["after_forge"]["url"], fg["after_forge"]["post"], fg["after_forge"]["clicks"]),
+                         ("https://x.com/home", None, 0), fg)
+        self.assertEqual((fg["after_real"]["url"], fg["after_real"]["post"]), ("https://x.com/home", "p1"), fg)
+        m0, m1 = ctl.marks[0], ctl.marks[1]
+        window = probes[m0:m1]
+        self.assertTrue(window, ctl.marks)
+        self.assertTrue(all(b["page"] == "x" and b["event"] == "key" for b in window), window)
+        last = window[-1]
+        self.assertEqual((last["move"], last["ok"], last["other"]), (1, 0, 0), window)   # UNE touche réelle
+        self.assertGreaterEqual(last["synthetic"], 9)
+        self.assertEqual(last["last"], {"cls": "move", "trusted": True, "editable": False, "doc_focus": True,
+                                        "handled": True})
+        for b in probes:
+            self.assertNotIn(b["seq"], (777777,))
+            self.assertLess(b["move"], 4242)
+        # zone de rédaction autofocusée par X : ↓ en sort et parcourt le fil ; après une saisie réelle, ↓ reste natif
+        cp = st["compose"]
+        self.assertEqual(cp["initial"], {"active": "compose", "post": None})
+        self.assertEqual((cp["leave"]["post"], cp["next"]["post"]), ("p1", "p2"))
+        self.assertNotEqual(cp["leave"]["active"], "compose")
+        self.assertEqual((cp["typed"]["active"], cp["typed"]["post"], cp["typed"]["text"]), ("compose", "p2", "abc"))
+        # CSP stricte : anneau et consigne visibles par nav.css (aucun style en ligne), aucune violation CSP causée
+        # par l'extension ; le témoin (un <style> de page) est bien bloqué
+        cs = st["csp"]
+        self.assertEqual((cs["active"], cs["ring"]), ("phone", "phone"), cs)
+        self.assertTrue(cs["outline"].startswith("solid 6px"), cs)
+        self.assertEqual((cs["inline"], cs["help_pos"], cs["help_inline"], cs["violations"]), ("", "fixed", "", 0), cs)
+        self.assertTrue(cs["moved"]["outline"].startswith("solid 6px"), cs)
+        self.assertEqual((cs["moved"]["inline"], cs["violations_after_keys"]), ("", 0), cs)
+        self.assertEqual(cs["moved"]["ring"], "user")                # ↓ : contrôle suivant, anneau toujours visible
+        self.assertFalse(cs["control_blocked"]["applied"])
+        self.assertGreaterEqual(cs["control_blocked"]["violations"], 1)
+        # sonde canari : extension injectée et service actif sur /tv ET x.com (route réelle : Origin de l'extension,
+        # clé TV) ; instantanés fermés ; touches RÉELLES comptées par classe ; synthétiques comptées à part
+        self.assertTrue(probes)
+        for b in probes:
+            self.assertEqual(set(b), set(xprobe.FIELDS), b)
+            self.assertEqual(b["ext"], VERSION)
+        tvp = [b for b in probes if b["page"] == "tv"]
+        xp = [b for b in probes if b["page"] == "x"]
+        self.assertTrue(tvp and all(b["mode"] == "tv" and b["event"] == "load" for b in tvp), tvp)
+        self.assertGreaterEqual({b["mode"] for b in xp}, {"feed", "dialog"})
+        self.assertIn("load", {b["event"] for b in xp})
+        self.assertIn("mode", {b["event"] for b in xp})          # fenêtre fermée : changement de mode signalé
+        keys = [b for b in xp if b["event"] == "key" and b["last"]]
+        self.assertTrue(all(b["last"]["trusted"] for b in keys))
+        self.assertTrue(any(b["last"]["cls"] == "move" and b["last"]["handled"] and b["mode"] == "dialog"
+                            for b in keys), keys)
+        self.assertTrue(any(b["last"]["cls"] == "move" and b["last"]["handled"] and b["mode"] == "feed"
+                            for b in keys), keys)
+        self.assertTrue(any(b["last"]["cls"] == "ok" for b in keys), keys)
+        self.assertTrue(any(b["last"]["editable"] for b in keys), keys)   # touches tapées dans un champ
+        self.assertTrue(any(b["move"] >= 5 for b in xp))
+        self.assertTrue(any(b["synthetic"] >= 4 for b in xp))    # touches de la page : comptées, jamais d'action
+        view = a.x_probe.view()["pages"]
+        self.assertTrue(view["tv"]["present"] or view["x"]["present"])
+        dump = json.dumps(probes)
+        # jamais une valeur/un code de touche, un texte tapé (identifiant compris), une URL, un hôte ni la clé TV
+        for bad in ("ArrowDown", "ArrowUp", "Enter", "Backspace", "alice", "example", "@", "abc", "http", "x.com",
+                    "127.0.0.1", "status", "password", a.tv_key, "keyCode", "url"):
+            self.assertNotIn(bad, dump, bad)
+        for b in probes:                                          # noms de champs : liste fermée, rien d'autre
+            self.assertEqual(set(b), set(xprobe.FIELDS))
+            self.assertTrue(b["last"] is None or set(b["last"]) == set(xprobe.LAST_FIELDS), b)
 
 
 if __name__ == "__main__":

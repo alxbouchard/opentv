@@ -16,7 +16,7 @@ import time
 from . import (VERSION, agents, bootid, canvas_tools, canvas_tv, cec, config, fsutil, musesetup, netjobs, netstate,
                nethelper, peeruid, phoneremote, tools, tvcontrol, validate, wifiscan)
 from .foryou import ForYou, EngineError
-from . import promotion, xcontext, xescape
+from . import promotion, xcontext, xescape, xprobe
 from . import source as sourcemod
 from .playback import Playback
 from .playerclient import PlayerClient
@@ -184,6 +184,8 @@ class App:
         self.peer_uid_fn = lambda ip, port, sport: peeruid.tcp_peer_uid(ip, port, sport, proc_root)
         if self.tv_client_uids is None:
             log("tv_peer_check_unavailable")
+        # lecture opérateur de la sonde X (GET xprobe.STATUS_PATH) : root seulement, refus sans contrôle du pair
+        self.operator_uids = xprobe.OPERATOR_UIDS if self.tv_client_uids is not None else None
         self.token = SetupToken(clock=mono, ttl=cfg.token_ttl_s)
         self.wifi_scan = wifiscan.Scanner(runner, mono)   # réseaux proches (assistant QR) : borné, mis en cache
         self.registry = agents.Registry(cfg.registry_file)
@@ -252,6 +254,7 @@ class App:
         self.tv_actions = tvcontrol.TvActions(mono=mono, log=log)   # pilotage par assistant (scope control)
         # X TV Mode : UN post X partagé par Alex (← sur x.com), mémoire seulement, TTL 10 min, jamais journalisé
         self.x_context = xcontext.XContext(mono=mono)
+        self.x_probe = xprobe.XProbe(mono=mono)   # sonde canari X : mémoire seulement, TTL court, aucun journal
         if self.remote is not None:
             self.remote.interceptor = self._remote_intercept
         self.boot_id = _boot_id(proc_root)

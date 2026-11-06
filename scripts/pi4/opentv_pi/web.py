@@ -31,7 +31,7 @@ import threading
 import time
 import urllib.parse
 
-from . import VERSION, agents, bounded, musesetup, museweb, phoneremote, validate, wifiscan, xcontext, xescape
+from . import VERSION, agents, bounded, musesetup, museweb, phoneremote, validate, wifiscan, xcontext, xescape, xprobe
 from . import app as appmod   # constantes d'erreur du formulaire (app n'importe pas web : pas de cycle)
 
 TV_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; "
@@ -288,10 +288,35 @@ class TVHandler(_Base):
         k = self.headers.get("X-OpenTV-TV") or ""
         return hmac.compare_digest(k.encode("utf-8"), self.app.tv_key.encode("utf-8"))
 
+    def _guard_operator(self):
+        """GET xprobe.STATUS_PATH : loopback, Host exact, UID du pair TCP = root (sudo opentv-pi x-probe). Contrôle du
+        pair indisponible (hors Linux) : refus. Jamais le kiosque, une page, un agent ni un autre compte local."""
+        try:
+            loop = ipaddress.ip_address(self.client_address[0]).is_loopback
+        except ValueError:
+            loop = False
+        port = self.server.server_address[1]
+        if not loop:
+            self.send(403, "interdit", "text/plain; charset=utf-8")
+            return False
+        if self.headers.get("Host") not in ("127.0.0.1:%d" % port, "localhost:%d" % port):
+            self.send(421, "hôte refusé", "text/plain; charset=utf-8")
+            return False
+        allowed = self.app.operator_uids
+        if allowed is None or \
+                self.app.peer_uid_fn(self.client_address[0], self.client_address[1], port) not in allowed:
+            self.send_json(403, {"ok": False, "error": "operator_only"})
+            return False
+        return True
+
     def do_GET(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if path == xprobe.STATUS_PATH:   # sonde canari X : lecture opérateur (root) seulement, jamais le kiosque
+            if self._guard_operator():
+                self.send_json(200, xprobe.status_view(self.app))
+            return
         if not self._guard():
             return
-        path = urllib.parse.urlsplit(self.path).path
         if path == "/healthz":
             return self.send_json(200, {"ok": True, "version": VERSION})
         if path in ("/", "/tv"):
@@ -330,6 +355,8 @@ class TVHandler(_Base):
             return self.send_json(403, {"ok": False, "error": TV_KEY_ERROR})
         if path == xcontext.SHARE_PATH:   # X TV Mode : portes propres dans xcontext (Origin, 16 Kio, champs fermés)
             return self.send_json(*xcontext.handle_share(self, self.app))
+        if path == xprobe.PROBE_PATH:   # sonde canari X : Origin de l'extension obligatoire, 1 Kio, champs fermés
+            return self.send_json(*xprobe.handle_probe(self, self.app))
         if (self.headers.get("Content-Type") or "").split(";")[0].strip() != "application/json":
             return self.send_json(415, {"ok": False, "error": "content_type"})
         raw = self.read_body(MAX_JSON)

@@ -188,7 +188,7 @@ for u in tv.html tv.js keys.js canvas.js tv.css setup.css setup.js remote.css re
 add "$REPO/native/app/qrcode.js" /opt/opentv/share/ui/qrcode.js 644                  # réutilisé tel quel
 # X TV Mode (0.7.7) : extension Chromium locale du kiosque (chargée par opentv-kiosk-browser, ID fixe autorisé par la
 # politique gérée ; OPENTV_X_TV=0 = jamais chargée). Fichiers root 0644, manifestés, retirés par uninstall.sh.
-for u in manifest.json background.js nav.js x.js x.css tvkey.js; do
+for u in manifest.json background.js nav.js nav.css x.js x.css tvkey.js; do
   add "$HERE/x-tv-extension/$u" "/opt/opentv/share/x-tv-extension/$u" 644
 done
 add "$REPO/scripts/nanopi/opentv_foryou.py" /opt/opentv/lib/foryou/opentv_foryou.py 644  # moteur « Pour toi »

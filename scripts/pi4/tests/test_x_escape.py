@@ -220,6 +220,22 @@ class TestDecoderAndDevices(unittest.TestCase):
         self.assertEqual(d.feed(ev(174, 1) + ev(174, 0) + ev(174, 1)), ["exit", "exit"])
         self.assertEqual(d.feed(b"\x00" * 5), [])                 # bloc partiel
 
+    def test_nav_class_decoder_exit_identical_and_classes_only(self):
+        """Canari 0.7.8 : KEY_EXIT exactement comme ExitDecoder ; flèches -> « move », OK/Entrée -> « ok » (classes,
+        jamais la direction) ; répétitions, relâchés, autres codes et autres types : rien."""
+        d, old = xescape.NavClassDecoder(), xescape.ExitDecoder()
+        for data in (ev(174, 1), ev(174, 2), ev(174, 0), ev(174, 1, typ=4), b"\x00" * 5,
+                     ev(174, 1) + ev(174, 0) + ev(174, 1)):
+            self.assertEqual([x for x in d.feed(data) if x == "exit"], old.feed(data))
+        for code in (103, 105, 106, 108):                         # ↑ ← → ↓ : même classe, direction perdue
+            self.assertEqual(d.feed(ev(code, 1)), ["move"], code)
+            self.assertEqual(d.feed(ev(code, 2) + ev(code, 0)), [], code)
+        for code in (28, 352, 353):                               # Entrée (Select CEC remappé), KEY_OK, KEY_SELECT
+            self.assertEqual(d.feed(ev(code, 1)), ["ok"], code)
+        for code in (1, 14, 30, 2, 158, 172, 206, 57, 113):        # Échap, Retour arrière, lettres, Back, Home…
+            self.assertEqual(d.feed(ev(code, 1)), [], code)
+        self.assertEqual(d.feed(ev(103, 1, typ=4)), [])           # EV_MSC
+
     def test_only_vc4_hdmi_devices_with_key_exit(self):
         cases = {"vc4-hdmi-0": True, "vc4-hdmi-1": True, "vc4-hdmi": True, "USB Keyboard": False,
                  "vc4-hdmi-0 extra": False, "Logitech K400": False, "": False, None: False}
@@ -274,7 +290,7 @@ class TestHelper(unittest.TestCase):
         self.h.tick()
         self.assertEqual(len(FakeWatcher.instances), 1)
         w = FakeWatcher.instances[0]
-        self.assertIsInstance(w.kw["decoder_factory"](), xescape.ExitDecoder)
+        self.assertIsInstance(w.kw["decoder_factory"](), xescape.NavClassDecoder)   # KEY_EXIT + classes canari
         self.h.tick()
         self.assertEqual(len(FakeWatcher.instances), 1)           # jamais deux surveillances
         xescape.set_marker(self.rdir, False)
@@ -310,6 +326,44 @@ class TestHelper(unittest.TestCase):
         xescape.set_marker(self.rdir, False)                       # /tv rechargée entre-temps
         on_key("exit")
         self.assertIsNone(self.request())
+
+    def test_nav_counters_logged_bounded_never_an_action(self):
+        """Canari : appuis move/ok comptés (classe seulement) pendant que le témoin est valide ; journal borné (au plus
+        une fois par NAV_LOG_INTERVAL_S, et au désarmement) ; jamais une demande, jamais une direction ni un code."""
+        xescape.set_marker(self.rdir, True, boot_id="b")
+        self.h.tick()
+        on_key = FakeWatcher.instances[0].on_key
+        for why in ("move", "move", "ok", "move"):
+            on_key(why)
+        self.assertIsNone(self.request())                        # aucune action
+        self.h.tick()
+        nav = [f for e, f in self.events if e == "x_escape_nav"]
+        self.assertEqual(nav, [{"move": 3, "ok": 1}])
+        for _ in range(50):
+            on_key("ok")
+        self.clock.t += 1
+        self.h.tick()                                             # < NAV_LOG_INTERVAL_S : pas de nouvelle ligne
+        self.assertEqual(len([e for e, _ in self.events if e == "x_escape_nav"]), 1)
+        self.clock.t += xescape.NAV_LOG_INTERVAL_S
+        self.h.tick()
+        self.h.tick()                                             # inchangé : rien
+        nav = [f for e, f in self.events if e == "x_escape_nav"]
+        self.assertEqual(nav, [{"move": 3, "ok": 1}, {"move": 3, "ok": 51}])
+        on_key("move")
+        xescape.set_marker(self.rdir, False)                       # /tv : désarmé -> derniers compteurs, puis plus rien
+        self.h.tick()
+        self.assertEqual([f for e, f in self.events if e == "x_escape_nav"][-1], {"move": 4, "ok": 51})
+        on_key("move")                                            # après désarmement : jamais compté
+        self.assertEqual(self.h.nav, {"move": 4, "ok": 51})
+        xescape.set_marker(self.rdir, True, boot_id="b")
+        self.h.tick()                                             # réarmé : compteurs repartent de zéro
+        self.assertEqual(self.h.nav, {"move": 0, "ok": 0})
+        for e, f in self.events:
+            self.assertTrue(set(f) <= {"reason", "move", "ok"}, (e, f))   # aucun code/direction journalisé
+        self.assertIsNone(self.request())
+        self.h.nav["move"] = xescape.NAV_COUNT_MAX
+        FakeWatcher.instances[-1].on_key("move")
+        self.assertEqual(self.h.nav["move"], xescape.NAV_COUNT_MAX)       # borné
 
     def test_pending_request_not_rewritten_and_unsafe_dir_refused(self):
         xescape.set_marker(self.rdir, True, boot_id="b")
@@ -654,8 +708,11 @@ class TestXEscapeEndToEnd(unittest.TestCase):
         reqp = os.path.join(req, xescape.REQUEST)
         os.write(kbd, ev(174, 1))                                 # clavier physique : jamais lu
         os.write(hdmi, ev(174, 2) + ev(174, 0) + ev(158, 1))      # répétition, relâché, autre touche : rien
+        os.write(kbd, ev(103, 1) + ev(28, 1))                     # clavier : jamais compté (jamais lu)
+        os.write(hdmi, ev(108, 1) + ev(108, 0) + ev(105, 1) + ev(28, 1) + ev(28, 2))   # canari : classes seulement
+        self.assertTrue(wait(lambda: h.nav == {"move": 2, "ok": 1}), h.nav)
         time.sleep(0.4)
-        self.assertFalse(os.path.exists(reqp))
+        self.assertFalse(os.path.exists(reqp))                    # flèches/OK : jamais une demande
         os.write(hdmi, ev(174, 1))                                # Retour Samsung (KEY_EXIT) sur X
         self.assertTrue(wait(lambda: os.path.exists(reqp)))
 

@@ -18,6 +18,12 @@ coincé sur x.com. Relancer opentv-kiosk.service ramène toujours /tv (prouvé t
    (propriétaire opentv, même boot) ; au plus une relance par ACTION_MIN_INTERVAL_S ; puis UNE commande exacte
    RESTART_ARGV. Témoin absent (page /tv) : rien, jamais de relance inconditionnelle.
 
+Canari 0.7.8 (preuve côté evdev, jamais une action) : pendant que le témoin est valide, l'aide compte aussi les appuis
+de navigation du MÊME périphérique CEC par CLASSE seulement — `move` (↑ ↓ ← →, sans direction) et `ok` (OK/Entrée) —
+et journalise ces deux compteurs, bornés, au plus une fois par NAV_LOG_INTERVAL_S (et au désarmement). Aucune
+direction, aucun code de touche n'est journalisé ; seule KEY_EXIT produit une demande. Comparés à la sonde de
+l'extension (`opentv-pi x-probe`), ils séparent « la touche n'arrive pas au Pi » de « elle n'atteint pas la page ».
+
 Fail-safe : tout doute (témoin illisible, lien, propriétaire, boot_id, demande invalide) = aucune action. Rien de
 saisi n'est lu, journalisé ni transmis ; aucun code de touche n'est journalisé.
 """
@@ -42,6 +48,10 @@ STAMP_DIR = "/run/opentv-x-escape-action"
 STAMP = "last"
 MAX_FILE = 256
 KEY_EXIT = 174
+NAV_MOVE_CODES = frozenset((103, 105, 106, 108))   # KEY_UP, KEY_LEFT, KEY_RIGHT, KEY_DOWN
+NAV_OK_CODES = frozenset((28, 352, 353))            # KEY_ENTER (Select CEC remappé), KEY_OK, KEY_SELECT
+NAV_LOG_INTERVAL_S = 5.0
+NAV_COUNT_MAX = 1000000
 POLL_S = 0.5
 HELPER_MIN_INTERVAL_S = 3.0
 ACTION_MIN_INTERVAL_S = 10.0
@@ -176,6 +186,25 @@ class ExitDecoder:
         return out
 
 
+class NavClassDecoder(ExitDecoder):
+    """KEY_EXIT appuyé -> « exit » (exactement comme ExitDecoder) ; appui (value=1) d'une flèche -> « move », d'OK/Entrée
+    -> « ok » (classes seulement, jamais la direction) ; tout autre code, répétition ou relâché : rien."""
+
+    def feed(self, data):
+        out = []
+        for off in range(0, len(data) - evkeys.EVENT_SIZE + 1, evkeys.EVENT_SIZE):
+            _, _, typ, code, value = struct.unpack_from(evkeys.EVENT_FMT, data, off)
+            if typ != evkeys.EV_KEY or value != 1:
+                continue
+            if code == KEY_EXIT:
+                out.append("exit")
+            elif code in NAV_MOVE_CODES:
+                out.append("move")
+            elif code in NAV_OK_CODES:
+                out.append("ok")
+        return out
+
+
 def _eviocgname(length=256):
     return (2 << 30) | (length << 16) | (ord("E") << 8) | 0x06
 
@@ -228,6 +257,21 @@ class Helper:
         self.lock = threading.Lock()
         self.watcher = None
         self.last = None
+        self.nav = {"move": 0, "ok": 0}      # appuis de navigation par classe depuis l'armement (canari, mémoire)
+        self.nav_logged = None               # derniers compteurs journalisés
+        self.nav_log_at = None
+
+    def _nav_log(self, force=False):
+        """Compteurs `move`/`ok` journalisés s'ils ont changé, au plus une fois par NAV_LOG_INTERVAL_S (sauf force)."""
+        with self.lock:
+            snap = dict(self.nav)
+            now = self.mono()
+            if snap == (self.nav_logged or {"move": 0, "ok": 0}):
+                return
+            if not force and self.nav_log_at is not None and 0 <= now - self.nav_log_at < NAV_LOG_INTERVAL_S:
+                return
+            self.nav_logged, self.nav_log_at = snap, now
+        self.log("x_escape_nav", move=snap["move"], ok=snap["ok"])
 
     def active(self):
         return read_marker(self.marker_dir, self.service_uid, boot_id=self.boot_id())
@@ -237,15 +281,24 @@ class Helper:
         w = None
         with self.lock:
             if on and self.watcher is None:
-                self.watcher = self.factory(self._on_key, decoder_factory=ExitDecoder).start()
+                self.nav, self.nav_logged, self.nav_log_at = {"move": 0, "ok": 0}, None, None
+                self.watcher = self.factory(self._on_key, decoder_factory=NavClassDecoder).start()
                 self.log("x_escape_armed")
             elif not on and self.watcher is not None:
                 w, self.watcher = self.watcher, None
         if w is not None:   # /tv rechargée : périphériques refermés par le thread de surveillance
             w.stop()
+            self._nav_log(force=True)
             self.log("x_escape_disarmed")
+        elif on:
+            self._nav_log()
 
     def _on_key(self, why):
+        if why in ("move", "ok"):   # canari : compteur de classe seulement, jamais une action ni une demande
+            with self.lock:
+                if self.watcher is not None:
+                    self.nav[why] = min(self.nav[why] + 1, NAV_COUNT_MAX)
+            return
         if why != "exit":
             return
         if not self.active():   # /tv rechargée entre-temps : jamais de demande

@@ -506,6 +506,27 @@ def cmd_x_escape_action(a):
     return _out(rep, 0)
 
 
+def cmd_x_probe(a, timeout=3.0):
+    """Lecture opérateur de la sonde canari X (root) : GET xprobe.STATUS_PATH sur la boucle locale du service. Le service
+    vérifie lui-même l'UID du pair (root) ; rien n'est écrit. Vue fermée : battements/modes et compteurs seulement."""
+    import http.client
+    from . import xprobe
+    cfg = config.Config.load(a.env)
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", cfg.tv_port, timeout=timeout)
+        c.request("GET", xprobe.STATUS_PATH, headers={"Host": "127.0.0.1:%d" % cfg.tv_port})
+        r = c.getresponse()
+        raw = r.read(64 * 1024)
+        c.close()
+        body = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError, http.client.HTTPException):
+        return _out({"ok": False, "error": "service_unreachable"}, 1)
+    if r.status != 200 or not isinstance(body, dict):
+        return _out({"ok": False, "error": body.get("error") if isinstance(body, dict) else "refused",
+                     "status": r.status}, 1)
+    return _out(body, 0)
+
+
 def cmd_playback(a):
     """Porte de production de « Regarder » : status (lecture seule), promote (root, après validation terrain), demote
     (root : témoin retiré PUIS séance en cours fermée côté contrôleur). Témoin et manifeste : root seulement."""
@@ -808,6 +829,8 @@ def build_parser():
     sub.add_parser("x-escape-helper", help="(opentv-keys) X TV : touche Retour Samsung (KEY_EXIT) -> /tv quand X est "
                    "ouvert (systemd)")
     sub.add_parser("x-escape-action", help="(root) X TV : relance bornée du kiosque sur demande vérifiée (systemd)")
+    sub.add_parser("x-probe", help="(root) X TV canari : dernière sonde de l'extension sur /tv et x.com (battement, "
+                                   "mode, compteurs de touches par classe ; mémoire du service, TTL court)")
     pb = sub.add_parser("playback", help="porte de production de « Regarder » : status | promote | demote")
     pb.add_argument("action", choices=("status", "promote", "demote"))
     pb.add_argument("--field-validated", action="store_true",
@@ -859,7 +882,7 @@ def main(argv):
     if a.cmd == "agent" and a.action in ("issue", "revoke") and not a.id:
         return _out({"ok": False, "error": "id_required"}, 2)
     return {"serve": cmd_serve, "player-daemon": cmd_player_daemon, "player-keys": cmd_player_keys,
-            "x-escape-helper": cmd_x_escape_helper, "x-escape-action": cmd_x_escape_action,
+            "x-escape-helper": cmd_x_escape_helper, "x-escape-action": cmd_x_escape_action, "x-probe": cmd_x_probe,
             "playback": cmd_playback, "preflight": cmd_preflight, "health": cmd_health, "net-helper": cmd_net_helper,
             "ap-guard": cmd_ap_guard, "agent": cmd_agent, "setup": cmd_setup, "cec": cmd_cec,
             "cec-bootstrap": cmd_cec_bootstrap, "cec-return-monitor": cmd_cec_return_monitor,
