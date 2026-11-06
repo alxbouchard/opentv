@@ -16,7 +16,7 @@ import time
 from . import (VERSION, agents, bootid, canvas_tools, canvas_tv, cec, config, fsutil, musesetup, netjobs, netstate,
                nethelper, peeruid, phoneremote, tools, tvcontrol, validate, wifiscan)
 from .foryou import ForYou, EngineError
-from . import promotion
+from . import promotion, xcontext
 from . import source as sourcemod
 from .playback import Playback
 from .playerclient import PlayerClient
@@ -248,6 +248,8 @@ class App:
         self.ap_stop_at = -1e9
         self.playback = self._make_playback(cfg, log, mono)
         self.tv_actions = tvcontrol.TvActions(mono=mono, log=log)   # pilotage par assistant (scope control)
+        # X TV Mode : UN post X partagé par Alex (← sur x.com), mémoire seulement, TTL 10 min, jamais journalisé
+        self.x_context = xcontext.XContext(mono=mono)
         if self.remote is not None:
             self.remote.interceptor = self._remote_intercept
         self.boot_id = _boot_id(proc_root)
@@ -1157,6 +1159,8 @@ class App:
                     "muse": self._muse_tv(assistants),
                     "foryou": self.foryou is not None, "remote": self._remote_view(),
                     "playback": self.playback.view(), "canvas": canvas,
+                    # applications de l'accueil (rangée « Applications », jamais un film) : X TV Mode seulement
+                    "apps": [{"id": "x", "title": "X"}] if self.cfg.x_tv else [],
                     # pilotage par assistant : actions en attente (fiche, film lancé, touche), à réclamer une fois
                     "actions": {"pending": [] if self.setup_mode else self.tv_actions.pending()}}
 
@@ -1202,6 +1206,12 @@ class App:
                     "cec": {"adapters": len(self.cec["adapters"]), "discovery_only": True},
                     "agent": {"id": agent, "scopes": list(scopes)}, "relay": {"status": "not_implemented"},
                     "version": VERSION, "control": self._control_view(scopes)}
+
+    def tv_x_share(self, body):   # POST /api/tv/x/context, portes du kiosque passées : rien journalisé ni audité
+        return xcontext.share_response(self.cfg.x_tv, self.x_context, body)
+
+    def agent_x_context(self):   # outil x_context (read) : dernier post partagé, contenu NON FIABLE (untrusted:true)
+        return self.x_context.view() if self.cfg.x_tv else {"available": False}
 
     def show_message(self, agent, text, seconds):
         # nom affiché = agent PROPRIÉTAIRE (« muse-device » -> « Muse ») ; le journal garde l'identité authentifiée

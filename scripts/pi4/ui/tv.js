@@ -49,6 +49,10 @@
   // identifiant technique brut ni une propriété héritée d'Object (« constructor »…)
   function agentName(id) { return typeof id === "string" && AGENTS.hasOwnProperty(id) ? AGENTS[id] : "un assistant"; }
   var NET = { ethernet: "Ethernet", wifi: "Wi-Fi", hotspot: "Wi-Fi temporaire", offline: "Hors ligne" };
+  // X TV Mode (0.7.7) : rangée « Applications » après les titres (annoncée par le service : state.apps). Une application
+  // n'est JAMAIS un film : ni fiche, ni « Regarder », ni avis, jamais ouverte par un assistant. OK = navigation de premier
+  // niveau dans ce même Chromium (profil persistant ; connexion faite par Alex lui-même, rien n'est rempli).
+  var APPS = { x: { id: "app:x", app: "x", kind: "app", title: "X", url: "https://x.com/home" } };
   // Reprise après redémarrage du service : la clé de page change à chaque démarrage. Un 403 explicite « tv_key »
   // recharge /tv (qui porte la nouvelle clé) après une attente croissante, au plus RELOAD_MAX fois par fenêtre,
   // journal tenu dans sessionStorage (survit au rechargement). Sans stockage : aucun rechargement (pas de boucle).
@@ -249,6 +253,11 @@
     return h;
   }
   function artFor(it) {   // visuel dessiné (aucune ressource) : jamais un bloc sombre « en chargement »
+    if (isApp(it)) {   // application : tuile noire à la marque, jamais une affiche
+      var ap = el("div", "art app");
+      ap.appendChild(el("span", "letter", it.title));
+      return ap;
+    }
     var a = el("div", "art"), h = hue(it.id || it.title);
     a.style.background = "linear-gradient(160deg, hsl(" + h + ", 52%, 36%) 0%, hsl(" + ((h + 48) % 360) +
                          ", 58%, 17%) 68%, #0a0c16 100%)";
@@ -279,10 +288,23 @@
     });
     return out;
   }
+  function isApp(it) { return !!(it && it.kind === "app"); }
+  // rangée « Applications » : seulement à côté de vrais titres (l'accueil vide garde son état écrit, Réglages au
+  // focus), toujours en dernier, hors de l'ordre Canvas des rangées
+  function appsRow(films) {
+    var items = [];
+    ((state && state.apps) || []).forEach(function (a) {
+      if (a && typeof a.id === "string" && APPS.hasOwnProperty(a.id)) { items.push(APPS[a.id]); }
+    });
+    return films.length && items.length ? { id: "apps", kind: "apps", title: "Applications", items: items } : null;
+  }
   function rowsData() {
     var out = [];
     ((fy && fy.rows) || []).forEach(function (r) { if (r && r.items && r.items.length) { out.push(r); } });
-    return orderRows(out);
+    out = orderRows(out);
+    var apps = appsRow(out);
+    if (apps) { out.push(apps); }
+    return out;
   }
   function renderEmpty(box) {
     var d = el("div", "empty"), ul = el("ul");
@@ -317,6 +339,7 @@
     var hit = null;
     if (!id) { return null; }
     ROWS.forEach(function (r, ri) {
+      if (r.kind === "apps") { return; }   // une application n'est jamais le film recherché
       r.items.forEach(function (it, ci) {
         if (it.id === id && (!hit || (rowKey(r, ri) === key && hit.key !== key))) { hit = { row: ri, col: ci, key: rowKey(r, ri) }; }
       });
@@ -358,7 +381,8 @@
           card.appendChild(mk);
         }
         info.appendChild(el("div", "t", it.title));
-        if (meta(it, true)) { info.appendChild(el("div", "y", meta(it, true))); }
+        if (isApp(it)) { info.appendChild(el("div", "y", "Application")); }
+        else if (meta(it, true)) { info.appendChild(el("div", "y", meta(it, true))); }
         if (it.reasons && it.reasons[0] && it.reasons[0].text) { info.appendChild(el("div", "r", it.reasons[0].text)); }
         card.appendChild(info);
         strip.appendChild(card);
@@ -444,7 +468,14 @@
     if (CV) { CV.focus(it ? hue(it.id || it.title) : -1); }   // halo du héros : teinte du visuel dessiné au focus
     var chips = $("hchips");
     chips.textContent = "";
-    if (!it) {
+    if (isApp(it)) {   // application : texte d'usage, aucune note, aucun badge
+      setKicker(r.title);
+      $("htitle").textContent = it.title;
+      $("htitle").className = "htitle";
+      $("hmeta").textContent = "Ton fil X en grand, à la télécommande";
+      $("hdesc").textContent = "OK ouvre X ici. Première fois : connecte-toi toi-même. Sur un post, ← le prépare " +
+        "pour Hermit ou Muse ; Retour revient à OpenTV.";
+    } else if (!it) {
       setKicker("Pour toi");
       $("htitle").textContent = "Ta soirée se prépare";
       $("htitle").className = "htitle";
@@ -522,6 +553,7 @@
   }
   function canWatch() { return !!(state && state.playback && state.playback.available); }
   function openItem(it, row, prop) {   // « Regarder » en premier, seulement si une lecture réelle est possible
+    if (isApp(it)) { return; }   // jamais de fiche film pour une application
     var m = ((fy && fy.marks) || {})[it.id] || {}, actions = Object.keys(LABELS).filter(function (a) {
       return a !== "watch" || canWatch();
     });
@@ -977,6 +1009,11 @@
     else if (kind === "unavailable") { toast(MSG_AGENTS_QR + "\nRien n'a changé."); }
     else if (cancelled) { toast("Annulé sur le téléphone : rien n'a changé."); }
   }
+  function openApp(it) {   // OK humain sur une application : quitte /tv pour le site (même onglet, même profil)
+    if (!isApp(it) || play || panel || !APPS.hasOwnProperty(it.app)) { return; }
+    toast("Ouverture de " + it.title + "…");
+    location.assign(APPS[it.app].url);
+  }
   function goStart() {
     focus.row = 0; focus.cols = [];
     focus.zone = ROWS.length ? "rows" : "top";
@@ -1143,6 +1180,7 @@
       if ({ agents: 1, assistants: 1, muse: 1, museconfirm: 1, musesetup: 1, museresult: 1 }[panel.kind]) { return "tv_busy"; }
       if (a !== "back" && a !== "home") { return "settings_forbidden"; }
     } else if (!panel && focus.zone === "top" && a === "ok") { return "settings_forbidden"; }
+    else if (!panel && a === "ok" && isApp(current())) { return "app_human_only"; }   // ouvrir X : Alex seulement
     else if (panel && a === "ok" && panel.actions[panel.btn] === "watch") { return "use_play_title"; }
     handle(a);
     return null;
@@ -1663,7 +1701,11 @@
     else if (a === "down") { focus.row = Math.min(ROWS.length - 1, focus.row + 1); }
     else if (a === "right") { focus.cols[focus.row] = Math.min(ROWS[focus.row].items.length - 1, col() + 1); }
     else if (a === "left") { focus.cols[focus.row] = Math.max(0, col() - 1); }
-    else if (a === "ok") { var it = current(); if (it) { openItem(it, ROWS[focus.row]); } return true; }
+    else if (a === "ok") {
+      var it = current();
+      if (isApp(it)) { openApp(it); } else if (it) { openItem(it, ROWS[focus.row]); }
+      return true;
+    }
     else if (a === "home") { goStart(); return true; }   // jamais quitter /tv : retour au début
     else if (a === "back") {   // Retour remonte d'UNE rangée (colonne gardée) ; en rangée 0 : première carte
       if (focus.row > 0) { focus.row -= 1; } else { focus.cols[0] = 0; }

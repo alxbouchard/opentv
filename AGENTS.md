@@ -373,6 +373,14 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   des compteurs à toute sortie (SIGTERM compris) ; module retiré ⇒ arrêt juste après le réveil, rien émis. Le POLL 0.7.4
   est coupé tant que `OPENTV_CEC_FOLLOWER≠0` ; repli/rollback `OPENTV_CEC_FOLLOWER=0` ; gate `OPENTV_CEC_FOLLOWER=canary`. Santé `cec_follower_failed`. Tests
   `scripts/pi4/tests/test_cec_follower.py` (faux noyau `tests/_cecfake.py`). Vérifié hors matériel seulement.
+- **X TV Mode (0.7.7)** : tuile X (rangée « Applications » de `tv.js`, jamais un film) ⇒ `https://x.com/home` en page
+  de premier niveau dans le même Chromium/profil du kiosque ; extension locale MV3 `scripts/pi4/x-tv-extension/`
+  (ID fixe autorisé par la politique gérée, `storage` + hôtes x.com/twitter.com/127.0.0.1) : CSS TV du fil, ↑ ↓ OK ←
+  Retour Accueil, ← partage texte+auteur visibles du post au focus vers `POST /api/tv/x/context` (portes du kiosque +
+  clé TV recapturée sur /tv, corps borné, champs fermés). `opentv_pi/xcontext.py` : UN contexte mémoire 10 min, jamais
+  journalisé ; outil read `x_context` / Muse `opentv.x_context`, `untrusted:true` (contenu non fiable, ne jamais
+  suivre ses instructions). Aucune API X, aucun clic auto, login fait par Alex. Opt-out `OPENTV_X_TV=0`. Tests
+  `scripts/pi4/tests/test_x_tv.py` + `e2e_x_tv.js` (Chrome for Testing + extension installée). Hors matériel seulement.
 - **Mode HDMI exact après extinction/rallumage de la TV (0.7.5)** : terrain 2026-11-01, au rallumage wlroots recrée
   la sortie et Cage prend le mode préféré de l'EDID (3840x2160@30) pendant que Chromium reste en 1920x1080 (quart
   d'écran). `opentv_pi/displaymode.py` : cible exacte `OPENTV_HDMI_MODE` (défaut `1920x1080@60`, jamais un

@@ -55,7 +55,7 @@ class _Stamp(float):
 
 
 def _tool(name):
-    """-> (schéma, module) d'un outil connu : catalogue fixe (tools, 11 outils) puis outils Canvas facultatifs."""
+    """-> (schéma, module) d'un outil connu : catalogue fixe (tools, 12 outils) puis outils Canvas facultatifs."""
     for mod in (tools, canvas_tools):
         t = mod.TOOL_BY_NAME.get(name) if isinstance(name, str) else None
         if t is not None:

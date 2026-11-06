@@ -168,7 +168,7 @@ class TestRegistryAudit(unittest.TestCase):
 class TestTools(unittest.TestCase):
     def test_schemas_are_closed_and_bounded(self):
         names = [t["name"] for t in tools.TOOLS]
-        self.assertEqual(names, ["status", "recommend", "catalogue_list", "search", "feedback", "history", "display_message",
+        self.assertEqual(names, ["status", "recommend", "catalogue_list", "search", "feedback", "history", "x_context", "display_message",
                                  "present_title", "play_title", "close_player", "remote_control"])
         for t in tools.TOOLS:
             self.assertFalse(t["inputSchema"].get("additionalProperties", True), t["name"])
@@ -346,7 +346,7 @@ class TestMCP(unittest.TestCase):
         self.assertEqual(by_id[1]["result"]["protocolVersion"], "2025-06-18")
         self.assertEqual(by_id[1]["result"]["capabilities"], {"tools": {"listChanged": False}})
         self.assertEqual([t["name"] for t in by_id[2]["result"]["tools"]],
-                         ["status", "recommend", "catalogue_list", "search", "history"])
+                         ["status", "recommend", "catalogue_list", "search", "history", "x_context"])
         for t in by_id[2]["result"]["tools"]:
             self.assertNotIn("scope", t)
             self.assertEqual(t["inputSchema"]["type"], "object")
@@ -397,7 +397,8 @@ class TestMCP(unittest.TestCase):
         res = [json.loads(l) for l in p.stdout.decode().splitlines()]
         self.assertEqual(res[0]["result"]["protocolVersion"], "2025-03-26")
         self.assertEqual([t["name"] for t in res[1]["result"]["tools"]],
-                         ["status", "recommend", "catalogue_list", "search", "feedback", "history"])
+                         ["status", "recommend", "catalogue_list", "search", "feedback", "history",
+                          "x_context"])
         self.assertEqual(len(res[2]["result"]["structuredContent"]["items"]), 2)
         self.assertTrue(res[3]["result"]["structuredContent"]["changed"])
         no_url(self, res)

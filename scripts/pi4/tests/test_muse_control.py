@@ -1019,7 +1019,7 @@ class TestMuseCommandDescriptions(unittest.TestCase):
     def test_descriptions_match_the_schema(self):
         from opentv_pi import musebridge
         specs = musebridge.command_specs()
-        self.assertEqual(len(specs), 11)
+        self.assertEqual(len(specs), 12)   # 0.7.7 : + opentv.x_context
         for cmd, spec in specs.items():
             t = tools.TOOL_BY_NAME[musebridge.COMMANDS[cmd]]
             for k, p in list(spec["required"].items()) + list(spec["optional"].items()):

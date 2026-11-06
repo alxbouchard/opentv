@@ -13,6 +13,9 @@
   "DownloadRestrictions": 3,
   "EditBookmarksEnabled": false,
   "EnableMediaRouter": false,
+  "ExtensionInstallAllowlist": [
+    "mmoccejphjkmbhejebkbhkbbmmocfafi"
+  ],
   "ExtensionInstallBlocklist": [
     "*"
   ],
@@ -28,7 +31,9 @@
   "URLAllowlist": [
     "http://127.0.0.1",
     "file:///opt/opentv/share/ui/fallback.html",
-    "about:blank"
+    "about:blank",
+    "https://x.com",
+    "https://twitter.com"
   ],
   "URLBlocklist": [
     "*",

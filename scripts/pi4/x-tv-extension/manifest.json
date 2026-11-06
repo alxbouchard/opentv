@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "OpenTV X TV Mode",
+  "description": "Fil X lisible à la télécommande dans le kiosque OpenTV (aucune API X, aucune action automatique).",
+  "version": "0.7.7",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4M+d0A/0EWKUoOIkPk6MXUpDoviNjoHCQIUZXaqlvNWuXCtOPJYvrjLGT349NgjvJ6VONXX2zsukOkN3jPfh/PyvZZRpfEOE0UP1hs5q2vw2CGGyR7ZWdG+jQVxLxsbd/eKX8BGDLYows14z77UHXlgbMnxV9vvrdIdk+nYFbIv3J0xhQmPvJVSytf9BwzeYJ3H7fnccFbX3dTQ/iz9Xc4GeSlzMdmWPQm0rdnkax06Zz4FHD65tggzhr6/RUiQjFJ37QbNnaAvfOdYG936RJKuQu8lq0melAIlpVhdtvZaLjgf1hoYafdi5UfoadXyACw+GjTcwVliAmqix8PEj8QIDAQAB",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://x.com/*",
+    "https://twitter.com/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": [
+        "x.js"
+      ],
+      "css": [
+        "x.css"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "http://127.0.0.1/tv*"
+      ],
+      "js": [
+        "tvkey.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

@@ -2586,10 +2586,13 @@ class TestKioskHardening(unittest.TestCase):
         self.assertIs(pol["PrintingEnabled"], False)
         self.assertEqual(pol["DownloadRestrictions"], 3)
         self.assertEqual(set(pol["URLBlocklist"]), {"*", "chrome://*", "chrome-untrusted://*", "devtools://*"})
+        # X TV Mode (0.7.7) : x.com/twitter.com seulement en plus (test_x_tv : extension unique autorisée)
         self.assertEqual(sorted(pol["URLAllowlist"]), sorted(["http://127.0.0.1", "about:blank",
-                                                               "file:///opt/opentv/share/ui/fallback.html"]))
+                                                               "file:///opt/opentv/share/ui/fallback.html",
+                                                               "https://x.com", "https://twitter.com"]))
         self.assertEqual(pol["IncognitoModeAvailability"], 1)
         self.assertEqual(pol["ExtensionInstallBlocklist"], ["*"])
+        self.assertEqual(pol["ExtensionInstallAllowlist"], ["mmoccejphjkmbhejebkbhkbbmmocfafi"])
         self.assertIs(pol["AllowFileSelectionDialogs"], False)
         # aucune politique ne touche au clavier : les 7 touches de navigation restent intactes
         for k in pol:

@@ -1,7 +1,7 @@
 """OpenTV Canvas (tâche 4) : permission facultative « canvas » par agent et outils MCP de proposition.
 
 Couvre : permission absente par défaut et jamais un niveau emboîté (MUSE_SCOPES, LINKED_REQUIRED, ordre des niveaux et
-les 11 outils / 11 commandes Muse inchangés), outils dynamiques par identité authentifiée (liste ET appel, isolation
+les 12 outils / 12 commandes Muse inchangés (0.7.7 : + x_context)), outils dynamiques par identité authentifiée (liste ET appel, isolation
 des sessions, révocation appel par appel), arguments plats énumérés seulement (aucune scène brute, URL, CSS ni
 balisage), aucune confirmation par un agent, retrait de SON aperçu seulement, débits 1/5 s et 20/10 min par agent
 canonique, délai de grâce après un refus du propriétaire ou un geste humain, audit borné sans double « proposed »,
@@ -27,7 +27,7 @@ from opentv_pi import (agentport, agents, app as appmod, canvas as cv, canvas_to
                        validate, web)
 
 CANVAS_NAMES = ["canvas_status", "canvas_preview", "canvas_cancel"]
-ELEVEN = ["status", "recommend", "catalogue_list", "search", "feedback", "history", "display_message",
+FIXED_TOOLS = ["status", "recommend", "catalogue_list", "search", "feedback", "history", "x_context", "display_message",
           "present_title", "play_title", "close_player", "remote_control"]
 CONTROL = ["control", "display", "feedback", "read"]
 KNOWN = appmod.KNOWN_AGENTS
@@ -129,15 +129,15 @@ class TestScopeModel(unittest.TestCase):
         self.assertEqual(agents.with_optional(CONTROL, ["read"]), CONTROL)
 
     def test_existing_tool_and_muse_command_surfaces_are_unchanged(self):
-        self.assertEqual([t["name"] for t in tools.TOOLS], ELEVEN)
+        self.assertEqual([t["name"] for t in tools.TOOLS], FIXED_TOOLS)
         self.assertTrue(all(t["scope"] != "canvas" for t in tools.TOOLS))
-        self.assertEqual(len(musebridge.COMMANDS), 11)
-        self.assertEqual(sorted(musebridge.COMMANDS.values()), sorted(ELEVEN))
+        self.assertEqual(len(musebridge.COMMANDS), 12)   # 0.7.7 : + opentv.x_context (lecture)
+        self.assertEqual(sorted(musebridge.COMMANDS.values()), sorted(FIXED_TOOLS))
         self.assertEqual(sorted(musebridge.command_specs()), sorted(musebridge.COMMANDS))
         self.assertFalse(set(CANVAS_NAMES) & set(musebridge.COMMANDS.values()))
         self.assertFalse(set(CANVAS_NAMES) & set(tools.TOOL_BY_NAME))
         for scopes in (CONTROL, CONTROL + ["canvas"]):   # catalogue fixe : la permission n'y ajoute rien
-            self.assertEqual([t["name"] for t in tools.public_tools(scopes)], ELEVEN)
+            self.assertEqual([t["name"] for t in tools.public_tools(scopes)], FIXED_TOOLS)
 
     def test_canvas_tool_schemas_are_closed_flat_enums(self):
         self.assertEqual([t["name"] for t in canvas_tools.TOOLS], CANVAS_NAMES)
@@ -209,7 +209,7 @@ class TestDefaults(Base):
     def test_identity_without_canvas_lists_exactly_its_level_tools(self):
         a, t = self.setup_agents({"muse": CONTROL, "hermit": ["read"], "hermes": []}, {"muse": CONTROL})
         p = Port(self, a)
-        self.assertEqual(names(p.session("muse", t["muse"])), ELEVEN)
+        self.assertEqual(names(p.session("muse", t["muse"])), FIXED_TOOLS)
 
 
 # --------------------------------------------------------------------------- outils dynamiques (vrai Agent Port)
@@ -223,8 +223,9 @@ class TestDynamicTools(Base):
     def test_tools_are_listed_per_identity_and_sessions_never_leak(self):
         a, t, p = self.env()
         sa, sb = p.session("hermit", t["hermit"]), p.session("hermes", t["hermes"])
-        want_a = ["status", "recommend", "catalogue_list", "search", "history"] + CANVAS_NAMES
-        want_b = ["status", "recommend", "catalogue_list", "search", "feedback", "history", "display_message"]
+        want_a = ["status", "recommend", "catalogue_list", "search", "history", "x_context"] + CANVAS_NAMES
+        want_b = ["status", "recommend", "catalogue_list", "search", "feedback", "history", "x_context",
+                  "display_message"]
         for _ in range(2):   # alterné : la liste d'une identité ne fuit jamais vers l'autre
             self.assertEqual(names(sa), want_a)
             self.assertEqual(names(sb), want_b)
@@ -330,13 +331,13 @@ class TestDynamicTools(Base):
         p = Port(self, a)
         self.assertEqual(p.raw("muse-device", tok, None, op="whoami")["result"],
                          {"agent": "muse-device", "scopes": CONTROL})
-        self.assertEqual(names(p.session("muse-device", tok)), ELEVEN)
+        self.assertEqual(names(p.session("muse-device", tok)), FIXED_TOOLS)
         self.assertEqual(p.raw("muse-device", tok, "canvas_status")["error"], "forbidden_scope")
         muse = next(x for x in a.assistants() if x["id"] == "muse")
         self.assertEqual((muse["bridge"]["state"], muse["level"], muse["canvas"]), ("ready", "control", True))
         self.assertEqual(a.tv_state()["assistants"]["muse_bridge"], "ready")
         # une identité liée qui porterait la permission sort de LINKED_REQUIRED : pause appel par appel (jamais un
-        # pont qui exposerait des outils hors de ses 11 commandes)
+        # pont qui exposerait des outils hors de ses 12 commandes)
         tok2 = a.registry.issue("muse-device", ["canvas"] + CONTROL)
         self.assertEqual(p.raw("muse-device", tok2, None, op="whoami")["error"], "bridge_paused")
         self.assertEqual(p.raw("muse-device", tok2, "canvas_status")["error"], "bridge_paused")

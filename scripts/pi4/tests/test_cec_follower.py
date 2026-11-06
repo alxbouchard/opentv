@@ -1478,8 +1478,8 @@ class TestInstall(unittest.TestCase):
 
 
 class TestReleaseDocs(unittest.TestCase):
-    def test_version(self):
-        self.assertEqual(VERSION, "0.7.6")
+    def test_version(self):   # suiveur livré en 0.7.6, conservé tel quel dans les versions suivantes (0.7.7 : X TV Mode)
+        self.assertGreaterEqual(tuple(int(x) for x in VERSION.split(".")), (0, 7, 6))
 
     def test_docs(self):
         for name in ("README.md", "CEC_COMPATIBILITY.md"):

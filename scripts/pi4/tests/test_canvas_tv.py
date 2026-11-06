@@ -1188,7 +1188,8 @@ class TestModule(unittest.TestCase):
     def test_line_caps_and_imports(self):
         import ast
         import sys
-        for name, cap in (("canvas_tv", 320), ("app", 1400), ("web", 1530)):
+        # web : + 2 lignes en 0.7.7 (délégation de la route X ; sa logique vit dans xcontext.py)
+        for name, cap in (("canvas_tv", 320), ("app", 1400), ("web", 1532)):
             with open(os.path.join(PI4, "opentv_pi", name + ".py"), encoding="utf-8") as f:
                 n = len(f.read().splitlines())
             self.assertLessEqual(n, cap, name)

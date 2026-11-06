@@ -1072,7 +1072,7 @@ class TestHelperJobValidation(HelperBase):
             "cancel": {"v", "id", "action", "target", "at"},
             "unpair": {"v", "id", "action", "confirm", "at"},
             "probe": {"v", "id", "action", "at"}})
-        self.assertEqual(sorted(musebridge.COMMANDS), tmb.EXPECTED)           # exactement les 11 commandes
+        self.assertEqual(sorted(musebridge.COMMANDS), tmb.EXPECTED)           # exactement les 12 commandes
         for bad in ("system.run", "file.read", "file.write", "device.health"):
             self.assertNotIn(bad, musebridge.COMMANDS)
 

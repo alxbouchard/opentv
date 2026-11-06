@@ -40,7 +40,7 @@ UPSTREAM = os.environ.get("OPENTV_TEST_MUSE_UPSTREAM",
                                        "muse-gadget-sdk-review"))
 EXPECTED = ["opentv.catalogue_list", "opentv.close_player", "opentv.display_message", "opentv.feedback",
             "opentv.history", "opentv.play_title", "opentv.present_title", "opentv.recommend", "opentv.remote_control",
-            "opentv.search", "opentv.status"]
+            "opentv.search", "opentv.status", "opentv.x_context"]   # 0.7.7 : + x_context (lecture, non fiable)
 CONTROL = ["control", "display", "feedback", "read"]
 HAVE_CRYPTO = importlib.util.find_spec("cryptography") is not None
 needs_crypto = unittest.skipUnless(HAVE_CRYPTO, "cryptography absente (python3-cryptography sur la Pi)")

@@ -25,9 +25,9 @@ from opentv_pi import agentport, agents, app as appmod, foryou, mcp, musebridge,
 
 URLISH = ("https://", "http://", "img.example", "spam.example", "evil.example", "/b/fakrov", "www.", "fakrov")
 MARK_KEYS = {"opinion", "seen", "watchlist", "not_tonight"}
-ELEVEN = ["opentv.catalogue_list", "opentv.close_player", "opentv.display_message", "opentv.feedback",
+TWELVE = ["opentv.catalogue_list", "opentv.close_player", "opentv.display_message", "opentv.feedback",
           "opentv.history", "opentv.play_title", "opentv.present_title", "opentv.recommend", "opentv.remote_control",
-          "opentv.search", "opentv.status"]
+          "opentv.search", "opentv.status", "opentv.x_context"]   # 0.7.7 : + x_context (lecture, contenu non fiable)
 
 
 def no_url(tc, obj):
@@ -68,10 +68,10 @@ class TestModeSchema(unittest.TestCase):
             for p in t["inputSchema"]["properties"].values():
                 self.assertIn(p["type"], ("integer", "string"), t["name"])
 
-    def test_exactly_the_eleven_muse_commands_and_tools(self):
-        self.assertEqual(sorted(musebridge.COMMANDS), ELEVEN)
-        self.assertEqual(sorted(musebridge.command_specs()), ELEVEN)
-        self.assertEqual(len(tools.TOOLS), 11)
+    def test_exactly_the_twelve_muse_commands_and_tools(self):
+        self.assertEqual(sorted(musebridge.COMMANDS), TWELVE)
+        self.assertEqual(sorted(musebridge.command_specs()), TWELVE)
+        self.assertEqual(len(tools.TOOLS), 12)
         self.assertEqual(sorted(musebridge.COMMANDS.values()), sorted(t["name"] for t in tools.TOOLS))
 
     def test_muse_specs_expose_mode_as_optional_enum_and_bridge_validates_it(self):

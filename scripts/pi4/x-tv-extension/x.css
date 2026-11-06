@@ -1,0 +1,102 @@
+/* OpenTV X TV Mode — présentation TV du fil X (1920×1080, distance canapé).
+ * Toute règle commence par html.otvx-tv : classe posée par x.js SEULEMENT quand la colonne principale du fil existe.
+ * Page de connexion ou sans fil : aucune règle ne s'applique (rien n'est masqué ni restylé). Aucune ressource externe. */
+
+/* une seule colonne centrale : navigation de gauche, colonne de droite, tiroirs et bandeaux masqués */
+html.otvx-tv header[role="banner"],
+html.otvx-tv [data-testid="sidebarColumn"],
+html.otvx-tv [data-testid="DMDrawer"],
+html.otvx-tv [data-testid="GrokDrawer"],
+html.otvx-tv [data-testid="BottomBar"],
+html.otvx-tv [data-testid="sheetDialog"] ~ [data-testid="mask"],
+html.otvx-tv [data-testid="primaryColumn"] [data-testid="toolBar"],
+html.otvx-tv [data-testid="primaryColumn"] [data-testid="tweetTextarea_0_label"],
+html.otvx-tv [data-testid="primaryColumn"] article [role="group"],
+html.otvx-tv [data-testid="primaryColumn"] [data-testid="placementTracking"] {
+  display: none !important;
+}
+html.otvx-tv main[role="main"] {
+  align-items: center !important;
+}
+html.otvx-tv [data-testid="primaryColumn"] {
+  width: 1180px !important;
+  max-width: 1180px !important;
+  margin: 0 auto !important;
+  border: 0 !important;
+  padding-bottom: 140px !important;
+}
+
+/* grosses cartes, gros texte */
+html.otvx-tv [data-testid="primaryColumn"] article[data-testid="tweet"] {
+  padding: 28px 36px !important;
+  margin: 18px 0 !important;
+  border-radius: 22px !important;
+  background: rgba(128, 128, 128, 0.10) !important;   /* thème de X conservé (clair ou « Lights out ») */
+  outline: 0 solid transparent;
+  scroll-margin: 160px;
+}
+html.otvx-tv [data-testid="primaryColumn"] [data-testid="tweetText"] {
+  font-size: 34px !important;
+  line-height: 1.38 !important;
+}
+html.otvx-tv [data-testid="primaryColumn"] [data-testid="User-Name"] {
+  font-size: 26px !important;
+  line-height: 1.3 !important;
+}
+html.otvx-tv [data-testid="primaryColumn"] [data-testid="User-Name"] * {
+  font-size: inherit !important;
+}
+
+/* médias lisibles : jamais rognés, hauteur bornée à l'écran */
+html.otvx-tv [data-testid="primaryColumn"] [data-testid="tweetPhoto"] img,
+html.otvx-tv [data-testid="primaryColumn"] article video {
+  object-fit: contain !important;
+  max-height: 70vh !important;
+}
+
+/* focus très visible (anneau jaune + halo), jamais confondu avec la sélection de X */
+html.otvx-tv article.otvx-focus {
+  outline: 8px solid #ffd400 !important;
+  outline-offset: 6px !important;
+  box-shadow: 0 0 0 16px rgba(255, 212, 0, 0.22), 0 18px 60px rgba(0, 0, 0, 0.45) !important;
+  background: rgba(255, 212, 0, 0.08) !important;
+}
+
+/* bandeau d'aide (bas) et message (haut) : textes français, aucune interaction */
+html.otvx-tv .otvx-help {
+  position: fixed !important;
+  left: 50% !important;
+  bottom: 28px !important;
+  transform: translateX(-50%) !important;
+  z-index: 2147483646 !important;
+  padding: 14px 30px !important;
+  border-radius: 999px !important;
+  background: rgba(10, 12, 16, 0.92) !important;
+  border: 2px solid rgba(255, 255, 255, 0.25) !important;
+  color: #e9edf1 !important;
+  font: 500 24px/1.3 system-ui, "Noto Sans", sans-serif !important;
+  white-space: nowrap !important;
+  pointer-events: none !important;
+}
+html.otvx-tv .otvx-help b {
+  color: #ffd400 !important;
+  font-weight: 700 !important;
+}
+html.otvx-tv .otvx-toast {
+  position: fixed !important;
+  left: 50% !important;
+  top: 40px !important;
+  transform: translateX(-50%) !important;
+  z-index: 2147483647 !important;
+  max-width: 1400px !important;
+  padding: 22px 40px !important;
+  border-radius: 20px !important;
+  background: #1d9bf0 !important;
+  color: #fff !important;
+  font: 600 30px/1.35 system-ui, "Noto Sans", sans-serif !important;
+  text-align: center !important;
+  pointer-events: none !important;
+}
+html.otvx-tv .otvx-toast[hidden] {
+  display: none !important;
+}

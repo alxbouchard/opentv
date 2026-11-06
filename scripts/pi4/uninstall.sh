@@ -608,7 +608,7 @@ if [ -f "$MANIFEST" ]; then
   act rm -rf -- "$(dest /opt/opentv/lib/opentv_pi/__pycache__)" "$(dest /opt/opentv/lib/foryou/__pycache__)" \
     "$(dest /opt/opentv/lib/muse/musegadget/__pycache__)" "$(dest /opt/opentv/lib/muse/musegadget/noise/__pycache__)"
   for d in /opt/opentv/lib/opentv_pi /opt/opentv/lib/foryou /opt/opentv/lib/muse/musegadget/noise \
-           /opt/opentv/lib/muse/musegadget /opt/opentv/lib/muse /opt/opentv/lib /opt/opentv/share/ui /opt/opentv/share/chromium-player-policy /opt/opentv/share \
+           /opt/opentv/lib/muse/musegadget /opt/opentv/lib/muse /opt/opentv/lib /opt/opentv/share/ui /opt/opentv/share/x-tv-extension /opt/opentv/share/chromium-player-policy /opt/opentv/share \
            /opt/opentv/bin /opt/opentv; do
     if [ -d "$(dest "$d")" ]; then
       if [ "$DRY" = 1 ]; then say "[dry-run] rmdir $(dest "$d")"; else rmdir -- "$(dest "$d")" 2>/dev/null || say "conservé (non vide) : $d"; fi

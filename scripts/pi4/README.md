@@ -176,7 +176,7 @@ Services :
 | Unité | Rôle |
 |---|---|
 | `opentv.service` | service Python stdlib (utilisateur `opentv`, `Type=notify`, watchdog 30 s — tick borné : `nmcli` 3 s + `ip` 2 s, groupe de processus tué à l'échéance, découverte CEC en thread —, durci) : page TV loopback `127.0.0.1:8080` (réservée au compte `opentv-kiosk` par l'UID du pair TCP, `/proc/net/tcp`), formulaire LAN `:8081` **seulement pendant la configuration**, Agent Port `/run/opentv/agent.sock` ; **télécommande téléphone** `<adresse LAN actuelle>:8082/r` (jamais `0.0.0.0`) seulement configuré et en ligne, écoute relancée si l'adresse change |
-| `opentv-kiosk.service` | Cage (Wayland) sur tty1 **sans `-s`** (aucun changement de console Ctrl+Alt+Fn : un clavier branché n'atteint aucune invite de connexion ; maintenance par SSH) + Chromium Raspberry Pi OS en kiosque, sous la politique gérée dédiée `opentv-kiosk.json` (DevTools, impression, téléchargements, boîtes de fichiers, extensions, navigation privée et toute navigation hors de `http://127.0.0.1`/page de secours bloqués), `Restart=always`, `RestartSec=5`, `StartLimitIntervalSec=0` (jamais bloqué en « failed » après une série de plantages). Profil Chromium **persistant** dédié (`/var/lib/opentv-kiosk/chromium`, verrous `Singleton*` effacés au lancement ; aucun secret durable : la clé de page change à chaque démarrage du service). Le lanceur teste seulement que le **port TCP** 127.0.0.1:8080 accepte une connexion (20 s), sinon il ouvre la page de secours locale `file://…/fallback.html`, qui interroge `/healthz` et revient au tableau de bord |
+| `opentv-kiosk.service` | Cage (Wayland) sur tty1 **sans `-s`** (aucun changement de console Ctrl+Alt+Fn : un clavier branché n'atteint aucune invite de connexion ; maintenance par SSH) + Chromium Raspberry Pi OS en kiosque, sous la politique gérée dédiée `opentv-kiosk.json` (DevTools, impression, téléchargements, boîtes de fichiers, extensions sauf l'extension locale X TV Mode, navigation privée et toute navigation hors de `http://127.0.0.1`/page de secours/`https://x.com` bloqués), `Restart=always`, `RestartSec=5`, `StartLimitIntervalSec=0` (jamais bloqué en « failed » après une série de plantages). Profil Chromium **persistant** dédié (`/var/lib/opentv-kiosk/chromium`, verrous `Singleton*` effacés au lancement ; aucun secret durable : la clé de page change à chaque démarrage du service). Le lanceur teste seulement que le **port TCP** 127.0.0.1:8080 accepte une connexion (20 s), sinon il ouvre la page de secours locale `file://…/fallback.html`, qui interroge `/healthz` et revient au tableau de bord |
 | `opentv-display-mode.service` | mode HDMI exact du kiosque (0.7.5) après chaque extinction/rallumage de la TV : moniteur long du compte `opentv-kiosk` (sans capacité, sans groupe ajouté, familles `AF_UNIX AF_NETLINK`, `IPAddressDeny=any`, `PrivateDevices`), tiré par `opentv-kiosk.service` (`Wants=`) et `PartOf=` lui ; attend les uevents DRM du noyau sans scrutation et ne réécrit que `OPENTV_HDMI_MODE` (défaut `1920x1080@60`) quand Cage a repris le mode préféré de la TV. Détails : §« Résolution ». |
 | `opentv-splash.service` | oneshot tty1 borné à 5 s, sans réseau et durci : fond sombre « OpenTV / Démarrage... » avant le kiosque — **repli** seulement : ordonné après `plymouth-start.service`, il n'écrit rien quand Plymouth affiche l'image OpenTV (`splash` + `plymouthd` vivant). Le drop-in `getty@tty1` retire l'invite de connexion seulement tant que le kiosque est activé; rien n'est masqué et SSH reste le chemin de récupération. |
 | `opentv-net-helper.path` / `.service` | helper root déclenché par un job : écrit le profil NetworkManager (keyfile 0600) et lance `nmcli` en argv fixe, sans shell. Dossier des jobs ouvert une fois sans suivre de lien (`O_DIRECTORY|O_NOFOLLOW`), lectures/suppressions relatives à ce descripteur ; résultats écrits par descripteur (`fchown`/`fchmod`, jamais de `chown`/`chmod` par chemin). **Wi-Fi transactionnel** : profil candidat `opentv-wifi-candidate` (UUID neuf, `autoconnect=false`) activé d'abord ; l'ancien `opentv-wifi` n'est remplacé (rename atomique du keyfile, UUID du candidat) qu'après succès ; échec ou délai ⇒ candidat supprimé, ancien profil remonté (ou hotspot en configuration hors ligne), dans une réserve de budget de 51 s gardée avant l'essai. Tout résidu du dossier des jobs (fichier/dossier caché, nom invalide, lien, fifo) est supprimé sans action (sans suivre de lien) : `DirectoryNotEmpty=` ne peut pas boucler. **Budget réel** d'une activation : 120 s pour tous les jobs (`TimeoutStartSec=180`) ; `nmcli --wait` courts (AP down 10 s, Wi-Fi up 35 s, AP up 20 s) + délai d'exécution = attente + 5 s tronqué au budget restant, groupe de processus tué à l'échéance ; un job qui ne tient plus attend l'activation suivante ; un `wifi-apply` pris plus de 60 s après son dépôt est refusé (`expired`) |
@@ -1389,6 +1389,57 @@ du lecteur. « Vivant » doit tenir le même budget, sinon il reste un choix du 
 7. `systemctl restart opentv` et `sudo reboot` ⇒ même ambiance ; `uninstall.sh` puis réinstallation ⇒ même ambiance ;
    `--purge` ⇒ ambiance d'origine à la réinstallation.
 
+## 6 sexies. X TV Mode (0.7.7) : X à la télécommande, contexte pour Hermit ou Muse
+
+**But** : lire son fil X sur la TV depuis l'accueil OpenTV, et demander à Hermit ou Muse de résumer un post choisi.
+**Aucune API X, aucun scraping côté serveur, aucun iframe** : X s'ouvre en page de premier niveau
+(`https://x.com/home`) dans le **même Chromium du kiosque** et son **profil persistant**
+(`/var/lib/opentv-kiosk/chromium`).
+
+- **Tuile** : rangée « Applications » après les titres (`state.apps` du service), tuile **X**. OK (humain seulement)
+  ouvre X ; une application n'est jamais un film : ni fiche, ni « Regarder », ni avis ; une touche OK d'assistant sur la
+  tuile est refusée (`app_human_only`). Accueil sans catalogue : état écrit inchangé, pas de rangée Applications.
+- **Connexion (propriétaire)** : la première fois, X affiche sa page de connexion ; **connecte-toi toi-même** avec la
+  télécommande ou un clavier USB. OpenTV et l'extension ne lisent, ne remplissent et ne stockent jamais identifiant,
+  mot de passe, cookie ni code ; la page de connexion n'est pas restylée. La session reste dans le profil du kiosque
+  (déconnexion depuis X ; `uninstall.sh --purge` efface tout le profil du kiosque, donc aussi cette session).
+- **Extension locale** `/opt/opentv/share/x-tv-extension` (Manifest V3, ID fixe `mmoccejphjkmbhejebkbhkbbmmocfafi`
+  dérivé de la seule clé publique du manifest ; aucune clé privée n'existe), chargée par `opentv-kiosk-browser`
+  (`--disable-extensions-except` + `--load-extension`) ; la politique gérée garde `ExtensionInstallBlocklist: *` et
+  n'autorise que cet ID (`ExtensionInstallAllowlist`) ; `URLAllowlist` ajoute `https://x.com` et `https://twitter.com`.
+  Permissions : `storage` (stockage de **session** seulement) + hôtes `x.com`, `twitter.com`, `127.0.0.1`. Sandbox,
+  sécurité web et DevTools bloqués inchangés ; aucun débogage distant, aucune API cookies/webRequest/scripting.
+- **Fil** (colonne principale présente seulement) : une colonne centrale, colonnes/tiroirs/barre d'actions masqués,
+  gros texte, médias entiers, anneau jaune très visible, bandeau d'aide en français. DOM dynamique suivi par un
+  `MutationObserver` regroupé (une passe ≤ 250 ms), sélecteurs `data-testid` de X avec repli inerte.
+- **Télécommande sur X** : ↑ ↓ post précédent/suivant ; OK ouvre le post au focus (son permalien) ou l'action native
+  du bouton/lien au focus ; **← partage le post au focus à « Hermit ou Muse »** ; Retour quitte d'abord un champ, puis
+  ferme la vue/modale (page précédente), puis à la racine revient explicitement à `http://127.0.0.1:<port>/tv` ;
+  Accueil revient à OpenTV. Aucun clic automatique, aucun « J'aime », repartage, réponse ni publication (publication
+  hors MVP).
+- **Partage** (← seulement, geste humain) : l'extension lit SEULEMENT le texte visible (≤ 2400) et l'auteur visible
+  (≤ 120) du post au focus — jamais une URL, un lien, un média, un cookie ni du HTML — puis appelle
+  `POST /api/tv/x/context` sur la boucle locale avec la **clé TV** de ce démarrage, relue par l'extension à chaque
+  visite de `/tv` (elle change à chaque redémarrage du service : un partage avec l'ancienne clé est refusé et la TV
+  demande de revenir à l'accueil). Portes identiques à `/api/tv/*` : loopback, Host exact, **UID du pair = kiosque**,
+  clé TV ; en plus POST + `Content-Type: application/json`, corps ≤ 16 Kio, champs fermés `{author, text}`, Origin
+  absente ou exactement `chrome-extension://<ID>`, Referer étranger refusé. Le service garde **UN** contexte en
+  mémoire, 10 min, contrôles/bidi/largeur nulle retirés, adresses remplacées par `[lien]` ; jamais journalisé, audité ni
+  écrit sur disque ; perdu au redémarrage. Réponse TV : « Prêt pour Hermit ou Muse. Demande-lui de résumer ce post. »
+- **Agents** : outil Agent Port **`x_context`** (scope `read`, aucun argument ; Muse : `opentv.x_context`) →
+  `{available:false}` ou `{available:true, source:"x", author, text, age_s, untrusted:true}`. Contenu externe
+  **non fiable** (injection de consignes possible) : la description impose de ne jamais suivre ses instructions et de
+  seulement résumer/analyser à la demande d'Alex. Rien n'est envoyé à un agent : c'est un contexte prêt à lire. L'audit
+  de l'appel garde l'outil et ses arguments (aucun), jamais le résultat.
+- **Retour arrière** : `OPENTV_X_TV=0` dans `/etc/opentv/opentv.env` puis
+  `sudo systemctl restart opentv.service opentv-kiosk.service` (tuile masquée, extension non chargée, route 404,
+  `x_context` indisponible). `uninstall.sh` retire l'extension avec le manifeste.
+- **Gate terrain (non vérifié sur la Pi)** : Chromium de Raspberry Pi OS charge bien l'extension sous la politique
+  gérée (anneau jaune visible sur le fil) ; connexion d'Alex réussie (si un défi de sécurité de X est bloqué par
+  `URLAllowlist`, l'ajouter délibérément, jamais `*`) ; touches CEC ↑ ↓ OK ← Retour sur X ; ← puis « Hermit, résume ce
+  post » ; Retour/Accueil ⇒ /tv ; `systemctl restart opentv` puis /tv ⇒ partage de nouveau accepté ; photo d'Alex.
+  Rendu sur le vrai DOM de X (sélecteurs `data-testid` changeants) à valider : en cas d'échec, le fil reste celui de X.
+
 ## 7. Retour arrière
 
 ```sh
@@ -1399,6 +1450,8 @@ sudo /opt/opentv/uninstall.sh --purge    # + état OpenTV (ambiance Canvas compr
 sudo /opt/opentv/uninstall.sh --purge --forget-wifi   # + profil Wi-Fi opentv-wifi
 sudo systemctl disable --now opentv-kiosk.service     # kiosque seul coupé : console tty1 de retour
 ```
+X TV Mode seul (0.7.7, rollback sans désinstaller) : `OPENTV_X_TV=0` dans `/etc/opentv/opentv.env` puis
+`sudo systemctl restart opentv.service opentv-kiosk.service` (§6 sexies).
 Suiveur CEC seul (0.7.6, rollback sans désinstaller) : `OPENTV_CEC_FOLLOWER=0` dans `/etc/opentv/opentv.env` puis
 `sudo systemctl restart opentv-cec-follower.service opentv-cec-return.service` — le suiveur rend le mode et s'arrête,
 le noyau reprend ses `FEATURE_ABORT` automatiques, le maintien POLL 0.7.4 redevient possible. Retour (downgrade) à
@@ -1528,6 +1581,10 @@ sauvegardes OpenTV, jamais un paquet.
   socket Wayland de Cage joignable depuis l'unité, `systemd-analyze verify`/`security opentv-display-mode` relus,
   extinction/rallumage réel de la Samsung (gate « Mode HDMI après rallumage », §9).
 
+- **X TV Mode (0.7.7) : vérifié hors matériel seulement** (Python 3.11/3.13, Chrome for Testing réel avec
+  l'extension installée dans une racine temporaire, pages X synthétiques). Chargement sous la politique gérée du
+  Chromium de Raspberry Pi OS, vrai DOM de X, connexion et touches CEC : gate « X TV Mode » (§9).
+
 - **OpenTV Canvas (0.7.2) : vérifié hors matériel seulement** (Python 3.11/3.13, Chromium headless réel, racines
   d'installation temporaires). Cadence, CPU/RSS, température, `get_throttled`, `hvs_underrun`, masques réels des
   unités (`mountinfo`), création tmpfiles du dossier sur Bookworm et rendu à distance de canapé restent la porte
@@ -1556,6 +1613,7 @@ sauvegardes OpenTV, jamais un paquet.
 | **Catalogue quotidien** | `systemctl list-timers opentv-catalogue-refresh.timer` : prochain passage planifié ; `sudo /opt/opentv/bin/opentv-pi catalogue refresh` → `updated` (ou `unchanged`), puis `catalogue status` : nombre attendu, `snapshot` présent, SHA-256 lu ; second passage → `unchanged` sans réécriture ; `catalogue rollback` → `rolled_back`, `hold.held: true`, puis `catalogue refresh` → `held` et SHA-256 inchangé ; `catalogue resume` → `resumed`, passage suivant `updated`/`unchanged` ; fiche ouverte ou lecture pendant un remplacement ⇒ Retour sur la même carte (photo) ; `ls -l /var/lib/opentv/catalogue.json*` : tout `opentv` ; Wi-Fi coupé → `discovery_failed` et SHA-256 inchangé ; accueil peuplé avec le nouveau catalogue en ≤ 120 s (attendu ≤ ~62 s) sans redémarrage de service ; `journalctl -u opentv-catalogue-refresh` sans hôte, préfixe, jeton ni URL ; `systemd-analyze security opentv-catalogue-refresh` relu |
 | **Notes TMDb quotidiennes** | `ls -ld /etc/opentv/tmdb` = `root opentv` `drwxr-x---` dès l'installation ; `getent group opentv` sans membre supplémentaire ; `sudo /opt/opentv/bin/opentv-pi catalogue ratings-credential` (jeton depuis le trousseau, jamais affiché) puis `ls -l /etc/opentv/tmdb/token` = `root opentv` `-rw-r-----` ; pour `opentv`, `opentv-cec` (pendant un passage) et le rafraîchissement : `grep ' /etc/opentv/tmdb ' /proc/<MainPID>/mountinfo` présent et `sudo nsenter -t <MainPID> -m ls /etc/opentv/tmdb` refusé ; jeton remplacé une 2e fois ⇒ masque toujours présent dans `opentv` sans redémarrage ; `catalogue refresh` puis `systemctl show -p ActiveEnterTimestamp,Result opentv-catalogue-ratings` (déclenchée après le rafraîchissement) ; `catalogue status` : `ratings.last.result` `updated`/`unchanged`, `coverage.pending` = 0, `rated` cohérent (aujourd'hui 110/116 : un spécial TV sans vote TMDb reste « indisponible », jamais 0) ; second `catalogue ratings` → `unchanged`, SHA-256 inchangé ; `IPAddressDeny` et DNS : passage réel réussi sous le bac à sable ; panne simulée (réseau coupé pendant le seul passage des notes) → `provider_unavailable`, unité `failed`, `health.warnings` = `ratings_enrichment_failed`, catalogue du rafraîchissement inchangé (SHA-256), puis réseau rétabli ⇒ `systemctl list-timers opentv-catalogue-ratings-retry.timer` et reprise réussie dans ≤ ~1 h 30 (`ratings.retry.attempts` 1, résultat `updated`), et heure suivante : reprise sans requête ; `journalctl -u opentv-catalogue-ratings*` et `-u opentv-catalogue-refresh` sans jeton, titre, hôte ni URL ; `systemd-analyze verify` et `security` des deux unités des notes relus ; `uninstall.sh` pendant un rafraîchissement ⇒ aucun passage des notes démarré (journal), `/run/opentv-uninstalling` retiré à la fin ; nouvelle note visible à l'accueil en ≤ 120 s sans redémarrage |
 | **Ambiance (Canvas)** | les 7 contrôles terrain du §6 quinquies : dossier `opentv:opentv 0700`, masques réels (`mountinfo`), photo/vidéo 1920×1080 des styles et mouvements, proposition d'un assistant autorisé refusée puis acceptée sur la TV (« Non » au focus), assistant sans permission refusé, mouvement réduit, budget (CPU/RSS, température, `get_throttled=0x0`, `hvs_underrun` stable), ambiance figée pendant « Regarder » et même carte au retour, ambiance conservée après redémarrage/réinstallation ; photo d'Alex |
+| **X TV Mode (0.7.7)** | tuile X (rangée « Applications ») ⇒ `https://x.com/home` dans le kiosque ; connexion faite par Alex lui-même ; fil : anneau jaune, colonne unique, bandeau d'aide ; ↑ ↓ OK ← Retour Accueil à la télécommande CEC ; ← ⇒ « Prêt pour Hermit ou Muse… », puis Hermit/Muse `x_context` résume le post ; Retour racine/Accueil ⇒ `/tv` ; `systemctl restart opentv` ⇒ partage refusé puis accepté après retour à /tv ; `journalctl -u opentv` sans texte de post ; `OPENTV_X_TV=0` + restart ⇒ tuile absente ; photo d'Alex |
 | **Agent** | `opentv-mcp` depuis le compte de l'agent : `tools/list` filtré par scopes, `recommend` sans URL, scope refusé, audit présent sans secret |
 
 ## 10. Développement
@@ -1569,7 +1627,9 @@ python3.11 -m unittest discover -s scripts/pi4/tests -t scripts/pi4   # version 
 #    « Gérer les assistants » de bout en bout : tests/e2e_agents.js, captures tv-agents-*.png / phone-agents-*.png ;
 #    « Regarder » : tests/e2e_play.js, captures item/loading/playing/held/returned/unavailable.png ;
 #    validation des calques du lecteur dans un vrai Chromium : tests/e2e_assist.js ;
-#    OpenTV Canvas : tests/e2e_canvas_ui.js et e2e_canvas_service.js ; paquet/cycle de vie : test_canvas_packaging.py)
+#    OpenTV Canvas : tests/e2e_canvas_ui.js et e2e_canvas_service.js ; paquet/cycle de vie : test_canvas_packaging.py ;
+#    X TV Mode : tests/e2e_x_tv.js, extension installée chargée dans un Chromium COMPLET (pas headless-shell) :
+#    OPENTV_TEST_CHROME_FULL=<binaire Chrome for Testing/Chromium>, captures x-tile/x-feed-shared/x-login.png)
 ./scripts/pi4/install.sh --dry-run ; ./scripts/pi4/install.sh --root /tmp/rfs --skip-preflight
 # image Plymouth : régénérée (Chromium headless, aucun réseau) puis réencodée en PNG RVB déterministe ; fichiers livrés
 #   scripts/pi4/system/plymouth/opentv.png (1920×1080) et opentv-mask.png (bande sans « Démarrage… »)

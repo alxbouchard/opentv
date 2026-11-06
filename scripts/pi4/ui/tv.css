@@ -130,6 +130,9 @@ canvas { image-rendering: pixelated; }   /* QR : modules nets même si l'écran 
 .art { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
 .art .letter { position: absolute; left: 18px; top: 6px; font-size: 128px; font-weight: 700; line-height: 1;
   color: rgba(255, 255, 255, .24); }
+/* X TV Mode : tuile d'application (rangée « Applications »), marque blanche sur noir, jamais une affiche de film */
+.art.app { background: #000; }
+.art.app .letter { left: 0; right: 0; top: 34px; text-align: center; font-size: 150px; color: #fff; }
 .info { position: absolute; left: 0; right: 0; bottom: 0; padding: 48px 16px 14px;
   background: linear-gradient(180deg, rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, .82) 62%); }
 .info .t { font-size: 22px; font-weight: 600; line-height: 1.2;

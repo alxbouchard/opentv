@@ -31,7 +31,7 @@ import threading
 import time
 import urllib.parse
 
-from . import VERSION, agents, bounded, musesetup, museweb, phoneremote, validate, wifiscan
+from . import VERSION, agents, bounded, musesetup, museweb, phoneremote, validate, wifiscan, xcontext
 from . import app as appmod   # constantes d'erreur du formulaire (app n'importe pas web : pas de cycle)
 
 TV_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; "
@@ -327,6 +327,8 @@ class TVHandler(_Base):
             return self.send_json(403, {"ok": False, "error": "forbidden"})
         if not self._key_ok():
             return self.send_json(403, {"ok": False, "error": TV_KEY_ERROR})
+        if path == xcontext.SHARE_PATH:   # X TV Mode : portes propres dans xcontext (Origin, 16 Kio, champs fermés)
+            return self.send_json(*xcontext.handle_share(self, self.app))
         if (self.headers.get("Content-Type") or "").split(";")[0].strip() != "application/json":
             return self.send_json(415, {"ok": False, "error": "content_type"})
         raw = self.read_body(MAX_JSON)
@@ -334,7 +336,7 @@ class TVHandler(_Base):
             return self.send_json(413, {"ok": False, "error": "too_large"})
         try:
             body = json.loads(raw.decode("utf-8") or "{}")
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):   # imbrication profonde : refus, jamais d'exception
             return self.send_json(400, {"ok": False, "error": "bad_json"})
         if not isinstance(body, dict):
             return self.send_json(400, {"ok": False, "error": "bad_json"})

@@ -59,6 +59,9 @@ DEFAULTS = {
     "OPENTV_REMOTE_ENABLED": "1",
     "OPENTV_REMOTE_PORT": "8082",
     "OPENTV_REMOTE_MDNS": "1",      # 1 = QR vers <nom d'hôte>.local si ce nom désigne bien la boîte ; 0 = adresse
+    # X TV Mode (0.7.7) : 1 = tuile X à l'accueil, extension locale du kiosque, route loopback de partage et outil
+    # x_context ; 0 = retour arrière complet (aucune tuile, extension non chargée, route 404, x_context indisponible)
+    "OPENTV_X_TV": "1",
     # « Regarder » : source approuvée hors Git (root:opentv 0640, voir source.py) et contrôleur du lecteur
     # (opentv-player.service, compte opentv-kiosk) joint par socket Unix authentifié
     "OPENTV_SOURCE_FILE": "/etc/opentv/source.env",
@@ -184,6 +187,7 @@ class Config:
         self.remote_enabled = _bool(e["OPENTV_REMOTE_ENABLED"], "OPENTV_REMOTE_ENABLED")
         self.remote_port = _port(e["OPENTV_REMOTE_PORT"], "OPENTV_REMOTE_PORT")
         self.remote_mdns = _bool(e["OPENTV_REMOTE_MDNS"], "OPENTV_REMOTE_MDNS")
+        self.x_tv = _bool(e["OPENTV_X_TV"], "OPENTV_X_TV")
         self.source_file = e["OPENTV_SOURCE_FILE"]
         self.player_socket = e["OPENTV_PLAYER_SOCKET"]
         self.playback_marker = e["OPENTV_PLAYBACK_MARKER"]
