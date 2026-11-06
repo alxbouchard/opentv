@@ -48,28 +48,68 @@ const LOGIN = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title
   `<body><div role="dialog" aria-modal="true"><h1>Connexion à X</h1><input id="user" name="text" autofocus ` +
   `autocomplete="username"><button id="next">Suivant</button></div><div data-testid="sidebarColumn" id="sb">Pied</div>` +
   `${INSTR}</body></html>`;
-// accueil déconnecté RÉALISTE (photo terrain : connexion X sombre) : modale de X, iframe Google (jamais un contrôle),
-// boutons natifs, « Continue with phone » (INSCRIPTION chez X : mode signup, start phone — jamais préféré) puis
-// « Log in with username or email » (connexion réelle, préférée), champ identifiant AUTOFOCUS (comme le vrai x.com),
-// rôles « button » non natifs (div), un bouton désactivé, un masqué, un leurre « Log in with username or email » sous
-// un parent opacity:0 et un lien hors écran (jamais focalisés). Chaque activation est comptée par id (window.__hits).
-const LANDING = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>X. It’s what’s happening / X</title>` +
-  `${STYLE}<style>button,[role=button],a,input{display:block;margin:12px auto;width:300px;height:40px}</style></head>` +
-  `<body><div id="react-root"><div role="dialog" aria-modal="true" aria-labelledby="h"><h1 id="h">Sign in to X</h1>` +
+// Accueil déconnecté RÉEL de x.com, MINIMISÉ (SSR de https://x.com/ relevé le 2026-11-06, en et ?lang=fr ;
+// sha256 54858e48…99730 / 7ba854cd…73268) : ordre, balises, href, id et libellés de X conservés ; classes, SVG, styles
+// et pied de page réduits. « Continue with phone » = INSCRIPTION (mode=signup, premier lien), Google/Apple = mode=login,
+// formulaire identifiant + « Continue », puis « Already have an account? » + lien générique « Sign in » (mode=login).
+// Seules simulations (X rend le reste côté client, rien dans le SSR) : l'autofocus du champ vu sur la photo terrain
+// (sauf ?nofocus) et la fenêtre de connexion DANS la page (clic intercepté : preventDefault + pushState, fenêtre
+// modale ajoutée 300 ms plus tard — 1500 ms avec ?slow — après un indicateur de chargement, champ autofocusé) ;
+// ?oldpk : leurre SYNTHÉTIQUE, une passkey déjà présente avant le clic. Chaque activation est comptée par id (__hits).
+const ONB = "/i/jf/onboarding/web";
+const SIGNIN_A = `<a id="signin" href="${ONB}?mode=login&amp;redirect_after_login=%2F">Sign in</a>`;
+// fenêtre de connexion de X (rendue côté client, SYNTHÉTIQUE) : leurres jamais focalisés (iframe Google, passkey sous
+// parent opacity:0, lien hors écran, masqué, désactivé), passkey native, rôles « button » non natifs, inscription
+const LOGIN_WINDOW = `<div id="layers"><div role="dialog" aria-modal="true" id="logindlg" style="position:fixed;top:0;` +
+  `left:560px;width:800px;height:1060px;background:#000;color:#fff;z-index:5"><h1>Sign in to X</h1>` +
   `<iframe title="Sign in with Google" srcdoc="<p>Google</p>" style="width:300px;height:40px"></iframe>` +
-  `<button id="apple" type="button" onclick="__hits.push('apple')">Sign in with Apple</button>` +
-  `<div style="opacity:0"><button id="ghost" type="button" onclick="__hits.push('ghost')">Log in with username or email</button></div>` +
+  `<div style="opacity:0"><button id="ghost" type="button" onclick="__hits.push('ghost')">Continue with passkey</button></div>` +
   `<a id="skip" href="#main" style="position:absolute;left:-9999px;top:0">Skip to content</a>` +
-  `<button id="phone" type="button" onclick="__hits.push('phone')"><span>Continue with phone</span></button>` +
-  `<button id="login" type="button" onclick="__hits.push('login')"><span>Log in with username or email</span></button>` +
+  `<input id="dlguser" name="text" autocomplete="username webauthn" type="text">` +
+  `<button id="passkey" type="button" onclick="__hits.push('passkey')"><span>Continue with passkey</span></button>` +
   `<button id="gone" type="button" style="display:none" onclick="__hits.push('gone')">Hidden</button>` +
-  `<div>or</div><label><span>Phone, email, or username</span>` +
-  `<input id="user" name="text" autofocus autocomplete="username" type="text"></label>` +
   `<button id="off" type="button" disabled onclick="__hits.push('off')">Disabled</button>` +
   `<div id="next" role="button" tabindex="0" onclick="__hits.push('next')"><span>Next</span></div>` +
   `<div id="forgot" role="button" tabindex="0" onclick="__hits.push('forgot')"><span>Forgot password?</span></div>` +
-  `<span>Don't have an account? <a id="signup" href="/i/flow/signup">Sign up</a></span></div></div>` +
-  `<script>window.__hits=[];</script>${INSTR}</body></html>`;
+  `<span>Don't have an account? <a id="dlgsignup" href="${ONB}?mode=signup&amp;redirect_after_login=%2F">Sign up</a>` +
+  `</span></div></div>`;
+const LANDING_BODY = `<div id="react-root"><div><h1>Happening now.</h1><div>` +
+  `<a id="phone" href="${ONB}?mode=signup&amp;redirect_after_login=%2F"><span><svg width="20" height="20"></svg></span>` +
+  `<span>Continue with phone</span></a><div><div><a id="google" href="${ONB}?mode=login&amp;redirect_after_login=%2F">` +
+  `<span><svg width="20" height="20"></svg></span><span>Continue with Google</span></a></div></div>` +
+  `<a id="apple" href="${ONB}?mode=login&amp;redirect_after_login=%2F"><span><svg width="20" height="20"></svg></span>` +
+  `<span>Continue with Apple</span></a><div><span></span> or <span></span></div>` +
+  `<form action="${ONB}" method="get"><input type="hidden" name="mode" value="login">` +
+  `<label for="landing-identifier" aria-label="Email or username"><span><span>Email or username</span>` +
+  `<input id="landing-identifier" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" ` +
+  `spellcheck="false" required="" placeholder=" " name="username"></span></label>` +
+  `<button id="continue" type="submit"><span>Continue</span></button></form><p>By continuing, you agree to our ` +
+  `<a id="tos" href="https://x.com/tos" target="_blank" rel="noopener noreferrer nofollow">Terms of Service</a>.</p>` +
+  `</div></div><div><h1>See what’s happening</h1><p>Already have an account?</p>${SIGNIN_A}</div>` +
+  `<footer><nav><a id="about" target="_blank" rel="noopener noreferrer nofollow" href="https://about.x.com">About</a>` +
+  `</nav></footer></div>`;
+const LANDING_JS = `<script>window.__hits=[];window.__pkFocus=0;window.__doc=String(Math.random());(function(){` +
+  `var W=${JSON.stringify(LOGIN_WINDOW)};` +
+  `document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('a[href^="${ONB}"]');` +
+  `if(!a){return;}e.preventDefault();__hits.push(a.id);var u=new URL(a.href);` +
+  `if(u.searchParams.get('mode')!=='login'){return;}` +
+  `if(location.pathname!==u.pathname){history.pushState({otv:1},'',u.pathname+u.search);}` +
+  `if(!document.getElementById('spinner')){document.body.insertAdjacentHTML('beforeend','<div id="spinner" role="progressbar">Loading…</div>');}` +
+  `setTimeout(function(){var sp=document.getElementById('spinner');if(sp){sp.remove();}` +
+  `if(document.getElementById('logindlg')){return;}document.body.insertAdjacentHTML('beforeend',W);` +
+  `document.getElementById('passkey').addEventListener('focus',function(){__pkFocus++;});` +
+  `document.getElementById('dlguser').focus();},/slow/.test(location.search)?1500:300);});` +
+  `addEventListener('popstate',function(){var d=document.getElementById('layers');if(d){d.remove();}});` +
+  `if(/oldpk/.test(location.search)){document.getElementById('signin').insertAdjacentHTML('afterend',` +
+  `'<button id="oldpk" type="button">Continue with passkey</button>');window.__oldFocus=0;` +
+  `document.getElementById('oldpk').addEventListener('focus',function(){__oldFocus++;});}` +
+  `if(!/nofocus/.test(location.search)){document.getElementById('landing-identifier').focus();window.__autofocused=true;}` +
+  `})();</script>`;
+const LANDING = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>X. It’s what’s happening / X</title>` +
+  `${STYLE}<style>a,button,[role=button],input{display:block;margin:10px auto;width:300px;height:40px}</style></head>` +
+  `<body>${LANDING_BODY}${LANDING_JS}${INSTR}</body></html>`;
+// même accueil réel SANS l'entrée générique « Sign in » : rien n'est préféré (fail closed), ↓ jamais l'inscription
+const LANDING_NOSIGNIN = LANDING.replace(SIGNIN_A, "");
 // 0.7.9 — étape identifiant avec passkey native de X (libellés du bundle web : « Continue with passkey ») : aucune
 // entrée « Log in with username or email » ici ; « Continue with phone » (inscription) présent mais jamais préféré
 const PASSKEY_LOGIN = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Log in to X / X</title>` +
@@ -144,7 +184,8 @@ function ctl(p) {
         return route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: LANDING_CSP,
                                headers: { "Content-Security-Policy": CSP } });
       }
-      const body = u.pathname === "/i/flow/stall" ? STALL : u.pathname === "/" ? LANDING :
+      const body = u.pathname === "/i/flow/stall" ? STALL :
+        u.pathname === "/" ? (u.searchParams.has("nosignin") ? LANDING_NOSIGNIN : LANDING) :
         u.pathname === "/i/flow/passkey" ? PASSKEY_LOGIN : u.pathname === "/i/flow/phoneonly" ? PHONE_ONLY :
         u.pathname === "/settings/dialog" ? FEED_DIALOG : u.pathname === "/compose/home" ? FEED_COMPOSE :
         (u.pathname.indexOf("/i/flow/login") === 0 || u.pathname.indexOf("/account/") === 0) ? LOGIN :
@@ -321,67 +362,156 @@ function ctl(p) {
     lg.thread_direct = await viaKey("https://x.com/alice_m/status/2", () => page.keyboard.press("Escape"));
     out.steps.login = lg;
 
-    // 7 bis) accueil déconnecté (photo terrain) : focus TV initial sur « Log in with username or email » (jamais
-    //         « Continue with phone » : inscription), OK = UN clic exact sur
-    //         ce bouton (activation native, geste réel) ; ↑ ↓ parcourent les contrôles visibles/activables dans
-    //         l'ordre ; champ : saisie native, aucune valeur lue par l'extension ; rôle « button » non natif activé
-    //         par OK réel seulement ; touche OK synthétique : rien
+    // 7 bis) accueil déconnecté RÉEL (minimisé) : focus TV initial sur le lien générique « Sign in » (jamais
+    //         « Continue with phone » : inscription ; jamais Google/Apple) ; OK synthétique : rien ; ↑ ↓ : contrôles
+    //         visibles dans l'ordre, SANS l'inscription ; OK RÉEL : UN clic natif sur « Sign in », X ouvre sa fenêtre de
+    //         connexion DANS la page (aucun page.goto) et la passkey reçoit le focus UNE fois (réarmement) ; ensuite
+    //         saisie native, focus jamais volé, aucun clic automatique
     await page.waitForSelector(".card.focused", { timeout: 10000 });
     await page.goto("https://x.com/");
     const ph = {};
-    // focus d'autofocus de X (champ) puis transfert UNIQUE vers « Log in with username or email », sans aucune touche
-    ph.autofocus_seen = await page.evaluate(() => !!document.querySelector("#user[autofocus]"));
     ph.first_ms = await page.evaluate(() => new Promise((res) => {
       const t0 = performance.now();
       (function poll() {
         const ae = document.activeElement;
-        if (ae && ae.id === "login") { res(Math.round(performance.now() - t0)); return; }
+        if (ae && ae.id === "signin") { res(Math.round(performance.now() - t0)); return; }
         if (performance.now() - t0 > 3000) { res(-1); return; }
         setTimeout(poll, 20);
       })();
     }));
+    ph.autofocus_seen = await page.evaluate(() => window.__autofocused === true);
     await sleep(600);
     const st = () => page.evaluate(() => {
       const ae = document.activeElement, f = document.querySelector("[data-otvx-focus]");
       const cs = f ? getComputedStyle(f) : null, h = document.querySelector(".otvx-login-help");
       return { active: ae && ae.id || null, ring: f ? f.id : null, outline: cs ? cs.outlineStyle + " " + cs.outlineWidth : "",
-               help: h ? h.textContent : "", hits: window.__hits.slice(), clicks: window.__clicks };
+               help: h ? h.textContent : "", hits: window.__hits.slice(), clicks: window.__clicks,
+               pk_focus: window.__pkFocus, doc: window.__doc, dialog: !!document.getElementById("logindlg"),
+               url: location.href };
     });
     ph.initial = await st();
-    if (cfg.shots) { await page.screenshot({ path: path.join(cfg.shots, "x-login-phone.png") }); }
+    if (cfg.shots) { await page.screenshot({ path: path.join(cfg.shots, "x-login-landing.png") }); }
     await page.evaluate(() => document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
-    await sleep(150);
+    await sleep(400);
     ph.synthetic = await st();
-    await page.keyboard.press("Enter");
-    await sleep(200);
-    ph.ok = await st();
-    ph.url_after_ok = page.url();
     const order = [];
-    for (let i = 0; i < 3; i++) { await page.keyboard.press("ArrowUp"); await sleep(60); order.push((await st()).active); }   // bord : on reste
-    for (let i = 0; i < 7; i++) { await page.keyboard.press("ArrowDown"); await sleep(60); order.push((await st()).active); }
+    for (let i = 0; i < 7; i++) { await page.keyboard.press("ArrowUp"); await sleep(60); order.push((await st()).active); }   // bord : on reste
+    for (let i = 0; i < 8; i++) { await page.keyboard.press("ArrowDown"); await sleep(60); order.push((await st()).active); }
     ph.seq = order;
-    await page.keyboard.press("ArrowUp"); await sleep(60);   // signup -> forgot
-    await page.keyboard.press("ArrowUp"); await sleep(60);   // forgot -> next
-    await page.keyboard.press("ArrowUp"); await sleep(60);   // next -> user (champ)
+    await page.keyboard.press("ArrowUp"); await sleep(60);   // about -> signin
+    ph.before_ok = await st();
+    await page.keyboard.press("Enter");                       // OK RÉEL : activation native du lien (geste humain)
+    await page.waitForFunction(() => document.getElementById("logindlg"), null, { timeout: 5000 });
+    await sleep(900);
+    ph.ok = await st();
+    if (cfg.shots) { await page.screenshot({ path: path.join(cfg.shots, "x-login-window-passkey.png") }); }
+    // X refait un rendu SANS geste : il remet son autofocus au champ et ajoute une AUTRE passkey — le réarmement est
+    // consommé, le focus n'est plus jamais déplacé seul
+    await page.evaluate(() => {
+      document.getElementById("dlguser").focus();
+      document.getElementById("logindlg").insertAdjacentHTML("beforeend",
+        '<button id="passkey2" type="button" style="display:block;width:300px;height:40px">Use passkey</button>');
+    });
+    await sleep(700);
+    ph.rerender = await st();
+    await page.keyboard.press("ArrowUp"); await sleep(60);   // champ identifiant (premier contrôle) : on y reste
     ph.field = (await st()).active;
     await page.keyboard.type("alice@example.com");
     await page.keyboard.press("ArrowLeft");                  // natif dans le champ
     await page.keyboard.press("ArrowRight");
     await page.keyboard.press("Backspace");
-    // la page change après une saisie réelle (rendu React de X) : le focus n'est JAMAIS repris au champ
-    await page.evaluate(() => { const d = document.createElement("div"); d.textContent = "re-render"; document.body.appendChild(d); });
-    await sleep(500);
+    // nouveau rendu de X après une saisie réelle, avec une passkey de plus : le focus n'est JAMAIS repris au champ
+    await page.evaluate(() => document.getElementById("logindlg").insertAdjacentHTML("beforeend",
+      '<button id="passkey3" type="button" style="display:block;width:300px;height:40px">Continue with passkey</button>'));
+    await sleep(700);
     ph.after_typing = await st();
-    ph.typed = await page.evaluate(() => document.getElementById("user").value);
-    await page.keyboard.press("ArrowDown"); await sleep(60);   // champ d'une ligne : ↓ en sort vers Next
-    await page.keyboard.press("ArrowDown"); await sleep(60);   // Forgot password? (div role=button)
+    ph.typed = await page.evaluate(() => document.getElementById("dlguser").value);
+    const dseq = [];
+    for (let i = 0; i < 7; i++) { await page.keyboard.press("ArrowDown"); await sleep(60); dseq.push((await st()).active); }
+    ph.dialog_seq = dseq;
+    for (let i = 0; i < 2; i++) { await page.keyboard.press("ArrowUp"); await sleep(60); }   // passkey3 -> passkey2 -> forgot
     ph.on_forgot = (await st()).active;
     await page.keyboard.press("Enter"); await sleep(200);      // OK réel : repli sur CE contrôle seulement
     ph.forgot = await st();
-    ph.url_end = page.url();
+    await page.keyboard.press("Escape");                       // Retour : inchangé (page précédente de X : l'accueil)
+    ph.url_after_back1 = await waitUrl((u) => u === "https://x.com/" || u === cfg.tv);
+    await sleep(300);
     await page.keyboard.press("Escape");
     ph.url_after_back = await waitUrl((u) => u === cfg.tv);
     out.steps.phone_login = ph;
+
+    // 7 bis-r) activation SYNTHÉTIQUE de « Sign in » (script de page : el.click()) : X ouvre quand même sa fenêtre,
+    //          mais rien n'est réarmé — la passkey n'est jamais focalisée, l'autofocus de X reste
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    await page.goto("https://x.com/");
+    await page.waitForFunction(() => document.activeElement && document.activeElement.id === "signin", null, { timeout: 5000 });
+    const fk = {};
+    await page.evaluate(() => document.getElementById("signin").click());
+    await page.waitForFunction(() => document.getElementById("logindlg"), null, { timeout: 5000 });
+    await sleep(900);
+    fk.after = await st();
+    await page.evaluate(() => document.getElementById("signin").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })));
+    await sleep(700);
+    fk.after_event = await st();
+    await page.keyboard.press("Escape");
+    await waitUrl((u) => u === "https://x.com/" || u === cfg.tv);
+    await sleep(300);
+    if (page.url() !== cfg.tv) { await page.keyboard.press("Escape"); }
+    fk.url_after_back = await waitUrl((u) => u === cfg.tv);
+    out.steps.fake_activation = fk;
+
+    // 7 bis-c) réarmement annulé : OK réel sur « Sign in », puis une touche réelle AVANT que la fenêtre (lente)
+    //          n'apparaisse — la passkey n'est jamais focalisée ensuite (l'humain a repris la main)
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    await page.goto("https://x.com/?slow=1");
+    await page.waitForFunction(() => document.activeElement && document.activeElement.id === "signin", null, { timeout: 5000 });
+    const cn = {};
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("ArrowDown");
+    cn.before = await st();
+    await page.waitForFunction(() => document.getElementById("logindlg"), null, { timeout: 5000 });
+    await sleep(900);
+    cn.after = await st();
+    await page.keyboard.press("Escape");
+    await waitUrl((u) => u === "https://x.com/?slow=1" || u === cfg.tv);
+    await sleep(300);
+    if (page.url() !== cfg.tv) { await page.keyboard.press("Escape"); }
+    cn.url_after_back = await waitUrl((u) => u === cfg.tv);
+    out.steps.cancelled = cn;
+
+    // 7 bis-d) passkey DÉJÀ présente avant le clic (leurre) + indicateur de chargement (mutation) : seule la passkey
+    //          NOUVELLE de la fenêtre ouverte par X reçoit le focus, jamais l'ancienne
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    await page.goto("https://x.com/?oldpk=1");
+    await page.waitForFunction(() => document.activeElement && document.activeElement.id === "signin", null, { timeout: 5000 });
+    const op = {};
+    await page.keyboard.press("Enter");
+    await sleep(150);
+    op.loading = Object.assign(await st(), { old_focus: await page.evaluate(() => window.__oldFocus) });
+    await page.waitForFunction(() => document.getElementById("logindlg"), null, { timeout: 5000 });
+    await sleep(900);
+    op.after = Object.assign(await st(), { old_focus: await page.evaluate(() => window.__oldFocus) });
+    await page.keyboard.press("Escape");
+    await waitUrl((u) => u === "https://x.com/?oldpk=1" || u === cfg.tv);
+    await sleep(300);
+    if (page.url() !== cfg.tv) { await page.keyboard.press("Escape"); }
+    op.url_after_back = await waitUrl((u) => u === cfg.tv);
+    out.steps.old_passkey = op;
+
+    // 7 bis-n) même accueil réel SANS « Sign in » ni autofocus : rien n'est préféré ni déplacé (fail closed) ; le
+    //          premier ↓ réel va au premier contrôle permis (Google), JAMAIS à « Continue with phone » (inscription)
+    await page.waitForSelector(".card.focused", { timeout: 10000 });
+    await page.goto("https://x.com/?nosignin=1&nofocus=1");
+    await page.waitForSelector("#landing-identifier");
+    await sleep(900);
+    const ns = { initial: await st() };
+    await page.keyboard.press("ArrowDown"); await sleep(100);
+    ns.down = await st();
+    await page.keyboard.press("ArrowUp"); await sleep(100);
+    ns.up = await st();
+    await page.keyboard.press("Escape");
+    ns.url_after_back = await waitUrl((u) => u === cfg.tv);
+    out.steps.no_signin = ns;
 
     // 7 bis-b) étape identifiant avec passkey native de X : focus UNE fois sur « Continue with passkey », aucun clic
     //          automatique ; OK synthétique : rien ; OK réel : UNE activation ; repli manuel : ↑ rejoint le champ
@@ -527,7 +657,7 @@ function ctl(p) {
       const t0 = performance.now();
       (function poll() {
         const ae = document.activeElement;
-        if ((ae && ae.id === "login") || performance.now() - t0 > 3000) { res(); return; }
+        if ((ae && ae.id === "signin") || performance.now() - t0 > 3000) { res(); return; }
         setTimeout(poll, 20);
       })();
     }));

@@ -1487,13 +1487,19 @@ voir, Alex restait coincé sur x.com. Relancer `opentv-kiosk.service` ramène to
 parcourent les contrôles **visibles et activables** (boutons, liens, champs ; ordre du document ; limités à la fenêtre
 modale de X ; jamais masqués, désactivés ni l'iframe Google) avec un anneau jaune ; au chargement, l'**entrée de
 connexion réelle** reçoit le focus UNE fois (OK direct, zéro flèche) si rien n'a le focus ou si X a autofocusé le champ
-(0.7.9). Correction 0.7.9 : **« Continue with phone » de X est l'INSCRIPTION** (bundle web déconnecté actuel :
-`mode:'signup', start:'phone'` — d'où le formulaire « numéro de téléphone » vu sur la TV) ; il n'est **plus jamais**
-préféré. Ordre (`preferRank` de `nav.js`, libellé visible + href, multilingue EN/FR, ES/DE/IT au mieux) : 0 « Log in
-with username or email » (verbe de connexion + identifiant/e-mail) ; 1 lien de connexion `href` `/login` ou
-`/i/flow/login` de x.com (indépendant de la langue) ; 2 passkey native de X (« Continue with passkey » / « Use
-passkey » / « clé d'accès », verbe d'action en tête) ; inscription, création, « en savoir plus » ou libellé inconnu ⇒
-**rien n'est préféré** (fail closed : l'autofocus de X reste, ↓ = premier contrôle). Préférer = focus seulement ; après
+(0.7.9). Correction 0.7.9, d'après le **DOM réel** de `https://x.com/` déconnecté (SSR relevé le 2026-11-06, EN/FR) :
+`<a>Continue with phone</a>` → `/i/jf/onboarding/web?mode=signup` (**INSCRIPTION**), Google/Apple → `?mode=login`,
+champ identifiant + « Continue », puis `<a>Sign in</a>` / `Se connecter` → `?mode=login` ; aucun « Log in with username
+or email » sur cet accueil. `preferRank` de `nav.js` : href **analysé comme URL** (même origine X en https, chemin
+exact, paramètre `mode` EXACTEMENT `login`, sans `start` ; `/login` et `/i/flow/login` gardés) ET libellé générique
+ancré en entier (« Sign in », « Log in », « Se connecter », « Connexion »… jamais « Déconnexion ») ⇒ rang 0 ; passkey
+native de X (bouton « Continue with passkey » / « Use passkey » / « clé d'accès ») ⇒ rang 1 ; Google/Apple, inscription,
+libellé inconnu ⇒ **rien n'est préféré** (fail closed). L'inscription (`mode=signup`, `start=phone`, « Sign up »,
+« Continue with phone ») est **retirée de ↑ ↓** : le premier ↓ ne peut jamais y atterrir. X ouvre sa fenêtre de
+connexion **dans la page** (preventDefault + routeur) : **un seul réarmement** par document, posé seulement par un clic
+de confiance (OK réel ou pointeur ; jamais un clic de script) sur ce « Sign in », borné à 15 s, annulé par toute touche
+ou tout geste réel suivant, consommé par la première passkey **visible et nouvelle** (absente au clic) : focus
+seulement, aucun clic, aucune valeur lue. Préférer = focus seulement ; après
 une touche réelle le focus n'est plus jamais déplacé seul (repli manuel identifiant/e-mail intact) ; consigne à l'écran « ↑ ↓ choisir · OK
 valider · Retour : OpenTV · Identifiant et mot de passe : au clavier ». **OK réel** : activation native de Chromium
 sur un bouton/lien natif (geste humain) ; pour un `role="button"` non natif seulement, UN clic de repli sur CE
@@ -1505,7 +1511,7 @@ aucun relais d'identifiant ni de texte.
 (« Scan to get the app ») **n'est pas** un QR de connexion : il ouvre seulement le magasin d'applications. OpenTV ne
 construit **aucun** relais de mot de passe ou de texte. Le seul chemin téléphone sûr est le flux **WebAuthn hybride
 natif de Chromium** (passkey sur un autre appareil) : passkey X créée au préalable dans l'app X mobile CONNECTÉE
-d'Alex (iPhone/Android) → sur la TV, « Log in with username or email » puis « Continue with passkey » / « Use
+d'Alex (iPhone/Android) → sur la TV, « Sign in » (OK réel) puis « Continue with passkey » / « Use
 passkey » (focus OpenTV, OK humain ; aucune activation automatique) → Chromium affiche **son propre
 QR d'authentification** (dans une boîte du navigateur, distinct du QR « get the app ») → le téléphone le scanne,
 vérifie la proximité par Bluetooth puis valide. Vérifié hors matériel (`test_x_tv.TestXPasskeyPathAudit`) : le kiosque
@@ -1520,8 +1526,8 @@ X active sur le téléphone, flux complet réussi sur la TV, photo — sinon con
 **Gates terrain (hotfix)** : sur la Pi, `journalctl -u opentv-x-escape` montre `x_escape_armed` à l'ouverture de X et
 `x_escape_disarmed` au retour ; Retour Samsung sur la connexion X sombre ET sur le fil ⇒ `/tv` (≤ 10 s) ; Retour sur
 `/tv` : comportement inchangé, aucun `x_escape_kiosk_restart` ; TV éteinte/rallumée puis X ⇒ Retour fonctionne encore
-(nouveau périphérique vc4-hdmi) ; ↓/OK sur « Log in with username or email » du VRAI DOM de X (0.7.9 : jamais
-« Continue with phone », inscription) ; photo d'Alex.
+(nouveau périphérique vc4-hdmi) ; OK sur « Sign in » du VRAI DOM de X puis passkey au focus dans la fenêtre
+ouverte par X (0.7.9 : jamais « Continue with phone », inscription) ; photo d'Alex.
 
 ### 6 sexies-b. Canari instrumenté 0.7.8 : ↑ ↓ ← → OK sur le VRAI X (preuve d'abord, aucune injection de touche)
 

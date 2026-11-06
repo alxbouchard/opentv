@@ -15,11 +15,13 @@
  *  Connexion (mode « contrôles », SEULEMENT hors fil : aucune colonne principale) : ↑ ↓ (et ← → hors champ) parcourent
  *           les contrôles VISIBLES et activables (boutons, liens, champs) dans l'ordre du document, limités à la
  *           fenêtre modale de X s'il y en a une ; anneau TV très visible ; au chargement, AVANT toute touche ou geste
- *           réel, l'entrée de connexion réelle (« Log in with username or email ») reçoit le focus UNE fois, même si
- *           X a autofocusé le champ identifiant ; à défaut le lien de connexion, puis la passkey native de X
- *           (« Continue with passkey ») ; JAMAIS « Continue with phone » (inscription chez X) ; rien de reconnu :
- *           rien n'est déplacé. Ensuite le focus n'est jamais déplacé seul (sinon ↓ : même préférence, ou premier
- *           contrôle).
+ *           réel, le lien générique « Sign in » / « Se connecter » (href /i/jf/onboarding/web?mode=login analysé)
+ *           reçoit le focus UNE fois, même si X a autofocusé le champ identifiant ; à défaut la passkey native de X
+ *           (« Continue with passkey ») ; JAMAIS Google/Apple ; JAMAIS « Continue with phone » (inscription, mode=signup :
+ *           retirée de ↑ ↓) ; rien de reconnu : rien n'est déplacé. Ensuite le focus n'est jamais déplacé seul (sinon
+ *           ↓ : même préférence, ou premier contrôle permis), sauf UN réarmement : après un clic de confiance sur ce
+ *           « Sign in », la première passkey visible NOUVELLE de la fenêtre que X ouvre dans la page reçoit le focus
+ *           une fois (borné, annulé par toute touche/geste réel).
  *           OK/Entrée RÉELLE : activation native du bouton/lien au focus (geste humain) ; repli pour un rôle
  *           « button » non natif seulement. Champ au focus :
  *           saisie au clavier physique 100 % native (← → Entrée Retour arrière natifs) ; aucune valeur n'est lue,
@@ -107,23 +109,51 @@
     '[role="link"], [role="checkbox"], [role="radio"], [role="switch"], [role="tab"], [role="menuitem"], [role="option"]';
   const CONTROLS_MAX = 200;
   const LABEL_MAX = 80;
-  // Préférence (0.7.9) — « Continue with phone » de X est l'INSCRIPTION (mode signup, start phone) : jamais préféré.
-  // Rang 0 : entrée de connexion réelle (« Log in with username or email » : verbe de connexion + identifiant) ;
-  // 1 : lien de connexion (href /login ou /i/flow/login de x.com, indépendant de la langue) ; 2 : passkey native de X
-  // (« Continue with passkey » / « Use passkey » : verbe d'action en tête) ; inscription, création, aide : -1 (rien de
-  // préféré, fail closed : l'autofocus de X reste). Préférer = focus seulement, jamais une activation.
-  const LOGIN_VERB_RE = /\b(log ?in|sign ?in)\b|connexion|se connecter|connecte-toi|iniciar sesi[oó]n|anmelden|accedi/i;
-  const LOGIN_ID_RE = /user ?name|e-?mail|nom d['’]utilisateur|identifiant|courriel|usuario|correo|benutzername|nome utente/i;
-  const LOGIN_HREF_RE = /^(https:\/\/(www\.|mobile\.)?(x|twitter)\.com)?\/(login|i\/flow\/login)\/?([?#]|$)/i;
+  // Préférence (0.7.9, DOM RÉEL de x.com déconnecté, SSR 2026-11-06) : « Continue with phone » ->
+  // /i/jf/onboarding/web?mode=signup (INSCRIPTION : jamais préférée, jamais atteinte par ↑ ↓) ; Google/Apple ->
+  // ?mode=login (fournisseurs : atteignables à la main, jamais préférés) ; lien générique « Sign in » / « Se connecter »
+  // -> ?mode=login. Rang RANK_LOGIN : ce lien générique SEUL (href analysé + libellé ancré en entier) ; RANK_PASSKEY :
+  // passkey native de X (bouton, verbe d'action en tête) ; sinon -1 (rien de préféré, fail closed). Préférer = focus
+  // seulement, jamais une activation.
+  const X_HOST_RE = /^(www\.|mobile\.)?(x|twitter)\.com$/;
+  const ONBOARDING_PATH = "/i/jf/onboarding/web";
+  const LEGACY_LOGIN_PATHS = new Set(["/login", "/i/flow/login"]);
+  const SIGNUP_PATHS = new Set(["/signup", "/i/flow/signup"]);
+  const RANK_LOGIN = 0;
+  const RANK_PASSKEY = 1;
+  const GENERIC_LOGIN_RE = /^(sign ?in|log ?in|se connecter|connexion|connecte-toi|iniciar sesi[oó]n|anmelden|einloggen|accedi|entrar)$/i;
   const PASSKEY_RE = /\bpass ?keys?\b|cl[ée]s? d['’](acc[eè]s|identification)|llaves? de acceso|chiavi? d['’]accesso/i;
   const PASSKEY_VERB_RE = /^(continue|use|sign ?in|log ?in|continuer|utiliser|se connecter|connexion|continuar|usar|iniciar sesi[oó]n|weiter|verwenden|mit|anmelden|continua|usa|accedi)\b/i;
-  const NOT_LOGIN_RE = /sign ?up|create|regist|reg[ií]str|inscri|cr[ée]er|ajouter|\badd\b|learn|about|en savoir|[àa] propos|^continue with phone|^continuer avec (le |ton |votre |un )?(t[ée]l[ée]phone|num[ée]ro)|^use phone/i;
+  const SIGNUP_RE = /\bsign ?up\b|\bcreate (an |your |a new )?account\b|s['’]inscrire|\binscri(s|ption)\b|cr[ée]er (un |ton |votre )?compte|^(continue|continuer|continuar|weiter|continua|use|utiliser|usar) (with |avec |con |mit )?(le |la |ton |votre |un |une |a |your |el |tu |dem |deinem |il )?(num[ée]ro (de )?)?(phone|t[ée]l[ée]phone|tel[ée]fono|telefon|num[ée]ro)/i;
+  const NOT_LOGIN_RE = /learn|about|en savoir|[àa] propos|\badd\b|ajouter|create|cr[ée]er|regist|reg[ií]str|d[ée]connex|d[ée]connect|log ?out|sign ?out/i;
+  // href analysé comme URL (jamais une sous-chaîne) : « login » | « signup » | « other » ; null sans href
+  function hrefKind(href) {
+    if (typeof href !== "string") { return null; }
+    let u = null;
+    try { u = new URL(href, "https://x.com/"); } catch (err) { return "other"; }
+    // https, hôte X exact, sans port ; URL recomposée identique (sinon informations d'utilisateur dans l'URL : refusée)
+    if (u.protocol !== "https:" || !X_HOST_RE.test(u.hostname) || u.port ||
+        u.href !== u.origin + u.pathname + u.search + u.hash) { return "other"; }
+    const path = u.pathname.replace(/\/+$/, "") || "/";
+    const q = u.searchParams;
+    const modes = q.getAll("mode");
+    const starts = q.getAll("start");
+    if (SIGNUP_PATHS.has(path)) { return "signup"; }
+    if (path !== ONBOARDING_PATH && !LEGACY_LOGIN_PATHS.has(path)) { return "other"; }
+    if (modes.indexOf("signup") >= 0 || starts.some((v) => /phone/i.test(v))) { return "signup"; }
+    if (starts.length) { return "other"; }
+    if (path === ONBOARDING_PATH) { return modes.length === 1 && modes[0] === "login" ? "login" : "other"; }
+    return modes.length === 0 || (modes.length === 1 && modes[0] === "login") ? "login" : "other";
+  }
+  function signupLike(text, href) {   // inscription (téléphone compris) : retirée de la navigation aux flèches
+    return hrefKind(href) === "signup" || SIGNUP_RE.test(typeof text === "string" ? text : "");
+  }
   function preferRank(text, href) {
-    const t = typeof text === "string" ? text : "";
-    if (NOT_LOGIN_RE.test(t)) { return -1; }
-    if (LOGIN_VERB_RE.test(t) && LOGIN_ID_RE.test(t)) { return 0; }
-    if (typeof href === "string" && LOGIN_HREF_RE.test(href)) { return 1; }
-    if (PASSKEY_RE.test(t) && PASSKEY_VERB_RE.test(t)) { return 2; }
+    const t = (typeof text === "string" ? text : "").trim();
+    const k = hrefKind(href);
+    if (signupLike(t, href) || NOT_LOGIN_RE.test(t)) { return -1; }
+    if (k === "login" && GENERIC_LOGIN_RE.test(t)) { return RANK_LOGIN; }   // « Sign in » générique, jamais un fournisseur
+    if (k === null && PASSKEY_RE.test(t) && PASSKEY_VERB_RE.test(t)) { return RANK_PASSKEY; }
     return -1;
   }
   const MOVE_KEYS = { ArrowUp: -1, Up: -1, ArrowDown: 1, Down: 1, ArrowLeft: -1, Left: -1, ArrowRight: 1, Right: 1 };
@@ -147,6 +177,12 @@
   let refreshTimer = 0;
   let autoFocused = false;
   let userActed = false;   // touche ou geste RÉEL sur cette page : le focus n'est plus jamais déplacé seul
+  // Réarmement UNIQUE (0.7.9) : X ouvre sa fenêtre de connexion DANS la page (preventDefault + routeur). Seul un clic
+  // de confiance (OK réel ou pointeur) sur l'entrée générique reconnue l'arme, une fois par document, REARM_MS au plus ;
+  // toute touche/geste réel suivant l'annule ; consommé par la première passkey VISIBLE absente au moment du clic.
+  const REARM_MS = 15000;
+  let loginArm = null;   // { until, seen } : seen = contrôles visibles au moment du clic (jamais une valeur)
+  let armSpent = false;
 
   // fenêtre modale VISIBLE la plus récente (X l'ajoute à la fin de ses calques) ; null sinon
   function modalDialog() {
@@ -186,10 +222,12 @@
     if (!root) { return []; }
     const all = Array.from(root.querySelectorAll(CONTROL_SEL)).slice(0, CONTROLS_MAX * 2);
     const out = [];
+    const dropped = [];
     for (const el of all) {
       if (out.length >= CONTROLS_MAX) { break; }
       if (!usable(el)) { continue; }
-      if (out.some((o) => o.contains(el))) { continue; }   // contrôle dans un contrôle : le plus externe seulement
+      if (out.some((o) => o.contains(el)) || dropped.some((o) => o.contains(el))) { continue; }   // le plus externe
+      if (signupLike(label(el), hrefOf(el))) { dropped.push(el); continue; }   // inscription : jamais atteinte par ↑ ↓
       out.push(el);
     }
     return out;
@@ -199,11 +237,12 @@
     const t = (el.getAttribute("aria-label") || el.textContent || "").replace(/\s+/g, " ").trim();
     return t.slice(0, LABEL_MAX);
   }
+  function hrefOf(el) { return el && el.tagName === "A" ? el.getAttribute("href") : null; }
   function preferred(list) {   // meilleur rang, puis ordre du document ; null si rien (fail closed)
     let best = null;
     let rank = 3;
     for (const el of list) {
-      const r = preferRank(label(el), el.tagName === "A" ? el.getAttribute("href") : null);
+      const r = preferRank(label(el), hrefOf(el));
       if (r >= 0 && r < rank) { best = el; rank = r; }
     }
     return best;
@@ -307,6 +346,16 @@
     }
     return false;
   }
+  // clic de confiance sur l'entrée générique « Sign in » reconnue (visible, dans la portée) : arme UNE fois
+  function onActivate(e) {
+    if (!e.isTrusted || armSpent || e.button !== 0 || !loginMode()) { return; }
+    const t = e.target instanceof Element ? e.target.closest(CONTROL_SEL) : null;
+    if (!t || preferRank(label(t), hrefOf(t)) !== RANK_LOGIN) { return; }
+    const list = controls();
+    if (!list.includes(t)) { return; }
+    armSpent = true;
+    loginArm = { until: Date.now() + REARM_MS, seen: new Set(list) };
+  }
   function refresh() {
     refreshTimer = 0;
     const mode = pageMode();
@@ -320,9 +369,15 @@
     if (tvFocus && !tvFocus.isConnected) { tvFocus = null; }
     const ae = document.activeElement;
     const none = !ae || ae === document.body || ae === document.documentElement;
-    if (!autoFocused && !userActed && (none || editable(ae))) {   // rien, ou champ autofocusé par X
+    if (loginArm && Date.now() > loginArm.until) { loginArm = null; }
+    if (loginArm) {   // fenêtre de connexion ouverte DANS la page après le clic humain : passkey nouvelle et visible
+      const pk = controls().find((el) => !loginArm.seen.has(el) && preferRank(label(el), hrefOf(el)) === RANK_PASSKEY);
+      if (pk) { loginArm = null; autoFocused = true; setFocus(pk); }   // UNE fois, focus seulement
+      return;
+    }
+    if (!autoFocused && !userActed && (none || editable(ae) || signupLike(label(ae), hrefOf(ae)))) {   // champ de X
       const p = preferred(controls());
-      if (p) { autoFocused = true; setFocus(p); }   // connexion réelle (ou passkey) : OK direct, zéro flèche, UNE fois
+      if (p) { autoFocused = true; setFocus(p); }   // « Sign in » générique (ou passkey) : OK direct, UNE fois
     } else if (!none) {
       autoFocused = true;   // contrôle placé par la page, ou touche/geste réel : jamais volé ensuite
     }
@@ -389,6 +444,7 @@
     probeKey(e);
     if (!e.isTrusted) { return; }   // touche synthétique d'une page (script de X ou injecté) : jamais d'action OpenTV
     userActed = true;
+    loginArm = null;   // touche réelle après le clic : le réarmement ne déplace plus rien
     noteTyping(e);
     const a = keyAction(e);
     if (!a) { loginKey(e); return; }
@@ -411,7 +467,8 @@
   } catch (err) { /* déjà posé (réinjection) : les écouteurs ci-dessous restent installés */ }
   window.addEventListener("keydown", onKey, true);
   window.addEventListener("keydown", onKeyLate, false);   // phase de remontée : après les gestionnaires de X
-  window.addEventListener("pointerdown", (e) => { if (e.isTrusted) { userActed = true; } }, true);   // geste réel
+  window.addEventListener("pointerdown", (e) => { if (e.isTrusted) { userActed = true; loginArm = null; } }, true);
+  window.addEventListener("click", onActivate, true);   // clic de confiance seulement (OK réel ou pointeur) : arme
   new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });
   if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule); } else { schedule(); }
   window.addEventListener("load", schedule);

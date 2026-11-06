@@ -615,58 +615,128 @@ class TestXExtensionStatic(unittest.TestCase):
         fois ; après une touche ou un geste réel, plus jamais de déplacement automatique du focus."""
         nav = code_only(read(os.path.join(EXT, "nav.js")))
         rf = nav[nav.index("function refresh()"):nav.index("function schedule()")]
-        self.assertIn("if (!autoFocused && !userActed && (none || editable(ae))) {", rf)
+        self.assertIn("if (!autoFocused && !userActed && (none || editable(ae) || signupLike(label(ae), hrefOf(ae)))) {",
+                      rf)
         self.assertIn("if (p) { autoFocused = true; setFocus(p); }", rf)
-        self.assertEqual(rf.count("setFocus("), 1)
+        self.assertEqual(rf.count("setFocus("), 2)                        # initial + réarmement passkey (UNE fois)
         ok = nav[nav.index("function onKey(e)"):nav.index('window.addEventListener("keydown", onKey, true);')]
         self.assertLess(ok.index("if (!e.isTrusted) { return; }"), ok.index("userActed = true;"))   # réelle seulement
         self.assertLess(ok.index("userActed = true;"), ok.index("const a = keyAction(e);"))         # TOUTE touche
-        self.assertIn('window.addEventListener("pointerdown", (e) => { if (e.isTrusted) { userActed = true; } }, true);',
-                      nav)
         vis = nav[nav.index("function visible(el)"):nav.index("function usable(el)")]
         self.assertIn("opacityProperty: true", vis)                       # parent opacity:0 : invisible
         self.assertIn("r.right <= 0 || r.left >= innerWidth", vis)        # hors écran : invisible
 
-    @unittest.skipUnless(NODE, "node absent")
-    def test_login_entry_then_passkey_never_signup_phone(self):
-        """« Continue with phone » de X est l'INSCRIPTION (mode signup, start phone) : jamais préféré. Rang 0 : entrée de
-        connexion réelle (« Log in with username or email », multilingue) ; 1 : lien de connexion (href /login ou
-        /i/flow/login, indépendant de la langue) ; 2 : passkey native de X ; sinon -1 (rien de préféré : fail closed)."""
-        nav = read(os.path.join(EXT, "nav.js"))
-        src = nav[nav.index("const LOGIN_VERB_RE"):nav.index("function preferred(list)")]
-        cases = [
-            ("Log in with username or email", None, 0), ("Log in with email or username", None, 0),
-            ("Sign in with username or email", None, 0), ("Log in with phone, email, or username", None, 0),
-            ("Se connecter avec un nom d'utilisateur ou une adresse e-mail", None, 0),
-            ("Connexion avec nom d’utilisateur ou e-mail", None, 0),
-            ("Iniciar sesión con nombre de usuario o correo electrónico", None, 0),
-            ("Mit Benutzername oder E-Mail anmelden", None, 0),
-            ("Sign in", "/login", 1), ("Se connecter", "/i/flow/login", 1),
-            ("Log in", "https://x.com/login?redirect_after_login=%2F", 1), ("", "/i/flow/login?lang=fr", 1),
-            ("Continue with passkey", None, 2), ("Use passkey", None, 2), ("Use a passkey", None, 2),
-            ("Sign in with a passkey", None, 2), ("Continuer avec une clé d'accès", None, 2),
-            ("Utiliser une clé d’accès", None, 2), ("Continue with Passkey", None, 2),
-            # inscription par téléphone (le bug terrain), inscription, fournisseurs tiers, aide, actions de compte
-            ("Continue with phone", None, -1), ("Continuer avec le téléphone", None, -1), ("Use phone", None, -1),
-            ("Continue with phone", "/login", -1), ("Sign up", "/i/flow/signup", -1), ("Sign up", "/login", -1),
-            ("Create account", None, -1), ("Créer un compte", None, -1), ("S'inscrire", None, -1),
-            ("Sign up with username or email", None, -1), ("Sign in with Google", None, -1),
-            ("Sign in with Apple", None, -1), ("Learn more about passkeys", None, -1), ("Create a passkey", None, -1),
-            ("Add a passkey", None, -1), ("Passkey", None, -1), ("Forgot password?", None, -1), ("Next", None, -1),
-            ("", None, -1), ("Sign in", "/i/flow/signup", -1), ("Sign in", "https://evil.example/login", -1),
-            ("Sign in", "/loginx", -1), ("Get the app", "/download", -1),
-        ]
+    def _node_eval(self, src, expr, inputs):
         js = (src + "\nconst c = JSON.parse(require('fs').readFileSync(0, 'utf8'));\n" +
-              "process.stdout.write(JSON.stringify(c.map((x) => preferRank(x[0], x[1]))));")
-        p = subprocess.run([NODE, "-e", js], input=json.dumps([[t, h] for t, h, _ in cases]),
-                           capture_output=True, text=True, timeout=30)
+              "process.stdout.write(JSON.stringify(c.map((x) => " + expr + ")));")
+        p = subprocess.run([NODE, "-e", js], input=json.dumps(inputs), capture_output=True, text=True, timeout=30)
         self.assertEqual(p.returncode, 0, p.stderr)
-        got = json.loads(p.stdout)
+        return json.loads(p.stdout)
+
+    def _pref_src(self):
+        nav = read(os.path.join(EXT, "nav.js"))
+        return nav[nav.index("const X_HOST_RE"):nav.index("function preferred(list)")]
+
+    @unittest.skipUnless(NODE, "node absent")
+    def test_href_kind_parsed_strictly(self):
+        """DOM réel de x.com déconnecté (SSR 2026-11-06) : « Continue with phone » -> /i/jf/onboarding/web?mode=signup,
+        Google/Apple/« Sign in » -> ?mode=login. URL ANALYSÉE (jamais une sous-chaîne) : même origine X (https, sans port
+        ni identifiants), chemin exact, paramètre mode EXACTEMENT « login » (une seule valeur, aucun start) ; mode=signup,
+        start=phone, /signup, /i/flow/signup : inscription ; tout le reste : « other »."""
+        on = "/i/jf/onboarding/web"
+        cases = [
+            (on + "?mode=login&redirect_after_login=%2F", "login"), ("https://x.com" + on + "?mode=login", "login"),
+            ("https://twitter.com" + on + "?mode=login", "login"), ("https://mobile.x.com" + on + "/?mode=login", "login"),
+            (on + "?mode=login&redirect_after_login=%2F%3Flang%3Dfr", "login"), ("/login", "login"),
+            ("/i/flow/login", "login"), ("https://x.com/login?redirect_after_login=%2F", "login"),
+            (on + "?mode=signup&redirect_after_login=%2F", "signup"), (on + "?mode=login&mode=signup", "signup"),
+            (on + "?mode=login&start=phone", "signup"), (on + "?start=phone", "signup"), ("/i/flow/signup", "signup"),
+            ("/signup", "signup"), ("https://x.com/i/flow/signup?lang=fr", "signup"),
+            (on + "?mode=Login", "other"), (on + "?mode=loginx", "other"), (on + "?mode=login&mode=login", "other"),
+            (on + "?modex=login", "other"), (on + "#mode=login", "other"), (on, "other"),
+            (on + "?redirect=%3Fmode%3Dlogin", "other"), (on + "?mode=login&start=email", "other"),
+            (on + "/extra?mode=login", "other"), (on + "x?mode=login", "other"), ("/i/jf/onboarding?mode=login", "other"),
+            ("https://evil.example" + on + "?mode=login", "other"), ("//evil.example" + on + "?mode=login", "other"),
+            ("https://x.com.evil.example" + on + "?mode=login", "other"), ("http://x.com" + on + "?mode=login", "other"),
+            ("https://x.com:444" + on + "?mode=login", "other"), ("https://u:p@x.com" + on + "?mode=login", "other"),
+            ("javascript:alert(1)//" + on + "?mode=login", "other"), ("/redirect?u=" + on + "?mode=login", "other"),
+            ("/loginx", "other"), ("/logout", "other"), ("https://x.com/tos", "other"), ("#main", "other"),
+            ("https://about.x.com", "other"), ("http://[", "other"), (None, None),
+        ]
+        got = self._node_eval(self._pref_src(), "hrefKind(x[0])", [[h] for h, _ in cases])
+        self.assertEqual([(h, g) for (h, _), g in zip(cases, got)], cases)
+
+    @unittest.skipUnless(NODE, "node absent")
+    def test_login_entry_generic_sign_in_then_passkey_never_signup_or_provider(self):
+        """Rang 0 : SEULE l'entrée générique « Sign in » / « Se connecter » (libellé ancré EN ENTIER) d'un lien de
+        connexion analysé (href mode=login) ; jamais Google/Apple (même href), jamais l'inscription, jamais un libellé
+        sans href. Rang 1 : passkey native de X (bouton). Sinon -1 (fail closed). « Déconnexion » n'est jamais une
+        connexion (anglais comme français)."""
+        L = "/i/jf/onboarding/web?mode=login&redirect_after_login=%2F"
+        S = "/i/jf/onboarding/web?mode=signup&redirect_after_login=%2F"
+        cases = [
+            ("Sign in", L, 0), ("Se connecter", L + "%3Flang%3Dfr", 0), ("Log in", L, 0), ("Sign In", L, 0),
+            ("Connexion", L, 0), ("Iniciar sesión", L, 0), ("Anmelden", L, 0), ("Accedi", L, 0),
+            ("Sign in", "/login", 0), ("Se connecter", "/i/flow/login", 0), ("Log in", "https://x.com/login", 0),
+            ("Continue with passkey", None, 1), ("Use passkey", None, 1), ("Use a passkey", None, 1),
+            ("Sign in with a passkey", None, 1), ("Continuer avec une clé d'accès", None, 1),
+            ("Utiliser une clé d’accès", None, 1), ("Continue with Passkey", None, 1),
+            ("Connexion avec une clé d'accès", None, 1),
+            # fournisseurs (même href mode=login), inscription par téléphone (le bug terrain), inscription
+            ("Continue with Google", L, -1), ("Continue with Apple", L, -1), ("Continuer avec Google", L, -1),
+            ("Continuer avec Apple", L, -1), ("Sign in with Google", L, -1), ("Sign in with Apple", None, -1),
+            ("Google", L, -1), ("", L, -1), ("Sign in with passkey", L + "&x=1", -1),
+            ("Continue with phone", S, -1), ("Continue with phone", L, -1), ("Continue with phone", None, -1),
+            ("Continuer avec un numéro téléphone", S, -1), ("Continuer avec le téléphone", None, -1),
+            ("Use phone", None, -1), ("Sign up", S, -1), ("Sign in", S, -1), ("Sign in", "/i/flow/signup", -1),
+            ("Sign in", L + "&start=phone", -1), ("Sign up", L, -1), ("S'inscrire", L, -1), ("Create account", L, -1),
+            # libellé sans href, href hors X ou non analysable, sous-chaîne, déconnexion
+            ("Sign in", None, -1), ("Se connecter", None, -1), ("Log in with username or email", None, -1),
+            ("Sign in", "https://evil.example" + L, -1), ("Sign in", "/loginx", -1), ("Sign in", "/redirect?u=" + L, -1),
+            ("Déconnexion", L, -1), ("Déconnexion", "/login", -1), ("Se déconnecter", L, -1), ("Log out", L, -1),
+            ("Sign out", L, -1), ("Reconnexion", L, -1), ("Connexion impossible", L, -1), ("Already signed in", L, -1),
+            ("Déconnexion avec une clé d'accès", None, -1), ("Se déconnecter de la clé d'accès", None, -1),
+            ("Learn more about passkeys", None, -1), ("Create a passkey", None, -1), ("Add a passkey", None, -1),
+            ("Passkey", None, -1), ("Forgot password?", None, -1), ("Next", None, -1), ("Continue", None, -1),
+            ("", None, -1), ("Get the app", "/download", -1),
+        ]
+        got = self._node_eval(self._pref_src(), "preferRank(x[0], x[1])", [[t, h] for t, h, _ in cases])
         self.assertEqual([(t, h, g) for (t, h, _), g in zip(cases, got)], cases)
-        code = code_only(nav)
+        # inscription : retirée de la navigation aux flèches (libellé ou href), jamais un champ (libellé vide)
+        sig = [("Continue with phone", S, True), ("Continue with phone", None, True), ("Sign up", S, True),
+               ("Continuer avec un numéro téléphone", S, True), ("Créer un compte", None, True),
+               ("Continue with Google", L, False), ("Sign in", L, False), ("", None, False), ("Next", None, False),
+               ("Terms of Service", "https://x.com/tos", False)]
+        got = self._node_eval(self._pref_src(), "signupLike(x[0], x[1])", [[t, h] for t, h, _ in sig])
+        self.assertEqual([(t, h, g) for (t, h, _), g in zip(sig, got)], sig)
+        code = code_only(read(os.path.join(EXT, "nav.js")))
         pf = code[code.index("function preferred(list)"):code.index("function applyInline(el, props)")]
-        self.assertIn("preferRank(label(el), el.tagName === \"A\" ? el.getAttribute(\"href\") : null)", pf)
+        self.assertIn("preferRank(label(el), hrefOf(el))", pf)
         self.assertNotIn("click", pf)                                     # préférer = focus seulement, jamais activer
+        ct = code[code.index("function controls()"):code.index("function label(el)")]
+        self.assertIn("signupLike(label(el), hrefOf(el))", ct)          # inscription : jamais atteinte par ↑ ↓
+
+    def test_login_rearm_once_after_trusted_generic_login_activation(self):
+        """X ouvre sa fenêtre de connexion DANS la page (preventDefault, routeur) : UN seul réarmement par document,
+        posé seulement par un clic de confiance (geste humain : OK réel ou pointeur) sur l'entrée générique reconnue ;
+        borné dans le temps ; annulé par toute touche/geste réel suivant ; consommé quand une passkey VISIBLE et
+        NOUVELLE (absente au moment du clic) apparaît : focus seulement, jamais de clic, jamais une valeur lue."""
+        nav = code_only(read(os.path.join(EXT, "nav.js")))
+        act = nav[nav.index("function onActivate(e)"):nav.index("function refresh()")]
+        self.assertIn("if (!e.isTrusted || armSpent || e.button !== 0 || !loginMode()) { return; }", act)
+        self.assertIn("preferRank(label(t), hrefOf(t)) !== RANK_LOGIN", act)
+        self.assertIn("armSpent = true;", act)
+        self.assertIn("until: Date.now() + REARM_MS", act)
+        self.assertNotIn(".click(", act)
+        rf = nav[nav.index("function refresh()"):nav.index("function schedule()")]
+        self.assertIn("!loginArm.seen.has(el) && preferRank(label(el), hrefOf(el)) === RANK_PASSKEY", rf)
+        self.assertIn("loginArm = null; autoFocused = true; setFocus(pk);", rf)
+        ok = nav[nav.index("function onKey(e)"):nav.index('window.addEventListener("keydown", onKey, true);')]
+        self.assertLess(ok.index("if (!e.isTrusted) { return; }"), ok.index("loginArm = null;"))
+        self.assertIn('window.addEventListener("click", onActivate, true);', nav)
+        self.assertIn('window.addEventListener("pointerdown", (e) => { if (e.isTrusted) { userActed = true; loginArm = '
+                      'null; } }, true);', nav)
+        self.assertRegex(nav, r"const REARM_MS = \d{4,5};")
 
     def test_css_inert_outside_feed_mode(self):
         css = read(os.path.join(EXT, "x.css"))
@@ -1168,35 +1238,71 @@ class TestXEndToEnd(unittest.TestCase):
         # Close (Exit CEC), BrowserBack (vérification /account/), Alt+←, BrowserHome : toujours /tv
         for k in ("close", "browser_back", "alt_left", "browser_home", "thread_direct"):
             self.assertEqual(lg[k]["url"], cfg["tv"], (k, lg[k]))
-        # accueil déconnecté (photo terrain) : X autofocus le champ identifiant ; avant toute touche, le focus passe
-        # UNE fois à « Log in with username or email » (connexion réelle ; jamais « Continue with phone », qui est
-        # l'INSCRIPTION, ni le leurre opacity:0), anneau visible, consigne à l'écran ;
-        # OK synthétique : rien ; OK réel : UN clic, exactement sur ce bouton
+        # accueil déconnecté RÉEL (SSR x.com minimisé) : X autofocus le champ identifiant ; avant toute touche, le focus
+        # passe UNE fois au lien générique « Sign in » (mode=login ; jamais « Continue with phone » = INSCRIPTION, jamais
+        # Google/Apple), anneau visible, consigne à l'écran ; OK synthétique : rien
         ph = st["phone_login"]
         self.assertTrue(ph["autofocus_seen"])
         self.assertTrue(0 <= ph["first_ms"] < 1500, ph["first_ms"])
-        self.assertEqual((ph["initial"]["active"], ph["initial"]["ring"]), ("login", "login"), ph["initial"])
+        self.assertEqual((ph["initial"]["active"], ph["initial"]["ring"]), ("signin", "signin"), ph["initial"])
         self.assertTrue(ph["initial"]["outline"].startswith("solid 6px"), ph["initial"])
         self.assertIn("OK valider", ph["initial"]["help"])
         self.assertIn("au clavier", ph["initial"]["help"])
         self.assertEqual((ph["initial"]["hits"], ph["initial"]["clicks"]), ([], 0))
-        self.assertEqual((ph["synthetic"]["hits"], ph["synthetic"]["clicks"]), ([], 0))
-        self.assertEqual((ph["ok"]["hits"], ph["ok"]["clicks"]), (["login"], 1))
-        self.assertEqual(ph["url_after_ok"], "https://x.com/")
-        # ↑ ↓ : contrôles visibles et activables, ordre du document, dans la modale ; jamais l'iframe Google, le
-        # bouton masqué, le désactivé, le leurre sous parent opacity:0 ni le lien hors écran ; bords : on reste
-        self.assertEqual(ph["seq"], ["phone", "apple", "apple", "phone", "login", "user", "next", "forgot", "signup",
-                                     "signup"])
-        # champ : saisie au clavier physique native (← → Retour arrière), aucun clic, ↑ ↓ en sortent ; après une
-        # touche réelle, un nouveau rendu de la page ne vole jamais le focus du champ
-        self.assertEqual(ph["field"], "user")
+        self.assertEqual((ph["synthetic"]["hits"], ph["synthetic"]["clicks"], ph["synthetic"]["dialog"]), ([], 0, False))
+        # ↑ ↓ : contrôles visibles dans l'ordre du document, SANS l'inscription par téléphone (jamais atteinte, bords
+        # compris) ; fournisseurs atteignables à la main seulement ; bords : on reste
+        self.assertEqual(ph["seq"], ["tos", "continue", "landing-identifier", "apple", "google", "google", "google",
+                                     "apple", "landing-identifier", "continue", "tos", "signin", "about", "about", "about"])
+        self.assertNotIn("phone", ph["seq"])
+        self.assertEqual((ph["before_ok"]["active"], ph["before_ok"]["hits"], ph["before_ok"]["clicks"]), ("signin", [], 0))
+        # OK RÉEL sur « Sign in » : UN clic natif ; X ouvre sa fenêtre DANS LA MÊME page (même document, pushState) ;
+        # la passkey (visible, nouvelle) reçoit le focus EXACTEMENT une fois ; leurre opacity:0 jamais ; aucun clic auto
+        ok = ph["ok"]
+        self.assertEqual((ok["hits"], ok["clicks"], ok["dialog"], ok["doc"]), (["signin"], 1, True, ph["initial"]["doc"]))
+        self.assertEqual(ok["url"], "https://x.com/i/jf/onboarding/web?mode=login&redirect_after_login=%2F")
+        self.assertEqual((ok["active"], ok["ring"], ok["pk_focus"]), ("passkey", "passkey", 1), ok)
+        # nouveau rendu de X sans geste (autofocus du champ + autre passkey) : réarmement consommé, rien ne bouge
+        self.assertEqual((ph["rerender"]["active"], ph["rerender"]["pk_focus"], ph["rerender"]["hits"]),
+                         ("dlguser", 1, ["signin"]))
+        # champ : saisie au clavier physique native, aucun clic ; après une touche réelle, un nouveau rendu (passkey de
+        # plus) ne vole jamais le focus du champ
+        self.assertEqual(ph["field"], "dlguser")
         self.assertEqual(ph["typed"], "alice@example.co")
-        self.assertEqual((ph["after_typing"]["active"], ph["after_typing"]["clicks"]), ("user", 1))
+        self.assertEqual((ph["after_typing"]["active"], ph["after_typing"]["clicks"], ph["after_typing"]["pk_focus"]),
+                         ("dlguser", 1, 1))
+        # fenêtre : iframe Google, leurre opacity:0, lien hors écran, masqué, désactivé et « Sign up » jamais atteints
+        self.assertEqual(ph["dialog_seq"], ["passkey", "next", "forgot", "passkey2", "passkey3", "passkey3", "passkey3"])
         # rôle « button » non natif : OK réel active CE contrôle seulement (repli), aucun autre
         self.assertEqual(ph["on_forgot"], "forgot")
-        self.assertEqual((ph["forgot"]["hits"], ph["forgot"]["clicks"]), (["login", "forgot"], 2))
-        self.assertEqual(ph["url_end"], "https://x.com/")
+        self.assertEqual((ph["forgot"]["hits"], ph["forgot"]["clicks"]), (["signin", "forgot"], 2))
+        # Retour inchangé : page précédente de X (l'accueil), puis OpenTV
+        self.assertEqual(ph["url_after_back1"], "https://x.com/")
         self.assertEqual(ph["url_after_back"], cfg["tv"])
+        # activation SYNTHÉTIQUE (el.click(), MouseEvent forgé) : X ouvre sa fenêtre, mais rien n'est réarmé — la
+        # passkey n'est jamais focalisée, l'autofocus de X reste
+        fk = st["fake_activation"]
+        self.assertEqual((fk["after"]["dialog"], fk["after"]["active"], fk["after"]["pk_focus"]), (True, "dlguser", 0), fk)
+        self.assertEqual((fk["after_event"]["active"], fk["after_event"]["pk_focus"]), ("dlguser", 0), fk)
+        self.assertEqual(fk["url_after_back"], cfg["tv"])
+        # touche réelle après le clic, avant la fenêtre (lente) : réarmement annulé, la passkey n'est jamais focalisée
+        cn = st["cancelled"]
+        self.assertEqual((cn["before"]["active"], cn["before"]["hits"]), ("about", ["signin"]), cn)
+        self.assertEqual((cn["after"]["dialog"], cn["after"]["active"], cn["after"]["pk_focus"]), (True, "dlguser", 0), cn)
+        self.assertEqual(cn["url_after_back"], cfg["tv"])
+        # passkey déjà présente avant le clic + mutation de chargement : jamais focalisée ; seule la NOUVELLE l'est
+        op = st["old_passkey"]
+        self.assertEqual((op["loading"]["active"], op["loading"]["old_focus"]), ("signin", 0), op)
+        self.assertEqual((op["after"]["active"], op["after"]["pk_focus"], op["after"]["old_focus"], op["after"]["hits"]),
+                         ("passkey", 1, 0, ["signin"]), op)
+        self.assertEqual(op["url_after_back"], cfg["tv"])
+        # accueil réel sans « Sign in » ni autofocus : rien n'est préféré ni déplacé ; le premier ↓ réel va à Google
+        # (premier contrôle permis), JAMAIS à « Continue with phone »
+        ns = st["no_signin"]
+        self.assertEqual((ns["initial"]["active"], ns["initial"]["ring"], ns["initial"]["hits"]), (None, None, []))
+        self.assertEqual((ns["down"]["active"], ns["down"]["hits"], ns["down"]["clicks"]), ("google", [], 0), ns["down"])
+        self.assertEqual(ns["up"]["active"], "google")
+        self.assertEqual(ns["url_after_back"], cfg["tv"])
         # étape identifiant avec passkey native de X (sans entrée de connexion) : le focus passe UNE fois à « Continue
         # with passkey » (jamais à « Continue with phone »), aucun clic automatique ; OK synthétique : rien ; OK réel :
         # UNE activation de CE bouton (le dialogue WebAuthn natif de Chromium reste celui du navigateur) ; repli
@@ -1279,12 +1385,12 @@ class TestXEndToEnd(unittest.TestCase):
         # CSP stricte : anneau et consigne visibles par nav.css (aucun style en ligne), aucune violation CSP causée
         # par l'extension ; le témoin (un <style> de page) est bien bloqué
         cs = st["csp"]
-        self.assertEqual((cs["active"], cs["ring"]), ("login", "login"), cs)
+        self.assertEqual((cs["active"], cs["ring"]), ("signin", "signin"), cs)
         self.assertTrue(cs["outline"].startswith("solid 6px"), cs)
         self.assertEqual((cs["inline"], cs["help_pos"], cs["help_inline"], cs["violations"]), ("", "fixed", "", 0), cs)
         self.assertTrue(cs["moved"]["outline"].startswith("solid 6px"), cs)
         self.assertEqual((cs["moved"]["inline"], cs["violations_after_keys"]), ("", 0), cs)
-        self.assertEqual(cs["moved"]["ring"], "user")                # ↓ : contrôle suivant, anneau toujours visible
+        self.assertEqual(cs["moved"]["ring"], "about")               # ↓ : contrôle suivant, anneau toujours visible
         self.assertFalse(cs["control_blocked"]["applied"])
         self.assertGreaterEqual(cs["control_blocked"]["violations"], 1)
         # sonde canari : extension injectée et service actif sur /tv ET x.com (route réelle : Origin de l'extension,

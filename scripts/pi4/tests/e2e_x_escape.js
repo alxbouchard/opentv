@@ -19,10 +19,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const FEED = "<!doctype html><html><head><meta charset=utf-8><title>Home / X</title></head><body>" +
   "<main><div data-testid=primaryColumn><article data-testid=tweet tabindex=0>Post</article></div></main></body></html>";
+// accueil déconnecté RÉEL de x.com minimisé (SSR 2026-11-06) : téléphone = inscription (mode=signup), « Sign in » générique
 const LANDING = "<!doctype html><html><head><meta charset=utf-8><title>X</title></head><body>" +
-  "<div role=dialog aria-modal=true><button id=phone type=button>Continue with phone</button>" +
-  "<button id=login type=button>Log in with username or email</button>" +
-  "<input id=user type=text></div></body></html>";
+  "<a id=phone href='/i/jf/onboarding/web?mode=signup&amp;redirect_after_login=%2F'>Continue with phone</a>" +
+  "<a id=google href='/i/jf/onboarding/web?mode=login&amp;redirect_after_login=%2F'>Continue with Google</a>" +
+  "<form action=/i/jf/onboarding/web method=get><input type=hidden name=mode value=login>" +
+  "<input id=user type=text name=username><button type=submit>Continue</button></form>" +
+  "<p>Already have an account?</p><a id=login href='/i/jf/onboarding/web?mode=login&amp;redirect_after_login=%2F'>Sign in</a>" +
+  "</body></html>";
 
 const lines = readline.createInterface({ input: process.stdin });
 const queue = [];
