@@ -1541,7 +1541,7 @@ X active sur le téléphone, flux complet réussi sur la TV, photo — sinon con
 (nouveau périphérique vc4-hdmi) ; OK sur « Sign in » du VRAI DOM de X puis passkey au focus dans la fenêtre
 ouverte par X (0.7.9 : jamais « Continue with phone », inscription) ; photo d'Alex.
 
-### 6 sexies-c. « Saisir avec le téléphone » : identifiant X sans clavier physique (0.7.10, drapeau, défaut désactivé ; placement et accueil 0.7.11)
+### 6 sexies-c. « Saisir avec le téléphone » : identifiant X sans clavier physique (0.7.10, drapeau, défaut désactivé ; placement et accueil 0.7.11 ; champ « jf » 0.7.12)
 
 Alex refuse tout clavier physique ; la passkey native de X n'apparaît qu'**après** un identifiant. Ce pont remplit
 **UN identifiant** (nom d'utilisateur, courriel ou téléphone) dans le champ de connexion X au focus, depuis le
@@ -1584,7 +1584,18 @@ Sécurité (`opentv_pi/xentry.py`, `x-tv-extension/xentry.js`, `ui/xphone.js`) :
   même `?` ou `#` nus, ni `/home` ni l'inscription) **avec la signature statique de son vrai champ** (0.7.11) : `id`
   `landing-identifier`, `name` `username`, formulaire d'`action` EXACTE `/i/jf/onboarding/web` et UN seul contrôle
   `mode`, caché, d'attribut `value` `login` — attributs lus par `getAttribute`, jamais une valeur saisie ; un champ
-  d'inscription rendu sur place à « / » (mode `signup`, autre id/nom, sans formulaire) n'est jamais éligible. Le QR
+  d'inscription rendu sur place à « / » (mode `signup`, autre id/nom, sans formulaire) n'est jamais éligible.
+  **Champ « jf » (0.7.12, défaut terrain 0.7.11 : pastille jamais affichée)** : 1 à 2 s après le chargement, le script
+  de X **remplace sur place** (URL inchangée) le formulaire servi par celui de son moteur « jf » — à « / » comme sur
+  `/i/flow/login` et `/i/jf/onboarding/web?mode=login` (relevé réel 2026-11-07, Chromium 1920×1080) : `id`
+  `jf-input-username_or_email`, `name` `username_or_email`, `autocomplete` `username webauthn`, `pattern`
+  `^[a-zA-Z0-9@._+\-]+$`, `<form>` sans `action` ni `mode`, et un **leurre** de X pour les gestionnaires de mots de
+  passe (`<input inert type=password name=password>`, opacité 0, frère du champ). L'ancienne porte refusait ce champ
+  (signature d'accueil absente, `pattern`, mot de passe voisin). Admis désormais **seulement** avec cette signature
+  EXACTE (`jfSigOk`) : ce motif exact, formulaire sans action, et UN SEUL champ sensible dans la portée — ce leurre
+  exact (attribut `inert`, invisible, même parent que le champ) ; deux leurres, un code à usage unique, un mot de passe
+  non `inert` ou visible (étape mot de passe rendue sur place, revérifiée à la livraison), un autre id/nom (inscription
+  jf), une `action` ou un autre motif : jamais éligible. Le QR
   natif « Scan to get the app » de X n'est jamais lu ni utilisé. INPUT au
   focus, visible, actif, modifiable, `type` text/email/tel, `autocomplete` `username`/`email`/`tel`/`tel-national`/
   `tel-local` (± `webauthn`). Refus : `inputmode` numérique, `maxlength` ≤ 8, `pattern`, champ mot de passe ou code à

@@ -94,8 +94,59 @@ function landing(layout) {
   `document.addEventListener("submit",function(e){e.preventDefault();},true);` +
   `document.getElementById(${JSON.stringify(fid)}).focus();})();</script>${INSTR}</body></html>`;
 }
+// 0.7.12 — champ « jf » RÉEL (relevé le 2026-11-07 sur x.com, Chromium 1920×1080, profil neuf, rien saisi) : ~1 à 2 s
+// après le chargement, le script de X REMPLACE SUR PLACE (URL inchangée « / ») les fournisseurs et le formulaire servis
+// par un <form> SANS action ni « mode » : boutons « Continue with phone » / Google / Apple, puis
+// <label for="jf-input-username_or_email"><div><span>…</span><span>…</span><input autocomplete="username webauthn"
+// inputmode="text" id="jf-input-username_or_email" pattern="^[a-zA-Z0-9@._+\-]+$" type="text" value=""
+// name="username_or_email"><input inert="" type="password" value="" name="password" style="position: absolute; …
+// opacity: 0; pointer-events: none;"></div></label>, « Continue » (div), CGU. Même champ sur /i/flow/login et
+// /i/jf/onboarding/web?mode=login, dans un role="dialog" sans aria-modal. Classes Tailwind remplacées par une CSS
+// équivalente : le champ reste à [366,659,730,679]. Variantes (jamais éligibles) : leurre sans inert, étape mot de passe
+// sur place (mot de passe visible), deux leurres, code à usage unique caché, leurre hors du conteneur du champ,
+// inscription jf (phone_number), formulaire avec action, autre motif.
+const DECOY = `<input inert="" type="password" value="" name="password" style="position: absolute; top: 0px; left: 0px; ` +
+  `width: 100%; height: 100%; opacity: 0; pointer-events: none;">`;
+function jfForm(v) {
+  const id = v === "jf_signup" ? "jf-input-phone_number" : "jf-input-username_or_email";
+  const name = v === "jf_signup" ? "phone_number" : "username_or_email";
+  const pat = v === "jf_pattern" ? "[0-9]*" : "^[a-zA-Z0-9@._+\\-]+$";
+  const decoy = v === "jf_noinert" ? DECOY.replace('inert="" ', "") :
+    v === "jf_pwstep" ? `<input type="password" value="" name="password" autocomplete="current-password">` : DECOY;
+  const field = `<input autocomplete="username webauthn" inputmode="text" id="${id}" pattern="${pat}" type="text" ` +
+    `value="" name="${name}">`;
+  return `<form${v === "jf_action" ? ` action="${ONB}"` : ""}><button type="button" id="jfphone" class="jfprov">` +
+    `<div><p>Continue with phone</p></div></button><div role="button" tabindex="0" id="jfgoogle" class="jfprov">` +
+    `<span>Continue with Google</span></div><button type="button" id="jfapple" class="jfprov"><div><p>Continue with ` +
+    `Apple</p></div></button><div class="or"><p>or</p></div><label for="${id}"><div class="jfbox"><span>Email or ` +
+    `username</span><span>Email or username</span>${field}${v === "jf_nonsibling" ? "" : decoy}</div></label>` +
+    (v === "jf_nonsibling" ? decoy : "") + (v === "jf_two" ? DECOY : "") +
+    (v === "jf_otp" ? `<input type="text" autocomplete="one-time-code" name="code" hidden>` : "") +
+    `<div id="jfcontinue"><div><p>Continue</p></div></div><p>By continuing, you agree to our ` +
+    `<a id="jftos" href="https://x.com/tos">Terms of Service</a></p></form>`;
+}
+const JF_CSS = `<style>.jfprov{display:flex;align-items:center;justify-content:center;height:46px;box-sizing:border-box;` +
+  `border:1px solid #cfd9de;border-radius:9999px;background:#fff;color:#0f1419;font:inherit;margin:0;padding:0}` +
+  `#jfapple{height:48px}.jfprov p,.or p{margin:0}.or{height:21px;text-align:center;font-size:14px}` +
+  `.jfbox{position:relative}.jfbox>span:first-child{position:absolute;left:0;top:-23px;font-size:13px;color:#536471}` +
+  `.jfbox>span+span{display:none}#jfcontinue{height:48px;border-radius:9999px;background:#aaa;display:flex;` +
+  `align-items:center;justify-content:center}</style>`;
+// accueil « / » : HTML SERVI (landing-identifier) puis remplacement SUR PLACE par le formulaire jf, comme X
+function jfLanding(v) {
+  const swap = `<script>setTimeout(function(){var c=document.getElementById("col"),h=c.querySelector("h1");` +
+    `while(h.nextSibling){c.removeChild(h.nextSibling);}c.insertAdjacentHTML("beforeend",${JSON.stringify(jfForm(v))});},400);` +
+    `</script>`;
+  return landing("real").replace("</head>", JF_CSS + "</head>").replace("</body>", swap + "</body>");
+}
+// routes de connexion : même formulaire jf dans un role="dialog" (sans aria-modal, comme X)
+function jfDialog(v) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Sign in to X / X</title>${STYLE}${JF_CSS}` +
+    `<style>#jf-input-username_or_email,#jf-input-phone_number{margin:30px 0 0}</style></head><body><div id="layers">` +
+    `<div role="dialog" aria-labelledby="h"><h1 id="h">Sign in to X</h1>${jfForm(v)}</div></div>${INSTR}</body></html>`;
+}
 const CASES = {
   login: page("Sign in to X", USER),
+  jf: jfDialog("jf"),
   password: page("Enter your password", `<input id="user" name="password" type="password" autocomplete="current-password" autofocus>`),
   otp: page("Enter your verification code", `<input id="user" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" autofocus>`),
   verifyuser: page("Enter your verification code", `<input id="user" name="text" type="text" autocomplete="username" autofocus>`),
@@ -138,7 +189,8 @@ function ctl(method, p, body) {
       const u = new URL(route.request().url());
       // pages de connexion synthétiques ; partout ailleurs (accueil, /home, inscription, http, hôte piégé) : l'accueil RÉEL
       const flow = u.hostname === "x.com" && u.protocol === "https:" && /^\/(i\/flow\/login|i\/jf\/onboarding\/web)$/.test(u.pathname);
-      const body = flow ? CASES[u.searchParams.get("case") || "login"] || CASES.login : landing(rootLayout);
+      const body = flow ? CASES[u.searchParams.get("case") || "login"] || CASES.login :
+        /^jf/.test(rootLayout) ? jfLanding(rootLayout) : landing(rootLayout);
       return route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: body });
     });
     const tv = ctx.pages()[0] || await ctx.newPage();
@@ -168,7 +220,9 @@ function ctl(method, p, body) {
                pill: !!pill && pill.isConnected && pill.getBoundingClientRect().width > 0,
                qr: !!document.querySelector('[data-otvx-entry="qr"]'),
                value: (document.getElementById("user") || document.getElementById("landing-identifier") ||
-                       document.getElementById("signup-identifier")).value,
+                       document.getElementById("signup-identifier") || document.getElementById("jf-input-username_or_email") ||
+                       document.getElementById("jf-input-phone_number")).value,
+               pw: Array.from(document.querySelectorAll('input[type="password"]')).map((i) => i.value),   // leurre : jamais rempli
                ev: Object.assign({}, window.__ev), href: location.href };
     });
     const waitFor = async (fn, ms) => {
@@ -180,9 +234,10 @@ function ctl(method, p, body) {
     // panneau d'OpenTV (hôtes des racines fantômes fermées : leur rectangle est visible de la page, pas leur contenu)
     const geo = () => tv.evaluate(() => {
       const R = (el) => { if (!el) { return null; } const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
-      const f = document.getElementById("landing-identifier") || document.getElementById("signup-identifier");
+      const f = document.getElementById("landing-identifier") || document.getElementById("signup-identifier") ||
+        document.getElementById("jf-input-username_or_email");
       const pill = document.querySelector('[data-otvx-entry="pill"]');
-      return { vw: innerWidth, vh: innerHeight, field: R(f), form: R(f && f.form), cont: R(document.getElementById("continue")),
+      return { vw: innerWidth, vh: innerHeight, field: R(f), form: R(f && f.form), cont: R(document.getElementById("continue") || document.getElementById("jfcontinue")),
                getapp: R(document.getElementById("getapp")), appqr: R(document.getElementById("appqr")),
                help: R(document.querySelector(".otvx-login-help")),
                pill: pill && pill.isConnected ? R(pill) : null, panel: R(document.querySelector('[data-otvx-entry="qr"]')),
@@ -558,6 +613,98 @@ function ctl(method, p, body) {
         await sleep(500);
         R.inplace[lay] = { href: before.href, active: before.active, pill: before.pill, after: (await tvState()).active,
                            qr: (await tvState()).qr, service: (await service()).active };
+      }
+      rootLayout = "real";
+    }
+    // ---------------------------------------------------------------- champ « jf » RÉEL (0.7.12, défaut terrain 0.7.11)
+    // « / » servi puis remplacé SUR PLACE par le formulaire jf de X (URL inchangée) : pastille, flèche RÉELLE + OK RÉEL,
+    // QR décodé, UN input + UN change, leurre jamais rempli, aucun clic ni envoi ; routes de connexion jf (fenêtre) ;
+    // variantes jamais éligibles ; étape mot de passe rendue sur place APRÈS le QR : refus à la livraison.
+    if (want("jf")) {
+      await ctl("POST", "/presence?on=1");
+      const J = {};
+      st.jf = J;
+      const JFID = "jf-input-username_or_email";
+      const openJf = async (lay, sel) => {
+        rootLayout = lay;
+        await openX("/", sel || "#" + JFID);
+        await sleep(300);
+      };
+      await openJf("jf");
+      J.swapped = await tv.evaluate(() => ({ landing: !!document.getElementById("landing-identifier"),
+        modes: document.querySelectorAll('input[name="mode"]').length, action: document.querySelector("form").getAttribute("action") }));
+      await tv.evaluate((i) => { window.__ev = { input: 0, change: 0, click: 0, submit: 0 }; document.getElementById(i).focus(); }, JFID);
+      await sleep(300);
+      J.initial = await tvState();
+      J.geo_pill = await geo();
+      if (J.initial.pill) {   // (mutant sans la branche jf : aucune pastille — défaut terrain 0.7.11 reproduit)
+      const sj = await startSession(JFID);
+      J.session = { on_pill: sj.on_pill, started: sj.started, url: sj.url, svc: sj.svc };
+      J.geo_panel = await geo();
+      await A.p.goto(sj.url);
+      await A.p.waitForSelector("#xform:not([hidden])");
+      await A.p.fill("#xid", "alex@example.com");
+      await A.p.click("#xsend");
+      await waitFor(async () => (await tvState()).value !== "" && !(await service()).active);
+      await waitFor(async () => /C'est fait/.test((await phoneText(A.p)).status || ""));
+      await sleep(300);
+      J.filled = { tv: await tvState(), phone: await phoneText(A.p), service: await service() };
+      }
+      // routes de connexion : même champ jf dans la fenêtre de X
+      J.routes = {};
+      for (const [name, q] of [["flow", "/i/flow/login?case=jf"], ["onboarding", "/i/jf/onboarding/web?mode=login&case=jf"]]) {
+        await openX(q, "#" + JFID);
+        await tv.evaluate((i) => document.getElementById(i).focus(), JFID);
+        await sleep(300);
+        J.routes[name] = await tvState();
+      }
+      await tv.evaluate(() => { window.__ev = { input: 0, change: 0, click: 0, submit: 0 }; });
+      if (J.routes.onboarding.pill) {
+      const sf = await startSession(JFID);
+      await A.p.goto(sf.url);
+      await A.p.waitForSelector("#xform:not([hidden])");
+      await A.p.fill("#xid", "alex@example.com");
+      await A.p.click("#xsend");
+      await waitFor(async () => (await tvState()).value !== "" && !(await service()).active);
+      await sleep(300);
+      J.routes.filled = await tvState();
+      }
+      // variantes : jamais de pastille, jamais de séance (flèche RÉELLE + OK RÉEL compris)
+      J.neg = {};
+      for (const v of ["jf_noinert", "jf_pwstep", "jf_two", "jf_otp", "jf_nonsibling", "jf_signup", "jf_action", "jf_pattern"]) {
+        const fid = v === "jf_signup" ? "jf-input-phone_number" : JFID;
+        await openJf(v, "#" + fid);
+        await tv.evaluate((i) => document.getElementById(i).focus(), fid);
+        await sleep(300);
+        const before = await tvState();
+        await tv.keyboard.press("ArrowDown");
+        await tv.keyboard.press("Enter");
+        await sleep(500);
+        J.neg[v] = { href: before.href, active: before.active, pill: before.pill, after: (await tvState()).active,
+                     qr: (await tvState()).qr, service: (await service()).active };
+      }
+      // étape mot de passe rendue SUR PLACE après le QR (leurre rendu actif et visible) : refus à la livraison
+      await openJf("jf");
+      await tv.evaluate((i) => { window.__u = document.getElementById(i); }, JFID);
+      if (J.initial.pill) {
+      const sl = await startSession(JFID);
+      await A.p.goto(sl.url);
+      await A.p.waitForSelector("#xform:not([hidden])");
+      await tv.evaluate(() => {
+        window.__ev = { input: 0, change: 0, click: 0, submit: 0 };
+        const pw = document.querySelector('input[name="password"]');
+        pw.removeAttribute("inert");
+        pw.removeAttribute("style");
+      });
+      const before = await tv.evaluate(() => ({ same: document.activeElement === window.__u,
+                                                qr: !!document.querySelector('[data-otvx-entry="qr"]') }));
+      await A.p.fill("#xid", "alex@example.com");
+      await A.p.click("#xsend");
+      await waitFor(async () => /Rien n'a été saisi|rien saisi|C'est fait/.test((await phoneText(A.p)).status || "") &&
+                                !(await tvState()).qr);
+      J.late = { before: before, phone: await phoneText(A.p), service: await service(),
+                 tv: Object.assign(await tvState(), await tv.evaluate(() => ({ same: document.activeElement === window.__u,
+                                                                            uvalue: window.__u.value }))) };
       }
       rootLayout = "real";
     }

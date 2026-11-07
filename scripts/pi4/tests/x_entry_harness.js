@@ -154,6 +154,44 @@ function gate() {
   for (const k of Object.keys(noRoot)) {
     expect("gate", "no_root:" + k, k === "root_no_sig" ? v(noRoot[k]) : v(Object.assign({}, LANDING, noRoot[k])), false);
   }
+  // 0.7.12 — champ « jf » RÉEL (relevé 2026-11-07 sur x.com : le script de X remplace le formulaire servi, SANS changer
+  // d'URL, à « / » comme sur /i/flow/login et /i/jf/onboarding/web?mode=login) : <input autocomplete="username webauthn"
+  // inputmode="text" id="jf-input-username_or_email" pattern="^[a-zA-Z0-9@._+\-]+$" type="text" name="username_or_email">
+  // + leurre <input inert type="password" name="password"> FRÈRE, invisible ; <form> sans action, sans « mode »
+  const JF = { url: "https://x.com/", id: "jf-input-username_or_email", name: "username_or_email", hasForm: true,
+               formAction: null, formModes: [], ac: "username webauthn", inputmode: "text", pattern: "^[a-zA-Z0-9@._+\\-]+$",
+               danger: true, dangerN: 1, decoyN: 1,
+               texts: ["username_or_email", "jf-input-username_or_email", "", "", "", "", "Email or usernameEmail or username"] };
+  const jf = (o) => v(Object.assign({}, JF, o));
+  const jfYes = { root: {}, root_twitter: { url: "https://twitter.com/" }, flow: { url: "https://x.com/i/flow/login" },
+                  onboarding: { url: "https://x.com/i/jf/onboarding/web?mode=login&redirect_after_login=%2F" },
+                  fr: { texts: ["username_or_email", "jf-input-username_or_email", "", "", "", "",
+                                "Adresse email ou nom d'utilisateurAdresse email ou nom d'utilisateur"] },
+                  ac_plain: { ac: "username" } };
+  for (const k of Object.keys(jfYes)) { expect("gate", "jf_yes:" + k, jf(jfYes[k]), true); }
+  // signature EXACTE : chaque écart refusé (« / » ET routes de connexion), un seul leurre exact et rien d'autre
+  const jfNo = { id_other: { id: "jf-input-phone_number" }, id_null: { id: null }, id_case: { id: "JF-input-username_or_email" },
+                 name_other: { name: "phone_number" }, name_null: { name: null }, pattern_digits: { pattern: "[0-9]*" },
+                 pattern_empty_with_decoy: { pattern: "" }, pattern_loose: { pattern: "^.*$" },
+                 no_form: { hasForm: false }, form_truthy: { hasForm: 1 }, action_onb: { formAction: ONB },
+                 action_empty: { formAction: "" }, decoy_none: { dangerN: 1, decoyN: 0 },
+                 two_dangers: { dangerN: 2, decoyN: 1 }, two_decoys: { dangerN: 2, decoyN: 2 }, no_danger_count: { dangerN: undefined },
+                 decoy_str: { decoyN: "1" }, otp_ac: { ac: "one-time-code" }, cur_pw: { ac: "current-password" },
+                 password_type: { type: "password" }, numeric: { inputmode: "numeric" }, maxlen6: { maxlength: 6 },
+                 label_code: { texts: ["Verification code"] }, label_pw: { texts: ["Mot de passe"] },
+                 not_focused: { focused: false }, hidden: { visible: false },
+                 root_query: { url: "https://x.com/?mode=signup" }, root_hash: { url: "https://x.com/#x" },
+                 home: { url: "https://x.com/home" }, signup_flow: { url: "https://x.com/i/flow/signup" },
+                 onb_signup: { url: "https://x.com/i/jf/onboarding/web?mode=signup" } };
+  for (const k of Object.keys(jfNo)) { expect("gate", "jf_no:" + k, jf(jfNo[k]), false); }
+  for (const k of ["flow", "onboarding"]) {   // routes de connexion : même exigence (motif/leurre admis SEULEMENT si jf exact)
+    for (const n of ["id_other", "name_other", "pattern_digits", "no_form", "action_onb", "decoy_none", "two_dangers"]) {
+      expect("gate", "jf_no_" + k + ":" + n, jf(Object.assign({}, jfYes[k], jfNo[n])), false);
+    }
+  }
+  // accueil servi (landing-identifier) : motif ou mot de passe voisin toujours refusés (le leurre n'y est jamais admis)
+  expect("gate", "landing_decoy_refused", v(Object.assign({}, LANDING, { danger: true, dangerN: 1, decoyN: 1 })), false);
+  expect("gate", "landing_pattern_refused", v(Object.assign({}, LANDING, { pattern: JF.pattern })), false);
   const no = { password: { type: "password" }, number: { type: "number" }, search: { type: "search" },
                cur_pw: { ac: "current-password" }, new_pw: { ac: "new-password" }, otp: { ac: "one-time-code" },
                ac_off: { ac: "off" }, ac_empty: { ac: "" }, ac_two: { ac: "username email" }, ac_cc: { ac: "cc-number" },

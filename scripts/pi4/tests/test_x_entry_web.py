@@ -150,7 +150,7 @@ class TestStatic(unittest.TestCase):
                          "`unknown`", "incertain"):
                 self.assertIn(need, doc)
             self.assertNotRegex(doc, r"(?i)wipe it immediately|tout est effacé")   # jamais d'effacement promis
-        self.assertEqual(VERSION, "0.7.11")
+        self.assertEqual(VERSION, "0.7.12")
         man = json.loads(read(os.path.join(EXT, "manifest.json")))
         self.assertEqual(man["version"], VERSION)
         # accueil « / » : xentry.js injecté sur x.com et twitter.com SEULEMENT (www./mobile. : porte oui, script non) ;
@@ -163,7 +163,7 @@ class TestStatic(unittest.TestCase):
             self.assertNotIn("QR à gauche de\nla fenêtre X", doc)
 
     def test_line_caps(self):
-        caps = {"opentv_pi/xentry.py": 400, "x-tv-extension/xentry.js": 560, "ui/xphone.js": 240,
+        caps = {"opentv_pi/xentry.py": 400, "x-tv-extension/xentry.js": 580, "ui/xphone.js": 240,
                 "opentv_pi/web.py": 1538, "opentv_pi/app.py": 1400, "opentv_pi/xprobe.py": 280,
                 "x-tv-extension/nav.js": 560, "x-tv-extension/background.js": 320}
         over = []
@@ -203,7 +203,8 @@ class TestHarnessAndMutations(unittest.TestCase):
         ("xentry", "toks.length !== 1 || !AC_OK.has(toks[0])", "false"),                              # autocomplete
         ("xentry", "!f.texts.some((t) => DENY_RE.test(String(t)))", "true"),                         # libellés
         ("xentry", "if (f.maxlength > 0 && f.maxlength <= 8) { return false; }", ""),                # code court
-        ("xentry", "if (f.pattern || f.danger) { return false; }", ""),                               # mot de passe voisin
+        ("xentry", "if (!jf && (f.pattern || f.danger)) { return false; }", ""),                     # mot de passe voisin
+        ("xentry", "if (!jf && (f.pattern", "if ((f.pattern"),                                       # jf réel admis
         ("xentry", 'if (u.searchParams.has("start")) { return false; }', ""),                        # inscription
         # accueil déconnecté « / » : forme canonique EXACTE seulement (requête, fragment, « ? »/« # » nus refusés)
         ("xentry", 'if (u.pathname === "/") { return u.href === u.origin + "/" ? "root" : false; }',
@@ -213,8 +214,19 @@ class TestHarnessAndMutations(unittest.TestCase):
         ("xentry", 'if (kind !== "root" && kind !== "login") { return false; }', ""),            # URL de connexion
         ("xentry", 'return modes.every((m) => m === "login") ? "login" : false;', 'return "login";'),
         # accueil : signature STATIQUE réelle exigée (champ d'inscription sur place jamais éligible)
-        ("xentry", 'if (kind === "root" && !rootSigOk(f)) { return false; }', ""),
-        ("xentry", 'if (kind === "root" && !rootSigOk(f))', "if (!rootSigOk(f))"),              # autres routes inchangées
+        ("xentry", 'if (kind === "root" && !rootSigOk(f) && !jf) { return false; }', ""),
+        ("xentry", 'if (kind === "root" && !rootSigOk(f) && !jf)', "if (!rootSigOk(f) && !jf)"),  # autres routes
+        ("xentry", ' && !rootSigOk(f) && !jf)', ' && !rootSigOk(f))'),                             # jf réel à « / »
+        # 0.7.12 — champ « jf » réel : chaque terme de la signature EXACTE porte (id, nom, motif, formulaire sans
+        # action, UN seul champ sensible, qui est le leurre exact)
+        ("xentry", "if (f.id !== JF_ID || ", "if ("),
+        ("xentry", " || f.name !== JF_NAME", ""),
+        ("xentry", " || f.pattern !== JF_PATTERN", ""),
+        ("xentry", "return f.hasForm === true && ", "return "),
+        ("xentry", " && f.formAction === null && ", " && "),
+        ("xentry", " && f.dangerN === 1", ""),
+        ("xentry", " && f.decoyN === 1;", ";"),
+        ("xentry", "const jf = jfSigOk(f);", "const jf = false;"),
         ("xentry", 'f.id !== "landing-identifier" || ', ""),
         ("xentry", 'f.name !== "username" || ', ""),
         ("xentry", " || f.formAction !== ONBOARDING_PATH", ""),
@@ -500,6 +512,48 @@ class TestXEntryEndToEnd(unittest.TestCase):
             self.assertIn(v["active"], ("landing-identifier", "signup-identifier"), (k, v))
             self.assertNotEqual(v["after"], "pill", (k, v))
 
+    JF_NEG = {"jf_noinert", "jf_pwstep", "jf_two", "jf_otp", "jf_nonsibling", "jf_signup", "jf_action", "jf_pattern"}
+
+    def assert_jf(self, J, rport):
+        """0.7.12 — champ « jf » RÉEL (le script de X remplace sur place le formulaire servi de « / », URL inchangée ; même
+        champ sur les routes de connexion) : pastille, ↓ + OK RÉELS, QR décodé, UN input + UN change, leurre jamais
+        rempli, aucun clic ni envoi ; géométrie 1080p ; variantes jamais éligibles ; étape mot de passe tardive refusée."""
+        JFID = "jf-input-username_or_email"
+        self.assertEqual(J["swapped"], {"landing": False, "modes": 0, "action": None})     # formulaire jf, pas l'accueil servi
+        self.assertEqual((J["initial"]["active"], J["initial"]["pill"], J["initial"]["qr"]), (JFID, True, False))
+        self.assertEqual(J["initial"]["href"], "https://x.com/")
+        g = J["geo_pill"]
+        self.assertEqual(g["field"], [366, 659, 730, 679])                                # x.com réel : même rectangle
+        self.assert_placed(g, J["geo_panel"], "jf")
+        self.assertGreaterEqual(g["pill"][0], g["form"][2] + 16, g["pill"])                # à droite du formulaire
+        url_re = r"^http://%s:%d/r/x\?s=([A-Za-z0-9_-]{22})#([A-Za-z0-9_-]{22})\.([A-Za-z0-9_-]{43})$" % (re.escape(MDNS), rport)
+        ss = J["session"]
+        self.assertEqual(ss["on_pill"], "pill")
+        m = re.match(url_re, ss["url"])
+        self.assertIsNotNone(m, ss["url"])
+        self.assertEqual(m.group(1), ss["svc"]["sid"])
+        f = J["filled"]
+        self.assertEqual((f["tv"]["value"], f["tv"]["pw"]), ("alex@example.com", [""]))   # leurre jamais rempli
+        self.assertEqual(f["tv"]["ev"], {"input": 1, "change": 1, "click": 0, "submit": 0})
+        self.assertEqual((f["tv"]["qr"], f["tv"]["active"], f["tv"]["href"]), (False, JFID, "https://x.com/"))
+        self.assertIn("C'est fait", f["phone"]["status"])
+        self.assertFalse(f["service"]["active"])
+        for k in ("flow", "onboarding"):
+            self.assertEqual((J["routes"][k]["active"], J["routes"][k]["pill"]), (JFID, True), k)
+        rf = J["routes"]["filled"]
+        self.assertEqual((rf["value"], rf["pw"], rf["ev"]), ("alex@example.com", [""],
+                                                             {"input": 1, "change": 1, "click": 0, "submit": 0}))
+        self.assertEqual(set(J["neg"]), self.JF_NEG)
+        for k, v in J["neg"].items():
+            self.assertEqual((v["href"], v["pill"], v["qr"], v["service"]), ("https://x.com/", False, False, False), (k, v))
+            self.assertNotEqual(v["after"], "pill", (k, v))
+        lt = J["late"]
+        self.assertEqual((lt["before"]["same"], lt["before"]["qr"]), (True, True))
+        self.assertEqual((lt["tv"]["same"], lt["tv"]["uvalue"], lt["tv"]["pw"]), (True, "", [""]))
+        self.assertEqual(lt["tv"]["ev"], {"input": 0, "change": 0, "click": 0, "submit": 0})
+        self.assertIn("n'acceptait plus la saisie", lt["phone"]["status"])
+        self.assertFalse(lt["service"]["active"])
+
     @staticmethod
     def _disjoint(a, b):
         return a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1]
@@ -643,6 +697,8 @@ class TestXEntryEndToEnd(unittest.TestCase):
         self.assertFalse(b["tv"]["qr"])
         # accueil déconnecté RÉEL (x.com/) : éligible à l'URL EXACTE seulement ; QR natif de X distinct
         self.assert_root(st["root"], rport)
+        # 0.7.12 : champ « jf » que le script de X met à la place du formulaire servi (« / » et routes de connexion)
+        self.assert_jf(st["jf"], rport)
         # jamais éligibles : mot de passe, OTP, code de vérification, NIP, mot de passe voisin, passkey, secours,
         # carte ; URL hors connexion (inscription)
         for k, v in st["ineligible"].items():
@@ -696,7 +752,7 @@ class TestXEntryEndToEnd(unittest.TestCase):
                                  "root_start", "root_unexpected"])
         # sans la signature STATIQUE de l'accueil, chaque champ d'inscription rendu sur place à « / » arme la pastille ;
         # sans les obstacles mesurés, le panneau QR recouvre la pastille/le formulaire : la géométrie échoue en vrai
-        st = self.e2e(only="root", mutants=[("xentry.js", 'if (kind === "root" && !rootSigOk(f)) { return false; }', ""),
+        st = self.e2e(only="root", mutants=[("xentry.js", 'if (kind === "root" && !rootSigOk(f) && !jf) { return false; }', ""),
                                             ("xentry.js", "const obs = obstacles(field).concat(extra || []);",
                                              "const obs = [];")])[0]
         self.assertEqual(sorted(k for k, v in st["root"]["inplace"].items() if v["pill"]),
@@ -704,6 +760,16 @@ class TestXEntryEndToEnd(unittest.TestCase):
         url_re = r"^http://[^/]+/r/x\?s=([A-Za-z0-9_-]{22})#"
         with self.assertRaises(AssertionError):
             self.assert_geometry(st["root"], url_re)
+        # 0.7.12 : sans la branche jf, AUCUNE pastille au vrai champ (défaut terrain 0.7.11 reproduit : « / » et routes) ;
+        # sans le contrôle inert / frère du leurre, un mot de passe non inert ou détaché arme la pastille
+        st = self.e2e(only="jf", mutants=[("xentry.js", "const jf = jfSigOk(f);", "const jf = false;")])[0]
+        self.assertEqual((st["jf"]["initial"]["active"], st["jf"]["initial"]["pill"]), ("jf-input-username_or_email", False))
+        self.assertEqual([st["jf"]["routes"][k]["pill"] for k in ("flow", "onboarding")], [False, False])
+        with self.assertRaises((AssertionError, KeyError)):
+            self.assert_jf(st["jf"], 0)
+        st = self.e2e(only="jf", mutants=[("xentry.js", 'c.hasAttribute("inert")', "true"),
+                                          ("xentry.js", "c.parentElement === el.parentElement", "true")])[0]
+        self.assertEqual(sorted(k for k, v in st["jf"]["neg"].items() if v["pill"]), ["jf_noinert", "jf_nonsibling"])
         st = self.e2e(only="badstart", mutants=[(
             "background.js", 'if (typeof j.sid === "string" && XSID_RE.test(j.sid)) { await xentry({ op: "cancel", '
             'sid: j.sid }).catch(() => null); }', "")])[0]

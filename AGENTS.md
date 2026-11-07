@@ -421,6 +421,12 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   routes de connexion hors « / » inchangées. Pastille et panneau QR vertical mesurés après insertion, posés (fonction
   pure `<place>`) entièrement à l'écran, à ≥ 16 px du champ, du formulaire, de chaque contrôle et du QR natif de X,
   d'abord à droite du formulaire ; QR réduit jusqu'à 5 px/module, sinon rien (jamais de recouvrement).
+  **0.7.12** (défaut terrain 0.7.11 : pastille absente) : le script de X remplace sur place, URL inchangée, le formulaire
+  servi par son formulaire « jf » (à « / » et sur les routes de connexion) : `id` `jf-input-username_or_email`, `name`
+  `username_or_email`, `pattern` exact de X, `<form>` sans `action`, leurre `<input inert type=password name=password>`
+  frère du champ. Admis seulement par `jfSigOk` (signature exacte, UN seul champ sensible = ce leurre inert, invisible,
+  même parent) ; tout autre mot de passe/code, leurre non inert ou détaché, inscription jf, `action` ou autre motif :
+  jamais. Diagnostic : vrai Chromium sur x.com (profil neuf, rien saisi, booléens/énumérations seulement).
 - **Mode HDMI exact après extinction/rallumage de la TV (0.7.5)** : terrain 2026-11-01, au rallumage wlroots recrée
   la sortie et Cage prend le mode préféré de l'EDID (3840x2160@30) pendant que Chromium reste en 1920x1080 (quart
   d'écran). `opentv_pi/displaymode.py` : cible exacte `OPENTV_HDMI_MODE` (défaut `1920x1080@60`, jamais un

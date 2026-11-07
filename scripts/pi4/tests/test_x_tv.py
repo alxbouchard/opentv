@@ -935,7 +935,7 @@ class TestKioskAndPolicy(unittest.TestCase):
         self.assertIn("#OPENTV_X_TV=1", read(os.path.join(PI4, "opentv-pi.env.example")))
 
     def test_version_and_docs(self):
-        self.assertEqual(VERSION, "0.7.11")
+        self.assertEqual(VERSION, "0.7.12")
         readme = read(os.path.join(PI4, "README.md"))
         for need in ("X TV Mode", "OPENTV_X_TV=0", "x_context", "non fiable", "connecte-toi", xcontext.EXTENSION_ID):
             self.assertTrue(need in readme, "README sans « %s »" % need)

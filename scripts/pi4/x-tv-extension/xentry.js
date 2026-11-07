@@ -1,4 +1,4 @@
-/* OpenTV X TV Mode — « Saisir avec le téléphone » (0.7.10 ; placement 0.7.11 ; OPENTV_X_PHONE_ENTRY ; défaut : absent).
+/* OpenTV X TV Mode — « Saisir avec le téléphone » (0.7.10 ; placement 0.7.11 ; champ « jf » 0.7.12 ; OPENTV_X_PHONE_ENTRY).
  *
  * But UNIQUE : placer UN identifiant X (nom d'utilisateur, courriel, téléphone) dans le champ de connexion ÉLIGIBLE au
  * focus, sans clavier physique ; Alex continue ensuite lui-même (Suivant, passkey native). Jamais un mot de passe, un
@@ -17,7 +17,9 @@
  *   pourtant) ; URL de connexion seulement (/i/flow/login, /login, /i/jf/onboarding/web?mode=login, et l'accueil
  *   déconnecté « / » en forme canonique EXACTE — href === origin + "/", sans « ? » ni « # », même nus — AVEC la
  *   signature statique de son vrai champ : id landing-identifier, name username, formulaire action EXACTE
- *   /i/jf/onboarding/web et UN contrôle « mode » caché d'attribut value « login » ; jamais une valeur saisie), champ
+ *   /i/jf/onboarding/web et UN contrôle « mode » caché d'attribut value « login » ; jamais une valeur saisie ; OU, à
+ *   « / » comme sur les routes de connexion, la signature EXACTE du champ « jf » que le script de X met à sa place :
+ *   jfSigOk, seul cas où le motif de X et son leurre de mot de passe inert, invisible, frère du champ, sont admis), champ
  *   INPUT au focus, visible, actif, modifiable, d'une ligne, type text/email/tel, autocomplete username / email /
  *   tel / tel-national / tel-local (± webauthn) ; refusé : inputmode numérique, maxlength ≤ 8, pattern, et tout
  *   libellé/nom/placeholder du champ ou titre de la fenêtre évoquant mot de passe, code, OTP, NIP, vérification, 2FA,
@@ -94,19 +96,33 @@
     const m = f.formModes;
     return Array.isArray(m) && m.length === 1 && !!m[0] && m[0].type === "hidden" && m[0].valueAttr === "login";
   }
+  // 0.7.12 (terrain : pastille absente) : le script de X REMPLACE sur place, sans changer d'URL, le formulaire servi par
+  // celui de son moteur « jf » — à « / » comme sur /i/flow/login et /i/jf/onboarding/web?mode=login (relevé réel
+  // 2026-11-07, Chromium 1920×1080). Signature EXACTE de cette étape identifiant (attributs STATIQUES seulement) : id
+  // jf-input-username_or_email, name username_or_email, motif EXACT de X, formulaire SANS action, et UN SEUL champ
+  // sensible dans la portée : le leurre de X pour les gestionnaires de mots de passe (input inert, type password,
+  // name password, invisible, frère du champ). Tout autre mot de passe ou code, visible ou non : jamais éligible.
+  const JF_ID = "jf-input-username_or_email";
+  const JF_NAME = "username_or_email";
+  const JF_PATTERN = "^[a-zA-Z0-9@._+\\-]+$";
+  function jfSigOk(f) {
+    if (f.id !== JF_ID || f.name !== JF_NAME || f.pattern !== JF_PATTERN) { return false; }
+    return f.hasForm === true && f.formAction === null && f.dangerN === 1 && f.decoyN === 1;
+  }
   // f : faits relevés sur le champ (attributs seulement, JAMAIS la valeur) -> éligible ?
   function factsOk(f) {
     if (!f || f.top !== true || f.focused !== true || f.visible !== true || f.tag !== "INPUT") { return false; }
     const kind = loginUrl(f.url);
     if (kind !== "root" && kind !== "login") { return false; }
-    if (kind === "root" && !rootSigOk(f)) { return false; }
+    const jf = jfSigOk(f);
+    if (kind === "root" && !rootSigOk(f) && !jf) { return false; }
     if (f.disabled || f.readonly || !TYPE_OK.has(f.type)) { return false; }
     const toks = String(f.ac).toLowerCase().trim().split(/\s+/).filter(Boolean);
     if (toks.length === 2 && toks[1] === "webauthn") { toks.pop(); }
     if (toks.length !== 1 || !AC_OK.has(toks[0])) { return false; }
     if (/^(numeric|decimal)$/i.test(String(f.inputmode).trim())) { return false; }
     if (f.maxlength > 0 && f.maxlength <= 8) { return false; }   // code court
-    if (f.pattern || f.danger) { return false; }                  // motif imposé, mot de passe/code à côté
+    if (!jf && (f.pattern || f.danger)) { return false; }         // motif imposé, mot de passe/code à côté (hors jf exact)
     return Array.isArray(f.texts) && !f.texts.some((t) => DENY_RE.test(String(t)));
   }
   // document déchiffré -> identifiant nettoyé et borné, ou null (séance, secret, champs exacts)
@@ -207,16 +223,23 @@
     // caché ; jamais une valeur saisie
     const form = el.form;
     const modes = form ? Array.from(form.elements).filter((c) => c.getAttribute("name") === "mode").slice(0, 4) : [];
+    const dangers = Array.from(scope.querySelectorAll(DANGER_SEL)).slice(0, 8);   // mots de passe / codes de la portée
     return {
       top: window.top === window, focused: document.activeElement === el, visible: visible(el), tag: el.tagName,
-      disabled: el.disabled, readonly: el.readOnly, url: location.href,
+      disabled: el.disabled, readonly: el.readOnly, url: location.href, hasForm: !!form,
       id: el.getAttribute("id"), name: el.getAttribute("name"), formAction: form ? form.getAttribute("action") : null,
       formModes: modes.map((c) => ({ type: c.tagName === "INPUT" ? (c.getAttribute("type") || "").trim().toLowerCase() : "",
                                      valueAttr: c.getAttribute("value") })),
       type: (el.getAttribute("type") || "text").trim().toLowerCase(), ac: el.getAttribute("autocomplete") || "",
       inputmode: el.getAttribute("inputmode") || "", maxlength: el.maxLength, pattern: el.getAttribute("pattern") || "",
-      danger: !!scope.querySelector(DANGER_SEL), texts: texts
+      danger: dangers.length > 0, dangerN: dangers.length, decoyN: dangers.filter((c) => decoy(c, el)).length, texts: texts
     };
+  }
+  // leurre « jf » de X : <input inert type=password name=password> FRÈRE du champ, invisible (attributs seulement)
+  function decoy(c, el) {
+    return c !== el && c.tagName === "INPUT" && c.parentElement === el.parentElement && c.hasAttribute("inert") &&
+      (c.getAttribute("type") || "").trim().toLowerCase() === "password" && c.getAttribute("name") === "password" &&
+      !visible(c);
   }
   function eligible(el) { return el instanceof HTMLInputElement && factsOk(facts(el)); }
 
