@@ -97,6 +97,11 @@ class TestStatic(unittest.TestCase):
             keys = sorted(k.strip().split(":")[0] for k in m.split(",") if k.strip())
             self.assertTrue(set(keys) <= {"type", "op", "n", "e", "sid", "result"}, keys)
         self.assertIn("if (!e || e.isTrusted !== true) { return false; }", src)
+        # signature de l'accueil : attributs STATIQUES seulement (getAttribute), jamais une propriété saisissable
+        self.assertIn('id: el.getAttribute("id"), name: el.getAttribute("name"), formAction: form ? '
+                      'form.getAttribute("action") : null,', src)
+        self.assertIn('valueAttr: c.getAttribute("value")', src)
+        self.assertIn('.filter((c) => c.getAttribute("name") === "mode")', src)
         nav = code_only(read(os.path.join(EXT, "nav.js")))
         # armement : seulement après la porte isTrusted de nav.js, et par une flèche RÉELLE (navFocus dans loginKey)
         self.assertLess(nav.index("if (!e.isTrusted) { return; }"), nav.index("eh.key(e) === true"))
@@ -145,11 +150,20 @@ class TestStatic(unittest.TestCase):
                          "`unknown`", "incertain"):
                 self.assertIn(need, doc)
             self.assertNotRegex(doc, r"(?i)wipe it immediately|tout est effacé")   # jamais d'effacement promis
-        self.assertEqual(VERSION, "0.7.10")
-        self.assertEqual(json.loads(read(os.path.join(EXT, "manifest.json")))["version"], VERSION)
+        self.assertEqual(VERSION, "0.7.11")
+        man = json.loads(read(os.path.join(EXT, "manifest.json")))
+        self.assertEqual(man["version"], VERSION)
+        # accueil « / » : xentry.js injecté sur x.com et twitter.com SEULEMENT (www./mobile. : porte oui, script non) ;
+        # la documentation le dit tel quel
+        xe = [c for c in man["content_scripts"] if "xentry.js" in c["js"]]
+        self.assertEqual([c["matches"] for c in xe], [["https://x.com/*", "https://twitter.com/*"]])
+        for doc in (readme, agents_md):
+            for need in ("www.`/`mobile.`", 'href === ', 'origin + "/"', "landing-identifier", "/i/jf/onboarding/web"):
+                self.assertIn(need, doc)
+            self.assertNotIn("QR à gauche de\nla fenêtre X", doc)
 
     def test_line_caps(self):
-        caps = {"opentv_pi/xentry.py": 400, "x-tv-extension/xentry.js": 430, "ui/xphone.js": 240,
+        caps = {"opentv_pi/xentry.py": 400, "x-tv-extension/xentry.js": 560, "ui/xphone.js": 240,
                 "opentv_pi/web.py": 1538, "opentv_pi/app.py": 1400, "opentv_pi/xprobe.py": 280,
                 "x-tv-extension/nav.js": 560, "x-tv-extension/background.js": 320}
         over = []
@@ -174,7 +188,8 @@ class TestHarnessAndMutations(unittest.TestCase):
         self.assertEqual(code, 0, r)
         self.assertTrue(r["ok"], r)
         self.assertGreaterEqual(r["counts"]["phone"], 30)
-        self.assertGreaterEqual(r["counts"]["gate"], 135)
+        self.assertGreaterEqual(r["counts"]["gate"], 170)
+        self.assertGreaterEqual(r["counts"]["place"], 50)
         self.assertGreaterEqual(r["counts"]["ident"], 35)
         self.assertGreaterEqual(r["counts"]["fill"], 14)
         self.assertGreaterEqual(r["counts"]["ui"], 40)
@@ -189,15 +204,37 @@ class TestHarnessAndMutations(unittest.TestCase):
         ("xentry", "!f.texts.some((t) => DENY_RE.test(String(t)))", "true"),                         # libellés
         ("xentry", "if (f.maxlength > 0 && f.maxlength <= 8) { return false; }", ""),                # code court
         ("xentry", "if (f.pattern || f.danger) { return false; }", ""),                               # mot de passe voisin
-        ("xentry", "|| !loginUrl(f.url) ", ""),                                                       # URL de connexion
         ("xentry", 'if (u.searchParams.has("start")) { return false; }', ""),                        # inscription
-        # accueil déconnecté « / » : URL EXACTE seulement (requête, fragment, chemin « // » refusés)
-        ("xentry", 'if (u.pathname === "/") { return !u.search && !u.hash; }',
-                   'if (u.pathname === "/") { return true; }'),
-        ("xentry", "return !u.search && !u.hash;", "return !u.hash;"),
-        ("xentry", "return !u.search && !u.hash;", "return !u.search;"),
-        ("xentry", 'if (u.pathname === "/")', 'if (path === "/")'),
-        ("xentry", 'if (u.pathname === "/") { return !u.search && !u.hash; }', ""),             # accueil refusé
+        # accueil déconnecté « / » : forme canonique EXACTE seulement (requête, fragment, « ? »/« # » nus refusés)
+        ("xentry", 'if (u.pathname === "/") { return u.href === u.origin + "/" ? "root" : false; }',
+                   'if (u.pathname === "/") { return "root"; }'),
+        ("xentry", 'u.href === u.origin + "/"', "!u.search && !u.hash"),                       # « ? »/« # » nus
+        ("xentry", 'if (u.pathname === "/") { return u.href === u.origin + "/" ? "root" : false; }', ""),   # refusé
+        ("xentry", 'if (kind !== "root" && kind !== "login") { return false; }', ""),            # URL de connexion
+        ("xentry", 'return modes.every((m) => m === "login") ? "login" : false;', 'return "login";'),
+        # accueil : signature STATIQUE réelle exigée (champ d'inscription sur place jamais éligible)
+        ("xentry", 'if (kind === "root" && !rootSigOk(f)) { return false; }', ""),
+        ("xentry", 'if (kind === "root" && !rootSigOk(f))', "if (!rootSigOk(f))"),              # autres routes inchangées
+        ("xentry", 'f.id !== "landing-identifier" || ', ""),
+        ("xentry", 'f.name !== "username" || ', ""),
+        ("xentry", " || f.formAction !== ONBOARDING_PATH", ""),
+        ("xentry", "m.length === 1 && ", ""),
+        ("xentry", ' && m[0].type === "hidden"', ""),
+        ("xentry", ' && m[0].valueAttr === "login"', ""),
+        # placement : à l'écran, à l'écart des obstacles, à droite du formulaire, au plus près ; null sans place
+        ("xentry", "if (obstacles.some((o) => hits(box, o, GAP))) { continue; }", ""),
+        ("xentry", "if (!(w > 0 && h > 0) || w > vw - 2 * EDGE || h > vh - 2 * EDGE) { return null; }", ""),
+        ("xentry", "!(w > 0 && h > 0) || ", ""),
+        ("xentry", "const maxL = vw - w - EDGE;", "const maxL = vw - w;"),
+        ("xentry", "const maxT = vh - h - EDGE;", "const maxT = vh - h;"),
+        ("xentry", "return a.left < b.right + gap && ", "return "),
+        ("xentry", "b.left < a.right + gap && ", ""),
+        ("xentry", "a.top < b.bottom + gap && ", ""),
+        ("xentry", " && b.top < a.bottom + gap;", ";"),
+        ("xentry", "(left >= scope.right + GAP ? 0 : 1e6) + ", ""),
+        ("xentry", "Math.min(max, Math.max(EDGE, Math.round(p)))", "EDGE"),
+        ("xentry", "if (!best || score < best.score)", "if (!best)"),
+        ("xentry", "const GAP = 16;", "const GAP = 0;"),
         ("xentry", "|| !TYPE_OK.has(f.type)", ""),                                                    # type
         ("xentry", "if (/^(numeric|decimal)$/i.test(String(f.inputmode).trim())) { return false; }", ""),
         ("xentry", "|| !sameText(doc.f, secret)", ""),                                                # secret du QR
@@ -436,7 +473,7 @@ class TestXEntryEndToEnd(unittest.TestCase):
         self.assertNotEqual(R["native_qr"], ss["url"])
         self.assertEqual(sorted(R["full_qrs"]), sorted([self.NATIVE_QR, ss["url"]]), R["full_qrs"])
         self.assertEqual([q for q in R["full_qrs"] if re.match(url_re, q)], [ss["url"]])   # UN seul QR OpenTV
-        self.assertLess(R["qr_box"]["right"], 1100)                                  # à gauche du formulaire de X
+        self.assert_geometry(R, url_re)
         f = R["filled"]
         self.assertEqual(f["tv"]["value"], "alex@example.com")
         self.assertEqual(f["tv"]["ev"], {"input": 1, "change": 1, "click": 0, "submit": 0})
@@ -444,7 +481,7 @@ class TestXEntryEndToEnd(unittest.TestCase):
         self.assertIn("C'est fait", f["phone"]["status"])
         self.assertFalse(f["service"]["active"])
         want_neg = {"root_signup", "root_mode_login", "root_start", "root_lang", "root_unexpected", "home", "flow_signup",
-                    "http", "evil"}
+                    "http", "evil", "root_bare_query", "root_bare_hash"}
         self.assertEqual(set(R["neg"]), want_neg)
         for k, v in R["neg"].items():
             self.assertEqual(v["active"], "landing-identifier", (k, v))                 # MÊME champ réel au focus
@@ -454,6 +491,63 @@ class TestXEntryEndToEnd(unittest.TestCase):
             self.assertFalse(v["service"], (k, v))
         self.assertTrue(R["neg"]["http"]["href"].startswith("http://x.com/"), R["neg"]["http"])     # jamais promu en https
         self.assertTrue(R["neg"]["evil"]["href"].startswith("https://x.com.evil.example/"), R["neg"]["evil"])
+        self.assertEqual((R["neg"]["root_bare_query"]["href"], R["neg"]["root_bare_hash"]["href"]),
+                         ("https://x.com/?", "https://x.com/#"))                       # « ? »/« # » nus : jamais éligibles
+        # champ d'inscription rendu SUR PLACE à « / » (URL exacte, champ au focus) : aucune pastille, aucune séance
+        self.assertEqual(set(R["inplace"]), {"signup_mode", "signup_field", "no_form"})
+        for k, v in R["inplace"].items():
+            self.assertEqual((v["href"], v["pill"], v["qr"], v["service"]), ("https://x.com/", False, False, False), (k, v))
+            self.assertIn(v["active"], ("landing-identifier", "signup-identifier"), (k, v))
+            self.assertNotEqual(v["after"], "pill", (k, v))
+
+    @staticmethod
+    def _disjoint(a, b):
+        return a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1]
+
+    def assert_placed(self, before, after, name):
+        """Rectangles EXACTS mesurés dans Chromium : pastille (avant) et panneau QR (après OK) ENTIÈREMENT à l'écran à
+        ≥ 16 px des bords, sans intersection avec le champ, le formulaire, Continuer, le QR natif (#getapp), aucun
+        contrôle de X, ni entre eux."""
+        self.assertEqual((before["vw"], before["vh"], after["vw"], after["vh"]), (1920, 1080, 1920, 1080), name)
+        pill, panel = before["pill"], after["panel"]
+        self.assertIsNotNone(pill, name)
+        self.assertIsNotNone(panel, name)
+        self.assertIsNone(before["panel"], name)
+        self.assertIsNone(after["pill"], name)                                     # pastille retirée pendant la séance
+        for what, r in (("pill", pill), ("panel", panel)):
+            self.assertTrue(r[0] >= 16 and r[1] >= 16 and r[2] <= 1920 - 16 and r[3] <= 1080 - 16, (name, what, r))
+            for g in (before, after):
+                for ob in ("field", "form", "cont", "getapp", "appqr", "help"):
+                    if g[ob] is not None:
+                        self.assertTrue(self._disjoint(r, g[ob]), (name, what, ob, r, g[ob]))
+                for c in g["controls"]:
+                    if c[2] > c[0] and c[3] > c[1]:
+                        self.assertTrue(self._disjoint(r, c), (name, what, "control", r, c))
+        self.assertTrue(self._disjoint(pill, panel), (name, pill, panel))
+        self.assertEqual(before["field"], after["field"], name)                    # X n'a pas bougé
+
+    def assert_geometry(self, R, url_re):
+        """Accueil RÉEL 1920×1080 (géométrie mesurée sur x.com) : pastille juste à droite du formulaire, centrée sur le
+        champ ; panneau QR vertical en haut à droite du formulaire ; les quatre bords de l'écran : toujours bien posés."""
+        g, p = R["geo_pill"], R["geo_panel"]
+        self.assertEqual(g["field"], [366, 659, 730, 679])                         # x.com réel : champ landing-identifier
+        self.assertEqual(g["form"], [356, 627, 740, 757])
+        self.assertEqual(g["cont"], [356, 709, 740, 757])
+        self.assertTrue(g["getapp"][2] > 1800 and g["getapp"][3] > 1000, g["getapp"])  # QR natif en bas à droite
+        self.assertIsNotNone(g["help"])                                            # consigne de nav.js, jamais couverte
+        self.assert_placed(g, p, "real")
+        self.assertEqual(g["pill"][0], g["form"][2] + 32, g["pill"])              # à DROITE du formulaire
+        self.assertLessEqual(abs((g["pill"][1] + g["pill"][3]) - (g["field"][1] + g["field"][3])), 2, g["pill"])
+        self.assertEqual(p["panel"][1], 16, p["panel"])                            # vertical, en haut
+        self.assertGreaterEqual(p["panel"][0], g["form"][2] + 16, p["panel"])      # à droite du formulaire
+        self.assertEqual(set(R["edges"]), {"left", "right", "top", "bottom"})
+        for k, e in R["edges"].items():
+            self.assertEqual(e["on_pill"], "pill", k)
+            self.assert_placed(e["before"], e["after"], k)
+            m = re.match(url_re, e["url"])                                          # QR d'OpenTV décodé sur capture
+            self.assertIsNotNone(m, (k, e["url"]))
+            self.assertEqual(m.group(1), e["sid"], k)
+        self.assertTrue(R["edges"]["right"]["after"]["panel"][2] <= R["edges"]["right"]["before"]["form"][0] - 16)
 
     def test_real_chromium_extension_phone_service(self):
         st, a, ctl, shots, rport = self.e2e()
@@ -593,12 +687,23 @@ class TestXEntryEndToEnd(unittest.TestCase):
             self.assert_late_refused(st["late"])
         # accueil : sans la branche « / », AUCUNE pastille au champ réel (défaut terrain 0.7.10) ; branche sans
         # contrôle de requête : l'accueil d'inscription (?mode=signup, ?start=phone…) armerait la pastille
-        root = 'if (u.pathname === "/") { return !u.search && !u.hash; }'
+        root = 'if (u.pathname === "/") { return u.href === u.origin + "/" ? "root" : false; }'
         st = self.e2e(only="root", mutants=[("xentry.js", root, "")])[0]
         self.assertEqual((st["root"]["initial"]["active"], st["root"]["initial"]["pill"]), ("landing-identifier", False))
-        st = self.e2e(only="root", mutants=[("xentry.js", root, 'if (u.pathname === "/") { return true; }')])[0]
+        st = self.e2e(only="root", mutants=[("xentry.js", root, 'if (u.pathname === "/") { return "root"; }')])[0]
         armed = sorted(k for k, v in st["root"]["neg"].items() if v["pill"])
-        self.assertEqual(armed, ["root_lang", "root_mode_login", "root_signup", "root_start", "root_unexpected"])
+        self.assertEqual(armed, ["root_bare_hash", "root_bare_query", "root_lang", "root_mode_login", "root_signup",
+                                 "root_start", "root_unexpected"])
+        # sans la signature STATIQUE de l'accueil, chaque champ d'inscription rendu sur place à « / » arme la pastille ;
+        # sans les obstacles mesurés, le panneau QR recouvre la pastille/le formulaire : la géométrie échoue en vrai
+        st = self.e2e(only="root", mutants=[("xentry.js", 'if (kind === "root" && !rootSigOk(f)) { return false; }', ""),
+                                            ("xentry.js", "const obs = obstacles(field).concat(extra || []);",
+                                             "const obs = [];")])[0]
+        self.assertEqual(sorted(k for k, v in st["root"]["inplace"].items() if v["pill"]),
+                         ["no_form", "signup_field", "signup_mode"])
+        url_re = r"^http://[^/]+/r/x\?s=([A-Za-z0-9_-]{22})#"
+        with self.assertRaises(AssertionError):
+            self.assert_geometry(st["root"], url_re)
         st = self.e2e(only="badstart", mutants=[(
             "background.js", 'if (typeof j.sid === "string" && XSID_RE.test(j.sid)) { await xentry({ op: "cancel", '
             'sid: j.sid }).catch(() => null); }', "")])[0]

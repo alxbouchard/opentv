@@ -415,6 +415,12 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   voit que le chiffré (il peut voler le cookie pour réclamer/annuler, rien injecter sans le secret du QR) ; un
   attaquant ACTIF du LAN ou un Pi/service OpenTV compromis peut la remplacer (pas de promesse bout en bout). Tests
   `test_x_entry.py`, `test_x_entry_web.py` (harnais + mutations + Chromium réel). Hors matériel seulement ; gate terrain sur le vrai X.
+  **0.7.11** : accueil `https://x.com/` (ou `https://twitter.com/` ; script injecté sur ces deux hôtes seulement, jamais
+  `www.`/`mobile.`) éligible en forme canonique exacte (`href === origin + "/"`) ET avec la signature statique du vrai
+  champ (`id` landing-identifier, `name` username, `action` exacte `/i/jf/onboarding/web`, UN `mode` caché `login`) ;
+  routes de connexion hors « / » inchangées. Pastille et panneau QR vertical mesurés après insertion, posés (fonction
+  pure `<place>`) entièrement à l'écran, à ≥ 16 px du champ, du formulaire, de chaque contrôle et du QR natif de X,
+  d'abord à droite du formulaire ; QR réduit jusqu'à 5 px/module, sinon rien (jamais de recouvrement).
 - **Mode HDMI exact après extinction/rallumage de la TV (0.7.5)** : terrain 2026-11-01, au rallumage wlroots recrée
   la sortie et Cage prend le mode préféré de l'EDID (3840x2160@30) pendant que Chromium reste en 1920x1080 (quart
   d'écran). `opentv_pi/displaymode.py` : cible exacte `OPENTV_HDMI_MODE` (défaut `1920x1080@60`, jamais un

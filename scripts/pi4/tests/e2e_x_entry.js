@@ -5,7 +5,8 @@
    argv[2] = module playwright ; argv[3] = JSON {chrome, ext, ext_id, tv, port, ctl, map, shots, only?}.
    only (mutations) : null = tout ; "late" = champ rendu inéligible après le QR seulement ; "badstart" = réponse de
    start écartée seulement ; "root" = accueil déconnecté réel (x.com/ : champ landing-identifier, QR natif de X
-   « Scan to get the app ») et URL voisines refusées seulement.
+   « Scan to get the app », géométrie 1920×1080 mesurée sur le vrai x.com, colonne aux quatre bords de l'écran, champ
+   d'inscription rendu sur place) et URL voisines refusées seulement.
    Sortie : une ligne JSON {steps}. */
 "use strict";
 const fs = require("fs");
@@ -33,36 +34,66 @@ function page(title, field) {
     `<button id="forgot" type="button">Forgot password?</button></form></div></div>${INSTR}</body></html>`;
 }
 // accueil déconnecté RÉEL (HTML de https://x.com/ relevé le 2026-11-06 : balisage du formulaire et attributs EXACTS du
-// champ, classes retirées) + QR NATIF de X « Scan to get the app » en bas à droite (rendu côté client par X : sa charge
-// exacte n'est pas relevée ; NATIVE_QR est un substitut d'adresse X de téléchargement — seul compte qu'il n'est PAS le
-// QR d'OpenTV). Le champ reçoit le focus comme sur le terrain (photo : « Email or username » au focus).
+// champ, classes Tailwind remplacées par une CSS ÉQUIVALENTE minimale) + QR NATIF de X « Scan to get the app » en bas à
+// droite (rendu côté client par X : sa charge exacte n'est pas relevée ; NATIVE_QR est un substitut d'adresse X de
+// téléchargement — seul compte qu'il n'est PAS le QR d'OpenTV). Géométrie 1920×1080 = celle MESURÉE sur le vrai x.com le
+// 2026-11-07 (Chromium) : fournisseurs [356,386..566,740], formulaire [356,627,740,757], champ landing-identifier
+// [366,659,730,679], Continuer [356,709,740,757], logo X [1053,271,1533,761], pied de page y 1044..1068, calque fixe
+// plein écran pointer-events:none. Variantes (même URL exacte « / », choisies par le test avant chaque chargement) :
+// colonne collée à gauche, à droite, en haut, en bas ; champ d'inscription rendu SUR PLACE (jamais éligible).
 const ONB = "/i/jf/onboarding/web";
 const NATIVE_QR = "https://x.com/download?src=landing";
 const QRLIB = fs.readFileSync(path.join(cfg.ext, "qrcode.js"), "utf8");
-const LANDING = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>X. It’s what’s happening / X</title>` +
-  `<style>body{margin:0;font:16px sans-serif;background:#000;color:#fff}#main{position:absolute;left:1100px;top:120px;` +
-  `width:380px}a,button,input{display:block;margin:10px 0;width:360px;min-height:40px}svg{width:20px;height:20px}` +
-  `label{display:block;border:2px solid #555;padding:6px}` +
-  `#getapp{position:fixed;right:40px;bottom:40px;background:#fff;color:#000;padding:16px;text-align:center}</style>` +
-  `</head><body><div id="main"><h1>Happening now<!-- -->.</h1><div><div><div>` +
+const LAYOUTS = { real: [356, 226], left: [16, 226], right: [1520, 16], top: [768, -385], bottom: [768, 527] };
+let rootLayout = "real";
+function landing(layout) {
+  const pos = LAYOUTS[layout] || LAYOUTS.real;
+  const mode = layout === "signup_mode" ? "signup" : "login";
+  const fid = layout === "signup_field" ? "signup-identifier" : "landing-identifier";
+  const fname = layout === "signup_field" ? "email" : "username";
+  const formOpen = layout === "no_form" ? `<div id="f">` : `<form action="${ONB}" method="get">`;
+  const formClose = layout === "no_form" ? `</div>` : `</form>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>X. It’s what’s happening / X</title>` +
+  `<style>body{margin:0;font:15px/20px sans-serif;background:#fff;color:#0f1419;overflow:hidden}` +
+  `#col{position:absolute;left:${pos[0]}px;top:${pos[1]}px;width:384px;display:flex;flex-direction:column;gap:20px}` +
+  `h1{margin:0;height:140px;font:700 60px/70px sans-serif}.prov{display:flex;flex-direction:column;gap:20px}` +
+  `.prov a{display:flex;align-items:center;justify-content:center;height:46px;box-sizing:border-box;` +
+  `border:1px solid #cfd9de;border-radius:9999px;color:#0f1419;text-decoration:none}#phone{background:#000;color:#fff!important}` +
+  `#apple{height:48px!important}.or{height:21px;text-align:center;font-size:14px}` +
+  `form,#f{display:flex;flex-direction:column;gap:20px;margin:0}` +
+  `label{display:block;position:relative;height:62px;box-sizing:border-box;border:1px solid #cfd9de;border-radius:4px;` +
+  `padding:31px 9px 0}label>span{display:block}label span span{position:absolute;left:9px;top:8px;font-size:13px;` +
+  `color:#536471}label input{display:block;width:100%;height:20px;border:0;padding:0;margin:0;outline:none;` +
+  `background:transparent;font-size:17px}#continue{height:48px;border:0;border-radius:9999px;margin:0;background:#aaa}` +
+  `p{margin:2px 0 0;font-size:12px;line-height:18px;text-align:center}svg{width:20px;height:20px}` +
+  `#logo{position:absolute;left:1053px;top:271px;width:480px;height:490px}` +
+  `footer{position:absolute;left:491px;top:1044px;display:flex;gap:11px;font-size:13px;line-height:24px}` +
+  `#overlay{pointer-events:none;position:fixed;top:20px;left:20px;right:20px;bottom:20px;z-index:40}` +
+  `#getapp{position:fixed;right:40px;bottom:40px;background:#fff;color:#000;padding:16px;text-align:center;` +
+  `border:1px solid #cfd9de;border-radius:16px;z-index:30}#appqr{display:block;margin:8px auto 0}</style>` +
+  `</head><body><div id="col"><h1>Happening now<!-- -->.</h1><div class="prov">` +
   `<a id="phone" href="${ONB}?mode=signup&amp;redirect_after_login=%2F"><span><svg></svg></span><span>Continue with phone</span></a>` +
-  `<div><div><a id="google" href="${ONB}?mode=login&amp;redirect_after_login=%2F"><span><svg></svg></span>` +
-  `<span>Continue with Google</span></a></div></div><a id="apple" href="${ONB}?mode=login&amp;redirect_after_login=%2F">` +
-  `<span><svg></svg></span><span>Continue with Apple</span></a></div><div><span></span> or <span></span></div>` +
-  `<form action="${ONB}" method="get"><input type="hidden" name="mode" value="login"/>` +
-  `<label for="landing-identifier" aria-label="Email or username"><span><span>Email or username</span>` +
-  `<span>Email or username</span><input id="landing-identifier" type="text" autoComplete="username" ` +
+  `<a id="google" href="${ONB}?mode=login&amp;redirect_after_login=%2F"><span><svg></svg></span>` +
+  `<span>Continue with Google</span></a><a id="apple" href="${ONB}?mode=login&amp;redirect_after_login=%2F">` +
+  `<span><svg></svg></span><span>Continue with Apple</span></a></div><div class="or"><span></span> or <span></span></div>` +
+  `${formOpen}<input type="hidden" name="mode" value="${mode}"/>` +
+  `<label for="${fid}" aria-label="Email or username"><span><span>Email or username</span>` +
+  `<span>Email or username</span><input id="${fid}" type="text" autoComplete="username" ` +
   `autoCapitalize="none" autoCorrect="off" spellCheck="false" required="" placeholder=" " ` +
-  `class="h-5 w-full bg-transparent outline-none" name="username"/></span></label>` +
-  `<button id="continue" type="submit"><span>Continue</span></button></form><p>By continuing, you agree to our ` +
+  `class="h-5 w-full bg-transparent outline-none" name="${fname}"/></span></label>` +
+  `<button id="continue" type="submit"><span>Continue</span></button>${formClose}<p>By continuing, you agree to our ` +
   `<a id="tos" href="https://x.com/tos" target="_blank" rel="noopener noreferrer nofollow">Terms of Service</a></p>` +
-  `</div></div></div><div id="getapp"><div>Scan to get the app</div><canvas id="appqr" width="232" height="232"></canvas>` +
+  `</div><svg id="logo" viewBox="0 0 24 24" aria-label="X" role="img"><path d="M2 2h5l15 20h-5z"></path></svg>` +
+  `<footer><a href="https://about.x.com">About</a><a href="https://help.x.com/using-x/download-the-x-app">Get App</a>` +
+  `<a href="https://x.com/tos">Terms</a><a href="https://x.com/privacy">Privacy</a></footer><div id="overlay"></div>` +
+  `<div id="getapp"><div>Scan to get the app</div><canvas id="appqr" width="232" height="232"></canvas>` +
   `</div><script>${QRLIB}</script><script>(function(){var q=qrcode(0,"M");q.addData(${JSON.stringify(NATIVE_QR)});` +
   `q.make();var n=q.getModuleCount(),c=document.getElementById("appqr"),k=Math.floor(232/(n+8)),g=c.getContext("2d");` +
   `g.fillStyle="#fff";g.fillRect(0,0,232,232);g.fillStyle="#000";for(var r=0;r<n;r++){for(var j=0;j<n;j++){` +
   `if(q.isDark(r,j)){g.fillRect((j+4)*k,(r+4)*k,k,k);}}}` +
   `document.addEventListener("submit",function(e){e.preventDefault();},true);` +
-  `document.getElementById("landing-identifier").focus();})();</script>${INSTR}</body></html>`;
+  `document.getElementById(${JSON.stringify(fid)}).focus();})();</script>${INSTR}</body></html>`;
+}
 const CASES = {
   login: page("Sign in to X", USER),
   password: page("Enter your password", `<input id="user" name="password" type="password" autocomplete="current-password" autofocus>`),
@@ -107,7 +138,7 @@ function ctl(method, p, body) {
       const u = new URL(route.request().url());
       // pages de connexion synthétiques ; partout ailleurs (accueil, /home, inscription, http, hôte piégé) : l'accueil RÉEL
       const flow = u.hostname === "x.com" && u.protocol === "https:" && /^\/(i\/flow\/login|i\/jf\/onboarding\/web)$/.test(u.pathname);
-      const body = flow ? CASES[u.searchParams.get("case") || "login"] || CASES.login : LANDING;
+      const body = flow ? CASES[u.searchParams.get("case") || "login"] || CASES.login : landing(rootLayout);
       return route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: body });
     });
     const tv = ctx.pages()[0] || await ctx.newPage();
@@ -136,7 +167,8 @@ function ctl(method, p, body) {
       return { active: ae ? (ae.getAttribute("data-otvx-entry") || ae.id || ae.tagName) : null,
                pill: !!pill && pill.isConnected && pill.getBoundingClientRect().width > 0,
                qr: !!document.querySelector('[data-otvx-entry="qr"]'),
-               value: (document.getElementById("user") || document.getElementById("landing-identifier")).value,
+               value: (document.getElementById("user") || document.getElementById("landing-identifier") ||
+                       document.getElementById("signup-identifier")).value,
                ev: Object.assign({}, window.__ev), href: location.href };
     });
     const waitFor = async (fn, ms) => {
@@ -144,6 +176,19 @@ function ctl(method, p, body) {
       return false;
     };
     const service = () => ctl("GET", "/state");
+    // rectangles EXACTS (getBoundingClientRect) : champ, formulaire, Continuer, QR natif, chaque contrôle ; pastille et
+    // panneau d'OpenTV (hôtes des racines fantômes fermées : leur rectangle est visible de la page, pas leur contenu)
+    const geo = () => tv.evaluate(() => {
+      const R = (el) => { if (!el) { return null; } const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
+      const f = document.getElementById("landing-identifier") || document.getElementById("signup-identifier");
+      const pill = document.querySelector('[data-otvx-entry="pill"]');
+      return { vw: innerWidth, vh: innerHeight, field: R(f), form: R(f && f.form), cont: R(document.getElementById("continue")),
+               getapp: R(document.getElementById("getapp")), appqr: R(document.getElementById("appqr")),
+               help: R(document.querySelector(".otvx-login-help")),
+               pill: pill && pill.isConnected ? R(pill) : null, panel: R(document.querySelector('[data-otvx-entry="qr"]')),
+               controls: Array.from(document.querySelectorAll("a[href], button, input:not([type=hidden])"))
+                 .filter((el) => !el.closest("[data-otvx-entry]")).map(R) };
+    });
     // ---------------------------------------------------------------- champ éligible : pastille ; faux événements
     await openX("/i/flow/login");
     st.initial = await tvState();
@@ -413,6 +458,7 @@ function ctl(method, p, body) {
       await sleep(300);
       await tv.evaluate(() => { window.__ev = { input: 0, change: 0, click: 0, submit: 0 }; });
       R.initial = await tvState();
+      R.geo_pill = await geo();
       R.native = await tv.evaluate(() => {
         const n = document.getElementById("getapp");
         const r = n.getBoundingClientRect();
@@ -460,10 +506,7 @@ function ctl(method, p, body) {
         const full = path.join(cfg.shots, "tv-x-root-landing.png");
         await tv.screenshot({ path: full });
         R.full_qrs = (await ctl("POST", "/qrmulti", fs.readFileSync(full))).texts;
-        R.qr_box = await tv.evaluate(() => {
-          const r = document.querySelector('[data-otvx-entry="qr"]').getBoundingClientRect();
-          return { left: Math.round(r.left), right: Math.round(r.right) };
-        });
+        R.geo_panel = await geo();
         await A.p.goto(sr.url);
         await A.p.waitForSelector("#xform:not([hidden])");
         await A.p.fill("#xid", "alex@example.com");
@@ -478,7 +521,8 @@ function ctl(method, p, body) {
       for (const [name, q] of [["root_signup", "/?mode=signup"], ["root_mode_login", "/?mode=login"],
                                ["root_start", "/?start=phone"], ["root_lang", "/?lang=en"], ["root_unexpected", "/?foo=1"],
                                ["home", "/home"], ["flow_signup", "/i/flow/signup"], ["http", "http://x.com/"],
-                               ["evil", "https://x.com.evil.example/"]]) {
+                               ["evil", "https://x.com.evil.example/"], ["root_bare_query", "/?"],
+                               ["root_bare_hash", "/#"]]) {
         await openX(q, "#landing-identifier");
         await sleep(300);
         const before = await tvState();
@@ -488,6 +532,34 @@ function ctl(method, p, body) {
         R.neg[name] = { href: before.href, active: before.active, pill: before.pill, after: (await tvState()).active,
                         qr: (await tvState()).qr, service: (await service()).active };
       }
+      // bords de l'écran (même URL exacte) : colonne de X collée à gauche, à droite, en haut, en bas ; pastille mesurée,
+      // puis flèche RÉELLE + OK RÉEL -> panneau mesuré et QR d'OpenTV décodé sur capture ; touche réelle : annulée
+      R.edges = {};
+      for (const lay of R.initial.pill ? ["left", "right", "top", "bottom"] : []) {   // (mutant sans « / » : aucune)
+        rootLayout = lay;
+        await openX("/", "#landing-identifier");
+        await sleep(300);
+        const before = await geo();
+        const ss = await startSession("landing-identifier");
+        const after = await geo();
+        await tv.keyboard.press("ArrowDown");
+        await waitFor(async () => !(await service()).active && !(await tvState()).qr);
+        R.edges[lay] = { before: before, after: after, url: ss.url, sid: ss.svc.sid, on_pill: ss.on_pill };
+      }
+      // champ d'inscription rendu SUR PLACE à « / » (URL exacte, champ au focus) : jamais de pastille ni de séance
+      R.inplace = {};
+      for (const lay of ["signup_mode", "signup_field", "no_form"]) {
+        rootLayout = lay;
+        await openX("/", lay === "signup_field" ? "#signup-identifier" : "#landing-identifier");
+        await sleep(300);
+        const before = await tvState();
+        await tv.keyboard.press("ArrowDown");
+        await tv.keyboard.press("Enter");
+        await sleep(500);
+        R.inplace[lay] = { href: before.href, active: before.active, pill: before.pill, after: (await tvState()).active,
+                           qr: (await tvState()).qr, service: (await service()).active };
+      }
+      rootLayout = "real";
     }
     if (want("main")) {
     // ---------------------------------------------------------------- champs jamais éligibles

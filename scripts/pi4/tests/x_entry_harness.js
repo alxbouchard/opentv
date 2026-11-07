@@ -20,7 +20,7 @@ const PI4 = process.argv[2];
 const XPHONE = process.argv[3] || path.join(PI4, "ui", "xphone.js");
 const XENTRY = process.argv[4] || path.join(PI4, "x-tv-extension", "xentry.js");
 const failures = [];
-const counts = { phone: 0, gate: 0, ident: 0, fill: 0, ui: 0 };
+const counts = { phone: 0, gate: 0, ident: 0, fill: 0, ui: 0, place: 0 };
 function expect(group, name, got, want) {
   counts[group] += 1;
   if (JSON.stringify(got) !== JSON.stringify(want)) { failures.push({ group, name, got, want }); }
@@ -115,6 +115,10 @@ function gate() {
                                                       "Sign in to X"] };
   const v = (o) => G.factsOk(Object.assign({}, base, o));
   expect("gate", "base", v({}), true);
+  const ONB = "/i/jf/onboarding/web";
+  const LANDING = { url: "https://x.com/", id: "landing-identifier", name: "username", formAction: ONB,
+                    formModes: [{ type: "hidden", valueAttr: "login" }],
+                    texts: ["username", "landing-identifier", " ", "", "", "", "Email or usernameEmail or username"] };
   const yes = { webauthn: { ac: "username webauthn" }, email: { ac: "email", type: "email" }, tel: { ac: "tel", type: "tel" },
                 tel_national: { ac: "tel-national", type: "tel" }, tel_local: { ac: "TEL-LOCAL", type: "tel" },
                 onboarding: { url: "https://x.com/i/jf/onboarding/web?mode=login&redirect_after_login=%2F" },
@@ -123,10 +127,33 @@ function gate() {
                 fr_label: { texts: ["Téléphone, adresse e-mail ou nom d'utilisateur", "Connexion à X"] },
                 // accueil déconnecté RÉEL (x.com/ relevé le 2026-11-06) : <input id="landing-identifier" type="text"
                 // autoComplete="username" … name="username"> dans <label aria-label="Email or username"> ; URL exacte
-                landing: { url: "https://x.com/", texts: ["username", "landing-identifier", " ", "", "", "",
-                                                         "Email or usernameEmail or username"] },
-                landing_twitter: { url: "https://twitter.com/" } };
+                landing: Object.assign({}, LANDING),
+                landing_twitter: Object.assign({}, LANDING, { url: "https://twitter.com/" }),
+                landing_host_case: Object.assign({}, LANDING, { url: "https://X.COM/" }),
+                // routes de connexion hors « / » : INCHANGÉES (aucune signature d'accueil exigée)
+                flow_no_sig: { id: "other", name: "text", formAction: null, formModes: [] },
+                flow_signup_form: { formAction: "/i/flow/signup", formModes: [{ type: "hidden", valueAttr: "signup" }] } };
   for (const k of Object.keys(yes)) { expect("gate", "yes:" + k, v(yes[k]), true); }
+  // accueil « / » : signature RÉELLE exigée (attributs STATIQUES seulement, jamais une valeur saisie) ; un champ
+  // d'inscription rendu SUR PLACE à « / » n'est jamais éligible
+  const noRoot = { root_no_sig: { url: "https://x.com/" }, id_other: { id: "signup-identifier" }, id_null: { id: null },
+                   id_case: { id: "Landing-Identifier" }, name_email: { name: "email" }, name_null: { name: null },
+                   no_form: { formAction: null, formModes: [] }, action_query: { formAction: ONB + "?mode=login" },
+                   action_abs: { formAction: "https://x.com" + ONB }, action_slash: { formAction: ONB + "/" },
+                   action_signup: { formAction: "/i/flow/signup" }, action_empty: { formAction: "" },
+                   modes_none: { formModes: [] }, mode_signup: { formModes: [{ type: "hidden", valueAttr: "signup" }] },
+                   mode_case: { formModes: [{ type: "hidden", valueAttr: "Login" }] },
+                   mode_text: { formModes: [{ type: "text", valueAttr: "login" }] },
+                   mode_null: { formModes: [{ type: "hidden", valueAttr: null }] },
+                   modes_two: { formModes: [{ type: "hidden", valueAttr: "login" }, { type: "hidden", valueAttr: "signup" }] },
+                   modes_dup: { formModes: [{ type: "hidden", valueAttr: "login" }, { type: "hidden", valueAttr: "login" }] },
+                   modes_not_array: { formModes: "login" },
+                   // forme canonique EXACTE : « ? » ou « # » nus (représentables dans href) refusés
+                   bare_query: { url: "https://x.com/?" }, bare_hash: { url: "https://x.com/#" },
+                   bare_both: { url: "https://x.com/?#" } };
+  for (const k of Object.keys(noRoot)) {
+    expect("gate", "no_root:" + k, k === "root_no_sig" ? v(noRoot[k]) : v(Object.assign({}, LANDING, noRoot[k])), false);
+  }
   const no = { password: { type: "password" }, number: { type: "number" }, search: { type: "search" },
                cur_pw: { ac: "current-password" }, new_pw: { ac: "new-password" }, otp: { ac: "one-time-code" },
                ac_off: { ac: "off" }, ac_empty: { ac: "" }, ac_two: { ac: "username email" }, ac_cc: { ac: "cc-number" },
@@ -202,6 +229,89 @@ function gate() {
                    ineligible: { eligible: false }, eligible_truthy: { eligible: 1 } };
   for (const k of Object.keys(nofill)) { expect("fill", "no:" + k, fo(nofill[k]), false); }
   expect("fill", "null", G.fillOk(null), false);
+}
+
+// ------------------------------------------------------------------ placement (bloc <place> de xentry.js, TEL QUEL)
+// Rectangles RÉELS de https://x.com/ déconnecté à 1920×1080 (relevés le 2026-11-07, Chromium) : champ
+// landing-identifier [366,659,730,679], formulaire [356,627,740,757], Continuer [356,709,740,757], fournisseurs, CGU,
+// pied de page ; QR natif « Scan to get the app » en bas à droite. Pastille et panneau : ENTIÈREMENT à l'écran (≥ 16 px
+// de chaque bord), à ≥ 16 px de chaque obstacle, à DROITE du formulaire si possible ; null si aucune place.
+function place() {
+  const src = fs.readFileSync(XENTRY, "utf8");
+  const a = src.indexOf("// <place>");
+  const b = src.indexOf("// </place>");
+  if (a < 0 || b < a) { failures.push({ group: "place", name: "markers" }); return; }
+  const P = new Function(src.slice(a, b) + "\nreturn { placeBox, hits, EDGE, GAP };")();
+  expect("place", "edge_gap", [P.EDGE, P.GAP], [16, 16]);
+  const R = (l, t, r, b2) => ({ left: l, top: t, right: r, bottom: b2 });
+  const W = 1920;
+  const H = 1080;
+  const box = (p, w, h) => R(p.left, p.top, p.left + w, p.top + h);
+  const inside = (r, vw, vh) => r.left >= 16 && r.top >= 16 && r.right <= vw - 16 && r.bottom <= vh - 16;
+  const clear = (r, obs) => obs.every((o) => !P.hits(r, o, 16));
+  // hits : écart EXACT de 16 px = libre ; 15 px = touché ; chevauchement = touché
+  expect("place", "hits_gap16", P.hits(R(0, 0, 10, 10), R(26, 0, 40, 10), 16), false);
+  expect("place", "hits_gap15", P.hits(R(0, 0, 10, 10), R(25, 0, 40, 10), 16), true);
+  expect("place", "hits_vertical15", P.hits(R(0, 0, 10, 10), R(0, 25, 10, 40), 16), true);
+  expect("place", "hits_right16", P.hits(R(26, 0, 40, 10), R(0, 0, 10, 10), 16), false);
+  expect("place", "hits_vertical16", P.hits(R(0, 0, 10, 10), R(0, 26, 10, 40), 16), false);
+  expect("place", "hits_below16", P.hits(R(0, 26, 10, 40), R(0, 0, 10, 10), 16), false);
+  expect("place", "hits_overlap", P.hits(R(0, 0, 10, 10), R(5, 5, 20, 20), 0), true);
+  expect("place", "hits_touch0", P.hits(R(0, 0, 10, 10), R(10, 0, 20, 10), 0), false);
+  const field = R(366, 659, 730, 679);
+  const form = R(356, 627, 740, 757);
+  const cont = R(356, 709, 740, 757);
+  const getapp = R(1616, 750, 1880, 1040);
+  const real = [field, form, R(356, 627, 740, 689), cont, R(356, 386, 740, 432), R(356, 452, 740, 498),
+                R(356, 518, 740, 566), R(550, 779, 678, 793), R(428, 779, 733, 811), R(540, 797, 668, 811),
+                R(491, 1044, 1340, 1068), getapp, R(1632, 790, 1864, 1022)];
+  // pastille (380×61) : juste à droite du formulaire, centrée sur le champ
+  const pill = P.placeBox(W, H, 380, 61, form, { left: form.right + 32, top: (field.top + field.bottom - 61) / 2 }, real);
+  expect("place", "real_pill_exact", pill, { left: 772, top: 639 });
+  const pr = pill && box(pill, 380, 61);
+  expect("place", "real_pill_ok", !!pr && inside(pr, W, H) && clear(pr, real), true);
+  // panneau QR vertical (421×717) : en haut, à droite du formulaire, jamais sur la pastille ni sur le QR natif
+  const pan = P.placeBox(W, H, 421, 717, form, { left: form.right + 32, top: 16 }, real.concat(pr ? [pr] : []));
+  expect("place", "real_panel_exact", pan, { left: 1168, top: 16 });
+  const qr = pan && box(pan, 421, 717);
+  expect("place", "real_panel_ok", !!qr && inside(qr, W, H) && clear(qr, real.concat([pr])), true);
+  // bords : formulaire collé à gauche, à droite, en haut, en bas ; QR natif toujours en bas à droite
+  const edges = { left: R(16, 500, 400, 630), right: R(1504, 300, 1904, 430), top: R(700, 16, 1084, 146),
+                  bottom: R(700, 934, 1084, 1064), top_left: R(16, 16, 400, 146), bottom_right: R(1504, 600, 1904, 730) };
+  for (const k of Object.keys(edges)) {
+    const f = edges[k];
+    const obs = [f, getapp];
+    for (const [kind, w, h, top] of [["pill", 380, 61, (f.top + f.bottom - 61) / 2], ["panel", 421, 717, 16],
+                                     ["panel_small", 320, 560, 16]]) {
+      const p = P.placeBox(W, H, w, h, f, { left: f.right + 32, top: top }, obs);
+      const r = p && box(p, w, h);
+      expect("place", "edge:" + k + ":" + kind, !!r && inside(r, W, H) && clear(r, obs), true);
+      // panneau (trop haut pour tenir au-dessus/au-dessous) : forcément À GAUCHE du formulaire collé à droite
+      if (r && k === "right" && kind !== "pill") { expect("place", "edge_right_goes_left:" + kind, r.right <= f.left - 16, true); }
+      if (r && (k === "left" || k === "top_left")) { expect("place", "edge_prefers_right:" + k + kind, r.left >= f.right + 16, true); }
+    }
+  }
+  // préférence absurde (hors écran) : bornée, toujours entièrement à l'écran
+  for (const [k, pref] of [["far_right", { left: 5000, top: 500 }], ["far_left", { left: -900, top: -300 }],
+                           ["far_bottom", { left: 772, top: 9000 }], ["nan", { left: NaN, top: NaN }]]) {
+    const p = P.placeBox(W, H, 380, 61, form, pref, real);
+    const r = p && box(p, 380, 61);
+    expect("place", "pref:" + k, !!r && inside(r, W, H) && clear(r, real), true);
+  }
+  // préférence : à DROITE du formulaire même si le point préféré est à gauche
+  const mid = R(500, 400, 880, 600);
+  const pl = P.placeBox(W, H, 380, 61, mid, { left: 100, top: 470 }, [mid]);
+  expect("place", "prefers_right_of_scope", !!pl && pl.left >= mid.right + 16, true);
+  // aucune place : null (jamais par-dessus) ; boîte plus grande que l'écran ; dimensions invalides
+  expect("place", "no_room", P.placeBox(W, H, 380, 61, form, { left: 0, top: 0 }, [R(0, 0, W, H)]), null);
+  expect("place", "no_room_narrow", P.placeBox(800, 600, 421, 717, form, { left: 0, top: 0 }, []), null);
+  expect("place", "too_wide", P.placeBox(400, 600, 380, 61, form, { left: 0, top: 0 }, []), null);
+  expect("place", "exact_fit", P.placeBox(412, 93, 380, 61, R(0, 0, 0, 0), { left: 0, top: 0 }, []), { left: 16, top: 16 });
+  expect("place", "zero", P.placeBox(W, H, 0, 61, form, { left: 0, top: 0 }, []), null);
+  expect("place", "nan_size", P.placeBox(W, H, NaN, 61, form, { left: 0, top: 0 }, []), null);
+  // seule place libre : le coin bas droit (tout le reste couvert) -> trouvée EXACTEMENT, bornée à 16 px des bords
+  const only = P.placeBox(W, H, 380, 61, form, { left: 772, top: 639 }, [R(0, 0, W, 987), R(0, 987, 1508, H)]);
+  expect("place", "only_corner", only, { left: W - 16 - 380, top: H - 16 - 61 });
 }
 
 // ------------------------------------------------------------------ page du téléphone : VRAI xphone.js, DOM factice
@@ -421,6 +531,7 @@ async function phoneUi() {
   try {
     await phone();
     gate();
+    place();
     await phoneUi();
   } catch (err) {
     failures.push({ group: "crash", name: String(err && err.stack || err).slice(0, 400) });

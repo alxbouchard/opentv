@@ -1541,7 +1541,7 @@ X active sur le téléphone, flux complet réussi sur la TV, photo — sinon con
 (nouveau périphérique vc4-hdmi) ; OK sur « Sign in » du VRAI DOM de X puis passkey au focus dans la fenêtre
 ouverte par X (0.7.9 : jamais « Continue with phone », inscription) ; photo d'Alex.
 
-### 6 sexies-c. « Saisir avec le téléphone » : identifiant X sans clavier physique (0.7.10, drapeau, défaut désactivé)
+### 6 sexies-c. « Saisir avec le téléphone » : identifiant X sans clavier physique (0.7.10, drapeau, défaut désactivé ; placement et accueil 0.7.11)
 
 Alex refuse tout clavier physique ; la passkey native de X n'apparaît qu'**après** un identifiant. Ce pont remplit
 **UN identifiant** (nom d'utilisateur, courriel ou téléphone) dans le champ de connexion X au focus, depuis le
@@ -1556,8 +1556,8 @@ l'exemple et le fichier installé), puis `sudo systemctl restart opentv.service 
 aucune séance.
 
 Parcours : X ouvert **à la TV** par la télécommande (témoin « X ouvert ») → champ identifiant au focus → ↓ réel :
-pastille **« Saisir avec le téléphone »** (juste après le champ dans le parcours ↑ ↓) → **OK réel** → QR à gauche de
-la fenêtre X → scan avec le téléphone appairé → page « Identifiant X » (clavier natif du téléphone, autocomplete,
+pastille **« Saisir avec le téléphone »** (juste après le champ dans le parcours ↑ ↓) → **OK réel** → panneau QR
+vertical, en haut à droite du formulaire de X → scan avec le téléphone appairé → page « Identifiant X » (clavier natif du téléphone, autocomplete,
 correction et majuscules automatiques coupées, boutons **Envoyer** / **Annuler**, avertissement
 **« Identifiant seulement — jamais mot de passe ou code »**) → l'identifiant apparaît dans le champ de la TV → Alex
 vérifie, Suivant, passkey native.
@@ -1566,11 +1566,26 @@ Sécurité (`opentv_pi/xentry.py`, `x-tv-extension/xentry.js`, `ui/xphone.js`) :
 - **Armement** : seulement une flèche RÉELLE de `nav.js` vers la pastille puis un OK RÉEL (`isTrusted`) ; un focus posé
   par la page, une touche ou un clic synthétiques n'arment rien. Pastille et QR dans des racines fantômes **fermées**
   (invisibles pour la page X).
-- **Champ éligible** (monde isolé de l'extension) : cadre principal, `https://x.com|twitter.com` (± `www.`/`mobile.`),
-  URL de connexion seulement (`/i/flow/login`, `/login`, `/i/jf/onboarding/web?mode=login`, jamais `start=` ; et
-  l'accueil déconnecté `https://x.com/` EXACT — sans requête ni fragment : jamais `?mode=`, `?start=`, `?lang=`, `/home`
-  ni l'inscription — dont le champ réel `landing-identifier` « Email or username » est au focus ; son QR natif « Scan to
-  get the app » n'est jamais lu ni utilisé), INPUT au
+- **Placement** (0.7.11, défaut terrain 0.7.10 : à 1920×1080, le champ réel est à gauche — `landing-identifier`
+  [366,659,730,679], formulaire [356,627,740,757] — et l'ancien panneau [16,659,476,1323] sortait de l'écran par le bas
+  en couvrant le formulaire) : pastille et panneau **mesurés après insertion**, posés par une fonction pure (`<place>`,
+  testée telle quelle par le harnais + mutations) dans une case libre **entièrement à l'écran** (≥ 16 px des bords), à
+  ≥ 16 px du champ, du formulaire/de la fenêtre, de **chaque contrôle visible** (Continuer, fournisseurs, liens) et du
+  **QR natif** de X (image presque carrée de 48 à 400 px et son cadre fixe) ; d'abord **à droite** du formulaire
+  (pastille centrée sur le champ, panneau QR vertical en haut), sinon au plus près ; puis rectangle relu et revérifié.
+  Sans place : QR réduit jusqu'à 5 px/module (≈ 3 mm sur 55 po, lisible du canapé) ; sinon **aucune** pastille / séance
+  refusée (« pas de place libre »), jamais un recouvrement. Vrai Chromium 1920×1080 : géométrie mesurée sur x.com,
+  colonne aux quatre bords, rectangles exacts sans intersection, QR décodé.
+- **Champ éligible** (monde isolé de l'extension) : cadre principal, https ; `xentry.js` n'est **injecté** que sur
+  `https://x.com/*` et `https://twitter.com/*` (`manifest.json`) — la porte accepterait aussi `www.`/`mobile.`, mais le
+  script n'y tourne jamais ; l'accueil « / » éligible est donc `https://x.com/` ou `https://twitter.com/`. URL de
+  connexion seulement (`/i/flow/login`, `/login`, `/i/jf/onboarding/web?mode=login`, jamais `start=`, inchangées ; et
+  l'accueil déconnecté en forme canonique EXACTE — `u.href === u.origin + "/"` : jamais `?mode=`, `?start=`, `?lang=`, ni
+  même `?` ou `#` nus, ni `/home` ni l'inscription) **avec la signature statique de son vrai champ** (0.7.11) : `id`
+  `landing-identifier`, `name` `username`, formulaire d'`action` EXACTE `/i/jf/onboarding/web` et UN seul contrôle
+  `mode`, caché, d'attribut `value` `login` — attributs lus par `getAttribute`, jamais une valeur saisie ; un champ
+  d'inscription rendu sur place à « / » (mode `signup`, autre id/nom, sans formulaire) n'est jamais éligible. Le QR
+  natif « Scan to get the app » de X n'est jamais lu ni utilisé. INPUT au
   focus, visible, actif, modifiable, `type` text/email/tel, `autocomplete` `username`/`email`/`tel`/`tel-national`/
   `tel-local` (± `webauthn`). Refus : `inputmode` numérique, `maxlength` ≤ 8, `pattern`, champ mot de passe ou code à
   usage unique dans la même fenêtre/formulaire, et tout nom/libellé/placeholder/titre de fenêtre évoquant mot de passe,

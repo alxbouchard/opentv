@@ -1,4 +1,4 @@
-/* OpenTV X TV Mode — « Saisir avec le téléphone » (0.7.10, OPENTV_X_PHONE_ENTRY ; défaut : absent).
+/* OpenTV X TV Mode — « Saisir avec le téléphone » (0.7.10 ; placement 0.7.11 ; OPENTV_X_PHONE_ENTRY ; défaut : absent).
  *
  * But UNIQUE : placer UN identifiant X (nom d'utilisateur, courriel, téléphone) dans le champ de connexion ÉLIGIBLE au
  * focus, sans clavier physique ; Alex continue ensuite lui-même (Suivant, passkey native). Jamais un mot de passe, un
@@ -8,9 +8,16 @@
  * - Activation : pastille « Saisir avec le téléphone » insérée juste après le champ éligible dans le parcours ↑ ↓ de
  *   nav.js, atteinte par une flèche RÉELLE (nav.js signale navFocus) puis UN OK réel ; un focus posé par la page, une
  *   touche ou un clic synthétiques n'arment jamais rien. Drapeau du service relu sur /tv (tvkey.js -> background.js).
- * - Champ éligible (porte, bloc <gate> exécuté tel quel par tests/x_entry_harness.js) : cadre principal, x.com /
- *   twitter.com en https, URL de connexion seulement (/i/flow/login, /login, /i/jf/onboarding/web?mode=login, et
- *   l'accueil déconnecté « / » EXACT, sans requête ni fragment : son champ landing-identifier), champ
+ * - Placement (0.7.11, bloc <place> pur, exécuté tel quel par le harnais) : pastille et panneau QR VERTICAL mesurés
+ *   APRÈS insertion, posés dans une case libre ENTIÈREMENT à l'écran (≥ 16 px des bords), à ≥ 16 px du champ, du
+ *   formulaire/de la fenêtre, de chaque contrôle visible (Continuer…) et du QR natif de X ; d'abord à DROITE du
+ *   formulaire ; QR réduit (jusqu'à 5 px/module) s'il ne tient pas ; sinon aucune pastille / aucune séance.
+ * - Champ éligible (porte, bloc <gate> exécuté tel quel par tests/x_entry_harness.js) : cadre principal, https ;
+ *   script INJECTÉ seulement sur x.com et twitter.com (manifest.json : jamais www./mobile., que la porte accepterait
+ *   pourtant) ; URL de connexion seulement (/i/flow/login, /login, /i/jf/onboarding/web?mode=login, et l'accueil
+ *   déconnecté « / » en forme canonique EXACTE — href === origin + "/", sans « ? » ni « # », même nus — AVEC la
+ *   signature statique de son vrai champ : id landing-identifier, name username, formulaire action EXACTE
+ *   /i/jf/onboarding/web et UN contrôle « mode » caché d'attribut value « login » ; jamais une valeur saisie), champ
  *   INPUT au focus, visible, actif, modifiable, d'une ligne, type text/email/tel, autocomplete username / email /
  *   tel / tel-national / tel-local (± webauthn) ; refusé : inputmode numérique, maxlength ≤ 8, pattern, et tout
  *   libellé/nom/placeholder du champ ou titre de la fenêtre évoquant mot de passe, code, OTP, NIP, vérification, 2FA,
@@ -48,7 +55,8 @@
     cancelled: "Saisie par téléphone annulée.",
     expired: "Saisie par téléphone expirée (2 minutes).",
     fail: "Saisie par téléphone indisponible pour l'instant.",
-    ineligible: "Ce champ n'accepte pas la saisie par téléphone."
+    ineligible: "Ce champ n'accepte pas la saisie par téléphone.",
+    room: "Rien n'a été lancé : pas de place libre à l'écran pour le QR sans cacher X."
   };
   // <gate> — fonctions PURES (aucun DOM) : exécutées telles quelles par tests/x_entry_harness.js (+ mutations)
   const ID_MAX = 100;
@@ -64,23 +72,35 @@
   // 9 chiffres. Refusé ICI aussi : la page du téléphone (HTTP LAN) peut être altérée. « +1 514… », ≥ 10 chiffres : ok.
   const CODE_RE = /^[\p{Nd}\s.-]+$/u;
   const DIGIT_RE = /\p{Nd}/gu;
+  // URL -> "root" (accueil déconnecté exact), "login" (route de connexion) ou false
   function loginUrl(href) {
     let u = null;
     try { u = new URL(href); } catch (err) { return false; }
     if (u.protocol !== "https:" || !X_HOST_RE.test(u.hostname) || u.port || u.username || u.password) { return false; }
     const path = u.pathname.replace(/\/+$/, "") || "/";
-    // accueil déconnecté (champ « landing-identifier » : nom d'utilisateur ou courriel) : URL EXACTE https://x.com/
-    // seulement — aucune requête (mode, start, lang…), aucun fragment ; jamais « // », /home ni l'inscription
-    if (u.pathname === "/") { return !u.search && !u.hash; }
+    // accueil déconnecté (champ « landing-identifier ») : forme canonique EXACTE https://x.com/ seulement — aucune
+    // requête (mode, start, lang…), aucun fragment, pas même « ? » ou « # » nus ; jamais « // », /home ni l'inscription
+    if (u.pathname === "/") { return u.href === u.origin + "/" ? "root" : false; }
     const modes = u.searchParams.getAll("mode");
     if (u.searchParams.has("start")) { return false; }   // « start=phone… » : inscription, jamais une connexion
-    if (LOGIN_PATHS.has(path)) { return modes.every((m) => m === "login"); }
-    return path === ONBOARDING_PATH && modes.length === 1 && modes[0] === "login";
+    if (LOGIN_PATHS.has(path)) { return modes.every((m) => m === "login") ? "login" : false; }
+    return path === ONBOARDING_PATH && modes.length === 1 && modes[0] === "login" ? "login" : false;
+  }
+  // accueil « / » : signature RÉELLE du champ de connexion (attributs STATIQUES seulement, jamais une valeur saisie) :
+  // id landing-identifier, name username, formulaire action EXACTE /i/jf/onboarding/web, UN seul contrôle « mode »,
+  // caché, attribut value « login ». Un champ d'inscription rendu sur place à « / » n'est jamais éligible.
+  function rootSigOk(f) {
+    if (f.id !== "landing-identifier" || f.name !== "username" || f.formAction !== ONBOARDING_PATH) { return false; }
+    const m = f.formModes;
+    return Array.isArray(m) && m.length === 1 && !!m[0] && m[0].type === "hidden" && m[0].valueAttr === "login";
   }
   // f : faits relevés sur le champ (attributs seulement, JAMAIS la valeur) -> éligible ?
   function factsOk(f) {
     if (!f || f.top !== true || f.focused !== true || f.visible !== true || f.tag !== "INPUT") { return false; }
-    if (f.disabled || f.readonly || !loginUrl(f.url) || !TYPE_OK.has(f.type)) { return false; }
+    const kind = loginUrl(f.url);
+    if (kind !== "root" && kind !== "login") { return false; }
+    if (kind === "root" && !rootSigOk(f)) { return false; }
+    if (f.disabled || f.readonly || !TYPE_OK.has(f.type)) { return false; }
     const toks = String(f.ac).toLowerCase().trim().split(/\s+/).filter(Boolean);
     if (toks.length === 2 && toks[1] === "webauthn") { toks.pop(); }
     if (toks.length !== 1 || !AC_OK.has(toks[0])) { return false; }
@@ -111,6 +131,39 @@
     return d === 0;
   }
   // </gate>
+  // <place> — géométrie PURE (aucun DOM) : exécutée telle quelle par tests/x_entry_harness.js (+ mutations)
+  const EDGE = 16;   // marge minimale à chaque bord de l'écran
+  const GAP = 16;    // écart minimal avec chaque obstacle (champ, formulaire, Continuer, contrôles, QR natif de X)
+  const STEP = 8;
+  function hits(a, b, gap) {   // rectangles {left, top, right, bottom} à moins de `gap` px l'un de l'autre ?
+    return a.left < b.right + gap && b.left < a.right + gap && a.top < b.bottom + gap && b.top < a.bottom + gap;
+  }
+  // case w×h ENTIÈREMENT à l'écran (≥ EDGE de chaque bord), à ≥ GAP de chaque obstacle ; d'abord à DROITE de `scope`
+  // (formulaire/fenêtre de X), puis au plus près de `pref` ; null si aucune place (jamais par-dessus un obstacle)
+  function placeBox(vw, vh, w, h, scope, pref, obstacles) {
+    if (!(w > 0 && h > 0) || w > vw - 2 * EDGE || h > vh - 2 * EDGE) { return null; }
+    const maxL = vw - w - EDGE;
+    const maxT = vh - h - EDGE;
+    const pl = Number.isFinite(pref.left) ? pref.left : EDGE;
+    const pt = Number.isFinite(pref.top) ? pref.top : EDGE;
+    const axis = (max, p) => {   // grille de STEP px + bords exacts + point préféré borné
+      const out = [EDGE, max, Math.min(max, Math.max(EDGE, Math.round(p)))];
+      for (let v = EDGE; v < max; v += STEP) { out.push(v); }
+      return out;
+    };
+    const tops = axis(maxT, pt);
+    let best = null;
+    for (const left of axis(maxL, pl)) {
+      for (const top of tops) {
+        const box = { left: left, top: top, right: left + w, bottom: top + h };
+        if (obstacles.some((o) => hits(box, o, GAP))) { continue; }
+        const score = (left >= scope.right + GAP ? 0 : 1e6) + Math.abs(left - pl) + Math.abs(top - pt);
+        if (!best || score < best.score) { best = { left: left, top: top, score: score }; }
+      }
+    }
+    return best && { left: best.left, top: best.top };
+  }
+  // </place>
 
   function b64uEnc(bytes) {
     let s = "";
@@ -150,9 +203,16 @@
         texts.push(String(h.textContent || "").slice(0, 200));
       }
     }
+    // signature de l'accueil : attributs STATIQUES (getAttribute) du champ, de son formulaire et du contrôle « mode »
+    // caché ; jamais une valeur saisie
+    const form = el.form;
+    const modes = form ? Array.from(form.elements).filter((c) => c.getAttribute("name") === "mode").slice(0, 4) : [];
     return {
       top: window.top === window, focused: document.activeElement === el, visible: visible(el), tag: el.tagName,
       disabled: el.disabled, readonly: el.readOnly, url: location.href,
+      id: el.getAttribute("id"), name: el.getAttribute("name"), formAction: form ? form.getAttribute("action") : null,
+      formModes: modes.map((c) => ({ type: c.tagName === "INPUT" ? (c.getAttribute("type") || "").trim().toLowerCase() : "",
+                                     valueAttr: c.getAttribute("value") })),
       type: (el.getAttribute("type") || "text").trim().toLowerCase(), ac: el.getAttribute("autocomplete") || "",
       inputmode: el.getAttribute("inputmode") || "", maxlength: el.maxLength, pattern: el.getAttribute("pattern") || "",
       danger: !!scope.querySelector(DANGER_SEL), texts: texts
@@ -183,11 +243,67 @@
   let panel = null;
   let toastBox = null;
   let toastTimer = 0;
-  function placeNear(el, w) {   // à gauche de la fenêtre de X (jamais sur le champ, ni sur « Suivant »)
-    const box = (el.closest(DIALOG_SEL) || el).getBoundingClientRect();
-    const r = el.getBoundingClientRect();
-    const left = box.left - w - 32 >= 16 ? box.left - w - 32 : 16;
-    return { left: Math.round(left) + "px", top: Math.round(Math.max(16, Math.min(r.top, innerHeight - 120))) + "px" };
+  let pillBox = null;   // dernier rectangle de la pastille : le panneau QR ne le recouvre jamais
+  // obstacles jamais recouverts : champ, formulaire/fenêtre, consigne de nav.js, chaque contrôle visible (Continuer, liens ;
+  // ceux de la fenêtre modale seulement si le champ y est), QR natif de X (« Scan to get the app ») et toute image
+  // presque carrée de 48 à 400 px avec son cadre fixe. Calques plein écran (≥ moitié de l'écran) ignorés.
+  const CTRL_SEL = 'a[href], button, input:not([type="hidden" i]), select, textarea, [role="button"], [role="link"], ' +
+    '[tabindex]:not([tabindex="-1"])';
+  const MEDIA_SEL = "canvas, img, svg, video, iframe, [role='img']";
+  function rectOf(el) { const r = el.getBoundingClientRect(); return { left: r.left, top: r.top, right: r.right, bottom: r.bottom }; }
+  function viewport() { return { w: document.documentElement.clientWidth || innerWidth, h: document.documentElement.clientHeight || innerHeight }; }
+  function obstacles(field) {
+    const vp = viewport();
+    const out = [];
+    const add = (el) => {
+      if (!el || el.closest("[data-otvx-entry]")) { return; }
+      const r = rectOf(el);
+      const w = r.right - r.left;
+      const h = r.bottom - r.top;
+      if (w > 0 && h > 0 && r.right > 0 && r.bottom > 0 && r.left < vp.w && r.top < vp.h && w * h < vp.w * vp.h / 2) { out.push(r); }
+    };
+    add(field);
+    add(field.form);
+    add(field.closest(DIALOG_SEL));
+    for (const l of Array.from(field.labels || []).slice(0, 4)) { add(l); }
+    add(document.querySelector(".otvx-login-help"));   // consigne ↑ ↓ OK de nav.js (bas de l'écran)
+    const modal = field.closest('[aria-modal="true"], dialog[open]');
+    for (const el of Array.from((modal || document).querySelectorAll(CTRL_SEL)).slice(0, 2000)) { add(el); }
+    for (const el of Array.from(document.querySelectorAll(MEDIA_SEL)).slice(0, 500)) {
+      const r = rectOf(el);
+      const w = r.right - r.left;
+      const h = r.bottom - r.top;
+      if (w < 48 || h < 48 || w > 400 || h > 400 || w > h * 1.25 || h > w * 1.25) { continue; }
+      add(el);
+      for (let a = el.parentElement; a && a !== document.body; a = a.parentElement) {
+        const p = getComputedStyle(a).position;
+        if (p === "fixed" || p === "sticky") { add(a); break; }
+      }
+    }
+    return out;
+  }
+  // pose `host` (déjà inséré) : taille MESURÉE après insertion, case libre (placeBox), bornée à l'écran, puis
+  // rectangle RELU et revérifié ; null (host masqué) si aucune place — jamais par-dessus le formulaire ni le QR natif
+  function place(host, field, kind, extra) {
+    css(host, { visibility: "hidden", left: "0px", top: "0px" });
+    const m = host.getBoundingClientRect();
+    const w = Math.ceil(m.width);
+    const h = Math.ceil(m.height);
+    const vp = viewport();
+    const scope = rectOf(field.closest(DIALOG_SEL) || field.form || field);
+    const f = rectOf(field);
+    const obs = obstacles(field).concat(extra || []);
+    const pref = { left: scope.right + 32, top: kind === "qr" ? EDGE : (f.top + f.bottom - h) / 2 };
+    const p = placeBox(vp.w, vp.h, w, h, scope, pref, obs);
+    if (!p) { return null; }
+    const left = Math.max(EDGE, Math.min(p.left, vp.w - w - EDGE));
+    const top = Math.max(EDGE, Math.min(p.top, vp.h - h - EDGE));
+    css(host, { left: left + "px", top: top + "px" });
+    const r = rectOf(host);
+    if (r.left < EDGE || r.top < EDGE || r.right > vp.w - EDGE || r.bottom > vp.h - EDGE ||
+        obs.some((o) => hits(r, o, 0))) { return null; }
+    css(host, { visibility: "visible" });
+    return r;
   }
   function showPill() {
     if (!pill) {
@@ -200,8 +316,9 @@
       sh.host.addEventListener("focusout", () => { pillTrusted = false; });
       pill = sh.host;
     }
-    css(pill, placeNear(anchor, 380));
     if (!pill.isConnected) { document.documentElement.appendChild(pill); }
+    pillBox = place(pill, anchor, "pill");
+    if (!pillBox) { hidePill(); }   // aucune place libre : pas de pastille plutôt qu'un recouvrement
   }
   function hidePill() {
     pillTrusted = false;
@@ -228,18 +345,32 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => toastBox.host.remove(), TOAST_MS);
   }
-  function showQr(text, field) {
-    if (typeof qrcode !== "function") { return false; }
+  // panneau QR VERTICAL, posé après mesure (place) ; s'il ne tient nulle part, QR réduit module par module jusqu'à
+  // QR_CELL_MIN px (≈ 3 mm par module sur une TV de 55 po : encore lisible du canapé), sinon refus (aucun recouvrement)
+  const QR_CELL_MAX = 7;
+  const QR_CELL_MIN = 5;
+  function showQr(text, field) {   // false = aucune place libre (générateur absent : exception, échec générique)
+    if (typeof qrcode !== "function") { throw new Error("qr"); }
     const q = qrcode(0, "M");
     q.addData(text);
     q.make();
-    const sh = shell("qr", Object.assign({ background: "#000", border: "3px solid #ffd400", "border-radius": "20px",
-                                           padding: "22px", width: "460px", "box-sizing": "border-box",
-                                           "pointer-events": "none" }, placeNear(field, 460)));
+    const n = q.getModuleCount();
+    for (let cell = Math.max(QR_CELL_MIN, Math.min(QR_CELL_MAX, Math.floor(400 / (n + 8)))); cell >= QR_CELL_MIN; cell--) {
+      const p = qrPanel(q, n, cell);
+      document.documentElement.appendChild(p.host);
+      if (place(p.host, field, "qr", pillBox ? [pillBox] : [])) { panel = p; return true; }
+      p.canvas.width = p.canvas.height = 0;
+      p.host.remove();
+    }
+    return false;
+  }
+  function qrPanel(q, n, cell) {
+    const side = cell * (n + 8);
+    const sh = shell("qr", { background: "#000", border: "3px solid #ffd400", "border-radius": "20px", padding: "22px",
+                             width: (Math.max(side, 300) + 50) + "px", "box-sizing": "border-box",
+                             "pointer-events": "none" });
     sh.host.setAttribute("aria-hidden", "true");
     line(sh.root, PILL_TEXT, { font: "700 28px/1.3 system-ui, sans-serif" });
-    const n = q.getModuleCount();
-    const cell = Math.max(3, Math.floor(400 / (n + 8)));
     const c = document.createElement("canvas");
     c.width = c.height = cell * (n + 8);
     css(c, { display: "block", margin: "10px auto", width: c.width + "px", height: c.height + "px" });
@@ -255,9 +386,7 @@
          { font: "500 21px/1.35 system-ui, sans-serif" });
     line(sh.root, WARN, { color: "#ffd400", font: "700 21px/1.35 system-ui, sans-serif" });
     line(sh.root, "2 minutes · une touche de la télécommande annule", { color: "#bbb", font: "500 19px/1.3 system-ui" });
-    document.documentElement.appendChild(sh.host);
-    panel = { host: sh.host, canvas: c };
-    return true;
+    return { host: sh.host, canvas: c };
   }
   function hideQr() {
     if (!panel) { return; }
@@ -319,11 +448,11 @@
         throw new Error("start");
       }
       s.sid = rsid;
-      if (!showQr(r.url + "#" + s.secret + "." + fp, field)) { throw new Error("qr"); }
+      if (!showQr(r.url + "#" + s.secret + "." + fp, field)) { throw new Error("room"); }
       s.poll = setTimeout(poll, POLL_MS);
     } catch (err) {
       if (s.sid) { send({ type: "xentry", op: "cancel", sid: s.sid }); }
-      end(s, MSG.fail);
+      end(s, err && err.message === "room" ? MSG.room : MSG.fail);
     }
   }
   async function poll() {
