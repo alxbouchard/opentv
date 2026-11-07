@@ -40,7 +40,45 @@ except ImportError:   # pragma: no cover - selon l'hôte
     cv2 = numpy = None
 
 
+FILL_WIRING = {"ident": "ident", "same": "document.activeElement === field", "docFocus": "document.hasFocus()",
+               "href": "location.href", "startHref": "s.href", "eligible": "eligible(field)"}
+
+
+def fill_wiring_ok(src):
+    """Appel FINAL de fillOk dans deliver() : chaque fait relevé sur le DOM réel à l'instant de la livraison, puis le
+    setter gardé par `if (ok)` seulement. Vrai seulement si le câblage est exactement celui-ci."""
+    code = no_comments(src)
+    m = re.search(r"const ok = fillOk\(\{(.*?)\}\);\s*if \(ok\) \{\s*//[^\n]*\n\s*Object\.getOwnPropertyDescriptor\("
+                  r"HTMLInputElement\.prototype, \"value\"\)\.set\.call\(field, ident\);", src, re.S)
+    if not m or code.count("fillOk(") != 2:   # définition + UN appel
+        return False
+    pairs = dict(p.split(":", 1) for p in re.split(r",\s*", m.group(1).strip()))
+    return {k.strip(): v.strip() for k, v in pairs.items()} == FILL_WIRING
+
+
 class TestStatic(unittest.TestCase):
+    WIRING_MUTANTS = (("eligible: eligible(field)", "eligible: true"),
+                      ("docFocus: document.hasFocus()", "docFocus: true"),
+                      ("href: location.href, startHref", "href: s.href, startHref"),
+                      ("same: document.activeElement === field", "same: true"),
+                      ("if (ok) {   // setter", "if (true) {   // setter"))
+
+    def test_final_fill_wiring_and_mutants(self):
+        src = read(XENTRY_JS)
+        self.assertTrue(fill_wiring_ok(src))
+        for old, new in self.WIRING_MUTANTS:
+            self.assertEqual(src.count(old), 1, old)
+            self.assertFalse(fill_wiring_ok(src.replace(old, new)), old)
+
+    def test_rejected_start_reply_cancels_created_session(self):
+        x = no_comments(read(XENTRY_JS))
+        i = x.index("if (session !== s || !m || m[1] !== rsid) {")
+        self.assertLess(i, x.index('if (rsid) { send({ type: "xentry", op: "cancel", sid: rsid }); }', i))
+        self.assertLess(x.index('op: "cancel", sid: rsid', i), x.index('throw new Error("start");', i))
+        bg = code_only(read(os.path.join(EXT, "background.js")))
+        j = bg.index("if (m && m[1] === j.sid) { return { ok: true, sid: j.sid, url: j.url }; }")
+        self.assertLess(j, bg.index('await xentry({ op: "cancel", sid: j.sid })', j))
+
     def test_extension_never_reads_value_clicks_or_submits(self):
         src = no_comments(read(XENTRY_JS))
         self.assertIsNone(re.search(r"\.value\b", src))       # valeur jamais lue (setter natif seulement)
@@ -102,13 +140,15 @@ class TestStatic(unittest.TestCase):
         agents_md = read(os.path.join(os.path.dirname(os.path.dirname(PI4)), "AGENTS.md"))
         for doc in (readme, agents_md):
             for need in ("OPENTV_X_PHONE_ENTRY", "Saisir avec le téléphone", "attaquant ACTIF",
-                         "Identifiant seulement — jamais mot de passe ou code"):
+                         "Identifiant seulement — jamais mot de passe ou code", "ramasse-miettes", "écouteur PASSIF",
+                         "voler le cookie", "sans le secret du QR", "service OpenTV compromis", "trop tard"):
                 self.assertIn(need, doc)
+            self.assertNotRegex(doc, r"(?i)wipe it immediately|tout est effacé")   # jamais d'effacement promis
         self.assertEqual(VERSION, "0.7.10")
         self.assertEqual(json.loads(read(os.path.join(EXT, "manifest.json")))["version"], VERSION)
 
     def test_line_caps(self):
-        caps = {"opentv_pi/xentry.py": 400, "x-tv-extension/xentry.js": 420, "ui/xphone.js": 200,
+        caps = {"opentv_pi/xentry.py": 400, "x-tv-extension/xentry.js": 430, "ui/xphone.js": 240,
                 "opentv_pi/web.py": 1538, "opentv_pi/app.py": 1400, "opentv_pi/xprobe.py": 280,
                 "x-tv-extension/nav.js": 560, "x-tv-extension/background.js": 320}
         over = []
@@ -134,7 +174,9 @@ class TestHarnessAndMutations(unittest.TestCase):
         self.assertTrue(r["ok"], r)
         self.assertGreaterEqual(r["counts"]["phone"], 30)
         self.assertGreaterEqual(r["counts"]["gate"], 120)
-        self.assertGreaterEqual(r["counts"]["ident"], 15)
+        self.assertGreaterEqual(r["counts"]["ident"], 35)
+        self.assertGreaterEqual(r["counts"]["fill"], 14)
+        self.assertGreaterEqual(r["counts"]["ui"], 24)
 
     MUTANTS = (
         ("xphone", "return b64uEnc(seal.sha256(nb)) === fp;", "return true;"),                      # empreinte
@@ -156,6 +198,27 @@ class TestHarnessAndMutations(unittest.TestCase):
         ("xentry", "return t && Array.from(t).length <= ID_MAX ? t : null;", "return t || null;"),   # borne
         ("xentry", "const t = doc.t.replace(STRIP_RE, \"\").trim();", "const t = doc.t.trim();"),     # contrôles
         ("xentry", "f.top !== true || f.focused !== true || ", ""),                                  # cadre + focus
+        # identifiant ressemblant à un code : refusé par l'extension elle-même (page du téléphone altérable)
+        ("xentry", "if (CODE_RE.test(t) && (t.match(DIGIT_RE) || []).length >= 4 && (t.match(DIGIT_RE) || []).length <= 9) "
+                   "{ return null; }", ""),
+        ("xentry", "(t.match(DIGIT_RE) || []).length >= 4 && ", ""),
+        # décision finale de remplissage : chaque condition porte
+        ("xentry", " || d.same !== true", ""),                                                         # même champ
+        ("xentry", " || d.docFocus !== true", ""),                                                     # document.hasFocus
+        ("xentry", " && d.href === d.startHref", ""),                                                  # URL exacte
+        ("xentry", " && d.eligible === true", ""),                                                     # encore éligible
+        ("xentry", 'typeof d.ident !== "string" || !d.ident || ', ""),                                # identifiant
+        # téléphone : Annuler jamais après l'envoi accepté ; textes tirés de la réponse du service
+        ("xphone", "sent = true; cancel.hidden = true; cancel.disabled = true;   // plus",
+                   "sent = true; cancel.disabled = true;   // plus"),
+        ("xphone", "sent = true; cancel.hidden = true; cancel.disabled = true;   // plus",
+                   "sent = true; cancel.hidden = true;   // plus"),
+        ("xphone", "if (over || sent || stopping) { return; }", "if (over || stopping) { return; }"),
+        ("xphone", 'if (j.error === "too_late") { return { end: false, text: TOO_LATE }; }', ""),
+        ("xphone", 'if (j.error === "over" && FINAL[j.state]) { return { end: true, text: FINAL[j.state] }; }', ""),
+        ("xphone", "if (over) { return; }   // issue déjà connue", "// issue déjà connue"),
+        ("xphone", "stopping = false; settle(cancelOutcome(r.status, r.j, cancelled));",
+                   "stopping = false; finish(cancelled);"),
     )
 
     def test_every_safety_mutant_is_detected(self):
@@ -205,6 +268,9 @@ class TestInstall(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------------------------- bout en bout
+_PHONE_BASE = xentry.phone_base
+
+
 class _Control(http.server.BaseHTTPRequestHandler):
     """Canal de test seulement : témoin « X ouvert », état de la séance, décodage du QR (capture), drapeau, appairage."""
 
@@ -219,8 +285,9 @@ class _Control(http.server.BaseHTTPRequestHandler):
         a = self.server.app
         if self.path == "/state":
             s = a.x_entry._s
+            started = sum(1 for x in a.test_logs if x.get("event") == "x_entry" and x.get("state") == "started")
             return self._send({"active": a.x_entry.active(), "sid": s["sid"] if s else None,
-                               "n": s["n"] if s else None})
+                               "n": s["n"] if s else None, "started": started})
         if self.path == "/pair":
             return self._send({"url": a.tv_state()["remote"]["url"]})
         self._send({})
@@ -233,6 +300,8 @@ class _Control(http.server.BaseHTTPRequestHandler):
             xescape.set_marker(a.cfg.run_dir, self.path.endswith("on=1"))
         elif self.path == "/flag?on=0":
             a.cfg.x_phone_entry = False
+        elif self.path.startswith("/badurl"):   # réponse de start hors forme (séance pourtant créée au service)
+            xentry.phone_base = (lambda app: "http://EVIL_host:8080") if self.path.endswith("on=1") else _PHONE_BASE
         elif self.path == "/qr":
             img = cv2.imdecode(numpy.frombuffer(data, numpy.uint8), cv2.IMREAD_GRAYSCALE)
             text = ""
@@ -255,11 +324,20 @@ class _Control(http.server.BaseHTTPRequestHandler):
 @unittest.skipUnless(NODE and os.environ.get("OPENTV_TEST_PLAYWRIGHT") and full_chrome() and cv2 is not None,
                      "bout en bout : OPENTV_TEST_PLAYWRIGHT + OPENTV_TEST_CHROME_FULL + node + cv2 (QR)")
 class TestXEntryEndToEnd(unittest.TestCase):
-    def test_real_chromium_extension_phone_service(self):
+    def e2e(self, only=None, mutants=()):
+        """Installation réelle (install.sh --root) ; mutants = [(fichier de l'extension installée, ancien, nouveau)]."""
         root = tempfile.mkdtemp(prefix="otvxee", dir="/tmp")
         self.addCleanup(shutil.rmtree, root, True)
+        self.addCleanup(setattr, xentry, "phone_base", _PHONE_BASE)
         p = sh([INSTALL, "--root", root, "--skip-preflight"])
         self.assertEqual(p.returncode, 0, p.stderr.decode()[-2000:])
+        ext = os.path.join(root, EXT_DST.lstrip("/"))
+        for fn, old, new in mutants:
+            src = read(os.path.join(ext, fn))
+            self.assertEqual(src.count(old), 1, (fn, old))
+            os.chmod(os.path.join(ext, fn), 0o644)
+            with open(os.path.join(ext, fn), "w", encoding="utf-8") as f:
+                f.write(src.replace(old, new))
         a = remote_app(self, OPENTV_X_PHONE_ENTRY="1")
         config.save_device(a.cfg, {"name": "Salon"})
         a.reload_device()
@@ -273,14 +351,29 @@ class TestXEntryEndToEnd(unittest.TestCase):
         shots = os.environ.get("OPENTV_TEST_SHOTS") or tempfile.mkdtemp(prefix="otvxeshots", dir="/tmp")
         os.makedirs(shots, exist_ok=True)
         rport = s.web.remote_port()
-        cfg = {"chrome": full_chrome(), "ext": os.path.join(root, EXT_DST.lstrip("/")), "ext_id": xcontext.EXTENSION_ID,
+        cfg = {"chrome": full_chrome(), "ext": ext, "ext_id": xcontext.EXTENSION_ID,
                "tv": "http://127.0.0.1:%d/tv" % s.web.tv_port(), "ctl": "http://127.0.0.1:%d" % ctl.server_port,
-               "map": "MAP %s 127.0.0.1" % MDNS, "shots": shots}
+               "map": "MAP %s 127.0.0.1" % MDNS, "shots": shots, "only": only}
         p = subprocess.run([NODE, os.path.join(PI4, "tests", "e2e_x_entry.js"), os.environ["OPENTV_TEST_PLAYWRIGHT"],
-                            json.dumps(cfg)], capture_output=True, timeout=300)
+                            json.dumps(cfg)], capture_output=True, timeout=420)
         self.assertEqual(p.returncode, 0, p.stdout.decode()[-3000:] + p.stderr.decode()[-3000:])
         st = json.loads(p.stdout.decode().strip().splitlines()[-1])["steps"]
         self.assertIs(st["flag_on"], True)
+        return st, a, ctl, shots, rport
+
+    def assert_late_refused(self, late):
+        self.assertEqual(sorted(late), sorted(["password", "otp", "vcode_dialog", "danger", "label", "maxlen", "numeric"]))
+        for k, v in late.items():
+            self.assertEqual((v["before"]["same"], v["before"]["qr"]), (True, True), k)   # MÊME élément, séance ouverte
+            self.assertIs(v["tv"]["same"], True, k)
+            self.assertEqual(v["tv"]["uvalue"], "", k)                                     # champ resté vide
+            self.assertEqual(v["tv"]["ev"], {"input": 0, "change": 0, "click": 0, "submit": 0}, k)
+            self.assertIn("n'acceptait plus la saisie", v["phone"]["status"], k)          # refusé, issue exacte
+            self.assertFalse(v["tv"]["qr"], k)
+            self.assertFalse(v["service"]["active"], k)
+
+    def test_real_chromium_extension_phone_service(self):
+        st, a, ctl, shots, rport = self.e2e()
         # champ éligible au focus : pastille ; rien d'armé par la page (focus programmatique, touches/clic factices)
         self.assertEqual((st["initial"]["active"], st["initial"]["pill"], st["initial"]["qr"]), ("user", True, False))
         self.assertFalse(st["fake"]["tv"]["qr"])
@@ -309,7 +402,7 @@ class TestXEntryEndToEnd(unittest.TestCase):
         self.assertEqual((wf["tv"]["qr"], wf["tv"]["value"]), (False, ""))
         # secret altéré / chiffré altéré : refusés par l'extension, champ intact, aucun événement
         for k in ("wrong_secret", "tampered_ct"):
-            self.assertIn("rien saisi", st[k]["phone"]["status"], k)
+            self.assertIn("La TV a rejeté l'envoi", st[k]["phone"]["status"], k)       # jamais « champ changé »
             self.assertEqual((st[k]["tv"]["value"], st[k]["tv"]["ev"]["input"], st[k]["tv"]["qr"]), ("", 0, False), k)
             self.assertFalse(st[k]["service"]["active"], k)
         # nominal : fragment effacé, champ natif sans nom ni aide à la saisie, second téléphone refusé, UN remplissage
@@ -318,6 +411,11 @@ class TestXEntryEndToEnd(unittest.TestCase):
                                              "autocorrect": "off", "spellcheck": "false", "name": None,
                                              "inputmode": "email"})
         self.assertIn("Un autre téléphone", st["second_phone"]["status"])
+        # envoi accepté (200) : Annuler caché ET désactivé aussitôt ; ses clics ne partent jamais
+        self.assertEqual(st["after_submit"], {"hidden": True, "disabled": True, "visible": False})
+        # Annuler tardif (après la livraison) : refusé, issue « delivered » gardée
+        self.assertEqual(st["late_cancel"], {"status": 409, "j": {"ok": False, "error": "over", "state": "delivered"},
+                                             "after": "delivered"})
         f = st["filled"]
         self.assertEqual(f["tv"]["value"], "alex@example.com")                  # nettoyé (espaces, largeur nulle)
         self.assertEqual(f["tv"]["ev"], {"input": 1, "change": 1, "click": 0, "submit": 0})
@@ -344,6 +442,14 @@ class TestXEntryEndToEnd(unittest.TestCase):
         self.assertTrue(st["return_before"])
         self.assertFalse(st["return_after"]["active"])
         self.assertIn("annulée", st["return_phone"]["status"])
+        # dernière vérification : champ rendu inéligible APRÈS le QR, même élément au focus -> refusé, champ vide
+        self.assert_late_refused(st["late"])
+        # réponse de start écartée APRÈS création de la séance : annulée aussitôt au service
+        b = st["badstart"]
+        self.assertEqual(b["on_pill"], "pill")
+        self.assertEqual(b["after"]["started"], b["before"]["started"] + 1)
+        self.assertFalse(b["after"]["active"])
+        self.assertFalse(b["tv"]["qr"])
         # jamais éligibles : mot de passe, OTP, code de vérification, NIP, mot de passe voisin, passkey, secours,
         # carte ; URL hors connexion (accueil, inscription, accueil déconnecté)
         for k, v in st["ineligible"].items():
@@ -377,6 +483,19 @@ class TestXEntryEndToEnd(unittest.TestCase):
                             x.get("event") in ("x_entry", "http")))
         for name in ("tv-x-entry-qr.png", "phone-x-entry.png"):
             self.assertGreater(os.path.getsize(os.path.join(shots, name)), 5000, name)
+
+    def test_real_chromium_mutants_are_caught(self):
+        """Chaque garde finale porte en vrai : sans `eligible(field)` à la livraison, chaque cas tardif REMPLIT le champ ;
+        sans l'annulation de background.js, la séance d'une réponse écartée reste active au service."""
+        st = self.e2e(only="late", mutants=[("xentry.js", "eligible: eligible(field)", "eligible: true")])[0]
+        filled = {k: v["tv"]["uvalue"] for k, v in st["late"].items()}
+        self.assertEqual(set(filled.values()), {"alex@example.com"}, filled)
+        with self.assertRaises(AssertionError):
+            self.assert_late_refused(st["late"])
+        st = self.e2e(only="badstart", mutants=[(
+            "background.js", 'if (typeof j.sid === "string" && XSID_RE.test(j.sid)) { await xentry({ op: "cancel", '
+            'sid: j.sid }).catch(() => null); }', "")])[0]
+        self.assertTrue(st["badstart"]["after"]["active"])
 
 
 if __name__ == "__main__":

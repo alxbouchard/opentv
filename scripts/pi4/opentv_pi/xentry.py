@@ -14,15 +14,18 @@ Chaîne (le service ne voit QUE des données publiques et un chiffré de taille 
    appairé RÉCLAME la séance (clé publique relue), vérifie l'empreinte du QR et e = 65537, chiffre {v, s, f, t} en
    RSA-OAEP (ui/muse.js, JavaScript pur : pas de crypto.subtle en HTTP LAN) et envoie UN chiffré de 256 octets.
 4. L'extension relève le chiffré UNE fois (poll), le déchiffre, vérifie s/f, nettoie et borne l'identifiant, et ne
-   remplit que si le MÊME champ est toujours au focus et éligible ; puis `done` : tout est effacé.
+   remplit que si le MÊME champ est toujours au focus et éligible ; puis `done` (filled / refused / rejected).
 
-Limite dite telle quelle : les pages du téléphone sont servies en HTTP sur le LAN. Un écouteur PASSIF (et ce service)
-ne voit que le chiffré ; un attaquant ACTIF du LAN pourrait remplacer le script de la page : aucune cryptographie
-livrée par un canal non authentifié ne l'empêche (aucune promesse « bout en bout » contre lui). Aucun repli en clair.
+Limite dite telle quelle : les pages du téléphone sont servies en HTTP sur le LAN. Un écouteur PASSIF ne voit que le
+chiffré (il peut voler le cookie du téléphone pour réclamer ou annuler la séance — déni — mais rien injecter sans le
+secret du QR) ; un attaquant ACTIF du LAN, ou un Pi/service OpenTV compromis, peut remplacer le script de la page :
+aucune cryptographie livrée par un canal non authentifié ne l'empêche (aucune promesse « bout en bout »). L'extension
+refuse donc elle-même codes, contrôles et longueurs. Aucun repli en clair.
 
-Séance : UNE, mémoire seulement, TTL_S monotones ; effacée à la livraison, au refus, à l'annulation (TV ou téléphone),
+Séance : UNE, mémoire seulement, TTL_S monotones ; close à la livraison, au refus, à l'annulation (TV ou téléphone),
 à l'expiration, à la perte du témoin, au chargement de /tv (Retour Samsung : le kiosque relancé recharge /tv) et au
-redémarrage. Jamais journalisée (seulement l'issue), jamais sur disque, absente des vues opérateur/TV/agents. Seule
+redémarrage : dictionnaire vidé, références lâchées (mémoire rendue par le ramasse-miettes de Python, jamais réécrite
+en place). Jamais journalisée (seulement l'issue), jamais sur disque, absente des vues opérateur/TV/agents. Seule
 l'ISSUE d'une séance terminée (sans matériel) reste TOMB_S pour la page du téléphone.
 """
 import base64
@@ -53,8 +56,15 @@ K = 256                                   # RSA-2048 : n et chiffré font exacte
 E = "AQAB"                                # 65537 seulement (jamais e = 1 ni un petit exposant)
 SID_RE = re.compile(r"[A-Za-z0-9_-]{22}")
 B64K_RE = re.compile(r"[A-Za-z0-9_-]{342}")   # 256 octets en base64url sans remplissage
-RESULTS = {"filled": "delivered", "refused": "refused"}
+# Automate (une séance) : waiting -> claimed -> submitted -> delivering -> issue ; issue = delivered | refused (champ
+# changé/plus éligible) | rejected (contenu illisible/altéré/autre secret/code) | cancelled | expired.
+# - TV `done` : seulement depuis delivering (chiffré remis à l'extension par `poll`) ;
+# - téléphone `phone_cancel` : seulement AVANT la remise (PHONE_CANCELLABLE) ; delivering -> 409 too_late (séance
+#   intacte) ; séance finie -> 409 over + issue réelle : une issue n'est JAMAIS réécrite ;
+# - TV `cancel`, TTL, perte du témoin : séance vivante seulement (l'extension n'a alors rien rempli).
+RESULTS = {"filled": "delivered", "refused": "refused", "rejected": "rejected"}
 PHONE_STATES = {"claimed": "waiting", "submitted": "sent", "delivering": "sent"}
+PHONE_CANCELLABLE = ("waiting", "claimed", "submitted")
 
 
 def _noop(event, **fields):
@@ -202,11 +212,14 @@ class XEntry:
     def phone_cancel(self, sid, phone_id):
         with self.lock:
             s = self._live(sid)
-            if s is not None and s["phone"] not in (None, phone_id):
+            if s is None:   # séance finie : issue réelle, jamais réécrite
+                return 409, {"ok": False, "error": "over", "state": self._final(sid)}
+            if s["phone"] not in (None, phone_id):
                 return 409, {"ok": False, "error": "claimed"}
-            if s is not None:
-                self._wipe("cancelled")
-        return 200, {"ok": True}
+            if s["state"] not in PHONE_CANCELLABLE:   # chiffré déjà remis à l'extension : trop tard
+                return 409, {"ok": False, "error": "too_late", "state": "sent"}
+            self._wipe("cancelled")
+        return 200, {"ok": True, "state": "cancelled"}
 
     def status(self, sid, phone_id):
         with self.lock:

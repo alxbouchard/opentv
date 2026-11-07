@@ -1581,23 +1581,38 @@ Sécurité (`opentv_pi/xentry.py`, `x-tv-extension/xentry.js`, `ui/xphone.js`) :
   chiffre `{v, s, f, t}` avec l'OAEP en JavaScript pur de Muse (`ui/muse.js` : `crypto.subtle` n'existe pas en HTTP
   LAN). Le chiffré fait **toujours 256 octets** : ni le service, ni les journaux, ni le disque, ni la vue opérateur,
   ni les agents (Hermit, Muse) ne voient le texte ou sa longueur. Relayé **une fois** à l'extension, déchiffré là,
-  séance et secret vérifiés, identifiant nettoyé (contrôles, bidi, largeur nulle, sauts de ligne) et borné à 100
-  caractères ; rempli seulement si le **même** champ est encore au focus et éligible : setter natif, **un** `input`,
+  séance et secret vérifiés, identifiant nettoyé (contrôles, bidi, largeur nulle, sauts de ligne), borné à 100
+  caractères et refusé s'il ressemble à un code (4 à 9 chiffres seulement) — par l'extension elle-même, sans se fier à
+  la page du téléphone. Dernière vérification juste avant d'écrire : **même** élément au focus, document au focus,
+  **même** URL exacte, champ **encore** éligible (sinon refusé, champ intact) ; puis setter natif, **un** `input`,
   **un** `change`.
-- **Séance** : une seule, **2 minutes** (monotone), mémoire seulement ; effacée à la livraison, au refus, à
+- **Séance** : une seule, **2 minutes** (monotone), mémoire seulement ; close à la livraison, au refus, à
   l'annulation (TV ou téléphone), à toute touche réelle, au focus déplacé, à la navigation, au Retour Samsung (le
-  kiosque relancé recharge `/tv`, qui l'efface), à la perte du témoin et au redémarrage du service. Aucun repli en
-  clair.
-- **Limite honnête** : la page du téléphone est servie en **HTTP** sur le LAN. Un écouteur passif (et le service) ne
-  voit que le chiffré ; un **attaquant ACTIF** du réseau local (usurpation ARP/DNS) pourrait remplacer la page et son
-  script : aucune cryptographie livrée par un canal non authentifié ne l'empêche — pas de promesse « bout en bout »
-  contre lui. À n'activer que sur un Wi-Fi de confiance.
+  kiosque relancé recharge `/tv`, qui la ferme), à la perte du témoin et au redémarrage du service. « Effacer » veut
+  dire ici : références lâchées (mémoire rendue par le ramasse-miettes de Python/JavaScript), tampon déchiffré de
+  l'extension mis à zéro, pixels du QR remis à zéro ; aucune chaîne n'est réécrite en place. Aucun repli en clair.
+- **Annulation et issues** : `waiting → claimed → submitted → delivering → issue`. Le téléphone peut annuler
+  seulement **avant** la remise du chiffré à l'extension (`waiting`/`claimed`/`submitted`) ; dès que l'envoi est
+  accepté (200), **Annuler** disparaît et se désactive. Après la remise (`delivering`), c'est **trop tard** (409
+  `too_late`, séance intacte) ; une séance finie répond 409 `over` avec son issue réelle, jamais réécrite. Le
+  téléphone n'affiche « Rien n'a été saisi » que si le service confirme l'annulation ; sinon il suit l'issue :
+  `delivered`, `refused` (champ plus éligible/sélectionné), `rejected` (envoi illisible, altéré, autre QR ou code),
+  `cancelled`, `expired`. Si l'extension écarte la réponse de `start` après création de la séance, elle l'annule au
+  mieux (identifiant de séance seulement).
+- **Limite honnête** : la page du téléphone est servie en **HTTP** sur le LAN. Un **écouteur PASSIF** ne voit que le
+  chiffré ; il peut voler le cookie du téléphone appairé pour réclamer ou annuler la séance (déni), mais ne peut rien
+  injecter sans le secret du QR (fragment, jamais sur le réseau). Un **attaquant ACTIF** du réseau local (usurpation
+  ARP/DNS), ou un Pi / service OpenTV compromis, peut remplacer la page et son script : aucune cryptographie livrée par
+  un canal non authentifié ne l'empêche — pas de promesse « bout en bout » contre lui. À n'activer que sur un Wi-Fi de
+  confiance.
 
 Tests : `tests/test_x_entry.py` (service, routes, effacements, aucune trace), `tests/test_x_entry_web.py` (statique,
 harnais Node `tests/x_entry_harness.js` + mutations des contrôles, installation, bout en bout Chromium réel
 `tests/e2e_x_entry.js` : QR décodé sur capture, fragment effacé, empreinte/secret/chiffré altérés refusés, chiffré de
-taille fixe, faux événements sans effet, champs mot de passe/OTP/code jamais éligibles, un `input` + un `change`,
-aucun clic ni envoi, annulations, Retour). **Gate terrain** : pastille et QR sur la vraie fenêtre de connexion X,
+taille fixe, faux événements sans effet, champs mot de passe/OTP/code jamais éligibles, champ rendu inéligible
+après le QR refusé à la livraison, Annuler caché dès l'envoi accepté, annulation tardive sans effet sur l'issue,
+réponse de `start` écartée annulée, un `input` + un `change`, aucun clic ni envoi, annulations, Retour ; mutants
+réels de la garde finale et de l'annulation de `start`). **Gate terrain** : pastille et QR sur la vraie fenêtre de connexion X,
 champ réellement éligible (le DOM réel de X peut différer : refus = rien ne s'affiche), remplissage accepté par X.
 
 ### 6 sexies-b. Canari instrumenté 0.7.8 : ↑ ↓ ← → OK sur le VRAI X (preuve d'abord, aucune injection de touche)

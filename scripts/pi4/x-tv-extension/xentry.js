@@ -20,7 +20,8 @@
  *   `#<secret>.<empreinte SHA-256 de n>` (fragment : jamais vu par le service). Chiffré relevé UNE fois, déchiffré ici,
  *   s/f vérifiés, identifiant nettoyé (contrôles, bidi, largeur nulle, sauts de ligne) et borné (ID_MAX) ; rempli
  *   seulement si le MÊME champ est encore au focus, éligible, document au focus et même URL : setter natif, UN
- *   « input » et UN « change », rien d'autre. Puis tout est effacé.
+ *   « input » et UN « change », rien d'autre. Puis : tampon déchiffré mis à zéro ; clé, secret, identifiant (chaînes
+ *   JS) et champ : références lâchées (ramasse-miettes), jamais réécrits en place. Code de 4 à 9 chiffres refusé ICI.
  * - Fin : livraison, refus, TTL_MS (horloge monotone), toute touche réelle, focus ailleurs, navigation (pagehide,
  *   navigate, popstate), annulation du téléphone, Retour (kiosque relancé : page détruite, /tv efface le service).
  * Limite (README) : la page du téléphone est servie en HTTP LAN ; un attaquant ACTIF du LAN pourrait la remplacer.
@@ -41,7 +42,8 @@
   const WARN = "Identifiant seulement — jamais mot de passe ou code";
   const MSG = {
     filled: "Identifiant saisi. Vérifie-le, puis Suivant et ta clé d'accès.",
-    refused: "Rien n'a été saisi : le champ a changé.",
+    refused: "Rien n'a été saisi : ce champ n'accepte plus la saisie (changé, plus sélectionné ou page changée).",
+    rejected: "Rien n'a été saisi : envoi rejeté (illisible, altéré, autre QR, ou ressemble à un code).",
     cancelled: "Saisie par téléphone annulée.",
     expired: "Saisie par téléphone expirée (2 minutes).",
     fail: "Saisie par téléphone indisponible pour l'instant.",
@@ -57,6 +59,10 @@
   const DENY_RE = /pass|mot de passe|\bmdp\b|code|\botp\b|one.?time|usage unique|\bpin\b|\bnip\b|v[ée]rif|2fa|\bmfa\b|two.?factor|2.?step|two.?step|deux (facteurs|[ée]tapes)|double authentification|authentifica|authenticat|backup|secours|r[ée]cup[ée]ration|recovery|cl[ée]s? d['’]acc[eè]s|security key|cl[ée] de s[ée]curit[ée]|token|jeton|\bcard\b|carte|\bcvc\b|\bcvv\b|\biban\b|paiement|payment|expir|confirm/i;
   // contrôles, sauts de ligne, bidi, largeur nulle : jamais écrits dans le champ
   const STRIP_RE = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]/g;
+  // ressemble à un code (OTP, vérification, NIP) : chiffres (Unicode compris), espaces, points, tirets SEULEMENT, de 4 à
+  // 9 chiffres. Refusé ICI aussi : la page du téléphone (HTTP LAN) peut être altérée. « +1 514… », ≥ 10 chiffres : ok.
+  const CODE_RE = /^[\p{Nd}\s.-]+$/u;
+  const DIGIT_RE = /\p{Nd}/gu;
   function loginUrl(href) {
     let u = null;
     try { u = new URL(href); } catch (err) { return false; }
@@ -85,7 +91,14 @@
     if (Object.keys(doc).sort().join(",") !== "f,s,t,v" || doc.v !== 1 || typeof doc.t !== "string") { return null; }
     if (typeof sid !== "string" || doc.s !== sid || typeof secret !== "string" || !sameText(doc.f, secret)) { return null; }
     const t = doc.t.replace(STRIP_RE, "").trim();
+    if (CODE_RE.test(t) && (t.match(DIGIT_RE) || []).length >= 4 && (t.match(DIGIT_RE) || []).length <= 9) { return null; }
     return t && Array.from(t).length <= ID_MAX ? t : null;
+  }
+  // décision FINALE, juste avant d'écrire : identifiant valide, MÊME champ au focus, document au focus, MÊME URL
+  // exacte qu'au départ, champ ENCORE éligible (faits relevés par deliver() sur le DOM réel à cet instant)
+  function fillOk(d) {
+    if (!d || typeof d.ident !== "string" || !d.ident || d.same !== true || d.docFocus !== true) { return false; }
+    return typeof d.href === "string" && d.href === d.startHref && d.eligible === true;
   }
   function sameText(a, b) {   // comparaison sans sortie anticipée
     if (typeof a !== "string" || a.length !== b.length) { return false; }
@@ -294,13 +307,14 @@
       const fp = b64uEnc(new Uint8Array(await crypto.subtle.digest("SHA-256", b64uDec(jwk.n))));
       s.secret = b64uEnc(crypto.getRandomValues(new Uint8Array(16)));
       const r = await send({ type: "xentry", op: "start", n: jwk.n, e: jwk.e });
-      const m = r && r.ok === true && typeof r.url === "string" ? URL_RE.exec(r.url) : null;
-      if (session !== s) {
-        if (m && SID_RE.test(r.sid)) { send({ type: "xentry", op: "cancel", sid: r.sid }); }
-        return;
+      const rsid = r && r.ok === true && typeof r.sid === "string" && SID_RE.test(r.sid) ? r.sid : null;
+      const m = rsid && typeof r.url === "string" ? URL_RE.exec(r.url) : null;
+      if (session !== s || !m || m[1] !== rsid) {   // réponse écartée : la séance créée au service est annulée
+        if (rsid) { send({ type: "xentry", op: "cancel", sid: rsid }); }
+        if (session !== s) { return; }
+        throw new Error("start");
       }
-      if (!m || m[1] !== r.sid) { throw new Error("start"); }
-      s.sid = r.sid;
+      s.sid = rsid;
       if (!showQr(r.url + "#" + s.secret + "." + fp, field)) { throw new Error("qr"); }
       s.poll = setTimeout(poll, POLL_MS);
     } catch (err) {
@@ -317,7 +331,7 @@
     if (session !== s) { return; }
     if (r && r.ok === true && r.state === "submitted" && CT_RE.test(r.ct)) { deliver(s, r.ct); return; }
     if (r && r.ok === true && !/^(waiting|claimed|delivering)$/.test(r.state)) {   // annulé/expiré côté téléphone
-      end(s, r.state === "expired" ? MSG.expired : MSG.cancelled);
+      end(s, r.state === "expired" ? MSG.expired : r.state === "cancelled" ? MSG.cancelled : MSG.fail);
       return;
     }
     s.poll = setTimeout(poll, POLL_MS);   // en attente (ou service momentanément injoignable : TTL borne tout)
@@ -335,16 +349,17 @@
       pt.fill(0);
     }
     const field = s.field;
-    const ok = ident !== null && document.activeElement === field && document.hasFocus() && location.href === s.href &&
-      eligible(field);
+    const ok = fillOk({ ident: ident, same: document.activeElement === field, docFocus: document.hasFocus(),
+                        href: location.href, startHref: s.href, eligible: eligible(field) });
     if (ok) {   // setter natif, UN « input », UN « change » ; jamais de clic ni d'envoi
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(field, ident);
       field.dispatchEvent(new Event("input", { bubbles: true }));
       field.dispatchEvent(new Event("change", { bubbles: true }));
     }
-    ident = null;
-    send({ type: "xentry", op: "done", sid: s.sid, result: ok ? "filled" : "refused" });
-    end(s, ok ? MSG.filled : MSG.refused);
+    const result = ok ? "filled" : ident === null ? "rejected" : "refused";
+    ident = null;   // référence lâchée (chaîne JS : récupérée par le ramasse-miettes, jamais réécrite en place)
+    send({ type: "xentry", op: "done", sid: s.sid, result: result });
+    end(s, MSG[result]);
   }
   function okKey(e) {
     const k = typeof e.key === "string" && e.key !== "Unidentified" ? e.key : "";

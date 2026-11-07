@@ -222,13 +222,14 @@ const XENTRY_OPS = new Set(["start", "poll", "done", "cancel"]);
 const XB64K_RE = /^[A-Za-z0-9_-]{342}$/;   // 256 octets : module public ou chiffré (taille fixe)
 const XSID_RE = /^[A-Za-z0-9_-]{22}$/;
 const XURL_RE = /^http:\/\/[a-z0-9.-]{1,253}:[0-9]{2,5}\/r\/x\?s=([A-Za-z0-9_-]{22})$/;
-const XSTATES = new Set(["waiting", "claimed", "submitted", "delivering", "delivered", "refused", "cancelled", "expired",
-                         "gone"]);
+const XSTATES = new Set(["waiting", "claimed", "submitted", "delivering", "delivered", "refused", "rejected", "cancelled",
+                         "expired", "gone"]);
+const XRESULTS = new Set(["filled", "refused", "rejected"]);
 function xentryBody(msg) {   // champs FERMÉS ; jamais de clair, de secret ni d'empreinte (inconnus ici)
   if (msg.op === "start") { return XB64K_RE.test(msg.n) && msg.e === "AQAB" ? { n: msg.n, e: "AQAB" } : null; }
   if (typeof msg.sid !== "string" || !XSID_RE.test(msg.sid)) { return null; }
   if (msg.op !== "done") { return { sid: msg.sid }; }
-  return msg.result === "filled" || msg.result === "refused" ? { sid: msg.sid, result: msg.result } : null;
+  return XRESULTS.has(msg.result) ? { sid: msg.sid, result: msg.result } : null;
 }
 async function xentry(msg) {
   const s = await chrome.storage.session.get(["xentry"]);
@@ -262,7 +263,10 @@ async function xentry(msg) {
   if (!r.ok || !j || j.ok !== true) { return { ok: false }; }
   if (msg.op === "start") {
     const m = typeof j.url === "string" ? XURL_RE.exec(j.url) : null;
-    return m && m[1] === j.sid ? { ok: true, sid: j.sid, url: j.url } : { ok: false };
+    if (m && m[1] === j.sid) { return { ok: true, sid: j.sid, url: j.url }; }
+    // réponse écartée APRÈS création de la séance au service : annulation au mieux (identifiant seulement)
+    if (typeof j.sid === "string" && XSID_RE.test(j.sid)) { await xentry({ op: "cancel", sid: j.sid }).catch(() => null); }
+    return { ok: false };
   }
   if (msg.op === "poll") {
     return XSTATES.has(j.state) ? { ok: true, state: j.state, ct: XB64K_RE.test(j.ct) ? j.ct : null } : { ok: false };

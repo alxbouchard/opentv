@@ -122,12 +122,61 @@ class TestXEntryState(unittest.TestCase):
         x, sid = self.started()
         x.claim(sid, "p1")
         self.assertEqual(x.phone_cancel(sid, "p2"), (409, {"ok": False, "error": "claimed"}))
-        self.assertEqual(x.phone_cancel(sid, "p1"), (200, {"ok": True}))
+        self.assertEqual(x.phone_cancel(sid, "p1"), (200, {"ok": True, "state": "cancelled"}))
         self.assertFalse(x.active())
         self.assertEqual(x.status(sid, "p1"), "cancelled")
         x, sid = self.started()
         self.assertEqual(x.cancel(sid), (200, {"ok": True}))
         self.assertEqual(x.poll(sid)[1]["state"], "cancelled")
+        # contenu rejeté par l'extension (illisible, altéré, autre secret, code) : issue DISTINCTE de « champ changé »
+        x, sid = self.started()
+        x.claim(sid, "p1")
+        x.submit(sid, "p1", seal_doc(sid, "a"))
+        x.poll(sid)
+        self.assertEqual(x.done(sid, "rejected"), (200, {"ok": True}))
+        self.assertEqual(x.status(sid, "p1"), "rejected")
+
+    def test_phone_cancel_only_before_ciphertext_handoff(self):
+        # waiting / claimed / submitted : avant la remise du chiffré à l'extension -> annulable (rien relayé)
+        for upto in ("waiting", "claimed", "submitted"):
+            x, sid = self.started()
+            if upto != "waiting":
+                x.claim(sid, "p1")
+            if upto == "submitted":
+                x.submit(sid, "p1", seal_doc(sid, "alex"))
+            self.assertEqual(x.phone_cancel(sid, "p1"), (200, {"ok": True, "state": "cancelled"}), upto)
+            self.assertEqual(x.poll(sid), (200, {"ok": True, "state": "cancelled", "ct": None}), upto)  # jamais relayé
+            self.assertEqual(x.status(sid, "p1"), "cancelled", upto)
+
+    def test_phone_cancel_too_late_after_handoff_never_overwrites_delivered(self):
+        x, sid = self.started()
+        x.claim(sid, "p1")
+        x.submit(sid, "p1", seal_doc(sid, "alex"))
+        self.assertEqual(x.poll(sid)[1]["state"], "submitted")         # chiffré remis : « delivering »
+        # course : Annuler du téléphone APRÈS la remise -> trop tard ; la séance continue, rien n'est effacé
+        self.assertEqual(x.phone_cancel(sid, "p1"), (409, {"ok": False, "error": "too_late", "state": "sent"}))
+        self.assertTrue(x.active())
+        self.assertEqual(x.status(sid, "p1"), "sent")
+        self.assertEqual(x.done(sid, "filled"), (200, {"ok": True}))  # la TV livre quand même : issue exacte
+        self.assertEqual(x.status(sid, "p1"), "delivered")
+        # course : Annuler arrivé APRÈS la livraison -> l'issue reste « delivered », jamais « cancelled »
+        self.assertEqual(x.phone_cancel(sid, "p1"), (409, {"ok": False, "error": "over", "state": "delivered"}))
+        self.assertEqual(x.cancel(sid), (200, {"ok": True}))           # annulation TV tardive : sans effet non plus
+        self.assertEqual(x.status(sid, "p1"), "delivered")
+        self.assertEqual(x.poll(sid)[1]["state"], "delivered")
+        self.assertEqual([l["state"] for l in self.logs if l["state"] in ("cancelled", "delivered")], ["delivered"])
+        # issue « refused » / « expired » gardée de même
+        x, sid = self.started()
+        x.claim(sid, "p1")
+        x.submit(sid, "p1", seal_doc(sid, "alex"))
+        x.poll(sid)
+        x.done(sid, "refused")
+        self.assertEqual(x.phone_cancel(sid, "p1"), (409, {"ok": False, "error": "over", "state": "refused"}))
+        self.assertEqual(x.status(sid, "p1"), "refused")
+        x, sid = self.started()
+        self.mono.t += xentry.TTL_S
+        self.assertEqual(x.phone_cancel(sid, "p1"), (409, {"ok": False, "error": "over", "state": "expired"}))
+        self.assertEqual(x.phone_cancel("bad", "p1"), (409, {"ok": False, "error": "over", "state": "gone"}))
 
     def test_ttl_two_minutes_monotonic(self):
         x, sid = self.started()
@@ -330,10 +379,19 @@ class TestXEntryHttp(unittest.TestCase):
         self.assertEqual(self.preq(s, "GET", "/r/x/status?s=" + sid, cookie=tok2)[2], {"ok": True, "state": "gone"})
         code, out = tv_post(s, "poll", {"sid": sid})
         self.assertEqual((code, out), (200, {"ok": True, "state": "submitted", "ct": ct}))
+        code, _, out = self.preq(s, "POST", "/r/x/cancel", body, cookie=tok)   # chiffré déjà remis : trop tard
+        self.assertEqual((code, out), (409, {"ok": False, "error": "too_late", "state": "sent"}))
+        self.assertTrue(a.x_entry.active())
         self.assertEqual(tv_post(s, "done", {"sid": sid, "result": "filled"}), (200, {"ok": True}))
         self.assertEqual(self.preq(s, "GET", "/r/x/status?s=" + sid, cookie=tok)[2],
                          {"ok": True, "state": "delivered"})
         self.assertFalse(a.x_entry.active())
+        # Annuler tardif (après la livraison) : 409 « over » + issue réelle ; jamais « cancelled »
+        code, _, out = self.preq(s, "POST", "/r/x/cancel", body, cookie=tok)
+        self.assertEqual((code, out), (409, {"ok": False, "error": "over", "state": "delivered"}))
+        self.assertEqual(self.preq(s, "GET", "/r/x/status?s=" + sid, cookie=tok)[2],
+                         {"ok": True, "state": "delivered"})
+        self.assertEqual(tv_post(s, "done", {"sid": sid, "result": "nope"})[0], 400)
         # aucune trace : journal, disque, vues TV/opérateur/agent
         secrets_ = (sid, ct, JWK["n"], csrf, "alex@example.com")
         blob = json.dumps(a.test_logs, ensure_ascii=False)

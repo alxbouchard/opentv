@@ -6,7 +6,9 @@
    3. refuse toute clé dont l'empreinte diffère du QR, dont e ≠ 65537 ou qui n'est pas un module de 2048 bits exactement ;
    4. chiffre {v, s, f, t} en RSA-OAEP SHA-256 (ui/muse.js : JavaScript pur, crypto.subtle n'existe pas en HTTP LAN ;
       aléa de crypto.getRandomValues) : chiffré de 256 octets, quelle que soit la longueur de l'identifiant ;
-   5. envoie UNE fois, vide le champ aussitôt, puis suit seulement l'issue (livré / refusé / annulé).
+   5. envoie UNE fois, vide le champ aussitôt, puis suit seulement l'issue (livré / refusé / rejeté / annulé).
+   Annuler : offert seulement AVANT l'envoi accepté (caché et désactivé dès la réponse 200) ; le texte affiché vient de
+   la réponse du service (annulée / trop tard / issue réelle), jamais d'un « rien n'a été saisi » présumé.
    Aucun repli en clair : au moindre manque (BigInt, aléa, auto-test, fragment, clé), rien ne part. La page ne clique
    jamais rien sur X et n'ouvre rien : la suite (Suivant, passkey) se fait sur la TV. Syntaxe ES5. */
 (function () {
@@ -54,6 +56,29 @@
     if (CODE_RE.test(v)) { return "code"; }
     return "";
   }
+  var FINAL = {
+    delivered: "C'est fait : l'identifiant est dans le champ de la TV. Vérifie-le à l'écran, puis continue sur la " +
+               "TV (Suivant, puis ta clé d'accès).",
+    refused: "La TV n'a rien saisi : le champ n'acceptait plus la saisie (il a changé ou n'était plus sélectionné). " +
+             "Recommence depuis la TV.",
+    rejected: "La TV a rejeté l'envoi (illisible, altéré, QR d'une autre séance, ou ressemble à un code). Rien n'a été " +
+              "saisi. Recommence depuis la TV.",
+    cancelled: "Séance annulée. Rien n'a été saisi.",
+    expired: "Séance expirée (2 minutes). Rien n'a été saisi.",
+    gone: "Séance terminée : regarde la TV."
+  };
+  var TOO_LATE = "Trop tard pour annuler : l'identifiant chiffré est déjà parti vers la TV. Regarde la TV ; l'issue " +
+                 "s'affiche ici.";
+  // réponse de POST /r/x/cancel -> { end, text } : « rien n'a été saisi » SEULEMENT si le service le confirme
+  function cancelOutcome(status, j, cancelled) {
+    j = j || {};
+    if (status === 200 && j.ok === true && j.state === "cancelled") { return { end: true, text: cancelled }; }
+    if (j.error === "over" && FINAL[j.state]) { return { end: true, text: FINAL[j.state] }; }
+    if (j.error === "too_late") { return { end: false, text: TOO_LATE }; }
+    if (j.error === "claimed") { return { end: true, text: "Un autre téléphone a déjà pris cette saisie." }; }
+    return { end: false, text: "Annulation non confirmée (la boîte OpenTV ne répond pas) : regarde la TV ; l'issue " +
+                               "s'affiche ici." };
+  }
   function makeCt(seal, n, sid, f, ident, rnd) {
     var doc = seal.utf8(JSON.stringify({ v: 1, s: sid, f: f, t: ident }));
     if (doc.length > DOC_MAX) { throw new Error("size"); }
@@ -71,7 +96,7 @@
   }
   if (typeof window !== "undefined") {
     window.OpenTVXPhone = { parseFragment: parseFragment, verifyKey: verifyKey, clean: clean, refusal: refusal,
-                            makeCt: makeCt };
+                            makeCt: makeCt, cancelOutcome: cancelOutcome };
   }
   if (typeof document === "undefined") { return; }
 
@@ -86,6 +111,7 @@
   var Q = parseFragment(raw);
   raw = null;
   var S = main.getAttribute("data-s"), C = main.getAttribute("data-c") || "", N = null, busy = false, over = false;
+  var sent = false, stopping = false;   // sent : envoi accepté (200) — Annuler n'est alors plus jamais offert
   var seal = window.OpenTVMuseSeal;
   var form = $("xform"), inp = $("xid"), send = $("xsend"), cancel = $("xcancel"), err = $("xerr"), st = $("xstatus");
   function say(t) { st.textContent = t; }
@@ -108,20 +134,23 @@
             "l'appareil photo. Rien n'a été envoyé.");
     return;
   }
-  function stop(why) {
-    post("/r/x/cancel", { s: S, c: C }).then(function () { return null; }, function () { return null; });
-    finish(why);
+  function settle(o) {   // issue d'une demande d'annulation, telle que rendue par le service
+    if (over) { return; }
+    if (o.end) { finish(o.text); return; }
+    say(o.text);
+    if (!sent) { cancel.disabled = false; }
+    startPoll();
+  }
+  function stop(cancelled) {   // jamais après l'envoi accepté ; le texte final vient de la réponse du service
+    if (over || sent || stopping) { return; }
+    stopping = true; cancel.disabled = true;
+    say("Annulation…");
+    post("/r/x/cancel", { s: S, c: C }).then(function (r) {
+      stopping = false; settle(cancelOutcome(r.status, r.j, cancelled));
+    }, function () { stopping = false; settle(cancelOutcome(0, null, cancelled)); });
   }
   cancel.hidden = false;
   cancel.addEventListener("click", function () { stop("Annulé. Rien n'a été saisi sur la TV."); });
-  var FINAL = {
-    delivered: "C'est fait : l'identifiant est dans le champ de la TV. Vérifie-le à l'écran, puis continue sur la " +
-               "TV (Suivant, puis ta clé d'accès).",
-    refused: "La TV n'a rien saisi : le champ n'était plus sélectionné. Recommence depuis la TV.",
-    cancelled: "Séance annulée sur la TV. Rien n'a été saisi.",
-    expired: "Séance expirée (2 minutes). Rien n'a été saisi.",
-    gone: "Séance terminée. Rien n'a été saisi."
-  };
   var polls = 0, polling = false;
   function poll() {   // issue de la séance (TV : annulée, expirée, livrée…) — un seul suivi à la fois
     if (over) { return; }
@@ -146,7 +175,7 @@
     }
     if (!verifyKey(seal, r.j.n, r.j.e, Q.fp)) {   // la clé ne vient pas de la TV qui a affiché ce QR
       showErr("Clé inattendue : ce QR ne correspond pas à la clé reçue. Rien n'a été envoyé.");
-      stop("Séance annulée par sécurité.");
+      stop("Séance annulée par sécurité. Rien n'a été envoyé.");
       return;
     }
     N = r.j.n;
@@ -156,7 +185,7 @@
   }, function () { showErr("La boîte OpenTV ne répond pas : ce téléphone doit être sur le même Wi-Fi que la TV."); });
   form.addEventListener("submit", function (ev) {
     ev.preventDefault();
-    if (busy || over || !N) { return; }
+    if (busy || over || stopping || !N) { return; }
     var v = clean(inp.value);
     inp.value = "";   // l'identifiant quitte le champ tout de suite
     var why = refusal(v);
@@ -174,15 +203,24 @@
     busy = true; send.disabled = true; showErr("");
     post("/r/x/submit", { s: S, c: C, ct: ct }).then(function (r) {
       ct = null;
+      if (over) { return; }   // issue déjà connue (réponse d'Annuler arrivée d'abord) : jamais écrasée
       if (r.status === 200) {
+        sent = true; cancel.hidden = true; cancel.disabled = true;   // plus aucune annulation : le chiffré est parti
         form.hidden = true; N = null;
         say("Envoyé chiffré. Regarde la TV…");
         startPoll();
         return;
       }
-      finish(r.j.error === "already_submitted" ? "Déjà envoyé." : "L'envoi n'a pas abouti. Rien n'a été saisi.");
+      if (r.j.error === "already_submitted") {   // un envoi précédent a abouti (réponse perdue) : issue suivie, pas présumée
+        sent = true; cancel.hidden = true; cancel.disabled = true; form.hidden = true; N = null;
+        say("Déjà envoyé. Regarde la TV…");
+        startPoll();
+        return;
+      }
+      finish("L'envoi n'a pas abouti. Rien n'a été saisi.");
     }, function () {
       ct = null; busy = false; send.disabled = false;
+      if (over) { return; }
       showErr("La boîte OpenTV ne répond pas : ce téléphone doit être sur le même Wi-Fi que la TV.");
     });
   });

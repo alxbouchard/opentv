@@ -5,7 +5,10 @@
       la clé (empreinte du QR, e = 65537, module de 2048 bits), refus (vide, code, trop long), nettoyage, chiffré de
       taille FIXE, aléatoire, déchiffré par WebCrypto (clé NON exportable, comme l'extension) et par OpenSSL.
    B. Extension : bloc <gate> … </gate> de x-tv-extension/xentry.js exécuté TEL QUEL : URL de connexion, faits du champ
-      (mot de passe, OTP, code, NIP, 2FA, passkey, secours, paiement EN/FR jamais éligibles), document déchiffré.
+      (mot de passe, OTP, code, NIP, 2FA, passkey, secours, paiement EN/FR jamais éligibles), document déchiffré (code
+      de 4 à 9 chiffres refusé par l'extension elle-même), décision finale de remplissage (fillOk).
+   C. Page du téléphone : VRAI xphone.js sur un DOM factice, réponses du service dans l'ordre choisi (courses Envoyer /
+      Annuler) : Annuler caché + désactivé dès l'envoi accepté, textes tirés de la réponse du service, issue gardée.
    Sortie : une ligne JSON {ok, failures, counts} ; code de sortie 1 si une attente échoue. */
 "use strict";
 const fs = require("fs");
@@ -17,7 +20,7 @@ const PI4 = process.argv[2];
 const XPHONE = process.argv[3] || path.join(PI4, "ui", "xphone.js");
 const XENTRY = process.argv[4] || path.join(PI4, "x-tv-extension", "xentry.js");
 const failures = [];
-const counts = { phone: 0, gate: 0, ident: 0 };
+const counts = { phone: 0, gate: 0, ident: 0, fill: 0, ui: 0 };
 function expect(group, name, got, want) {
   counts[group] += 1;
   if (JSON.stringify(got) !== JSON.stringify(want)) { failures.push({ group, name, got, want }); }
@@ -105,7 +108,7 @@ function gate() {
   const a = src.indexOf("// <gate>");
   const b = src.indexOf("// </gate>");
   if (a < 0 || b < a) { failures.push({ group: "gate", name: "markers" }); return; }
-  const G = new Function(src.slice(a, b) + "\nreturn { loginUrl, factsOk, identOf, ID_MAX };")();
+  const G = new Function(src.slice(a, b) + "\nreturn { loginUrl, factsOk, identOf, fillOk, ID_MAX };")();
   const base = { top: true, focused: true, visible: true, tag: "INPUT", disabled: false, readonly: false,
                  url: "https://x.com/i/flow/login", type: "text", ac: "username", inputmode: "", maxlength: -1,
                  pattern: "", danger: false, texts: ["text", "", "", "", "", "", "Phone, email, or username",
@@ -163,12 +166,189 @@ function gate() {
                 t_num: { v: 1, s: sid, f: sec, t: 5 }, blank: { v: 1, s: sid, f: sec, t: " \u200b\n" },
                 long: { v: 1, s: sid, f: sec, t: "a".repeat(101) }, arr: [1], nul: null };
   for (const k of Object.keys(bad)) { expect("ident", "bad:" + k, id(bad[k]), null); }
+  // défense en profondeur : la page du téléphone (HTTP LAN) peut être altérée ; l'extension refuse ELLE-MÊME tout
+  // identifiant qui ressemble à un code (4 à 9 chiffres, espaces/points/tirets seulement, chiffres Unicode compris)
+  const t = (s) => id({ v: 1, s: sid, f: sec, t: s });
+  for (const code of ["1234", "123456", " 123 456 ", "12.34.56", "1-2-3-4-5-6", "123456789", "１２３４５６", "٤٥٦٧٨٩",
+                      "123\u200b456", "12 34\n56", "0000"]) {
+    expect("ident", "code:" + JSON.stringify(code), t(code), null);
+  }
+  for (const ok of ["+1 514 555 1234", "5145551234", "+33612345678", "+123456", "514-555-1234", "alex123456", "123",
+                    "@a1234", "a1234"]) {
+    expect("ident", "not_code:" + ok, t(ok), ok);
+  }
+  // décision FINALE de remplissage (même champ au focus, document au focus, MÊME URL exacte, champ encore éligible)
+  const href = "https://x.com/i/flow/login";
+  const fb = { ident: "alex", same: true, docFocus: true, href: href, startHref: href, eligible: true };
+  const fo = (o) => G.fillOk(Object.assign({}, fb, o));
+  expect("fill", "base", fo({}), true);
+  const nofill = { ident_null: { ident: null }, ident_empty: { ident: "" }, other_element: { same: false },
+                   same_truthy: { same: 1 }, doc_unfocused: { docFocus: false }, doc_truthy: { docFocus: "yes" },
+                   url_query: { href: href + "?step=2" }, url_hash: { href: href + "#x" },
+                   url_other: { href: "https://x.com/home" }, url_missing: { href: undefined, startHref: undefined },
+                   ineligible: { eligible: false }, eligible_truthy: { eligible: 1 } };
+  for (const k of Object.keys(nofill)) { expect("fill", "no:" + k, fo(nofill[k]), false); }
+  expect("fill", "null", G.fillOk(null), false);
+}
+
+// ------------------------------------------------------------------ page du téléphone : VRAI xphone.js, DOM factice
+// Courses Envoyer / Annuler : réponses du service rendues dans l'ordre choisi par le test (fetch et minuteries manuels).
+function phonePage(jwk, fp, sid, f) {
+  const els = {};
+  const mk = (id, extra) => {
+    els[id] = Object.assign({ id: id, hidden: false, disabled: false, textContent: "", value: "", attrs: {}, on: {},
+      addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); },
+      getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; },
+      focus() {}, fire(type) { (this.on[type] || []).forEach((fn) => fn({ preventDefault() {} })); },
+      click() { if (!this.disabled && !this.hidden) { this.fire("click"); } } }, extra || {});
+  };
+  mk("xentry", { attrs: { "data-s": sid, "data-c": "C".repeat(43) } });
+  mk("xform", { hidden: true });
+  mk("xid");
+  mk("xsend");
+  mk("xcancel", { hidden: true });
+  mk("xerr", { hidden: true });
+  mk("xstatus");
+  const reqs = [];
+  const timers = [];
+  const sb = { btoa: (s) => Buffer.from(s, "latin1").toString("base64"),
+               atob: (s) => Buffer.from(s, "base64").toString("latin1"), crypto: nodeCrypto.webcrypto,
+               setTimeout: (fn) => { timers.push(fn); return timers.length; },
+               document: { getElementById: (id) => els[id] || null },
+               location: { hash: "#" + f + "." + fp, pathname: "/r/x", search: "?s=" + sid },
+               history: { replaceState() { sb.location.hash = ""; } } };
+  sb.window = sb;
+  sb.fetch = (p, opts) => new Promise((resolve, reject) => {
+    reqs.push({ path: String(p).split("?")[0], body: opts && opts.body ? JSON.parse(opts.body) : null,
+                reply: (status, j) => resolve({ status: status, json: () => Promise.resolve(j) }),
+                fail: () => reject(new Error("net")) });
+  });
+  vm.createContext(sb);
+  vm.runInContext(fs.readFileSync(path.join(PI4, "ui", "muse.js"), "utf8"), sb, { filename: "muse.js" });
+  vm.runInContext(fs.readFileSync(XPHONE, "utf8"), sb, { filename: "xphone.js" });
+  const flush = async () => { for (let i = 0; i < 8; i++) { await new Promise((r) => setImmediate(r)); } };
+  const last = (p) => reqs.filter((r) => r.path === p).slice(-1)[0];
+  const tick = async () => { const fns = timers.splice(0); fns.forEach((fn) => fn()); await flush(); };
+  const ui = () => ({ status: els.xstatus.textContent, err: els.xerr.textContent, form: !els.xform.hidden,
+                      cancel: !els.xcancel.hidden, cancelDisabled: els.xcancel.disabled });
+  return { els, reqs, flush, last, tick, ui, n: (p) => reqs.filter((r) => r.path === p).length };
+}
+
+async function phoneUi() {
+  const subtle = nodeCrypto.webcrypto.subtle;
+  const pair = await subtle.generateKey({ name: "RSA-OAEP", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]),
+                                          hash: "SHA-256" }, false, ["encrypt", "decrypt"]);
+  const jwk = await subtle.exportKey("jwk", pair.publicKey);
+  const fp = b64u(nodeCrypto.createHash("sha256").update(Buffer.from(jwk.n, "base64url")).digest());
+  const sid = "S".repeat(22);
+  const f = "F".repeat(22);
+  const NOTHING = /Rien n'a été saisi/;
+  const claimed = async () => {
+    const P = phonePage(jwk, fp, sid, f);
+    await P.flush();
+    P.last("/r/x/claim").reply(200, { ok: true, n: jwk.n, e: "AQAB" });
+    await P.flush();
+    return P;
+  };
+  const submit = async (P) => {
+    P.els.xid.value = "alex@example.com";
+    P.els.xform.fire("submit");
+    await P.flush();
+  };
+  // 1) Envoyer accepté (200) : Annuler caché ET désactivé AUSSITÔT ; plus aucun /r/x/cancel ; issue lue au service
+  let P = await claimed();
+  expect("ui", "claimed:cancel_offered", [P.ui().form, P.ui().cancel], [true, true]);
+  await submit(P);
+  expect("ui", "in_flight:cancel_still_offered", P.ui().cancel, true);
+  P.last("/r/x/submit").reply(200, { ok: true });
+  await P.flush();
+  expect("ui", "sent:cancel_hidden", P.ui().cancel, false);
+  expect("ui", "sent:cancel_disabled", P.ui().cancelDisabled, true);
+  expect("ui", "sent:form_hidden", P.ui().form, false);
+  P.els.xcancel.fire("click");   // tap déjà en file : le gestionnaire lui-même refuse
+  await P.flush();
+  expect("ui", "sent:no_cancel_request", P.n("/r/x/cancel"), 0);
+  expect("ui", "sent:not_nothing", NOTHING.test(P.ui().status), false);
+  await P.tick();
+  P.last("/r/x/status").reply(200, { ok: true, state: "delivered" });
+  await P.flush();
+  expect("ui", "sent:delivered", /C'est fait/.test(P.ui().status), true);
+  // 2) course : Annuler pendant l'envoi ; 200 de l'envoi PUIS 409 too_late -> « trop tard », puis issue réelle
+  P = await claimed();
+  await submit(P);
+  P.els.xcancel.click();
+  await P.flush();
+  expect("ui", "race_late:cancel_sent", P.n("/r/x/cancel"), 1);
+  P.last("/r/x/submit").reply(200, { ok: true });
+  await P.flush();
+  expect("ui", "race_late:cancel_hidden", [P.ui().cancel, P.ui().cancelDisabled], [false, true]);
+  P.last("/r/x/cancel").reply(409, { ok: false, error: "too_late", state: "sent" });
+  await P.flush();
+  expect("ui", "race_late:too_late_text", /Trop tard/.test(P.ui().status), true);
+  expect("ui", "race_late:not_nothing", NOTHING.test(P.ui().status), false);
+  await P.tick();
+  P.last("/r/x/status").reply(200, { ok: true, state: "delivered" });
+  await P.flush();
+  expect("ui", "race_late:delivered", /C'est fait/.test(P.ui().status), true);
+  // 3) course : la réponse d'Annuler arrive AVANT celle de l'envoi : issue « delivered » gardée, jamais écrasée
+  P = await claimed();
+  await submit(P);
+  P.els.xcancel.click();
+  await P.flush();
+  P.last("/r/x/cancel").reply(409, { ok: false, error: "over", state: "delivered" });
+  await P.flush();
+  P.last("/r/x/submit").reply(200, { ok: true });
+  await P.flush();
+  expect("ui", "race_over:delivered_kept", /C'est fait/.test(P.ui().status), true);
+  expect("ui", "race_over:not_nothing", NOTHING.test(P.ui().status), false);
+  expect("ui", "race_over:no_form", [P.ui().form, P.ui().cancel], [false, false]);
+  // 4) Annuler avant tout envoi : le service CONFIRME l'annulation -> « rien n'a été saisi » est alors vrai
+  P = await claimed();
+  P.els.xcancel.click();
+  await P.flush();
+  expect("ui", "cancel:pending_disabled", P.ui().cancelDisabled, true);
+  expect("ui", "cancel:not_yet_final", NOTHING.test(P.ui().status), false);
+  P.last("/r/x/cancel").reply(200, { ok: true, state: "cancelled" });
+  await P.flush();
+  expect("ui", "cancel:confirmed", NOTHING.test(P.ui().status), true);
+  expect("ui", "cancel:closed", [P.ui().form, P.ui().cancel], [false, false]);
+  // 5) Annuler sans réponse (réseau) : jamais « rien n'a été saisi » ; Annuler de nouveau possible ; suivi continu
+  P = await claimed();
+  P.els.xcancel.click();
+  await P.flush();
+  P.last("/r/x/cancel").fail();
+  await P.flush();
+  expect("ui", "cancel_net:not_nothing", NOTHING.test(P.ui().status), false);
+  expect("ui", "cancel_net:retry", [P.ui().cancel, P.ui().cancelDisabled], [true, false]);
+  // 5 bis) réponse d'envoi perdue puis 409 already_submitted : l'envoi a abouti -> Annuler retiré, issue suivie
+  P = await claimed();
+  await submit(P);
+  P.last("/r/x/submit").reply(409, { ok: false, error: "already_submitted" });
+  await P.flush();
+  expect("ui", "already:cancel_hidden", [P.ui().cancel, P.ui().cancelDisabled], [false, true]);
+  expect("ui", "already:not_nothing", NOTHING.test(P.ui().status), false);
+  await P.tick();
+  P.last("/r/x/status").reply(200, { ok: true, state: "delivered" });
+  await P.flush();
+  expect("ui", "already:delivered", /C'est fait/.test(P.ui().status), true);
+  // 6) issues finales distinctes (contenu rejeté / champ refusé) : jamais le même texte
+  for (const [state, re] of [["rejected", /rejet/i], ["refused", /champ/]]) {
+    P = await claimed();
+    await submit(P);
+    P.last("/r/x/submit").reply(200, { ok: true });
+    await P.flush();
+    await P.tick();
+    P.last("/r/x/status").reply(200, { ok: true, state: state });
+    await P.flush();
+    expect("ui", "final:" + state, re.test(P.ui().status), true);
+  }
 }
 
 (async () => {
   try {
     await phone();
     gate();
+    await phoneUi();
   } catch (err) {
     failures.push({ group: "crash", name: String(err && err.stack || err).slice(0, 400) });
   }

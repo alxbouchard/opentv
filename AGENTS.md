@@ -405,10 +405,14 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   neuve, clé privée NON exportable ; service (`opentv_pi/xentry.py`, routes `/api/tv/x/entry/*` et `/r/x*`) : clé
   publique + chiffré de 256 octets seulement, une séance, 2 min, mémoire ; QR = adresse + `#secret.empreinte` (fragment
   jamais envoyé) ; téléphone (`ui/xphone.js` + OAEP pur JS de `ui/muse.js`) : fragment effacé, empreinte/e/taille
-  vérifiées, avertissement « Identifiant seulement — jamais mot de passe ou code ». Effacée à la livraison, annulation,
-  touche, focus, navigation, Retour (/tv), redémarrage. Limite : page téléphone en HTTP LAN — un attaquant ACTIF du LAN
-  pourrait la remplacer (pas de promesse bout en bout contre lui). Tests `test_x_entry.py`, `test_x_entry_web.py`
-  (harnais + mutations + Chromium réel). Hors matériel seulement ; gate terrain sur le vrai X.
+  vérifiées, avertissement « Identifiant seulement — jamais mot de passe ou code ». Close à la livraison, annulation,
+  touche, focus, navigation, Retour (/tv), redémarrage : références lâchées (ramasse-miettes), seul le tampon déchiffré
+  est mis à zéro. Extension : code de 4 à 9 chiffres refusé elle-même ; garde finale (même élément, document au focus,
+  URL exacte, encore éligible). Annuler du téléphone seulement avant la remise du chiffré ; ensuite trop tard (409),
+  issue jamais réécrite, Annuler caché dès l'envoi accepté. Limite : page téléphone en HTTP LAN — un écouteur PASSIF ne
+  voit que le chiffré (il peut voler le cookie pour réclamer/annuler, rien injecter sans le secret du QR) ; un
+  attaquant ACTIF du LAN ou un Pi/service OpenTV compromis peut la remplacer (pas de promesse bout en bout). Tests
+  `test_x_entry.py`, `test_x_entry_web.py` (harnais + mutations + Chromium réel). Hors matériel seulement ; gate terrain sur le vrai X.
 - **Mode HDMI exact après extinction/rallumage de la TV (0.7.5)** : terrain 2026-11-01, au rallumage wlroots recrée
   la sortie et Cage prend le mode préféré de l'EDID (3840x2160@30) pendant que Chromium reste en 1920x1080 (quart
   d'écran). `opentv_pi/displaymode.py` : cible exacte `OPENTV_HDMI_MODE` (défaut `1920x1080@60`, jamais un

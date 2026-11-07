@@ -2,7 +2,9 @@
    kiosque = contexte persistant avec l'extension TELLE QU'INSTALLÉE par install.sh ; téléphones = navigateurs séparés
    (cookies séparés), nom mDNS de test résolu vers 127.0.0.1 ; vrai service OpenTV (TV + télécommande) ; pages X
    SYNTHÉTIQUES servies par Playwright. Le QR est lu sur une CAPTURE D'ÉCRAN (décodage par le canal de contrôle).
-   argv[2] = module playwright ; argv[3] = JSON {chrome, ext, ext_id, tv, port, ctl, map, shots}.
+   argv[2] = module playwright ; argv[3] = JSON {chrome, ext, ext_id, tv, port, ctl, map, shots, only?}.
+   only (mutations) : null = tout ; "late" = champ rendu inéligible après le QR seulement ; "badstart" = réponse de
+   start écartée seulement.
    Sortie : une ligne JSON {steps}. */
 "use strict";
 const fs = require("fs");
@@ -165,6 +167,8 @@ function ctl(method, p, body) {
       form: !!document.getElementById("xform") && !document.getElementById("xform").hidden, href: location.href,
       hash: location.hash }));
     const flip = (s, i) => s.slice(0, i) + (s[i] === "A" ? "B" : "A") + s.slice(i + 1);
+    const want = (k) => !cfg.only || cfg.only === k;
+    if (want("main")) {
     // 1) empreinte du QR altérée : clé refusée par le téléphone, séance annulée, rien envoyé
     let s1 = await startSession();
     st.s1 = s1;
@@ -179,7 +183,7 @@ function ctl(method, p, body) {
     await A.p.waitForSelector("#xform:not([hidden])");
     await A.p.fill("#xid", "mallory@example.com");
     await A.p.click("#xsend");
-    await waitFor(async () => /rien saisi/i.test((await phoneText(A.p)).status || "") && !(await tvState()).qr);
+    await waitFor(async () => /rejeté/.test((await phoneText(A.p)).status || "") && !(await tvState()).qr);
     st.wrong_secret = { phone: await phoneText(A.p), tv: await tvState(), service: await service() };
     // 3) chiffré altéré en route : refusé par l'extension (OAEP), champ intact
     const s3 = await startSession();
@@ -192,7 +196,7 @@ function ctl(method, p, body) {
     await A.p.waitForSelector("#xform:not([hidden])");
     await A.p.fill("#xid", "mallory@example.com");
     await A.p.click("#xsend");
-    await waitFor(async () => /rien saisi/i.test((await phoneText(A.p)).status || "") && !(await tvState()).qr);
+    await waitFor(async () => /rejeté/.test((await phoneText(A.p)).status || "") && !(await tvState()).qr);
     await A.p.unroute("**/r/x/submit");
     st.tampered_ct = { phone: await phoneText(A.p), tv: await tvState(), service: await service() };
     // 4) chemin nominal : A réclame, B refusé ; A envoie ; UN input + UN change ; aucun clic ni envoi
@@ -212,12 +216,37 @@ function ctl(method, p, body) {
     await B.p.goto(s4.url);
     await waitFor(async () => /autre téléphone/.test((await phoneText(B.p)).status || ""));
     st.second_phone = await phoneText(B.p);
+    let release = null;
+    const held = new Promise((r) => { release = r; });
+    await A.p.route("**/r/x/status*", async (route) => { await held; await route.continue().catch(() => undefined); });
     await A.p.fill("#xid", "  alex@example.com\u200b ");
     await A.p.click("#xsend");
+    await A.p.waitForFunction(() => /Envoyé chiffré/.test(document.getElementById("xstatus").textContent));
+    st.after_submit = await A.p.evaluate(() => {   // aussitôt après le 200 : Annuler n'est plus offert
+      const b = document.getElementById("xcancel");
+      const out = { hidden: b.hidden, disabled: b.disabled, visible: b.getBoundingClientRect().width > 0 };
+      b.click();
+      b.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      return out;
+    });
+    await waitFor(async () => (await tvState()).value !== "" && !(await service()).active);
+    st.phone_reqs = A.reqs.map((r) => ({ path: new URL(r.url).pathname, method: r.method, url: r.url, body: r.body }));
+    // course : Annuler arrivé APRÈS la livraison (requête directe, comme un tap retardé) -> issue « delivered » gardée
+    st.late_cancel = await A.p.evaluate(async () => {
+      const m = document.getElementById("xentry");
+      const r = await fetch("/r/x/cancel", { method: "POST", headers: { "Content-Type": "application/json",
+        "X-OpenTV-Remote": "x" }, body: JSON.stringify({ s: m.getAttribute("data-s"), c: m.getAttribute("data-c") }) });
+      return { status: r.status, j: await r.json() };
+    });
+    release();
+    await A.p.unroute("**/r/x/status*");
     await waitFor(async () => /C'est fait/.test((await phoneText(A.p)).status || ""));
+    st.late_cancel.after = await A.p.evaluate(async () => {   // issue relue APRÈS l'annulation tardive
+      const sid = document.getElementById("xentry").getAttribute("data-s");
+      return (await (await fetch("/r/x/status?s=" + encodeURIComponent(sid))).json()).state;
+    });
     await sleep(300);
     st.filled = { tv: await tvState(), phone: await phoneText(A.p), service: await service() };
-    st.phone_reqs = A.reqs.map((r) => ({ path: new URL(r.url).pathname, method: r.method, url: r.url, body: r.body }));
     // 5) annulations : touche réelle, focus posé par la page, navigation, Retour (/tv rechargée)
     await startSession();
     await tv.keyboard.press("ArrowDown");
@@ -239,6 +268,65 @@ function ctl(method, p, body) {
     st.return_after = await service();
     await waitFor(async () => /annulée/.test((await phoneText(A.p)).status || ""));
     st.return_phone = await phoneText(A.p);
+    }
+    // ---------------------------------------------------------------- dernière vérification avant de remplir
+    // MÊME élément au focus de bout en bout ; APRÈS le QR/start et AVANT l'envoi du téléphone, la page X le rend
+    // inéligible (mot de passe, code à usage unique, fenêtre « code de vérification », mot de passe voisin, libellé,
+    // longueur de code) : l'extension refuse à la livraison ; champ vide ; aucun input/change/click/submit.
+    if (want("late")) {
+      await ctl("POST", "/presence?on=1");
+      st.late = {};
+      for (const c of ["password", "otp", "vcode_dialog", "danger", "label", "maxlen", "numeric"]) {
+        await openX("/i/flow/login");
+        await tv.evaluate(() => { window.__u = document.getElementById("user"); });
+        const sl = await startSession();
+        await A.p.goto(sl.url);
+        await A.p.waitForSelector("#xform:not([hidden])");
+        await tv.evaluate((k) => {
+          window.__ev = { input: 0, change: 0, click: 0, submit: 0 };
+          const u = window.__u;
+          if (k === "password") { u.type = "password"; }
+          if (k === "otp") { u.setAttribute("autocomplete", "one-time-code"); }
+          if (k === "vcode_dialog") { document.getElementById("h").textContent = "Enter your verification code"; }
+          if (k === "danger") {
+            const pw = document.createElement("input");
+            pw.type = "password";
+            pw.autocomplete = "current-password";
+            document.getElementById("f").appendChild(pw);
+          }
+          if (k === "label") { u.setAttribute("aria-label", "Verification code"); }
+          if (k === "maxlen") { u.setAttribute("maxlength", "6"); }
+          if (k === "numeric") { u.setAttribute("inputmode", "numeric"); }
+        }, c);
+        const before = await tv.evaluate(() => ({ same: document.activeElement === window.__u, qr:
+          !!document.querySelector('[data-otvx-entry="qr"]') }));
+        await A.p.fill("#xid", "alex@example.com");
+        await A.p.click("#xsend");
+        await waitFor(async () => /Rien n'a été saisi|rien saisi|C'est fait/.test((await phoneText(A.p)).status || "") &&
+                                  !(await tvState()).qr);
+        st.late[c] = { before: before, phone: await phoneText(A.p), service: await service(),
+                       tv: Object.assign(await tvState(), await tv.evaluate(() => ({
+                         same: document.activeElement === window.__u, uvalue: window.__u.value }))) };
+      }
+    }
+    // ---------------------------------------------------------------- réponse de start écartée
+    // le service a créé la séance, mais sa réponse est écartée (adresse hors forme) : annulation au mieux immédiate
+    if (want("badstart")) {
+      await ctl("POST", "/presence?on=1");
+      await openX("/i/flow/login");
+      await ctl("POST", "/badurl?on=1");
+      const before = await service();
+      await tv.evaluate(() => document.getElementById("user").focus());
+      await sleep(250);
+      await tv.keyboard.press("ArrowDown");
+      const onPill = (await tvState()).active;
+      await tv.keyboard.press("Enter");
+      await waitFor(async () => (await service()).started > before.started);
+      await waitFor(async () => !(await service()).active, 6000);
+      st.badstart = { on_pill: onPill, before: before, after: await service(), tv: await tvState() };
+      await ctl("POST", "/badurl?on=0");
+    }
+    if (want("main")) {
     // ---------------------------------------------------------------- champs jamais éligibles
     await ctl("POST", "/presence?on=1");
     st.ineligible = {};
@@ -261,6 +349,7 @@ function ctl(method, p, body) {
     await ctl("POST", "/presence?on=1");
     await openX("/i/flow/login");
     st.off = await tvState();
+    }
   } catch (err) {
     out.error = String(err && err.stack || err).slice(0, 1500);
     process.stdout.write(JSON.stringify(out) + "\n");
