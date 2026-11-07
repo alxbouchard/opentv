@@ -27,3 +27,13 @@ p { font-size: 17px; margin: 10px 0; }
   border-radius: 12px; padding: 12px 16px; min-height: 48px; }
 .more { text-align: center; }
 .more a { color: #58a6ff; font-size: 18px; display: inline-block; padding: 12px 8px; }
+/* Identifiant X depuis le téléphone (xentry) : un champ, deux boutons, avertissement visible */
+[hidden] { display: none !important; }
+.xwarn { font-size: 18px; font-weight: 700; color: #ffd166; background: #3a2c00; border: 2px solid #e3b341;
+  border-radius: 12px; padding: 12px 16px; }
+#xform label { display: block; font-size: 17px; margin: 14px 0 6px; color: #c9d1d9; }
+#xform input { display: block; width: 100%; min-height: 56px; font: inherit; font-size: 20px; border-radius: 12px;
+  border: 2px solid #30363d; background: #161b22; color: #f0f3f6; padding: 10px 14px; -webkit-user-select: text;
+  user-select: text; }
+.secondary { display: block; width: 100%; min-height: 56px; font: inherit; font-size: 18px; border-radius: 16px;
+  border: 2px solid #30363d; background: transparent; color: #c9d1d9; margin: 10px 0; }

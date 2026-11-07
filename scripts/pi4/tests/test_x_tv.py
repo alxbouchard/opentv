@@ -34,7 +34,7 @@ from tests.test_service import make_app, Servers, find_chromium
 from opentv_pi import VERSION, agentport, agents, config, mcp, musebridge, tools, web, xcontext, xprobe
 
 EXT = os.path.join(PI4, "x-tv-extension")
-EXT_FILES = ("manifest.json", "background.js", "nav.js", "nav.css", "x.js", "x.css", "tvkey.js")
+EXT_FILES = ("manifest.json", "background.js", "nav.js", "nav.css", "x.js", "x.css", "tvkey.js", "qrcode.js", "xentry.js")
 EXT_DST = "/opt/opentv/share/x-tv-extension"
 INSTALL = os.path.join(PI4, "install.sh")
 UNINSTALL = os.path.join(PI4, "uninstall.sh")
@@ -507,7 +507,7 @@ class TestXExtensionStatic(unittest.TestCase):
             self.assertNotIn(k, m)
         self.assertEqual(m["background"], {"service_worker": "background.js"})
         cs = m["content_scripts"]
-        self.assertEqual(len(cs), 3)
+        self.assertEqual(len(cs), 4)
         nv = [c for c in cs if "nav.js" in c["js"]][0]                  # Retour/Accueil : autonome, dès le début
         self.assertEqual(sorted(nv["matches"]), ["https://twitter.com/*", "https://x.com/*"])
         self.assertEqual((nv["js"], nv["run_at"], nv.get("all_frames", False)), (["nav.js"], "document_start", False))
@@ -520,9 +520,18 @@ class TestXExtensionStatic(unittest.TestCase):
         self.assertEqual(tv["matches"], ["http://127.0.0.1/tv*"])
         self.assertEqual((tv["js"], tv.get("all_frames", False)), (["tvkey.js"], False))
         self.assertNotIn("css", tv)
+        # saisie de l'identifiant par téléphone (0.7.10) : générateur de QR + xentry.js, cadre principal seulement
+        xe = [c for c in cs if "xentry.js" in c["js"]][0]
+        self.assertEqual(sorted(xe["matches"]), ["https://twitter.com/*", "https://x.com/*"])
+        self.assertEqual((xe["js"], xe["run_at"], xe.get("all_frames", False)), (["qrcode.js", "xentry.js"],
+                                                                                  "document_idle", False))
+        self.assertNotIn("css", xe)
+        with open(os.path.join(EXT, "qrcode.js"), "rb") as a, \
+                open(os.path.join(os.path.dirname(os.path.dirname(PI4)), "native", "app", "qrcode.js"), "rb") as b:
+            self.assertEqual(a.read(), b.read())                                   # copie exacte, jamais modifiée
 
     def test_no_sensitive_api_no_click_no_write_action(self):
-        for f in ("background.js", "nav.js", "x.js", "tvkey.js"):
+        for f in ("background.js", "nav.js", "x.js", "tvkey.js", "xentry.js"):
             src = code_only(read(os.path.join(EXT, f)))
             for bad in ("chrome.cookies", "document.cookie", "webRequest", "chrome.debugger", "chrome.scripting",
                         "eval(", "new Function", ".click(", "dispatchEvent", "innerHTML", "outerHTML",
@@ -533,6 +542,9 @@ class TestXExtensionStatic(unittest.TestCase):
                 if f == "nav.js" and bad == ".click(":   # repli unique d'un OK réel (test_login_controls_mode_…)
                     self.assertEqual(src.count(bad), 1)
                     continue
+                if f == "xentry.js" and bad == "dispatchEvent":   # UN « input » + UN « change » (test_x_entry_web)
+                    self.assertEqual(src.count(bad), 2)
+                    continue
                 self.assertNotIn(bad, src, "%s : %s" % (f, bad))
         bg = code_only(read(os.path.join(EXT, "background.js")))
         self.assertIn("storage.session", bg)
@@ -540,9 +552,11 @@ class TestXExtensionStatic(unittest.TestCase):
         self.assertIn('referrerPolicy: "no-referrer"', bg)
         self.assertIn(xcontext.SHARE_PATH, bg)
         self.assertIn(xprobe.PROBE_PATH, bg)
-        # deux appels réseau seulement, tous deux vers la boucle locale : partage (←) et sonde canari
+        # trois appels réseau seulement, tous vers la boucle locale : partage (←), sonde canari, relais FERMÉ de la
+        # saisie de l'identifiant par téléphone (clé publique / chiffré de taille fixe seulement, test_x_entry_web)
         self.assertEqual(re.findall(r"fetch\(([^,]*),", bg), ["`http://127.0.0.1:${tv.port}${SHARE_PATH}`",
-                                                               "`http://127.0.0.1:${tv.port}${PROBE_PATH}`"])
+                                                               "`http://127.0.0.1:${tv.port}${PROBE_PATH}`",
+                                                               "`http://127.0.0.1:${tv.port}${XENTRY_PATH}${msg.op}`"])
         self.assertNotRegex(bg, r"https?://(?!127\.0\.0\.1)[a-z]")          # jamais d'autre hôte contacté
 
     def test_share_payload_is_closed_author_text(self):
@@ -841,7 +855,7 @@ class TestXExtensionStatic(unittest.TestCase):
 
     @unittest.skipUnless(NODE and os.environ.get("OPENTV_TEST_ACORN"), "acorn absent (OPENTV_TEST_ACORN)")
     def test_extension_scripts_parse_es2020(self):
-        for f in ("background.js", "nav.js", "x.js", "tvkey.js"):
+        for f in ("background.js", "nav.js", "x.js", "tvkey.js", "xentry.js"):
             js = ("const a=require(process.argv[1]);a.parse(require('fs').readFileSync(process.argv[2],'utf8'),"
                   "{ecmaVersion:2020,sourceType:'script'});")
             p = subprocess.run([NODE, "-e", js, os.environ["OPENTV_TEST_ACORN"], os.path.join(EXT, f)],
@@ -921,7 +935,7 @@ class TestKioskAndPolicy(unittest.TestCase):
         self.assertIn("#OPENTV_X_TV=1", read(os.path.join(PI4, "opentv-pi.env.example")))
 
     def test_version_and_docs(self):
-        self.assertEqual(VERSION, "0.7.9")
+        self.assertEqual(VERSION, "0.7.10")
         readme = read(os.path.join(PI4, "README.md"))
         for need in ("X TV Mode", "OPENTV_X_TV=0", "x_context", "non fiable", "connecte-toi", xcontext.EXTENSION_ID):
             self.assertTrue(need in readme, "README sans « %s »" % need)

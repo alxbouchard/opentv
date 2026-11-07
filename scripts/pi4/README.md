@@ -1541,6 +1541,65 @@ X active sur le téléphone, flux complet réussi sur la TV, photo — sinon con
 (nouveau périphérique vc4-hdmi) ; OK sur « Sign in » du VRAI DOM de X puis passkey au focus dans la fenêtre
 ouverte par X (0.7.9 : jamais « Continue with phone », inscription) ; photo d'Alex.
 
+### 6 sexies-c. « Saisir avec le téléphone » : identifiant X sans clavier physique (0.7.10, drapeau, défaut désactivé)
+
+Alex refuse tout clavier physique ; la passkey native de X n'apparaît qu'**après** un identifiant. Ce pont remplit
+**UN identifiant** (nom d'utilisateur, courriel ou téléphone) dans le champ de connexion X au focus, depuis le
+téléphone **déjà appairé** à la télécommande OpenTV ; Alex continue ensuite lui-même (Suivant, puis passkey native).
+**Jamais** un mot de passe, un code (OTP, vérification, NIP, 2FA, secours), une passkey ni un paiement ; aucun clic,
+aucun envoi de formulaire, aucune action de compte ; le téléphone et les assistants n'ouvrent jamais X et ne
+démarrent jamais de séance. Ce n'est **pas** « Continue with phone » (inscription X, toujours retirée de ↑ ↓).
+
+Activation : `OPENTV_X_PHONE_ENTRY=1` dans `/etc/opentv/opentv.env` (canari explicite ; **0 par défaut** dans
+l'exemple et le fichier installé), puis `sudo systemctl restart opentv.service opentv-kiosk.service`. Désactivé (ou
+`OPENTV_X_TV=0`, ou télécommande téléphone coupée) : aucune pastille, aucune route (404), aucun script téléphone servi,
+aucune séance.
+
+Parcours : X ouvert **à la TV** par la télécommande (témoin « X ouvert ») → champ identifiant au focus → ↓ réel :
+pastille **« Saisir avec le téléphone »** (juste après le champ dans le parcours ↑ ↓) → **OK réel** → QR à gauche de
+la fenêtre X → scan avec le téléphone appairé → page « Identifiant X » (clavier natif du téléphone, autocomplete,
+correction et majuscules automatiques coupées, boutons **Envoyer** / **Annuler**, avertissement
+**« Identifiant seulement — jamais mot de passe ou code »**) → l'identifiant apparaît dans le champ de la TV → Alex
+vérifie, Suivant, passkey native.
+
+Sécurité (`opentv_pi/xentry.py`, `x-tv-extension/xentry.js`, `ui/xphone.js`) :
+- **Armement** : seulement une flèche RÉELLE de `nav.js` vers la pastille puis un OK RÉEL (`isTrusted`) ; un focus posé
+  par la page, une touche ou un clic synthétiques n'arment rien. Pastille et QR dans des racines fantômes **fermées**
+  (invisibles pour la page X).
+- **Champ éligible** (monde isolé de l'extension) : cadre principal, `https://x.com|twitter.com` (± `www.`/`mobile.`),
+  URL de connexion seulement (`/i/flow/login`, `/login`, `/i/jf/onboarding/web?mode=login`, jamais `start=`), INPUT au
+  focus, visible, actif, modifiable, `type` text/email/tel, `autocomplete` `username`/`email`/`tel`/`tel-national`/
+  `tel-local` (± `webauthn`). Refus : `inputmode` numérique, `maxlength` ≤ 8, `pattern`, champ mot de passe ou code à
+  usage unique dans la même fenêtre/formulaire, et tout nom/libellé/placeholder/titre de fenêtre évoquant mot de passe,
+  code, OTP, NIP, vérification, 2FA, passkey/clé d'accès, secours, récupération, jeton, carte, paiement (EN/FR). La
+  **valeur** du champ n'est jamais lue.
+- **Chiffrement** : l'extension tire une paire RSA-OAEP-2048/SHA-256 **neuve**, clé privée **non exportable**
+  (WebCrypto) ; le service ne reçoit que la clé publique (n, e = 65537). Le QR porte l'adresse de la télécommande et,
+  dans le **fragment** (jamais envoyé au service), un secret de séance et l'empreinte SHA-256 de n. Le téléphone
+  efface le fragment de la barre d'adresse, réclame la séance (cookie appairé, Origin exacte, CSRF, en-tête dédié ;
+  **premier** téléphone appairé seulement), refuse toute clé dont l'empreinte, l'exposant ou la taille diffère, puis
+  chiffre `{v, s, f, t}` avec l'OAEP en JavaScript pur de Muse (`ui/muse.js` : `crypto.subtle` n'existe pas en HTTP
+  LAN). Le chiffré fait **toujours 256 octets** : ni le service, ni les journaux, ni le disque, ni la vue opérateur,
+  ni les agents (Hermit, Muse) ne voient le texte ou sa longueur. Relayé **une fois** à l'extension, déchiffré là,
+  séance et secret vérifiés, identifiant nettoyé (contrôles, bidi, largeur nulle, sauts de ligne) et borné à 100
+  caractères ; rempli seulement si le **même** champ est encore au focus et éligible : setter natif, **un** `input`,
+  **un** `change`.
+- **Séance** : une seule, **2 minutes** (monotone), mémoire seulement ; effacée à la livraison, au refus, à
+  l'annulation (TV ou téléphone), à toute touche réelle, au focus déplacé, à la navigation, au Retour Samsung (le
+  kiosque relancé recharge `/tv`, qui l'efface), à la perte du témoin et au redémarrage du service. Aucun repli en
+  clair.
+- **Limite honnête** : la page du téléphone est servie en **HTTP** sur le LAN. Un écouteur passif (et le service) ne
+  voit que le chiffré ; un **attaquant ACTIF** du réseau local (usurpation ARP/DNS) pourrait remplacer la page et son
+  script : aucune cryptographie livrée par un canal non authentifié ne l'empêche — pas de promesse « bout en bout »
+  contre lui. À n'activer que sur un Wi-Fi de confiance.
+
+Tests : `tests/test_x_entry.py` (service, routes, effacements, aucune trace), `tests/test_x_entry_web.py` (statique,
+harnais Node `tests/x_entry_harness.js` + mutations des contrôles, installation, bout en bout Chromium réel
+`tests/e2e_x_entry.js` : QR décodé sur capture, fragment effacé, empreinte/secret/chiffré altérés refusés, chiffré de
+taille fixe, faux événements sans effet, champs mot de passe/OTP/code jamais éligibles, un `input` + un `change`,
+aucun clic ni envoi, annulations, Retour). **Gate terrain** : pastille et QR sur la vraie fenêtre de connexion X,
+champ réellement éligible (le DOM réel de X peut différer : refus = rien ne s'affiche), remplissage accepté par X.
+
 ### 6 sexies-b. Canari instrumenté 0.7.8 : ↑ ↓ ← → OK sur le VRAI X (preuve d'abord, aucune injection de touche)
 
 **Terrain 0.7.7** : la sortie Retour (appareil) est prouvée ; sur le vrai x.com, **flèches et OK ne font rien** alors que

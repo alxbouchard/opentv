@@ -1,22 +1,19 @@
 """Serveurs HTTP du service (stdlib).
 
-- TV (127.0.0.1 seulement, toujours) : /tv, /static/*, /api/tv/* (en-tête secret par démarrage, Host vérifié contre le
-  DNS rebinding, JSON borné). CSP stricte : aucun script en ligne, connexions vers soi uniquement.
+- TV (127.0.0.1 seulement) : /tv, /static/*, /api/tv/* (clé par démarrage, Host vérifié, JSON borné) ; CSP stricte.
 - LAN (0.0.0.0:OPENTV_SETUP_PORT, seulement pendant la configuration) : /setup (assistant en 3 étapes, utilisable
   sans JavaScript), /static/setup.css et /static/setup.js. Rien d'autre. Le jeton n'apparaît jamais dans un journal.
-- Gestion des assistants (Réglages TV, configuré et en ligne seulement) : même port, mais écoute sur l'adresse LAN
-  actuelle (jamais 0.0.0.0) et **seulement** /assistants + /static/setup.css (aucun /setup, aucun balayage Wi-Fi) ;
-  jeton distinct à usage unique, Host = adresse liée, pairs IPv4 privés, Origin exacte + jeton CSRF au POST,
-  Referrer-Policy same-origin, aucun script.
-- Connexion de Muse (Réglages TV → Gérer les assistants → Muse, consentement confirmé sur la TV) : même port, écoute
-  sur l'adresse LAN actuelle, Host = nom mDNS exact de la boîte seulement (QR sans adresse IP), /muse + /muse/status + /muse/submit + /muse/cancel + setup.css + muse.js ; séance courte à
-  usage unique, jeton SDK chiffré par le téléphone (museseal), Referrer-Policy no-referrer, Cache-Control no-store.
+- Gestion des assistants (Réglages TV, configuré et en ligne) : même port, sur l'adresse LAN actuelle (jamais
+  0.0.0.0), **seulement** /assistants + /static/setup.css ; jeton distinct à usage unique, Host = adresse liée, pairs
+  IPv4 privés, Origin exacte + jeton CSRF au POST, Referrer-Policy same-origin, aucun script.
+- Connexion de Muse (consentement confirmé sur la TV) : même port, adresse LAN actuelle, Host = nom mDNS exact
+  seulement, /muse(/status|/submit|/cancel) + setup.css + muse.js ; séance courte à usage unique, jeton SDK chiffré
+  par le téléphone (museseal), Referrer-Policy no-referrer, Cache-Control no-store.
 - Télécommande sur téléphone (<adresse LAN actuelle>:OPENTV_REMOTE_PORT, jamais 0.0.0.0, seulement configuré et en
   ligne ; écoute relancée si l'adresse change) : /r (appairage par QR seulement, puis pavé de navigation), POST
-  /r/pair, /r/cmd, /r/forget ; /static/remote.css|js. Host = adresse liée ou nom mDNS exact de la boîte (avec le
-  port) ; pairs IPv4 privés hors boucle locale ; pages en Referrer-Policy same-origin (le navigateur envoie alors
-  l'Origin réelle des formulaires ; « Origin: null » est toujours refusé). HTTP sur le LAN : prototype (aucun
-  certificat propre à l'appareil).
+  /r/pair, /r/cmd, /r/forget ; /static/remote.css|js ; /r/x… = identifiant X chiffré (xentry, drapeau). Host = adresse
+  liée ou nom mDNS exact (avec le port) ; pairs IPv4 privés hors boucle locale ; Referrer-Policy same-origin (Origin
+  réelle des formulaires ; « Origin: null » toujours refusé). HTTP sur le LAN : prototype (aucun certificat).
 """
 import base64
 import hashlib
@@ -31,7 +28,7 @@ import threading
 import time
 import urllib.parse
 
-from . import VERSION, agents, bounded, musesetup, museweb, phoneremote, validate, wifiscan, xprobe
+from . import VERSION, agents, bounded, musesetup, museweb, phoneremote, validate, wifiscan, xentry, xprobe
 from . import app as appmod   # constantes d'erreur du formulaire (app n'importe pas web : pas de cycle)
 
 TV_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; "
@@ -111,7 +108,7 @@ LEVEL_LABELS = (("none", "Aucun accès"), ("read", "Voir seulement"), ("feedback
 
 # Journal HTTP : erreurs et non-2xx toujours (sauf sonde X : jamais, xprobe.quiet_log) ; pages /tv, /setup toujours ;
 # succès des requêtes répétitives (poll /api/tv/*, /static/*, /healthz) non journalisés, un échantillon tous les N.
-QUIET_OK_PREFIXES = ("/api/tv/", "/static/", "/r/cmd", "/muse/status")
+QUIET_OK_PREFIXES = ("/api/tv/", "/static/", "/r/cmd", "/r/x/status", "/muse/status")
 QUIET_OK_PATHS = ("/healthz",)
 HTTP_OK_SAMPLE = 600
 BUSY_LOG_INTERVAL_S = 60.0
@@ -303,7 +300,7 @@ class TVHandler(_Base):
             xprobe.clear_presence(self.app)   # X TV : /tv chargée = plus jamais « X ouvert » (xescape)
             try:
                 with open(os.path.join(self.app.cfg.share_dir, "tv.html"), encoding="utf-8") as f:
-                    page = f.read()
+                    page = xentry.tv_page(self.app, f.read())   # méta de la saisie par téléphone (xentry)
             except OSError:
                 return self.send(500, "page TV absente", "text/plain; charset=utf-8")
             return self.send(200, page.replace("{{TV_KEY}}", self.app.tv_key).replace("{{VERSION}}", VERSION))
@@ -1348,13 +1345,14 @@ class RemoteHandler(_Base):
     def do_GET(self):
         u = urllib.parse.urlsplit(self.path)
         if u.path.startswith("/static/"):   # mêmes contrôles de pair et de Host que les pages
-            return self.send_static(u.path[len("/static/"):], REMOTE_STATIC) if self._peer_host_ok() else None
+            return self.send_static(u.path[8:], xentry.static_types(self.app, REMOTE_STATIC)) if self._peer_host_ok() \
+                else None
         if not self._guard():
             return
         if u.path == "/":
             return self._redirect()
-        if u.path != "/r":
-            return self.send(404, "introuvable", "text/plain; charset=utf-8")
+        if u.path != "/r":   # /r/x… : identifiant X chiffré (xentry) ; tout le reste : 404
+            return xentry.phone_get(self, u)
         try:
             q = urllib.parse.parse_qs(u.query, max_num_fields=1)
         except ValueError:
@@ -1385,6 +1383,8 @@ class RemoteHandler(_Base):
 
     def do_POST(self):
         path = urllib.parse.urlsplit(self.path).path
+        if path in xentry.PHONE_POSTS:   # identifiant X chiffré (xentry) : mêmes portes, puis les siennes
+            return xentry.phone_post(self, path) if self._guard() else None
         if path not in ("/r/pair", "/r/cmd", "/r/forget"):
             return self.send(404, "introuvable", "text/plain; charset=utf-8")
         if not self._guard():

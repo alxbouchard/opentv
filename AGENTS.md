@@ -398,6 +398,17 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   rien ; OK natif, champs natifs, aucune valeur lue). Tests déterministes : `tests/x_nav_harness.js`. Passkey
   téléphone : flux WebAuthn
   hybride natif seulement, **gate terrain** (kiosque sans groupe bluetooth). Tests `test_x_escape.py` + `e2e_x_escape.js`.
+- **X TV — « Saisir avec le téléphone » (0.7.10, `OPENTV_X_PHONE_ENTRY`, défaut 0)** : sans clavier physique, UN
+  identifiant X (nom d'utilisateur/courriel/téléphone) saisi sur le téléphone DÉJÀ appairé remplit le champ de connexion
+  éligible au focus ; Alex continue avec la passkey native. Jamais mot de passe, code, NIP, passkey, paiement ; aucun
+  clic/envoi. Armement : flèche RÉELLE vers la pastille + OK réel, X ouvert à la TV (témoin). Extension : RSA-OAEP-2048
+  neuve, clé privée NON exportable ; service (`opentv_pi/xentry.py`, routes `/api/tv/x/entry/*` et `/r/x*`) : clé
+  publique + chiffré de 256 octets seulement, une séance, 2 min, mémoire ; QR = adresse + `#secret.empreinte` (fragment
+  jamais envoyé) ; téléphone (`ui/xphone.js` + OAEP pur JS de `ui/muse.js`) : fragment effacé, empreinte/e/taille
+  vérifiées, avertissement « Identifiant seulement — jamais mot de passe ou code ». Effacée à la livraison, annulation,
+  touche, focus, navigation, Retour (/tv), redémarrage. Limite : page téléphone en HTTP LAN — un attaquant ACTIF du LAN
+  pourrait la remplacer (pas de promesse bout en bout contre lui). Tests `test_x_entry.py`, `test_x_entry_web.py`
+  (harnais + mutations + Chromium réel). Hors matériel seulement ; gate terrain sur le vrai X.
 - **Mode HDMI exact après extinction/rallumage de la TV (0.7.5)** : terrain 2026-11-01, au rallumage wlroots recrée
   la sortie et Cage prend le mode préféré de l'EDID (3840x2160@30) pendant que Chromium reste en 1920x1080 (quart
   d'écran). `opentv_pi/displaymode.py` : cible exacte `OPENTV_HDMI_MODE` (défaut `1920x1080@60`, jamais un

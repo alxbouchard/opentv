@@ -16,7 +16,7 @@ import time
 from . import (VERSION, agents, bootid, canvas_tools, canvas_tv, cec, config, fsutil, musesetup, netjobs, netstate,
                nethelper, peeruid, phoneremote, tools, tvcontrol, validate, wifiscan)
 from .foryou import ForYou, EngineError
-from . import promotion, xcontext, xescape, xprobe
+from . import promotion, xcontext, xentry, xescape, xprobe
 from . import source as sourcemod
 from .playback import Playback
 from .playerclient import PlayerClient
@@ -251,6 +251,7 @@ class App:
         self.tv_actions = tvcontrol.TvActions(mono=mono, log=log)   # pilotage par assistant (scope control)
         # X TV : UN post partagé par Alex (← sur x.com, TTL 10 min) + sonde canari (xprobe, TTL court) ; mémoire seule
         self.x_context, self.x_probe = xcontext.XContext(mono=mono), xprobe.XProbe(mono=mono)
+        self.x_entry = xentry.XEntry(cfg.run_dir, mono=mono, log=log)   # identifiant X du téléphone : mémoire seule
         if self.remote is not None:
             self.remote.interceptor = self._remote_intercept
         self.boot_id = _boot_id(proc_root)

@@ -62,6 +62,9 @@ DEFAULTS = {
     # X TV Mode (0.7.7) : 1 = tuile X à l'accueil, extension locale du kiosque, route loopback de partage et outil
     # x_context ; 0 = retour arrière complet (aucune tuile, extension non chargée, route 404, x_context indisponible)
     "OPENTV_X_TV": "1",
+    # X TV — saisie de l'IDENTIFIANT X depuis le téléphone appairé (0.7.10, xentry) : 0 par défaut (aucune route,
+    # aucune UI, aucune séance) ; 1 = canari explicite seulement
+    "OPENTV_X_PHONE_ENTRY": "0",
     # « Regarder » : source approuvée hors Git (root:opentv 0640, voir source.py) et contrôleur du lecteur
     # (opentv-player.service, compte opentv-kiosk) joint par socket Unix authentifié
     "OPENTV_SOURCE_FILE": "/etc/opentv/source.env",
@@ -188,6 +191,7 @@ class Config:
         self.remote_port = _port(e["OPENTV_REMOTE_PORT"], "OPENTV_REMOTE_PORT")
         self.remote_mdns = _bool(e["OPENTV_REMOTE_MDNS"], "OPENTV_REMOTE_MDNS")
         self.x_tv = _bool(e["OPENTV_X_TV"], "OPENTV_X_TV")
+        self.x_phone_entry = _bool(e["OPENTV_X_PHONE_ENTRY"], "OPENTV_X_PHONE_ENTRY")
         self.source_file = e["OPENTV_SOURCE_FILE"]
         self.player_socket = e["OPENTV_PLAYER_SOCKET"]
         self.playback_marker = e["OPENTV_PLAYBACK_MARKER"]

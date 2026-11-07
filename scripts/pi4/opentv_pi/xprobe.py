@@ -5,8 +5,7 @@ Chaîne, sans disque ni journal de contenu :
 1. nav.js (x.com, cadre principal) envoie au service de l'extension, borné (≥ PROBE_MIN_MS = 400 ms entre deux envois ;
    AUCUN plafond par document : le battement ne meurt jamais sur une page restée ouverte longtemps — débit tenu par
    l'intervalle, puis par background.js et RATE_MAX ci-dessous), un INSTANTANÉ cumulatif : mode de la page, compteurs
-   d'APPUIS RÉELS par classe
-   (`move` = flèches, `ok` = OK/Entrée, `other`) — répétitions (`e.repeat`, touche tenue) comptées à part dans
+   d'APPUIS RÉELS par classe (`move` = flèches, `ok` = OK/Entrée, `other`) — répétitions (`e.repeat`, touche tenue) comptées à part dans
    `repeat`, si bien que move/ok se comparent 1:1 aux appuis evdev de l'aide x-escape —, compteur de touches
    synthétiques, document au focus et page visible (chaque instantané, battement compris : une absence de touches
    reste explicable), et pour la dernière touche réelle seulement des booléens (fiable, champ éditable au focus,
@@ -31,11 +30,10 @@ Chaîne, sans disque ni journal de contenu :
 4. lecture opérateur : GET STATUS_PATH sur la boucle locale, réservé à root (UID du pair TCP, /proc/net/tcp ; contrôle
    indisponible = refus), via `sudo opentv-pi x-probe`, qui vérifie que l'écoute appartient au compte du service,
    revalide la réponse sur un schéma FERMÉ (status_clean, sinon refus sans rien recopier) et y joint les compteurs
-   evdev EN MÉMOIRE de l'aide x-escape (xescape.NavServer, même TTL). Jamais lisible par le kiosque, une page ou un
-   agent.
+   evdev EN MÉMOIRE de l'aide x-escape (xescape.NavServer, même TTL) ; jamais lisible par le kiosque, une page, un agent.
 
-Ce module porte aussi les routes HTTP X de web.TVHandler (câblage minimal côté web) : POSTS (partage xcontext, sonde,
-témoin « X ouvert » de xescape) et la lecture opérateur avec sa porte root (guard_operator).
+Ce module porte aussi les routes HTTP X de web.TVHandler : POSTS (partage xcontext, sonde, témoin « X ouvert »
+de xescape, identifiant X chiffré de xentry) et la lecture opérateur avec sa porte root (guard_operator).
 """
 import ipaddress
 import json
@@ -44,7 +42,7 @@ import re
 import threading
 import time
 
-from . import VERSION, xcontext, xescape
+from . import VERSION, xcontext, xentry, xescape
 
 PROBE_PATH = "/api/tv/x/probe"
 STATUS_PATH = "/admin/x-probe"
@@ -241,12 +239,14 @@ def handle_presence(handler, app):
 
 
 def clear_presence(app):
-    """Chargement de /tv : jamais « X ouvert » (aucune relance du kiosque par KEY_EXIT sur /tv)."""
+    """Chargement de /tv : jamais « X ouvert » (aucune relance par KEY_EXIT sur /tv) ; saisie par téléphone effacée."""
     xescape.set_marker(app.cfg.run_dir, False)
+    xentry.on_tv(app)
 
 
 # routes POST X de web.TVHandler (après loopback, Host, UID kiosque, clé TV) : chacune porte ses propres contrôles
-POSTS = {xcontext.SHARE_PATH: xcontext.handle_share, PROBE_PATH: handle_probe, xescape.PRESENCE_PATH: handle_presence}
+POSTS = dict({xcontext.SHARE_PATH: xcontext.handle_share, PROBE_PATH: handle_probe,
+              xescape.PRESENCE_PATH: handle_presence}, **xentry.TV_POSTS)   # + identifiant X chiffré (xentry)
 
 
 def guard_operator(handler, app):

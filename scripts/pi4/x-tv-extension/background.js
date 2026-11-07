@@ -19,6 +19,10 @@
  *    — ni instantané ni battement — jusqu'à une clé NEUVE validée remise par tvkey.js sur /tv. Par conception, la clé
  *    n'est reprise QUE sur /tv, gardée en stockage de SESSION seulement, jamais persistée ni obtenue autrement.
  *    Écritures de la clé sérialisées (keyLocked) : un 403 tardif de l'ancienne clé n'efface jamais une clé neuve.
+ *  - xentry (0.7.10, saisie de l'identifiant par téléphone, xentry.js sur x.com) : relais FERMÉ vers PREFIX
+ *    XENTRY_PATH sur 127.0.0.1 avec la clé TV — « enabled » (drapeau du service relu sur /tv par tvkey.js), « start »
+ *    (clé PUBLIQUE n/e seulement), « poll » (renvoie un chiffré de taille fixe), « done », « cancel ». Ce service ne
+ *    voit jamais d'identifiant en clair, de clé privée, de secret ni d'empreinte du QR (gardés par xentry.js).
  * Une page x.com ne peut jamais forger ces messages : aucun externally_connectable, aucun écouteur postMessage ;
  * seuls les scripts de contenu de CETTE extension (monde isolé) atteignent ce service.
  * Aucune API X, aucun cookie, aucune lecture d'onglet, aucun autre hôte contacté, aucun envoi vers un agent.
@@ -212,6 +216,60 @@ async function goTv(tabId) {
   await chrome.tabs.update(tabId, { url: `http://127.0.0.1:${tv.port}/tv` });
 }
 
+// ---------------------------------------------------------------- saisie de l'identifiant par téléphone (xentry)
+const XENTRY_PATH = "/api/tv/x/entry/";
+const XENTRY_OPS = new Set(["start", "poll", "done", "cancel"]);
+const XB64K_RE = /^[A-Za-z0-9_-]{342}$/;   // 256 octets : module public ou chiffré (taille fixe)
+const XSID_RE = /^[A-Za-z0-9_-]{22}$/;
+const XURL_RE = /^http:\/\/[a-z0-9.-]{1,253}:[0-9]{2,5}\/r\/x\?s=([A-Za-z0-9_-]{22})$/;
+const XSTATES = new Set(["waiting", "claimed", "submitted", "delivering", "delivered", "refused", "cancelled", "expired",
+                         "gone"]);
+function xentryBody(msg) {   // champs FERMÉS ; jamais de clair, de secret ni d'empreinte (inconnus ici)
+  if (msg.op === "start") { return XB64K_RE.test(msg.n) && msg.e === "AQAB" ? { n: msg.n, e: "AQAB" } : null; }
+  if (typeof msg.sid !== "string" || !XSID_RE.test(msg.sid)) { return null; }
+  if (msg.op !== "done") { return { sid: msg.sid }; }
+  return msg.result === "filled" || msg.result === "refused" ? { sid: msg.sid, result: msg.result } : null;
+}
+async function xentry(msg) {
+  const s = await chrome.storage.session.get(["xentry"]);
+  if (s.xentry !== true) { return { ok: false }; }   // drapeau du service relu sur /tv : désactivé = rien
+  if (msg.op === "enabled") { return { ok: true }; }
+  const body = XENTRY_OPS.has(msg.op) ? xentryBody(msg) : null;
+  const tv = body ? await tvSession() : null;
+  if (!tv || !tv.key) { return { ok: false }; }
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
+  let r = null;
+  let j = null;
+  try {
+    r = await fetch(`http://127.0.0.1:${tv.port}${XENTRY_PATH}${msg.op}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenTV-TV": tv.key },
+      body: JSON.stringify(body),
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+      cache: "no-store",
+      redirect: "error",
+      signal: ctl.signal
+    });
+    try { j = await r.json(); } catch (e) { j = null; }
+  } catch (e) {
+    return { ok: false };
+  } finally {
+    clearTimeout(timer);
+  }
+  if (r.status === 403 && j && j.error === "tv_key") { await markDead(tv.key); }
+  if (!r.ok || !j || j.ok !== true) { return { ok: false }; }
+  if (msg.op === "start") {
+    const m = typeof j.url === "string" ? XURL_RE.exec(j.url) : null;
+    return m && m[1] === j.sid ? { ok: true, sid: j.sid, url: j.url } : { ok: false };
+  }
+  if (msg.op === "poll") {
+    return XSTATES.has(j.state) ? { ok: true, state: j.state, ct: XB64K_RE.test(j.ct) ? j.ct : null } : { ok: false };
+  }
+  return { ok: true };
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, respond) => {
   if (!sender || sender.id !== chrome.runtime.id || !msg || typeof msg !== "object") { return false; }
   if (msg.type === "tvkey" && fromTv(sender)) {
@@ -223,7 +281,7 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
       keyLocked(async () => {
         const s = await chrome.storage.session.get(["tvport", "tvdead"]);
         if (!(s.tvport === undefined || s.tvport === port) || deadKeys(s.tvdead).includes(msg.key)) { return false; }
-        await chrome.storage.session.set({ tvkey: msg.key, tvport: port });
+        await chrome.storage.session.set({ tvkey: msg.key, tvport: port, xentry: msg.entry === true });
         return true;
       }).then((fresh) => {
         if (fresh) { queueProbe(probeBody("tv", { event: "load", doc_focus: msg.doc_focus, visible: msg.visible })); }
@@ -237,6 +295,10 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
   }
   if (msg.type === "share" && fromX(sender)) {
     share(msg).then(respond, () => respond({ ok: false, message: MSG.fail }));
+    return true;
+  }
+  if (msg.type === "xentry" && fromX(sender)) {   // saisie de l'identifiant par téléphone : relais fermé
+    xentry(msg).then(respond, () => respond({ ok: false }));
     return true;
   }
   if (msg.type === "probe" && fromX(sender)) {

@@ -21,6 +21,8 @@
       /* extension rechargée pendant la page : la prochaine visite de /tv recapture la clé */
     }
   }
-  send({ type: "tvkey", key: key });
+  // saisie de l'identifiant X par téléphone (0.7.10) : drapeau du service, « 1 » seulement si activée
+  const entry = document.querySelector('meta[name="opentv-x-entry"]');
+  send({ type: "tvkey", key: key, entry: !!entry && entry.content === "1" });
   setInterval(() => send({ type: "tvbeat" }), BEAT_MS);
 })();

@@ -695,7 +695,7 @@ class TestExtensionProbeSource(unittest.TestCase):
         m = json.loads(read(os.path.join(EXT, "manifest.json")))
         self.assertNotIn("externally_connectable", m)
         self.assertNotIn("web_accessible_resources", m)
-        for f in ("nav.js", "x.js", "background.js", "tvkey.js"):
+        for f in ("nav.js", "x.js", "background.js", "tvkey.js", "xentry.js"):
             src = code_only(read(os.path.join(EXT, f)))
             for bad in ("onMessageExternal", "onConnectExternal", 'addEventListener("message"', "postMessage",
                         "window.wrappedJSObject", "CustomEvent"):
@@ -913,7 +913,8 @@ class TestExtensionProbeRuntime(unittest.TestCase):
     def test_tvkey_periodic_beat_booleans_only(self):
         sent = self.run_harness("tvkey")["sent"]
         self.assertEqual([m["type"] for m in sent], ["tvkey", "tvbeat", "tvbeat", "tvbeat", "tvbeat"])
-        self.assertEqual(set(sent[0]), {"type", "key", "doc_focus", "visible"})
+        self.assertEqual(set(sent[0]), {"type", "key", "entry", "doc_focus", "visible"})
+        self.assertIs(sent[0]["entry"], False)   # méta « opentv-x-entry » absente : saisie par téléphone désactivée
         for m in sent[1:]:
             self.assertEqual(set(m), {"type", "doc_focus", "visible"})   # jamais la clé dans un battement
         self.assertEqual((sent[-1]["doc_focus"], sent[-1]["visible"]), (False, False))

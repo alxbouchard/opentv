@@ -254,7 +254,13 @@
       if (signupLike(label(el), hrefOf(el))) { dropped.push(el); continue; }   // inscription : jamais atteinte par ↑ ↓
       out.push(el);
     }
-    return out;
+    const h = entryHook();
+    return h ? h.augment(out) : out;   // pastille « Saisir avec le téléphone » juste après son champ (xentry.js)
+  }
+  // saisie de l'identifiant par téléphone (0.7.10, xentry.js, MÊME monde isolé ; absent si désactivée)
+  function entryHook() {
+    const h = window.__otvxEntry;
+    return h && typeof h.augment === "function" ? h : null;
   }
   function label(el) {   // libellé VISIBLE d'un bouton/lien seulement (jamais la valeur d'un champ)
     if (editable(el)) { return ""; }
@@ -372,6 +378,8 @@
       e.stopImmediatePropagation();
       markHandled(e);
       move(m.dir);
+      const h = entryHook();
+      if (h) { h.navFocus(document.activeElement); }   // focus posé par une flèche RÉELLE (seule voie d'armement)
       return true;
     }
     if (okKey(e) && !e.repeat) {
@@ -500,6 +508,8 @@
     if (!e.isTrusted) { return; }   // touche synthétique d'une page (script de X ou injecté) : jamais d'action OpenTV
     userActed = true;
     disarm();   // touche réelle après le clic : le réarmement ne déplace plus rien
+    const eh = entryHook();
+    if (eh && eh.key(e) === true) { markHandled(e); return; }   // OK sur la pastille, ou séance en cours annulée
     noteTyping(e);
     const a = keyAction(e);
     if (!a) { loginKey(e); return; }
