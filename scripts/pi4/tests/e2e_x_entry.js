@@ -309,6 +309,46 @@ function ctl(method, p, body) {
                          same: document.activeElement === window.__u, uvalue: window.__u.value }))) };
       }
     }
+    // ---------------------------------------------------------------- réponse d'envoi PERDUE (course réelle)
+    // le service accepte l'envoi, le téléphone perd la réponse (réseau) ; la TV livre ; le renvoi reçoit 410 over +
+    // issue réelle -> « C'est fait », Annuler caché ; jamais « Rien n'a été saisi » ; UN seul remplissage
+    if (want("lost")) {
+      await ctl("POST", "/presence?on=1");
+      await openX("/i/flow/login");
+      await tv.evaluate(() => { window.__ev = { input: 0, change: 0, click: 0, submit: 0 }; });
+      const sx = await startSession();
+      let relx = null;
+      const heldx = new Promise((r) => { relx = r; });
+      await A.p.route("**/r/x/status*", async (route) => { await heldx; await route.continue().catch(() => undefined); });
+      let firstSubmit = 0;   // la requête RÉELLE du téléphone (mêmes en-têtes, Host, corps) atteint le service ; sa
+      await A.p.route("**/r/x/submit", async (route) => {   // réponse est perdue : le navigateur voit un échec réseau
+        const rq = route.request();
+        const u = new URL(rq.url());
+        firstSubmit = await new Promise((res) => {
+          const c = http.request({ host: "127.0.0.1", port: u.port, path: u.pathname, method: "POST",
+                                   headers: Object.assign({}, rq.headers(), { host: u.host }) },
+                                 (r) => { r.resume(); r.on("end", () => res(r.statusCode)); });
+          c.on("error", () => res(-1));
+          c.end(rq.postData());
+        });
+        await route.abort("failed");
+      }, { times: 1 });
+      await A.p.goto(sx.url);
+      await A.p.waitForSelector("#xform:not([hidden])");
+      await A.p.fill("#xid", "alex@example.com");
+      await A.p.click("#xsend");
+      await waitFor(async () => /incertain/i.test((await phoneText(A.p)).status || ""));
+      const unsure = await phoneText(A.p);
+      await waitFor(async () => (await tvState()).value !== "" && !(await service()).active);
+      await A.p.fill("#xid", "alex@example.com");
+      await A.p.click("#xsend");
+      await waitFor(async () => /C'est fait/.test((await phoneText(A.p)).status || ""));
+      st.lost = { first_submit: firstSubmit, unsure: unsure, after: await phoneText(A.p), tv: await tvState(), service: await service(),
+                  cancel: await A.p.evaluate(() => { const b = document.getElementById("xcancel");
+                    return { hidden: b.hidden, disabled: b.disabled }; }) };
+      relx();
+      await A.p.unroute("**/r/x/status*");
+    }
     // ---------------------------------------------------------------- réponse de start écartée
     // le service a créé la séance, mais sa réponse est écartée (adresse hors forme) : annulation au mieux immédiate
     if (want("badstart")) {

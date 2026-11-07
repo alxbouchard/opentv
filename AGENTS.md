@@ -409,7 +409,9 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   touche, focus, navigation, Retour (/tv), redémarrage : références lâchées (ramasse-miettes), seul le tampon déchiffré
   est mis à zéro. Extension : code de 4 à 9 chiffres refusé elle-même ; garde finale (même élément, document au focus,
   URL exacte, encore éligible). Annuler du téléphone seulement avant la remise du chiffré ; ensuite trop tard (409),
-  issue jamais réécrite, Annuler caché dès l'envoi accepté. Limite : page téléphone en HTTP LAN — un écouteur PASSIF ne
+  issue jamais réécrite, Annuler caché dès l'envoi accepté ; renvoi après réponse perdue : 410 `over` + issue réelle ;
+  séance close après la remise sans `done` : `unknown` (saisie possible) ; réponse perdue/410 générique/5xx : téléphone
+  « incertain », jamais « Rien n'a été saisi ». Limite : page téléphone en HTTP LAN — un écouteur PASSIF ne
   voit que le chiffré (il peut voler le cookie pour réclamer/annuler, rien injecter sans le secret du QR) ; un
   attaquant ACTIF du LAN ou un Pi/service OpenTV compromis peut la remplacer (pas de promesse bout en bout). Tests
   `test_x_entry.py`, `test_x_entry_web.py` (harnais + mutations + Chromium réel). Hors matériel seulement ; gate terrain sur le vrai X.

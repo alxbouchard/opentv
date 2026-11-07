@@ -1595,9 +1595,13 @@ Sécurité (`opentv_pi/xentry.py`, `x-tv-extension/xentry.js`, `ui/xphone.js`) :
   seulement **avant** la remise du chiffré à l'extension (`waiting`/`claimed`/`submitted`) ; dès que l'envoi est
   accepté (200), **Annuler** disparaît et se désactive. Après la remise (`delivering`), c'est **trop tard** (409
   `too_late`, séance intacte) ; une séance finie répond 409 `over` avec son issue réelle, jamais réécrite. Le
-  téléphone n'affiche « Rien n'a été saisi » que si le service confirme l'annulation ; sinon il suit l'issue :
-  `delivered`, `refused` (champ plus éligible/sélectionné), `rejected` (envoi illisible, altéré, autre QR ou code),
-  `cancelled`, `expired`. Si l'extension écarte la réponse de `start` après création de la séance, elle l'annule au
+  téléphone n'affiche « Rien n'a été saisi » que si le service confirme une fin **avant** la remise (annulation,
+  expiration, envoi refusé sans envoi précédent incertain) ; sinon il suit l'issue : `delivered`, `refused` (la TV
+  signale le champ plus éligible/sélectionné), `rejected` (la TV signale un envoi illisible, altéré, autre QR ou code),
+  `cancelled`, `expired`, `unknown` (séance close **après** la remise sans `done` de l'extension — TTL à la
+  milliseconde, témoin perdu, Retour, annulation TV : saisie possible, le service ne peut pas prouver le contraire).
+  Réponse d'envoi perdue : le renvoi reçoit 410 `over` + issue réelle (ou 409 `already_submitted`) ; perte réseau,
+  410 générique, 5xx : « incertain » (l'identifiant a pu partir), issue suivie, jamais « Rien n'a été saisi ». Si l'extension écarte la réponse de `start` après création de la séance, elle l'annule au
   mieux (identifiant de séance seulement).
 - **Limite honnête** : la page du téléphone est servie en **HTTP** sur le LAN. Un **écouteur PASSIF** ne voit que le
   chiffré ; il peut voler le cookie du téléphone appairé pour réclamer ou annuler la séance (déni), mais ne peut rien

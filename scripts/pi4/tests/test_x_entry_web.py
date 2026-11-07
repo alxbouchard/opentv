@@ -141,7 +141,8 @@ class TestStatic(unittest.TestCase):
         for doc in (readme, agents_md):
             for need in ("OPENTV_X_PHONE_ENTRY", "Saisir avec le téléphone", "attaquant ACTIF",
                          "Identifiant seulement — jamais mot de passe ou code", "ramasse-miettes", "écouteur PASSIF",
-                         "voler le cookie", "sans le secret du QR", "service OpenTV compromis", "trop tard"):
+                         "voler le cookie", "sans le secret du QR", "service OpenTV compromis", "trop tard",
+                         "`unknown`", "incertain"):
                 self.assertIn(need, doc)
             self.assertNotRegex(doc, r"(?i)wipe it immediately|tout est effacé")   # jamais d'effacement promis
         self.assertEqual(VERSION, "0.7.10")
@@ -176,7 +177,7 @@ class TestHarnessAndMutations(unittest.TestCase):
         self.assertGreaterEqual(r["counts"]["gate"], 120)
         self.assertGreaterEqual(r["counts"]["ident"], 35)
         self.assertGreaterEqual(r["counts"]["fill"], 14)
-        self.assertGreaterEqual(r["counts"]["ui"], 24)
+        self.assertGreaterEqual(r["counts"]["ui"], 40)
 
     MUTANTS = (
         ("xphone", "return b64uEnc(seal.sha256(nb)) === fp;", "return true;"),                      # empreinte
@@ -215,7 +216,19 @@ class TestHarnessAndMutations(unittest.TestCase):
                    "sent = true; cancel.hidden = true;   // plus"),
         ("xphone", "if (over || sent || stopping) { return; }", "if (over || stopping) { return; }"),
         ("xphone", 'if (j.error === "too_late") { return { end: false, text: TOO_LATE }; }', ""),
-        ("xphone", 'if (j.error === "over" && FINAL[j.state]) { return { end: true, text: FINAL[j.state] }; }', ""),
+        ("xphone", 'if (j.error === "over" && fin(j.state)) { return { end: true, text: fin(j.state) }; }\n'
+                   '    if (j.error === "too_late")', 'if (j.error === "too_late")'),
+        # envoi : réponse perdue / 410 générique / 5xx -> « incertain » ; issue réelle lue au renvoi (410 over)
+        ("xphone", 'if (j.error === "over" && fin(j.state)) { return { end: true, text: fin(j.state) }; }\n'
+                   '    if (!unsure', "if (!unsure"),
+        ("xphone", "if (!unsure && ", "if ("),
+        ("xphone", "PRE.test(j.error)", "true"),
+        ("xphone", "unsure = true; send.disabled = false;", "send.disabled = false;"),
+        ("xphone", 'if (status === 409 && j.error === "already_submitted")', "if (false)"),
+        ("xphone", "return Object.prototype.hasOwnProperty.call(FINAL, state) ? FINAL[state] : null;",
+                   "return FINAL[state] || null;"),
+        ("xphone", "ct = null; submitted(submitOutcome(0, null, unsure));",
+                   "ct = null; submitted({ end: true, text: \"L'envoi n'a pas abouti. Rien n'a été saisi.\" });"),
         ("xphone", "if (over) { return; }   // issue déjà connue", "// issue déjà connue"),
         ("xphone", "stopping = false; settle(cancelOutcome(r.status, r.j, cancelled));",
                    "stopping = false; finish(cancelled);"),
@@ -435,6 +448,18 @@ class TestXEntryEndToEnd(unittest.TestCase):
         self.assertEqual(sorted(body), ["c", "ct", "s"])
         self.assertEqual(len(body["ct"]), 342)                                  # taille FIXE
         self.assertEqual([r["path"] for r in reqs if r["method"] == "POST"], ["/r/x/claim", "/r/x/submit"])
+        # réponse d'envoi perdue (le service l'a acceptée) : « incertain », jamais « rien saisi » ; la TV livre UNE
+        # fois ; le renvoi reçoit 410 over + issue réelle -> « C'est fait », Annuler caché et désactivé
+        lo = st["lost"]
+        self.assertEqual(lo["first_submit"], 200)                               # accepté par le service, réponse perdue
+        self.assertIn("incertain", lo["unsure"]["status"])
+        self.assertTrue(lo["unsure"]["form"])
+        for t in (lo["unsure"]["status"], lo["after"]["status"]):
+            self.assertNotIn("Rien n'a été saisi", t)
+        self.assertIn("C'est fait", lo["after"]["status"])
+        self.assertEqual((lo["cancel"], lo["after"]["form"]), ({"hidden": True, "disabled": True}, False))
+        self.assertEqual((lo["tv"]["value"], lo["tv"]["ev"]["input"], lo["tv"]["ev"]["change"]), ("alex@example.com", 1, 1))
+        self.assertFalse(lo["service"]["active"])
         # annulations : touche réelle, focus posé par la page, navigation ; Retour (/tv) efface le service
         for k in ("cancel_key", "cancel_focus", "cancel_nav"):
             self.assertFalse(st[k]["service"]["active"], k)

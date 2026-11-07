@@ -341,7 +341,67 @@ async function phoneUi() {
     P.last("/r/x/status").reply(200, { ok: true, state: state });
     await P.flush();
     expect("ui", "final:" + state, re.test(P.ui().status), true);
+    expect("ui", "final_not_nothing:" + state, NOTHING.test(P.ui().status), false);   // rapporté par la TV, après remise
   }
+  const UNSURE = /incertain/i;
+  // 7) course réelle : envoi ACCEPTÉ, réponse perdue (réseau) ; la TV livre ; le renvoi reçoit 410 over + issue réelle
+  P = await claimed();
+  await submit(P);
+  P.last("/r/x/submit").fail();
+  await P.flush();
+  expect("ui", "lost:uncertain", [UNSURE.test(P.ui().status), NOTHING.test(P.ui().status)], [true, false]);
+  expect("ui", "lost:retry_possible", [P.ui().form, P.els.xsend.disabled], [true, false]);
+  await submit(P);
+  expect("ui", "lost:retry_sent", P.n("/r/x/submit"), 2);
+  P.last("/r/x/submit").reply(410, { ok: false, error: "over", state: "delivered" });
+  await P.flush();
+  expect("ui", "lost:delivered", /C'est fait/.test(P.ui().status), true);
+  expect("ui", "lost:not_nothing", NOTHING.test(P.ui().status), false);
+  expect("ui", "lost:cancel_hidden_no_form", [P.ui().cancel, P.ui().cancelDisabled, P.ui().form], [false, true, false]);
+  // 7 bis) même course, renvoi pendant la livraison : 409 already_submitted -> suivi, puis issue lue au service
+  P = await claimed();
+  await submit(P);
+  P.last("/r/x/submit").fail();
+  await P.flush();
+  await submit(P);
+  P.last("/r/x/submit").reply(409, { ok: false, error: "already_submitted" });
+  await P.flush();
+  expect("ui", "lost_already:cancel_hidden", [P.ui().cancel, P.ui().cancelDisabled], [false, true]);
+  // 8) issue impossible à connaître : jamais « rien n'a été saisi » (410 générique, 5xx, illisible, renvoi refusé
+  //    après un envoi incertain, issue « unknown » / « gone » du service)
+  for (const [name, status, j] of [["410_generic", 410, { ok: false, error: "expired" }], ["500", 500, {}],
+                                   ["garbage", 409, { ok: false, error: "over", state: "constructor" }]]) {
+    P = await claimed();
+    await submit(P);
+    P.last("/r/x/submit").reply(status, j);
+    await P.flush();
+    expect("ui", "unknowable:" + name, [UNSURE.test(P.ui().status), NOTHING.test(P.ui().status)], [true, false]);
+  }
+  P = await claimed();
+  await submit(P);
+  P.last("/r/x/submit").fail();
+  await P.flush();
+  await submit(P);
+  P.last("/r/x/submit").reply(400, { ok: false, error: "bad_ct" });
+  await P.flush();
+  expect("ui", "retry_refused_after_unsure", [UNSURE.test(P.ui().status), NOTHING.test(P.ui().status)], [true, false]);
+  for (const state of ["unknown", "gone"]) {
+    P = await claimed();
+    await submit(P);
+    P.last("/r/x/submit").fail();
+    await P.flush();
+    await P.tick();
+    P.last("/r/x/status").reply(200, { ok: true, state: state });
+    await P.flush();
+    expect("ui", "status_" + state, [UNSURE.test(P.ui().status), NOTHING.test(P.ui().status), P.ui().form],
+           [true, false, false]);
+  }
+  // 9) refus CONFIRMÉ par le service avant toute remise, sans envoi incertain : « rien n'a été saisi » est vrai
+  P = await claimed();
+  await submit(P);
+  P.last("/r/x/submit").reply(400, { ok: false, error: "bad_ct" });
+  await P.flush();
+  expect("ui", "pre_handoff_refused", [NOTHING.test(P.ui().status), P.ui().form], [true, false]);
 }
 
 (async () => {

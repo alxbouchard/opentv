@@ -16,17 +16,15 @@ Chaîne (le service ne voit QUE des données publiques et un chiffré de taille 
 4. L'extension relève le chiffré UNE fois (poll), le déchiffre, vérifie s/f, nettoie et borne l'identifiant, et ne
    remplit que si le MÊME champ est toujours au focus et éligible ; puis `done` (filled / refused / rejected).
 
-Limite dite telle quelle : les pages du téléphone sont servies en HTTP sur le LAN. Un écouteur PASSIF ne voit que le
-chiffré (il peut voler le cookie du téléphone pour réclamer ou annuler la séance — déni — mais rien injecter sans le
-secret du QR) ; un attaquant ACTIF du LAN, ou un Pi/service OpenTV compromis, peut remplacer le script de la page :
-aucune cryptographie livrée par un canal non authentifié ne l'empêche (aucune promesse « bout en bout »). L'extension
-refuse donc elle-même codes, contrôles et longueurs. Aucun repli en clair.
+Limite : pages du téléphone en HTTP sur le LAN. Un écouteur PASSIF ne voit que le chiffré (il peut voler le cookie du
+téléphone pour réclamer ou annuler — déni — mais rien injecter sans le secret du QR) ; un attaquant ACTIF du LAN, ou un
+Pi/service OpenTV compromis, peut remplacer le script de la page : aucune promesse « bout en bout ». L'extension refuse
+donc elle-même codes, contrôles et longueurs. Aucun repli en clair.
 
 Séance : UNE, mémoire seulement, TTL_S monotones ; close à la livraison, au refus, à l'annulation (TV ou téléphone),
-à l'expiration, à la perte du témoin, au chargement de /tv (Retour Samsung : le kiosque relancé recharge /tv) et au
-redémarrage : dictionnaire vidé, références lâchées (mémoire rendue par le ramasse-miettes de Python, jamais réécrite
-en place). Jamais journalisée (seulement l'issue), jamais sur disque, absente des vues opérateur/TV/agents. Seule
-l'ISSUE d'une séance terminée (sans matériel) reste TOMB_S pour la page du téléphone.
+à l'expiration, à la perte du témoin, au chargement de /tv (Retour Samsung) et au redémarrage : dictionnaire vidé,
+références lâchées (ramasse-miettes de Python, jamais réécrite en place). Jamais journalisée (seulement l'issue), jamais
+sur disque, absente des vues opérateur/TV/agents. Seule l'ISSUE (sans matériel) reste TOMB_S pour le téléphone.
 """
 import base64
 import hashlib
@@ -57,11 +55,12 @@ E = "AQAB"                                # 65537 seulement (jamais e = 1 ni un 
 SID_RE = re.compile(r"[A-Za-z0-9_-]{22}")
 B64K_RE = re.compile(r"[A-Za-z0-9_-]{342}")   # 256 octets en base64url sans remplissage
 # Automate (une séance) : waiting -> claimed -> submitted -> delivering -> issue ; issue = delivered | refused (champ
-# changé/plus éligible) | rejected (contenu illisible/altéré/autre secret/code) | cancelled | expired.
+# changé/plus éligible) | rejected (illisible/altéré/autre secret/code) | cancelled | expired | unknown.
 # - TV `done` : seulement depuis delivering (chiffré remis à l'extension par `poll`) ;
 # - téléphone `phone_cancel` : seulement AVANT la remise (PHONE_CANCELLABLE) ; delivering -> 409 too_late (séance
-#   intacte) ; séance finie -> 409 over + issue réelle : une issue n'est JAMAIS réécrite ;
-# - TV `cancel`, TTL, perte du témoin : séance vivante seulement (l'extension n'a alors rien rempli).
+#   intacte) ; séance finie -> 409 over + issue réelle (de même `submit` : 410 over), JAMAIS réécrite ;
+# - TV `cancel`, TTL, perte du témoin, /tv, nouvelle séance : cancelled/expired AVANT la remise seulement ; APRÈS
+#   (delivering sans `done`), le service ne peut pas prouver « rien saisi » : issue `unknown` (saisie possible).
 RESULTS = {"filled": "delivered", "refused": "refused", "rejected": "rejected"}
 PHONE_STATES = {"claimed": "waiting", "submitted": "sent", "delivering": "sent"}
 PHONE_CANCELLABLE = ("waiting", "claimed", "submitted")
@@ -95,13 +94,14 @@ class XEntry:
 
     def __repr__(self):
         return "<XEntry active=%s>" % (self._s is not None)
-
     __str__ = __repr__
 
     def _wipe(self, final):   # sous self.lock
         s = self._s
         if s is None:
             return
+        if s["state"] == "delivering" and final not in RESULTS.values():
+            final = "unknown"   # chiffré déjà remis : rempli ou non, le service ne le sait pas
         self._tomb = (_h(s["sid"]), final, self.mono() + TOMB_S)
         s.clear()   # n, chiffré, téléphone : références lâchées tout de suite
         self._s = None
@@ -196,8 +196,8 @@ class XEntry:
     def submit(self, sid, phone_id, ct):
         with self.lock:
             s = self._live(sid)
-            if s is None:
-                return 410, {"ok": False, "error": "expired"}
+            if s is None:   # séance finie (réponse d'un envoi précédent perdue ?) : issue réelle, jamais présumée
+                return 410, {"ok": False, "error": "over", "state": self._final(sid)}
             if s["phone"] != phone_id:
                 return 409, {"ok": False, "error": "claimed" if s["phone"] else "not_claimed"}
             if s["state"] != "claimed":

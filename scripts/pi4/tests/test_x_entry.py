@@ -184,11 +184,53 @@ class TestXEntryState(unittest.TestCase):
         self.mono.t += 119.9
         self.assertTrue(x.active())
         self.mono.t += 0.1
-        self.assertEqual(x.submit(sid, "p1", seal_doc(sid, "a")), (410, {"ok": False, "error": "expired"}))
+        self.assertEqual(x.submit(sid, "p1", seal_doc(sid, "a")), (410, {"ok": False, "error": "over", "state": "expired"}))
         self.assertFalse(x.active())
         self.assertEqual(x.poll(sid)[1]["state"], "expired")
         self.mono.t += xentry.TOMB_S
         self.assertEqual(x.poll(sid)[1]["state"], "gone")                # issue oubliée elle aussi
+
+    def test_lost_submit_response_retry_learns_real_outcome(self):
+        # 1er envoi accepté, réponse perdue par le téléphone ; la TV livre ; le renvoi lit l'issue RÉELLE (410 over)
+        for result, final in (("filled", "delivered"), ("refused", "refused"), ("rejected", "rejected")):
+            x, sid = self.started()
+            x.claim(sid, "p1")
+            self.assertEqual(x.submit(sid, "p1", seal_doc(sid, "alex")), (200, {"ok": True}))
+            x.poll(sid)
+            x.done(sid, result)
+            self.assertEqual(x.submit(sid, "p1", seal_doc(sid, "alex")),
+                             (410, {"ok": False, "error": "over", "state": final}), result)
+        self.assertEqual(x.submit("B" * 22, "p1", "A" * 342), (410, {"ok": False, "error": "over", "state": "gone"}))
+
+    def test_close_after_handoff_is_unknown_never_cancelled_or_expired(self):
+        # chiffré remis à l'extension (delivering) puis séance fermée SANS `done` : le service ne peut pas prouver
+        # « rien saisi » -> issue « unknown » (saisie possible), jamais « expired » ni « cancelled »
+        def handed():
+            x, sid = self.started()
+            x.claim(sid, "p1")
+            x.submit(sid, "p1", seal_doc(sid, "alex"))
+            x.poll(sid)
+            return x, sid
+        x, sid = handed()
+        self.mono.t += xentry.TTL_S                                      # expiration à la milliseconde près
+        self.assertEqual(x.done(sid, "filled"), (409, {"ok": False, "error": "not_delivering"}))
+        self.assertEqual(x.status(sid, "p1"), "unknown")
+        self.assertEqual(x.submit(sid, "p1", seal_doc(sid, "a")), (410, {"ok": False, "error": "over", "state": "unknown"}))
+        self.assertEqual(x.phone_cancel(sid, "p1"), (409, {"ok": False, "error": "over", "state": "unknown"}))
+        x, sid = handed()
+        self.present[0] = False                                          # témoin X perdu
+        self.assertEqual(x.status(sid, "p1"), "unknown")
+        for close in (lambda x, sid: x.cancel(sid), lambda x, sid: x.wipe_all(),
+                      lambda x, sid: x.start({"n": JWK["n"], "e": JWK["e"]})):
+            x, sid = handed()
+            close(x, sid)
+            self.assertEqual(x.poll(sid)[1]["state"], "unknown")
+        # AVANT la remise (submitted, jamais relayé) : « expired » reste vrai (rien n'a pu être saisi)
+        x, sid = self.started()
+        x.claim(sid, "p1")
+        x.submit(sid, "p1", seal_doc(sid, "alex"))
+        self.mono.t += xentry.TTL_S
+        self.assertEqual(x.status(sid, "p1"), "expired")
 
     def test_presence_lost_wipes(self):
         x, sid = self.started()
@@ -433,8 +475,8 @@ class TestXEntryHttp(unittest.TestCase):
         self.assertEqual(code, 410)
         self.assertIn("QR", page)
         self.assertEqual(self.preq(s, "GET", "/r/x?s=bad", cookie=tok)[0], 410)
-        self.assertEqual(self.preq(s, "POST", "/r/x/submit", {"s": "B" * 22, "c": csrf, "ct": "A" * 342},
-                                   cookie=tok)[0], 410)
+        code, _, out = self.preq(s, "POST", "/r/x/submit", {"s": "B" * 22, "c": csrf, "ct": "A" * 342}, cookie=tok)
+        self.assertEqual((code, out), (410, {"ok": False, "error": "over", "state": "gone"}))
 
 
 if __name__ == "__main__":
