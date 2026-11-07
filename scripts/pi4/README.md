@@ -1567,7 +1567,10 @@ Sécurité (`opentv_pi/xentry.py`, `x-tv-extension/xentry.js`, `ui/xphone.js`) :
   par la page, une touche ou un clic synthétiques n'arment rien. Pastille et QR dans des racines fantômes **fermées**
   (invisibles pour la page X).
 - **Champ éligible** (monde isolé de l'extension) : cadre principal, `https://x.com|twitter.com` (± `www.`/`mobile.`),
-  URL de connexion seulement (`/i/flow/login`, `/login`, `/i/jf/onboarding/web?mode=login`, jamais `start=`), INPUT au
+  URL de connexion seulement (`/i/flow/login`, `/login`, `/i/jf/onboarding/web?mode=login`, jamais `start=` ; et
+  l'accueil déconnecté `https://x.com/` EXACT — sans requête ni fragment : jamais `?mode=`, `?start=`, `?lang=`, `/home`
+  ni l'inscription — dont le champ réel `landing-identifier` « Email or username » est au focus ; son QR natif « Scan to
+  get the app » n'est jamais lu ni utilisé), INPUT au
   focus, visible, actif, modifiable, `type` text/email/tel, `autocomplete` `username`/`email`/`tel`/`tel-national`/
   `tel-local` (± `webauthn`). Refus : `inputmode` numérique, `maxlength` ≤ 8, `pattern`, champ mot de passe ou code à
   usage unique dans la même fenêtre/formulaire, et tout nom/libellé/placeholder/titre de fenêtre évoquant mot de passe,

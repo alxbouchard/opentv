@@ -4,7 +4,8 @@
    SYNTHÉTIQUES servies par Playwright. Le QR est lu sur une CAPTURE D'ÉCRAN (décodage par le canal de contrôle).
    argv[2] = module playwright ; argv[3] = JSON {chrome, ext, ext_id, tv, port, ctl, map, shots, only?}.
    only (mutations) : null = tout ; "late" = champ rendu inéligible après le QR seulement ; "badstart" = réponse de
-   start écartée seulement.
+   start écartée seulement ; "root" = accueil déconnecté réel (x.com/ : champ landing-identifier, QR natif de X
+   « Scan to get the app ») et URL voisines refusées seulement.
    Sortie : une ligne JSON {steps}. */
 "use strict";
 const fs = require("fs");
@@ -31,6 +32,37 @@ function page(title, field) {
     `<form id="f" onsubmit="return false">${field}<div id="next" role="button" tabindex="0">Next</div>` +
     `<button id="forgot" type="button">Forgot password?</button></form></div></div>${INSTR}</body></html>`;
 }
+// accueil déconnecté RÉEL (HTML de https://x.com/ relevé le 2026-11-06 : balisage du formulaire et attributs EXACTS du
+// champ, classes retirées) + QR NATIF de X « Scan to get the app » en bas à droite (rendu côté client par X : sa charge
+// exacte n'est pas relevée ; NATIVE_QR est un substitut d'adresse X de téléchargement — seul compte qu'il n'est PAS le
+// QR d'OpenTV). Le champ reçoit le focus comme sur le terrain (photo : « Email or username » au focus).
+const ONB = "/i/jf/onboarding/web";
+const NATIVE_QR = "https://x.com/download?src=landing";
+const QRLIB = fs.readFileSync(path.join(cfg.ext, "qrcode.js"), "utf8");
+const LANDING = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>X. It’s what’s happening / X</title>` +
+  `<style>body{margin:0;font:16px sans-serif;background:#000;color:#fff}#main{position:absolute;left:1100px;top:120px;` +
+  `width:380px}a,button,input{display:block;margin:10px 0;width:360px;min-height:40px}svg{width:20px;height:20px}` +
+  `label{display:block;border:2px solid #555;padding:6px}` +
+  `#getapp{position:fixed;right:40px;bottom:40px;background:#fff;color:#000;padding:16px;text-align:center}</style>` +
+  `</head><body><div id="main"><h1>Happening now<!-- -->.</h1><div><div><div>` +
+  `<a id="phone" href="${ONB}?mode=signup&amp;redirect_after_login=%2F"><span><svg></svg></span><span>Continue with phone</span></a>` +
+  `<div><div><a id="google" href="${ONB}?mode=login&amp;redirect_after_login=%2F"><span><svg></svg></span>` +
+  `<span>Continue with Google</span></a></div></div><a id="apple" href="${ONB}?mode=login&amp;redirect_after_login=%2F">` +
+  `<span><svg></svg></span><span>Continue with Apple</span></a></div><div><span></span> or <span></span></div>` +
+  `<form action="${ONB}" method="get"><input type="hidden" name="mode" value="login"/>` +
+  `<label for="landing-identifier" aria-label="Email or username"><span><span>Email or username</span>` +
+  `<span>Email or username</span><input id="landing-identifier" type="text" autoComplete="username" ` +
+  `autoCapitalize="none" autoCorrect="off" spellCheck="false" required="" placeholder=" " ` +
+  `class="h-5 w-full bg-transparent outline-none" name="username"/></span></label>` +
+  `<button id="continue" type="submit"><span>Continue</span></button></form><p>By continuing, you agree to our ` +
+  `<a id="tos" href="https://x.com/tos" target="_blank" rel="noopener noreferrer nofollow">Terms of Service</a></p>` +
+  `</div></div></div><div id="getapp"><div>Scan to get the app</div><canvas id="appqr" width="232" height="232"></canvas>` +
+  `</div><script>${QRLIB}</script><script>(function(){var q=qrcode(0,"M");q.addData(${JSON.stringify(NATIVE_QR)});` +
+  `q.make();var n=q.getModuleCount(),c=document.getElementById("appqr"),k=Math.floor(232/(n+8)),g=c.getContext("2d");` +
+  `g.fillStyle="#fff";g.fillRect(0,0,232,232);g.fillStyle="#000";for(var r=0;r<n;r++){for(var j=0;j<n;j++){` +
+  `if(q.isDark(r,j)){g.fillRect((j+4)*k,(r+4)*k,k,k);}}}` +
+  `document.addEventListener("submit",function(e){e.preventDefault();},true);` +
+  `document.getElementById("landing-identifier").focus();})();</script>${INSTR}</body></html>`;
 const CASES = {
   login: page("Sign in to X", USER),
   password: page("Enter your password", `<input id="user" name="password" type="password" autocomplete="current-password" autofocus>`),
@@ -71,9 +103,11 @@ function ctl(method, p, body) {
     let sw = ctx.serviceWorkers()[0];
     if (!sw) { sw = await ctx.waitForEvent("serviceworker", { timeout: 15000 }); }
     if (sw.url().indexOf("chrome-extension://" + cfg.ext_id + "/") !== 0) { throw new Error("ID " + sw.url()); }
-    await ctx.route(/^https:\/\/(x|twitter)\.com\//, (route) => {
+    await ctx.route(/^(https:\/\/(x|twitter)\.com\/|http:\/\/x\.com\/|https:\/\/x\.com\.evil\.example\/)/, (route) => {
       const u = new URL(route.request().url());
-      const body = CASES[u.searchParams.get("case") || "login"] || CASES.login;
+      // pages de connexion synthétiques ; partout ailleurs (accueil, /home, inscription, http, hôte piégé) : l'accueil RÉEL
+      const flow = u.hostname === "x.com" && u.protocol === "https:" && /^\/(i\/flow\/login|i\/jf\/onboarding\/web)$/.test(u.pathname);
+      const body = flow ? CASES[u.searchParams.get("case") || "login"] || CASES.login : LANDING;
       return route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: body });
     });
     const tv = ctx.pages()[0] || await ctx.newPage();
@@ -91,9 +125,9 @@ function ctl(method, p, body) {
     };
     st.flag_on = await loadTv();
     await ctl("POST", "/presence?on=1");   // X ouvert À LA TV (POST presence de /tv avant d'ouvrir X)
-    const openX = async (q) => {
-      await tv.goto("https://x.com" + q);
-      await tv.waitForSelector("#user");
+    const openX = async (q, sel) => {
+      await tv.goto(/^https?:/.test(q) ? q : "https://x.com" + q);
+      await tv.waitForSelector(sel || "#user");
       await sleep(700);
     };
     const tvState = () => tv.evaluate(() => {
@@ -101,7 +135,8 @@ function ctl(method, p, body) {
       const pill = document.querySelector('[data-otvx-entry="pill"]');
       return { active: ae ? (ae.getAttribute("data-otvx-entry") || ae.id || ae.tagName) : null,
                pill: !!pill && pill.isConnected && pill.getBoundingClientRect().width > 0,
-               qr: !!document.querySelector('[data-otvx-entry="qr"]'), value: document.getElementById("user").value,
+               qr: !!document.querySelector('[data-otvx-entry="qr"]'),
+               value: (document.getElementById("user") || document.getElementById("landing-identifier")).value,
                ev: Object.assign({}, window.__ev), href: location.href };
     });
     const waitFor = async (fn, ms) => {
@@ -128,9 +163,9 @@ function ctl(method, p, body) {
     });
     await sleep(300);
     st.synthetic_arrow = await tvState();
-    const startSession = async () => {
+    const startSession = async (fid) => {
       await waitFor(async () => !(await tvState()).qr);   // séance précédente terminée côté TV
-      await tv.evaluate(() => document.getElementById("user").focus());
+      await tv.evaluate((i) => document.getElementById(i).focus(), fid || "user");
       await sleep(250);
       await tv.keyboard.press("ArrowDown");
       const onPill = (await tvState()).active;
@@ -366,6 +401,94 @@ function ctl(method, p, body) {
       st.badstart = { on_pill: onPill, before: before, after: await service(), tv: await tvState() };
       await ctl("POST", "/badurl?on=0");
     }
+    // ---------------------------------------------------------------- accueil déconnecté RÉEL (x.com/)
+    // terrain 0.7.10 : « Happening now », « Email or username » au focus, QR NATIF de X « Scan to get the app » en bas à
+    // droite. Pastille pour landing-identifier SEULEMENT ; QR natif ignoré ; inscription par téléphone jamais atteinte ;
+    // flèche RÉELLE + OK RÉEL exigés ; QR d'OpenTV décodé sur capture et DISTINCT du QR natif ; URL voisines refusées.
+    if (want("root")) {
+      await ctl("POST", "/presence?on=1");
+      const R = {};
+      st.root = R;
+      await openX("/", "#landing-identifier");
+      await sleep(300);
+      await tv.evaluate(() => { window.__ev = { input: 0, change: 0, click: 0, submit: 0 }; });
+      R.initial = await tvState();
+      R.native = await tv.evaluate(() => {
+        const n = document.getElementById("getapp");
+        const r = n.getBoundingClientRect();
+        return { text: n.textContent, canvas: !!n.querySelector("canvas"), right: Math.round(innerWidth - r.right),
+                 bottom: Math.round(innerHeight - r.bottom), otv: !!n.closest("[data-otvx-entry]") };
+      });
+      if (R.initial.pill) {
+        await tv.evaluate(() => {   // page : focus programmatique + touches/clics synthétiques sur la pastille
+          const p = document.querySelector('[data-otvx-entry="pill"]');
+          p.focus();
+          p.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+          document.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+          p.click();
+        });
+        await tv.keyboard.press("Enter");   // OK RÉEL, mais pastille focalisée par la PAGE : jamais armé
+        await sleep(800);
+        R.fake = { tv: await tvState(), service: await service() };
+        await tv.evaluate(() => {
+          const u = document.getElementById("landing-identifier");
+          u.focus();
+          u.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+        });
+        await sleep(300);
+        R.synthetic_arrow = await tvState();
+        // autres contrôles de l'accueil au focus (inscription, fournisseurs, Continuer, QR natif) : jamais de pastille
+        R.others = {};
+        for (const id of ["phone", "google", "apple", "continue", "tos"]) {
+          await tv.evaluate((i) => document.getElementById(i).focus(), id);
+          await sleep(250);
+          R.others[id] = await tvState();
+        }
+        // parcours RÉEL ↑ depuis le champ : « Continue with phone » (inscription) jamais atteint
+        await tv.evaluate(() => document.getElementById("landing-identifier").focus());
+        await sleep(250);
+        R.walk_up = [];
+        for (let i = 0; i < 5; i++) { await tv.keyboard.press("ArrowUp"); R.walk_up.push((await tvState()).active); }
+        // flèche RÉELLE ↓ -> pastille, OK RÉEL -> QR d'OpenTV (compteurs remis à zéro : le clic factice ci-dessus
+        // était celui du TEST ; à partir d'ici, aucun clic ni envoi)
+        await tv.evaluate(() => { window.__ev = { input: 0, change: 0, click: 0, submit: 0 }; });
+        const sr = await startSession("landing-identifier");
+        R.session = { on_pill: sr.on_pill, started: sr.started, url: sr.url, svc: sr.svc };
+        const nshot = path.join(cfg.shots, "tv-x-native-app-qr.png");
+        await tv.locator("#appqr").screenshot({ path: nshot });
+        R.native_qr = (await ctl("POST", "/qr", fs.readFileSync(nshot))).text;
+        const full = path.join(cfg.shots, "tv-x-root-landing.png");
+        await tv.screenshot({ path: full });
+        R.full_qrs = (await ctl("POST", "/qrmulti", fs.readFileSync(full))).texts;
+        R.qr_box = await tv.evaluate(() => {
+          const r = document.querySelector('[data-otvx-entry="qr"]').getBoundingClientRect();
+          return { left: Math.round(r.left), right: Math.round(r.right) };
+        });
+        await A.p.goto(sr.url);
+        await A.p.waitForSelector("#xform:not([hidden])");
+        await A.p.fill("#xid", "alex@example.com");
+        await A.p.click("#xsend");
+        await waitFor(async () => (await tvState()).value !== "" && !(await service()).active);
+        await waitFor(async () => /C'est fait/.test((await phoneText(A.p)).status || ""));
+        await sleep(300);
+        R.filled = { tv: await tvState(), phone: await phoneText(A.p), service: await service() };
+      }
+      // URL voisines : même accueil RÉEL, champ au focus ; jamais de pastille, jamais de séance (OK réel compris)
+      R.neg = {};
+      for (const [name, q] of [["root_signup", "/?mode=signup"], ["root_mode_login", "/?mode=login"],
+                               ["root_start", "/?start=phone"], ["root_lang", "/?lang=en"], ["root_unexpected", "/?foo=1"],
+                               ["home", "/home"], ["flow_signup", "/i/flow/signup"], ["http", "http://x.com/"],
+                               ["evil", "https://x.com.evil.example/"]]) {
+        await openX(q, "#landing-identifier");
+        await sleep(300);
+        const before = await tvState();
+        await tv.keyboard.press("ArrowDown");
+        await tv.keyboard.press("Enter");
+        await sleep(500);
+        R.neg[name] = { href: before.href, active: before.active, pill: before.pill, after: (await tvState()).active,
+                        qr: (await tvState()).qr, service: (await service()).active };
+      }
+    }
     if (want("main")) {
     // ---------------------------------------------------------------- champs jamais éligibles
     await ctl("POST", "/presence?on=1");
@@ -378,8 +501,8 @@ function ctl(method, p, body) {
       await sleep(500);
       st.ineligible[c] = { pill: before.pill, after: (await tvState()).active, service: (await service()).active };
     }
-    for (const [name, q] of [["home", "/home"], ["signup", "/i/jf/onboarding/web?mode=signup"],
-                             ["landing", "/"], ["onboarding_login", "/i/jf/onboarding/web?mode=login"]]) {
+    for (const [name, q] of [["signup", "/i/jf/onboarding/web?mode=signup"],
+                             ["onboarding_login", "/i/jf/onboarding/web?mode=login"]]) {
       await openX(q);
       st.ineligible["url_" + name] = { pill: (await tvState()).pill };
     }

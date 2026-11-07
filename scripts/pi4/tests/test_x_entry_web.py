@@ -174,7 +174,7 @@ class TestHarnessAndMutations(unittest.TestCase):
         self.assertEqual(code, 0, r)
         self.assertTrue(r["ok"], r)
         self.assertGreaterEqual(r["counts"]["phone"], 30)
-        self.assertGreaterEqual(r["counts"]["gate"], 120)
+        self.assertGreaterEqual(r["counts"]["gate"], 135)
         self.assertGreaterEqual(r["counts"]["ident"], 35)
         self.assertGreaterEqual(r["counts"]["fill"], 14)
         self.assertGreaterEqual(r["counts"]["ui"], 40)
@@ -191,6 +191,13 @@ class TestHarnessAndMutations(unittest.TestCase):
         ("xentry", "if (f.pattern || f.danger) { return false; }", ""),                               # mot de passe voisin
         ("xentry", "|| !loginUrl(f.url) ", ""),                                                       # URL de connexion
         ("xentry", 'if (u.searchParams.has("start")) { return false; }', ""),                        # inscription
+        # accueil déconnecté « / » : URL EXACTE seulement (requête, fragment, chemin « // » refusés)
+        ("xentry", 'if (u.pathname === "/") { return !u.search && !u.hash; }',
+                   'if (u.pathname === "/") { return true; }'),
+        ("xentry", "return !u.search && !u.hash;", "return !u.hash;"),
+        ("xentry", "return !u.search && !u.hash;", "return !u.search;"),
+        ("xentry", 'if (u.pathname === "/")', 'if (path === "/")'),
+        ("xentry", 'if (u.pathname === "/") { return !u.search && !u.hash; }', ""),             # accueil refusé
         ("xentry", "|| !TYPE_OK.has(f.type)", ""),                                                    # type
         ("xentry", "if (/^(numeric|decimal)$/i.test(String(f.inputmode).trim())) { return false; }", ""),
         ("xentry", "|| !sameText(doc.f, secret)", ""),                                                # secret du QR
@@ -328,6 +335,17 @@ class _Control(http.server.BaseHTTPRequestHandler):
                 with open(os.path.join(os.environ["OPENTV_TEST_SHOTS"], "qr-miss-%d.png" % len(self.server.qrs)), "wb") as f:
                     f.write(data)
             return self._send({"text": text})
+        elif self.path == "/qrmulti":   # capture COMPLÈTE de l'écran : tous les QR lisibles (natif de X + OpenTV)
+            img = cv2.imdecode(numpy.frombuffer(data, numpy.uint8), cv2.IMREAD_GRAYSCALE)
+            texts = set()
+            for det in [cv2.QRCodeDetector()] + ([cv2.QRCodeDetectorAruco()] if hasattr(cv2, "QRCodeDetectorAruco") else []):
+                try:
+                    ok, decoded = det.detectAndDecodeMulti(img)[:2]
+                except cv2.error:
+                    ok, decoded = False, ()
+                if ok:
+                    texts.update(x for x in decoded if x)
+            return self._send({"texts": sorted(texts)})
         self._send({})
 
     def log_message(self, *a):
@@ -385,6 +403,58 @@ class TestXEntryEndToEnd(unittest.TestCase):
             self.assertFalse(v["tv"]["qr"], k)
             self.assertFalse(v["service"]["active"], k)
 
+    NATIVE_QR = "https://x.com/download?src=landing"   # substitut du QR natif « Scan to get the app » (e2e_x_entry.js)
+
+    def assert_root(self, R, rport):
+        """Accueil déconnecté RÉEL (x.com/) : pastille pour landing-identifier seulement, QR natif ignoré et distinct,
+        inscription jamais atteinte, faux événements sans effet, UN remplissage sans clic ni envoi ; URL voisines refusées."""
+        self.assertEqual((R["initial"]["active"], R["initial"]["pill"], R["initial"]["qr"]), ("landing-identifier", True, False))
+        self.assertTrue(R["initial"]["href"] == "https://x.com/", R["initial"]["href"])
+        self.assertEqual((R["native"]["text"], R["native"]["canvas"], R["native"]["otv"]), ("Scan to get the app", True, False))
+        self.assertLess(max(R["native"]["right"], R["native"]["bottom"]), 100)          # en bas à droite, comme sur la photo
+        self.assertFalse(R["fake"]["tv"]["qr"])
+        self.assertFalse(R["fake"]["service"]["active"])
+        self.assertEqual(R["synthetic_arrow"]["active"], "landing-identifier")
+        for k, v in R["others"].items():                                              # autres contrôles : jamais de pastille
+            self.assertEqual((v["pill"], v["qr"]), (False, False), k)
+            if k == "phone":   # inscription : nav.js peut retirer le focus posé par la page ; jamais champ ni pastille
+                self.assertNotIn(v["active"], ("pill", "landing-identifier"), v)
+            else:
+                self.assertEqual(v["active"], k, k)
+        self.assertNotIn("phone", R["walk_up"])                                        # inscription jamais atteinte
+        self.assertNotIn("pill", R["walk_up"])
+        ss = R["session"]
+        self.assertEqual(ss["on_pill"], "pill")                                        # ↓ RÉEL : champ -> pastille
+        self.assertTrue(ss["started"], ss)
+        url_re = r"^http://%s:%d/r/x\?s=([A-Za-z0-9_-]{22})#([A-Za-z0-9_-]{22})\.([A-Za-z0-9_-]{43})$" % (re.escape(MDNS), rport)
+        m = re.match(url_re, ss["url"])
+        self.assertIsNotNone(m, ss["url"])
+        self.assertEqual(m.group(1), ss["svc"]["sid"])
+        # QR natif de X : décodé, jamais l'adresse d'OpenTV ; capture complète : les DEUX QR, distincts
+        self.assertEqual(R["native_qr"], self.NATIVE_QR)
+        self.assertIsNone(re.match(url_re, R["native_qr"]))
+        self.assertNotEqual(R["native_qr"], ss["url"])
+        self.assertEqual(sorted(R["full_qrs"]), sorted([self.NATIVE_QR, ss["url"]]), R["full_qrs"])
+        self.assertEqual([q for q in R["full_qrs"] if re.match(url_re, q)], [ss["url"]])   # UN seul QR OpenTV
+        self.assertLess(R["qr_box"]["right"], 1100)                                  # à gauche du formulaire de X
+        f = R["filled"]
+        self.assertEqual(f["tv"]["value"], "alex@example.com")
+        self.assertEqual(f["tv"]["ev"], {"input": 1, "change": 1, "click": 0, "submit": 0})
+        self.assertEqual((f["tv"]["qr"], f["tv"]["active"], f["tv"]["href"]), (False, "landing-identifier", "https://x.com/"))
+        self.assertIn("C'est fait", f["phone"]["status"])
+        self.assertFalse(f["service"]["active"])
+        want_neg = {"root_signup", "root_mode_login", "root_start", "root_lang", "root_unexpected", "home", "flow_signup",
+                    "http", "evil"}
+        self.assertEqual(set(R["neg"]), want_neg)
+        for k, v in R["neg"].items():
+            self.assertEqual(v["active"], "landing-identifier", (k, v))                 # MÊME champ réel au focus
+            self.assertFalse(v["pill"], (k, v))
+            self.assertNotEqual(v["after"], "pill", (k, v))
+            self.assertFalse(v["qr"], (k, v))
+            self.assertFalse(v["service"], (k, v))
+        self.assertTrue(R["neg"]["http"]["href"].startswith("http://x.com/"), R["neg"]["http"])     # jamais promu en https
+        self.assertTrue(R["neg"]["evil"]["href"].startswith("https://x.com.evil.example/"), R["neg"]["evil"])
+
     def test_real_chromium_extension_phone_service(self):
         st, a, ctl, shots, rport = self.e2e()
         # champ éligible au focus : pastille ; rien d'armé par la page (focus programmatique, touches/clic factices)
@@ -407,7 +477,9 @@ class TestXEntryEndToEnd(unittest.TestCase):
             n = base64.urlsafe_b64decode(ss["svc"]["n"] + "==")
             self.assertEqual(len(n), 256)
             self.assertEqual(m.group(3), base64.urlsafe_b64encode(hashlib.sha256(n).digest()).rstrip(b"=").decode())
-        self.assertEqual(len(set(q.split("#")[1] for q in ctl.qrs if "#" in q)), len(ctl.qrs))   # secret neuf
+        otv = [q for q in ctl.qrs if q != self.NATIVE_QR]                       # QR natif de X : décodé UNE fois, à part
+        self.assertEqual(len(ctl.qrs) - len(otv), 1)
+        self.assertEqual(len(set(q.split("#")[1] for q in otv if "#" in q)), len(otv))   # secret neuf
         # empreinte altérée : clé refusée, séance annulée, rien saisi
         wf = st["wrong_fp"]
         self.assertIn("Clé inattendue", wf["phone"]["err"])
@@ -475,8 +547,10 @@ class TestXEntryEndToEnd(unittest.TestCase):
         self.assertEqual(b["after"]["started"], b["before"]["started"] + 1)
         self.assertFalse(b["after"]["active"])
         self.assertFalse(b["tv"]["qr"])
+        # accueil déconnecté RÉEL (x.com/) : éligible à l'URL EXACTE seulement ; QR natif de X distinct
+        self.assert_root(st["root"], rport)
         # jamais éligibles : mot de passe, OTP, code de vérification, NIP, mot de passe voisin, passkey, secours,
-        # carte ; URL hors connexion (accueil, inscription, accueil déconnecté)
+        # carte ; URL hors connexion (inscription)
         for k, v in st["ineligible"].items():
             if k == "url_onboarding_login":
                 self.assertTrue(v["pill"], k)
@@ -517,6 +591,14 @@ class TestXEntryEndToEnd(unittest.TestCase):
         self.assertEqual(set(filled.values()), {"alex@example.com"}, filled)
         with self.assertRaises(AssertionError):
             self.assert_late_refused(st["late"])
+        # accueil : sans la branche « / », AUCUNE pastille au champ réel (défaut terrain 0.7.10) ; branche sans
+        # contrôle de requête : l'accueil d'inscription (?mode=signup, ?start=phone…) armerait la pastille
+        root = 'if (u.pathname === "/") { return !u.search && !u.hash; }'
+        st = self.e2e(only="root", mutants=[("xentry.js", root, "")])[0]
+        self.assertEqual((st["root"]["initial"]["active"], st["root"]["initial"]["pill"]), ("landing-identifier", False))
+        st = self.e2e(only="root", mutants=[("xentry.js", root, 'if (u.pathname === "/") { return true; }')])[0]
+        armed = sorted(k for k, v in st["root"]["neg"].items() if v["pill"])
+        self.assertEqual(armed, ["root_lang", "root_mode_login", "root_signup", "root_start", "root_unexpected"])
         st = self.e2e(only="badstart", mutants=[(
             "background.js", 'if (typeof j.sid === "string" && XSID_RE.test(j.sid)) { await xentry({ op: "cancel", '
             'sid: j.sid }).catch(() => null); }', "")])[0]

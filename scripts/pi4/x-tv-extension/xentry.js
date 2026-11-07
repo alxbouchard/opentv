@@ -9,7 +9,8 @@
  *   nav.js, atteinte par une flèche RÉELLE (nav.js signale navFocus) puis UN OK réel ; un focus posé par la page, une
  *   touche ou un clic synthétiques n'arment jamais rien. Drapeau du service relu sur /tv (tvkey.js -> background.js).
  * - Champ éligible (porte, bloc <gate> exécuté tel quel par tests/x_entry_harness.js) : cadre principal, x.com /
- *   twitter.com en https, URL de connexion seulement (/i/flow/login, /login, /i/jf/onboarding/web?mode=login), champ
+ *   twitter.com en https, URL de connexion seulement (/i/flow/login, /login, /i/jf/onboarding/web?mode=login, et
+ *   l'accueil déconnecté « / » EXACT, sans requête ni fragment : son champ landing-identifier), champ
  *   INPUT au focus, visible, actif, modifiable, d'une ligne, type text/email/tel, autocomplete username / email /
  *   tel / tel-national / tel-local (± webauthn) ; refusé : inputmode numérique, maxlength ≤ 8, pattern, et tout
  *   libellé/nom/placeholder du champ ou titre de la fenêtre évoquant mot de passe, code, OTP, NIP, vérification, 2FA,
@@ -68,6 +69,9 @@
     try { u = new URL(href); } catch (err) { return false; }
     if (u.protocol !== "https:" || !X_HOST_RE.test(u.hostname) || u.port || u.username || u.password) { return false; }
     const path = u.pathname.replace(/\/+$/, "") || "/";
+    // accueil déconnecté (champ « landing-identifier » : nom d'utilisateur ou courriel) : URL EXACTE https://x.com/
+    // seulement — aucune requête (mode, start, lang…), aucun fragment ; jamais « // », /home ni l'inscription
+    if (u.pathname === "/") { return !u.search && !u.hash; }
     const modes = u.searchParams.getAll("mode");
     if (u.searchParams.has("start")) { return false; }   // « start=phone… » : inscription, jamais une connexion
     if (LOGIN_PATHS.has(path)) { return modes.every((m) => m === "login"); }

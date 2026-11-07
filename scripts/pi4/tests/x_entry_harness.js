@@ -120,7 +120,12 @@ function gate() {
                 onboarding: { url: "https://x.com/i/jf/onboarding/web?mode=login&redirect_after_login=%2F" },
                 twitter: { url: "https://twitter.com/login" }, mobile: { url: "https://mobile.x.com/i/flow/login" },
                 www: { url: "https://www.x.com/i/flow/login/" }, maxlen_long: { maxlength: 512 },
-                fr_label: { texts: ["Téléphone, adresse e-mail ou nom d'utilisateur", "Connexion à X"] } };
+                fr_label: { texts: ["Téléphone, adresse e-mail ou nom d'utilisateur", "Connexion à X"] },
+                // accueil déconnecté RÉEL (x.com/ relevé le 2026-11-06) : <input id="landing-identifier" type="text"
+                // autoComplete="username" … name="username"> dans <label aria-label="Email or username"> ; URL exacte
+                landing: { url: "https://x.com/", texts: ["username", "landing-identifier", " ", "", "", "",
+                                                         "Email or usernameEmail or username"] },
+                landing_twitter: { url: "https://twitter.com/" } };
   for (const k of Object.keys(yes)) { expect("gate", "yes:" + k, v(yes[k]), true); }
   const no = { password: { type: "password" }, number: { type: "number" }, search: { type: "search" },
                cur_pw: { ac: "current-password" }, new_pw: { ac: "new-password" }, otp: { ac: "one-time-code" },
@@ -130,7 +135,15 @@ function gate() {
                maxlen8: { maxlength: 8 }, pattern: { pattern: "[0-9]*" }, danger: { danger: true },
                not_top: { top: false }, not_focused: { focused: false }, hidden: { visible: false },
                disabled: { disabled: true }, readonly: { readonly: true }, textarea: { tag: "TEXTAREA" },
-               home: { url: "https://x.com/home" }, landing: { url: "https://x.com/" },
+               home: { url: "https://x.com/home" }, home_slash: { url: "https://x.com/home/" },
+               // accueil « / » : seulement l'URL EXACTE (aucune requête, aucun fragment, https, hôte X exact)
+               root_signup: { url: "https://x.com/?mode=signup" }, root_mode_login: { url: "https://x.com/?mode=login" },
+               root_start: { url: "https://x.com/?start=phone" }, root_lang: { url: "https://x.com/?lang=en" },
+               root_unexpected: { url: "https://x.com/?foo=1" }, root_empty_param: { url: "https://x.com/?mode" },
+               root_hash: { url: "https://x.com/#signup" }, root_double_slash: { url: "https://x.com//" },
+               root_http: { url: "http://x.com/" }, root_evil: { url: "https://x.com.evil.example/" },
+               root_evil_prefix: { url: "https://evilx.com/" }, root_port: { url: "https://x.com:8443/" },
+               root_creds: { url: "https://a:b@x.com/" }, root_flow_signup: { url: "https://x.com/i/flow/signup" },
                signup_mode: { url: "https://x.com/i/jf/onboarding/web?mode=signup" },
                signup_phone: { url: "https://x.com/i/jf/onboarding/web?mode=login&start=phone" },
                onb_two_modes: { url: "https://x.com/i/jf/onboarding/web?mode=login&mode=signup" },
