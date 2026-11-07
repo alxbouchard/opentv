@@ -111,7 +111,8 @@ function jfForm(v) {
   const id = v === "jf_signup" ? "jf-input-phone_number" : "jf-input-username_or_email";
   const name = v === "jf_signup" ? "phone_number" : "username_or_email";
   const pat = v === "jf_pattern" ? "[0-9]*" : "^[a-zA-Z0-9@._+\\-]+$";
-  const decoy = v === "jf_noinert" ? DECOY.replace('inert="" ', "") :
+  // jf_rendered (revue 0.7.12) : leurre inert GARDÉ mais RENDU (style retiré : mot de passe visible, pleine taille)
+  const decoy = v === "jf_noinert" ? DECOY.replace('inert="" ', "") : v === "jf_rendered" ? DECOY.replace(/ style="[^"]*"/, "") :
     v === "jf_pwstep" ? `<input type="password" value="" name="password" autocomplete="current-password">` : DECOY;
   const field = `<input autocomplete="username webauthn" inputmode="text" id="${id}" pattern="${pat}" type="text" ` +
     `value="" name="${name}">`;
@@ -122,6 +123,7 @@ function jfForm(v) {
     `username</span><span>Email or username</span>${field}${v === "jf_nonsibling" ? "" : decoy}</div></label>` +
     (v === "jf_nonsibling" ? decoy : "") + (v === "jf_two" ? DECOY : "") +
     (v === "jf_otp" ? `<input type="text" autocomplete="one-time-code" name="code" hidden>` : "") +
+    (/^jf_mode_/.test(v) ? `<input type="hidden" name="mode" value="${v.slice(8)}">` : "") +   // « mode » caché : jamais jf
     `<div id="jfcontinue"><div><p>Continue</p></div></div><p>By continuing, you agree to our ` +
     `<a id="jftos" href="https://x.com/tos">Terms of Service</a></p></form>`;
 }
@@ -146,7 +148,8 @@ function jfDialog(v) {
 }
 const CASES = {
   login: page("Sign in to X", USER),
-  jf: jfDialog("jf"),
+  jf: jfDialog("jf"), jf_rendered: jfDialog("jf_rendered"), jf_mode_login: jfDialog("jf_mode_login"),
+  jf_mode_signup: jfDialog("jf_mode_signup"),
   password: page("Enter your password", `<input id="user" name="password" type="password" autocomplete="current-password" autofocus>`),
   otp: page("Enter your verification code", `<input id="user" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" autofocus>`),
   verifyuser: page("Enter your verification code", `<input id="user" name="text" type="text" autocomplete="username" autofocus>`),
@@ -671,7 +674,8 @@ function ctl(method, p, body) {
       }
       // variantes : jamais de pastille, jamais de séance (flèche RÉELLE + OK RÉEL compris)
       J.neg = {};
-      for (const v of ["jf_noinert", "jf_pwstep", "jf_two", "jf_otp", "jf_nonsibling", "jf_signup", "jf_action", "jf_pattern"]) {
+      for (const v of ["jf_noinert", "jf_pwstep", "jf_two", "jf_otp", "jf_nonsibling", "jf_signup", "jf_action", "jf_pattern",
+                       "jf_rendered", "jf_mode_login", "jf_mode_signup"]) {
         const fid = v === "jf_signup" ? "jf-input-phone_number" : JFID;
         await openJf(v, "#" + fid);
         await tv.evaluate((i) => document.getElementById(i).focus(), fid);
@@ -682,6 +686,25 @@ function ctl(method, p, body) {
         await sleep(500);
         J.neg[v] = { href: before.href, active: before.active, pill: before.pill, after: (await tvState()).active,
                      qr: (await tvState()).qr, service: (await service()).active };
+      }
+      // revue 0.7.12 : mêmes refus sur les routes de connexion (fenêtre jf) — leurre inert RENDU, « mode » caché
+      J.routeNeg = {};
+      for (const v of ["jf_rendered", "jf_mode_login", "jf_mode_signup"]) {
+        await openX("/i/flow/login?case=" + v, "#" + JFID);
+        await tv.evaluate((i) => document.getElementById(i).focus(), JFID);
+        await sleep(300);
+        const before = await tvState();
+        const shown = await tv.evaluate(() => {   // leurre réellement RENDU (boîte non nulle, opacité 1) mais inert
+          const pw = document.querySelector('input[name="password"]');
+          const r = pw.getBoundingClientRect();
+          return { inert: pw.hasAttribute("inert"), w: r.width, h: r.height, op: getComputedStyle(pw).opacity,
+                   modes: Array.from(document.querySelectorAll('input[name="mode"]')).map((m) => m.getAttribute("value")) };
+        });
+        await tv.keyboard.press("ArrowDown");
+        await tv.keyboard.press("Enter");
+        await sleep(500);
+        J.routeNeg[v] = { href: before.href, active: before.active, pill: before.pill, after: (await tvState()).active,
+                          qr: (await tvState()).qr, service: (await service()).active, shown: shown };
       }
       // étape mot de passe rendue SUR PLACE après le QR (leurre rendu actif et visible) : refus à la livraison
       await openJf("jf");

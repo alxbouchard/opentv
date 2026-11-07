@@ -1593,7 +1593,10 @@ Sécurité (`opentv_pi/xentry.py`, `x-tv-extension/xentry.js`, `ui/xphone.js`) :
   passe (`<input inert type=password name=password>`, opacité 0, frère du champ). L'ancienne porte refusait ce champ
   (signature d'accueil absente, `pattern`, mot de passe voisin). Admis désormais **seulement** avec cette signature
   EXACTE (`jfSigOk`) : ce motif exact, formulaire sans action, et UN SEUL champ sensible dans la portée — ce leurre
-  exact (attribut `inert`, invisible, même parent que le champ) ; deux leurres, un code à usage unique, un mot de passe
+  exact (attribut `inert`, invisible, même parent que le champ) ; aucun contrôle `mode` dans le formulaire (un
+  `mode` caché `login` ou `signup` : jamais éligible) ; l'invisibilité du leurre est **prouvée par son propre rendu**
+  (display `none`, visibility `hidden`/`collapse`, opacité propre `0` ou `checkVisibility` faux), jamais déduite
+  d'`inert` — un mot de passe `inert` mais rendu visible n'est jamais un leurre ; deux leurres, un code à usage unique, un mot de passe
   non `inert` ou visible (étape mot de passe rendue sur place, revérifiée à la livraison), un autre id/nom (inscription
   jf), une `action` ou un autre motif : jamais éligible. Le QR
   natif « Scan to get the app » de X n'est jamais lu ni utilisé. INPUT au

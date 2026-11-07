@@ -426,7 +426,9 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   `username_or_email`, `pattern` exact de X, `<form>` sans `action`, leurre `<input inert type=password name=password>`
   frère du champ. Admis seulement par `jfSigOk` (signature exacte, UN seul champ sensible = ce leurre inert, invisible,
   même parent) ; tout autre mot de passe/code, leurre non inert ou détaché, inscription jf, `action` ou autre motif :
-  jamais. Diagnostic : vrai Chromium sur x.com (profil neuf, rien saisi, booléens/énumérations seulement).
+  jamais. Revue 0.7.12 : formulaire jf SANS aucun contrôle `mode` (caché login/signup refusé) ; invisibilité du leurre
+  PROUVÉE par son propre rendu (`ownHidden` : display/visibility/opacité propre/`checkVisibility`), jamais par `inert`
+  (`visible()` rend false pour tout élément inert : un mot de passe inert mais RENDU n'est pas un leurre). Diagnostic : vrai Chromium sur x.com (profil neuf, rien saisi, booléens/énumérations seulement).
 - **Mode HDMI exact après extinction/rallumage de la TV (0.7.5)** : terrain 2026-11-01, au rallumage wlroots recrée
   la sortie et Cage prend le mode préféré de l'EDID (3840x2160@30) pendant que Chromium reste en 1920x1080 (quart
   d'écran). `opentv_pi/displaymode.py` : cible exacte `OPENTV_HDMI_MODE` (défaut `1920x1080@60`, jamais un

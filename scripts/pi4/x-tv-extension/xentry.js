@@ -19,7 +19,8 @@
  *   signature statique de son vrai champ : id landing-identifier, name username, formulaire action EXACTE
  *   /i/jf/onboarding/web et UN contrôle « mode » caché d'attribut value « login » ; jamais une valeur saisie ; OU, à
  *   « / » comme sur les routes de connexion, la signature EXACTE du champ « jf » que le script de X met à sa place :
- *   jfSigOk, seul cas où le motif de X et son leurre de mot de passe inert, invisible, frère du champ, sont admis), champ
+ *   jfSigOk, seul cas où le motif de X et son leurre de mot de passe inert, invisible, frère du champ, sont admis ;
+ *   formulaire sans aucun « mode » ; invisibilité PROPRE du leurre prouvée par son rendu, jamais par inert), champ
  *   INPUT au focus, visible, actif, modifiable, d'une ligne, type text/email/tel, autocomplete username / email /
  *   tel / tel-national / tel-local (± webauthn) ; refusé : inputmode numérique, maxlength ≤ 8, pattern, et tout
  *   libellé/nom/placeholder du champ ou titre de la fenêtre évoquant mot de passe, code, OTP, NIP, vérification, 2FA,
@@ -102,12 +103,20 @@
   // jf-input-username_or_email, name username_or_email, motif EXACT de X, formulaire SANS action, et UN SEUL champ
   // sensible dans la portée : le leurre de X pour les gestionnaires de mots de passe (input inert, type password,
   // name password, invisible, frère du champ). Tout autre mot de passe ou code, visible ou non : jamais éligible.
+  // AUCUN contrôle « mode » (ni login, ni signup, caché ou non) : le formulaire jf réel n'en porte pas.
   const JF_ID = "jf-input-username_or_email";
   const JF_NAME = "username_or_email";
   const JF_PATTERN = "^[a-zA-Z0-9@._+\\-]+$";
   function jfSigOk(f) {
     if (f.id !== JF_ID || f.name !== JF_NAME || f.pattern !== JF_PATTERN) { return false; }
+    if (!Array.isArray(f.formModes) || f.formModes.length !== 0) { return false; }   // AUCUN « mode »
     return f.hasForm === true && f.formAction === null && f.dangerN === 1 && f.decoyN === 1;
+  }
+  // d : faits d'un champ sensible de la portée (attributs + invisibilité PROPRE prouvée par son rendu) -> leurre exact ?
+  // Un mot de passe inert mais RENDU (visible) n'est jamais un leurre : l'attribut inert ne prouve pas l'invisibilité.
+  function decoyOk(d) {
+    return !!d && d.other === true && d.input === true && d.sibling === true && d.inert === true &&
+      d.type === "password" && d.name === "password" && d.ownHidden === true;
   }
   // f : faits relevés sur le champ (attributs seulement, JAMAIS la valeur) -> éligible ?
   function factsOk(f) {
@@ -232,14 +241,28 @@
                                      valueAttr: c.getAttribute("value") })),
       type: (el.getAttribute("type") || "text").trim().toLowerCase(), ac: el.getAttribute("autocomplete") || "",
       inputmode: el.getAttribute("inputmode") || "", maxlength: el.maxLength, pattern: el.getAttribute("pattern") || "",
-      danger: dangers.length > 0, dangerN: dangers.length, decoyN: dangers.filter((c) => decoy(c, el)).length, texts: texts
+      danger: dangers.length > 0, dangerN: dangers.length, decoyN: dangers.filter((c) => decoyOk(decoyFacts(c, el))).length,
+      texts: texts
     };
   }
-  // leurre « jf » de X : <input inert type=password name=password> FRÈRE du champ, invisible (attributs seulement)
-  function decoy(c, el) {
-    return c !== el && c.tagName === "INPUT" && c.parentElement === el.parentElement && c.hasAttribute("inert") &&
-      (c.getAttribute("type") || "").trim().toLowerCase() === "password" && c.getAttribute("name") === "password" &&
-      !visible(c);
+  // leurre « jf » de X : <input inert type=password name=password> FRÈRE du champ, invisible (attributs + rendu ; jamais
+  // une valeur). Invisibilité PROPRE (ownHidden), indépendante d'inert : visible() rend false pour tout élément inert.
+  function decoyFacts(c, el) {
+    return { other: c !== el, input: c.tagName === "INPUT", sibling: c.parentElement === el.parentElement,
+             inert: c.hasAttribute("inert"), type: (c.getAttribute("type") || "").trim().toLowerCase(),
+             name: c.getAttribute("name"), ownHidden: ownHidden(c) };
+  }
+  // PREUVE que l'élément lui-même n'est pas rendu : display none, visibility hidden/collapse, opacité PROPRE nulle, ou
+  // checkVisibility (ancêtre display none / opacité nulle / content-visibility hidden ; jamais « auto » : hors écran
+  // seulement, défilable). Sans preuve : réputé visible (fail-closed).
+  function ownHidden(c) {
+    if (!c.isConnected) { return false; }   // style calculé vide hors du document : aucune preuve
+    const cs = getComputedStyle(c);
+    if (cs.display === "none" || cs.visibility === "hidden" || cs.visibility === "collapse" || cs.opacity === "0") {
+      return true;
+    }
+    return typeof c.checkVisibility === "function" &&
+      !c.checkVisibility({ opacityProperty: true, visibilityProperty: true });
   }
   function eligible(el) { return el instanceof HTMLInputElement && factsOk(facts(el)); }
 

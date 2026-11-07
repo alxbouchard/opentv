@@ -108,7 +108,7 @@ function gate() {
   const a = src.indexOf("// <gate>");
   const b = src.indexOf("// </gate>");
   if (a < 0 || b < a) { failures.push({ group: "gate", name: "markers" }); return; }
-  const G = new Function(src.slice(a, b) + "\nreturn { loginUrl, factsOk, identOf, fillOk, ID_MAX };")();
+  const G = new Function(src.slice(a, b) + "\nreturn { loginUrl, factsOk, decoyOk, identOf, fillOk, ID_MAX };")();
   const base = { top: true, focused: true, visible: true, tag: "INPUT", disabled: false, readonly: false,
                  url: "https://x.com/i/flow/login", type: "text", ac: "username", inputmode: "", maxlength: -1,
                  pattern: "", danger: false, texts: ["text", "", "", "", "", "", "Phone, email, or username",
@@ -182,13 +182,32 @@ function gate() {
                  not_focused: { focused: false }, hidden: { visible: false },
                  root_query: { url: "https://x.com/?mode=signup" }, root_hash: { url: "https://x.com/#x" },
                  home: { url: "https://x.com/home" }, signup_flow: { url: "https://x.com/i/flow/signup" },
-                 onb_signup: { url: "https://x.com/i/jf/onboarding/web?mode=signup" } };
+                 onb_signup: { url: "https://x.com/i/jf/onboarding/web?mode=signup" },
+                 // revue 0.7.12 : AUCUN contrôle « mode » dans le formulaire jf (caché login/signup, texte, vide, non-tableau)
+                 mode_login_hidden: { formModes: [{ type: "hidden", valueAttr: "login" }] },
+                 mode_signup_hidden: { formModes: [{ type: "hidden", valueAttr: "signup" }] },
+                 mode_text: { formModes: [{ type: "text", valueAttr: "login" }] },
+                 mode_null: { formModes: [{ type: "hidden", valueAttr: null }] },
+                 modes_two: { formModes: [{ type: "hidden", valueAttr: "login" }, { type: "hidden", valueAttr: "signup" }] },
+                 modes_str_empty: { formModes: "" }, modes_str: { formModes: "login" }, modes_undef: { formModes: undefined },
+                 modes_obj: { formModes: {} } };
   for (const k of Object.keys(jfNo)) { expect("gate", "jf_no:" + k, jf(jfNo[k]), false); }
   for (const k of ["flow", "onboarding"]) {   // routes de connexion : même exigence (motif/leurre admis SEULEMENT si jf exact)
-    for (const n of ["id_other", "name_other", "pattern_digits", "no_form", "action_onb", "decoy_none", "two_dangers"]) {
+    for (const n of ["id_other", "name_other", "pattern_digits", "no_form", "action_onb", "decoy_none", "two_dangers",
+                     "mode_login_hidden", "mode_signup_hidden"]) {
       expect("gate", "jf_no_" + k + ":" + n, jf(Object.assign({}, jfYes[k], jfNo[n])), false);
     }
   }
+  // leurre exact (faits relevés par decoyFacts sur le DOM) : chaque terme porte ; un mot de passe inert mais RENDU
+  // (ownHidden false : visible() rendait false pour tout élément inert, revue 0.7.12) n'est JAMAIS un leurre
+  const DECOY = { other: true, input: true, sibling: true, inert: true, type: "password", name: "password", ownHidden: true };
+  expect("gate", "decoy_yes", G.decoyOk(DECOY), true);
+  const decoyNo = { rendered_inert: { ownHidden: false }, hidden_unknown: { ownHidden: undefined },
+                    hidden_truthy: { ownHidden: 1 }, not_inert: { inert: false }, self: { other: false },
+                    not_input: { input: false }, not_sibling: { sibling: false }, type_text: { type: "text" },
+                    type_case: { type: "Password" }, name_other: { name: "pass" }, name_null: { name: null } };
+  for (const k of Object.keys(decoyNo)) { expect("gate", "decoy_no:" + k, G.decoyOk(Object.assign({}, DECOY, decoyNo[k])), false); }
+  expect("gate", "decoy_no:null", G.decoyOk(null), false);
   // accueil servi (landing-identifier) : motif ou mot de passe voisin toujours refusés (le leurre n'y est jamais admis)
   expect("gate", "landing_decoy_refused", v(Object.assign({}, LANDING, { danger: true, dangerN: 1, decoyN: 1 })), false);
   expect("gate", "landing_pattern_refused", v(Object.assign({}, LANDING, { pattern: JF.pattern })), false);

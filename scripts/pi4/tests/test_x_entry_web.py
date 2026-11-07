@@ -163,7 +163,7 @@ class TestStatic(unittest.TestCase):
             self.assertNotIn("QR à gauche de\nla fenêtre X", doc)
 
     def test_line_caps(self):
-        caps = {"opentv_pi/xentry.py": 400, "x-tv-extension/xentry.js": 580, "ui/xphone.js": 240,
+        caps = {"opentv_pi/xentry.py": 400, "x-tv-extension/xentry.js": 600, "ui/xphone.js": 240,
                 "opentv_pi/web.py": 1538, "opentv_pi/app.py": 1400, "opentv_pi/xprobe.py": 280,
                 "x-tv-extension/nav.js": 560, "x-tv-extension/background.js": 320}
         over = []
@@ -226,6 +226,20 @@ class TestHarnessAndMutations(unittest.TestCase):
         ("xentry", " && f.formAction === null && ", " && "),
         ("xentry", " && f.dangerN === 1", ""),
         ("xentry", " && f.decoyN === 1;", ";"),
+        # revue 0.7.12 : formulaire jf SANS aucun « mode » (caché login/signup refusé) ; leurre : chaque terme porte,
+        # dont l'invisibilité PROPRE (un mot de passe inert mais rendu n'est jamais un leurre)
+        ("xentry", "if (!Array.isArray(f.formModes) || f.formModes.length !== 0) { return false; }", ""),
+        ("xentry", "!Array.isArray(f.formModes) || ", ""),
+        ("xentry", " || f.formModes.length !== 0", ""),
+        ("xentry", "return !!d && d.other === true && ", "return "),
+        ("xentry", "!!d && ", ""),
+        ("xentry", " && d.input === true", ""),
+        ("xentry", " && d.sibling === true", ""),
+        ("xentry", " && d.inert === true", ""),
+        ("xentry", ' &&\n      d.type === "password" && ', " &&\n      "),
+        ("xentry", ' && d.name === "password"', ""),
+        ("xentry", " && d.ownHidden === true;", ";"),
+        ("xentry", "d.ownHidden === true;", "d.ownHidden !== false;"),
         ("xentry", "const jf = jfSigOk(f);", "const jf = false;"),
         ("xentry", 'f.id !== "landing-identifier" || ', ""),
         ("xentry", 'f.name !== "username" || ', ""),
@@ -512,7 +526,9 @@ class TestXEntryEndToEnd(unittest.TestCase):
             self.assertIn(v["active"], ("landing-identifier", "signup-identifier"), (k, v))
             self.assertNotEqual(v["after"], "pill", (k, v))
 
-    JF_NEG = {"jf_noinert", "jf_pwstep", "jf_two", "jf_otp", "jf_nonsibling", "jf_signup", "jf_action", "jf_pattern"}
+    JF_NEG = {"jf_noinert", "jf_pwstep", "jf_two", "jf_otp", "jf_nonsibling", "jf_signup", "jf_action", "jf_pattern",
+              "jf_rendered", "jf_mode_login", "jf_mode_signup"}
+    JF_ROUTE_NEG = {"jf_rendered", "jf_mode_login", "jf_mode_signup"}
 
     def assert_jf(self, J, rport):
         """0.7.12 — champ « jf » RÉEL (le script de X remplace sur place le formulaire servi de « / », URL inchangée ; même
@@ -547,6 +563,20 @@ class TestXEntryEndToEnd(unittest.TestCase):
         for k, v in J["neg"].items():
             self.assertEqual((v["href"], v["pill"], v["qr"], v["service"]), ("https://x.com/", False, False, False), (k, v))
             self.assertNotEqual(v["after"], "pill", (k, v))
+        # revue 0.7.12 : routes de connexion — leurre inert mais RENDU (boîte pleine, opacité 1), « mode » caché login/signup
+        self.assertEqual(set(J["routeNeg"]), self.JF_ROUTE_NEG)
+        for k, v in J["routeNeg"].items():
+            self.assertEqual((v["href"], v["active"], v["pill"], v["qr"], v["service"]),
+                             ("https://x.com/i/flow/login?case=" + k, JFID, False, False, False), (k, v))
+            self.assertNotEqual(v["after"], "pill", (k, v))
+            sh = v["shown"]
+            self.assertTrue(sh["inert"], (k, sh))
+            if k == "jf_rendered":
+                self.assertEqual(sh["op"], "1", sh)
+                self.assertGreaterEqual(min(sh["w"], sh["h"]), 4, sh)
+                self.assertEqual(sh["modes"], [], sh)
+            else:
+                self.assertEqual((sh["op"], sh["modes"]), ("0", [k[len("jf_mode_"):]]), (k, sh))
         lt = J["late"]
         self.assertEqual((lt["before"]["same"], lt["before"]["qr"]), (True, True))
         self.assertEqual((lt["tv"]["same"], lt["tv"]["uvalue"], lt["tv"]["pw"]), (True, "", [""]))
@@ -770,6 +800,14 @@ class TestXEntryEndToEnd(unittest.TestCase):
         st = self.e2e(only="jf", mutants=[("xentry.js", 'c.hasAttribute("inert")', "true"),
                                           ("xentry.js", "c.parentElement === el.parentElement", "true")])[0]
         self.assertEqual(sorted(k for k, v in st["jf"]["neg"].items() if v["pill"]), ["jf_noinert", "jf_nonsibling"])
+        # revue 0.7.12 : l'ANCIEN critère d'invisibilité (!visible(c), faux pour tout inert) arme le leurre inert RENDU ;
+        # sans « aucun mode », un formulaire jf avec « mode » caché login/signup arme la pastille (« / » et route)
+        st = self.e2e(only="jf", mutants=[("xentry.js", "ownHidden: ownHidden(c)", "ownHidden: !visible(c)"),
+                                          ("xentry.js", " || f.formModes.length !== 0", "")])[0]
+        self.assertEqual(sorted(k for k, v in st["jf"]["neg"].items() if v["pill"]),
+                         ["jf_mode_login", "jf_mode_signup", "jf_rendered"])
+        self.assertEqual(sorted(k for k, v in st["jf"]["routeNeg"].items() if v["pill"]),
+                         ["jf_mode_login", "jf_mode_signup", "jf_rendered"])
         st = self.e2e(only="badstart", mutants=[(
             "background.js", 'if (typeof j.sid === "string" && XSID_RE.test(j.sid)) { await xentry({ op: "cancel", '
             'sid: j.sid }).catch(() => null); }', "")])[0]
