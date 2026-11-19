@@ -1,6 +1,10 @@
 /* OpenTV X TV Mode — présentation TV du fil X (1920×1080, distance canapé).
  * Toute règle commence par html.otvx-tv : classe posée par x.js SEULEMENT quand la colonne principale du fil existe.
- * Page de connexion ou sans fil : aucune règle ne s'applique (rien n'est masqué ni restylé). Aucune ressource externe. */
+ * Page de connexion ou sans fil : aucune règle ne s'applique (rien n'est masqué ni restylé). Fenêtre modale de X :
+ * jamais visée (aucune règle hors colonne principale, bandeaux et aide). Aucune ressource externe.
+ * 0.7.14 : largeur RÉELLE (chaque ancêtre effectif main -> colonne -> post marqué data-otvx-lane par x.js), texte
+ * lisible sans sur-zoom, médias et lecteurs vidéo de X JAMAIS restylés ni masqués (aucun [role=group] hors de la
+ * rangée d'actions), rangée d'actions réduite aux VRAIS boutons J'aime / Enregistrer (signet), focus d'action distinct. */
 
 /* une seule colonne centrale : navigation de gauche, colonne de droite, tiroirs et bandeaux masqués */
 html.otvx-tv header[role="banner"],
@@ -11,70 +15,132 @@ html.otvx-tv [data-testid="BottomBar"],
 html.otvx-tv [data-testid="sheetDialog"] ~ [data-testid="mask"],
 html.otvx-tv [data-testid="primaryColumn"] [data-testid="toolBar"],
 html.otvx-tv [data-testid="primaryColumn"] [data-testid="tweetTextarea_0_label"],
-html.otvx-tv [data-testid="primaryColumn"] article [role="group"],
 html.otvx-tv [data-testid="primaryColumn"] [data-testid="placementTracking"] {
   display: none !important;
 }
+
+/* rangée d'actions de X = la [role=group] du post qui porte J'aime/Répondre/Repartager et AUCUN média. Tout y est
+ * masqué sauf les vrais boutons J'aime / Je n'aime plus / Enregistrer / Retirer des signets. Lecteur et commandes
+ * vidéo, galeries, tout autre [role=group] : jamais visés. Rangée d'un post cité/imbriqué : masquée (BON post). */
+html.otvx-tv [data-testid="primaryColumn"] article [role="group"]:has([data-testid="like"], [data-testid="unlike"], [data-testid="reply"], [data-testid="retweet"], [data-testid="unretweet"]):not(:has(video, [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="tweetPhoto"])) > :not(:has([data-testid="like"], [data-testid="unlike"], [data-testid="bookmark"], [data-testid="removeBookmark"])),
+html.otvx-tv [data-testid="primaryColumn"] article [role="group"]:has([data-testid="like"], [data-testid="unlike"], [data-testid="reply"], [data-testid="retweet"], [data-testid="unretweet"]):not(:has(video, [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="tweetPhoto"])) :is(a, button, [role="button"], [role="link"]):not([data-testid="like"], [data-testid="unlike"], [data-testid="bookmark"], [data-testid="removeBookmark"]),
+html.otvx-tv [data-testid="primaryColumn"] article article [role="group"]:has([data-testid="like"], [data-testid="unlike"], [data-testid="bookmark"], [data-testid="removeBookmark"]):not(:has(video, [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="tweetPhoto"])) {
+  display: none !important;
+}
+html.otvx-tv [data-testid="primaryColumn"] article [role="group"]:has([data-testid="like"], [data-testid="unlike"]):not(:has(video, [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="tweetPhoto"])) {
+  justify-content: flex-start !important;
+  gap: 28px !important;
+  max-width: none !important;
+  margin-top: 14px !important;
+}
+html.otvx-tv [data-testid="primaryColumn"] article [role="group"] :is([data-testid="like"], [data-testid="unlike"], [data-testid="bookmark"], [data-testid="removeBookmark"]) svg {
+  width: 28px !important;
+  height: 28px !important;
+}
+html.otvx-tv [data-testid="primaryColumn"] article [role="group"] :is([data-testid="like"], [data-testid="unlike"]) span {
+  font-size: 22px !important;
+}
+
+/* largeur RÉELLE : aucun plafond de X (600 px, 990 px…) ne survit sur les ancêtres marqués ; colonne centrée,
+ * responsive, marges sûres TV (≥ 120 px de chaque côté) */
 html.otvx-tv main[role="main"] {
   align-items: center !important;
 }
+html.otvx-tv [data-otvx-lane] {
+  width: 100% !important;
+  max-width: none !important;
+  min-width: 0 !important;
+  flex-basis: auto !important;
+}
+html.otvx-tv [data-otvx-lane="shell"] {
+  align-items: center !important;
+  justify-content: center !important;
+}
 html.otvx-tv [data-testid="primaryColumn"] {
-  width: 1180px !important;
-  max-width: 1180px !important;
+  width: min(1440px, calc(100vw - 240px)) !important;
+  max-width: min(1440px, calc(100vw - 240px)) !important;
+  flex: 0 0 auto !important;
+  align-self: center !important;
   margin: 0 auto !important;
   border: 0 !important;
-  padding-bottom: 140px !important;
+  padding-bottom: 160px !important;
 }
 
-/* grosses cartes, gros texte */
+/* cartes et texte lisibles à 3 m, sans sur-zoom (≈ 100 caractères par ligne en 1080p, 32 px) */
 html.otvx-tv [data-testid="primaryColumn"] article[data-testid="tweet"] {
-  padding: 28px 36px !important;
-  margin: 18px 0 !important;
-  border-radius: 22px !important;
+  padding: 22px 30px !important;
+  margin: 14px 0 !important;
+  border-radius: 20px !important;
   background: rgba(128, 128, 128, 0.10) !important;   /* thème de X conservé (clair ou « Lights out ») */
   outline: 0 solid transparent;
-  scroll-margin: 160px;
+  scroll-margin: 120px 0 150px;
+}
+html.otvx-tv [data-testid="primaryColumn"] article article[data-testid="tweet"] {
+  padding: 14px 18px !important;
+  margin: 10px 0 !important;
+  background: rgba(128, 128, 128, 0.08) !important;
 }
 html.otvx-tv [data-testid="primaryColumn"] [data-testid="tweetText"] {
-  font-size: 34px !important;
-  line-height: 1.38 !important;
+  font-size: 32px !important;
+  line-height: 1.4 !important;
 }
 html.otvx-tv [data-testid="primaryColumn"] [data-testid="User-Name"] {
-  font-size: 26px !important;
+  font-size: 24px !important;
   line-height: 1.3 !important;
 }
 html.otvx-tv [data-testid="primaryColumn"] [data-testid="User-Name"] * {
   font-size: inherit !important;
 }
 
-/* médias lisibles : jamais rognés, hauteur bornée à l'écran */
-html.otvx-tv [data-testid="primaryColumn"] [data-testid="tweetPhoto"] img,
-html.otvx-tv [data-testid="primaryColumn"] article video {
-  object-fit: contain !important;
-  max-height: 70vh !important;
-}
-
-/* focus très visible (anneau jaune + halo), jamais confondu avec la sélection de X */
+/* focus du POST (↑ ↓) : anneau jaune très visible, jamais confondu avec la sélection de X */
 html.otvx-tv article.otvx-focus {
   outline: 8px solid #ffd400 !important;
   outline-offset: 6px !important;
   box-shadow: 0 0 0 16px rgba(255, 212, 0, 0.22), 0 18px 60px rgba(0, 0, 0, 0.45) !important;
   background: rgba(255, 212, 0, 0.08) !important;
 }
+/* mode actions (→) : le post passe en anneau pointillé, le BOUTON au focus porte un anneau blanc/bleu distinct */
+html.otvx-tv article.otvx-focus[data-otvx-acting] {
+  outline: 6px dashed #ffd400 !important;
+  box-shadow: none !important;
+}
+html.otvx-tv [data-otvx-act] {
+  outline: 6px solid #ffffff !important;
+  outline-offset: 4px !important;
+  box-shadow: 0 0 0 12px #1d9bf0 !important;
+  border-radius: 999px !important;
+  background: rgba(29, 155, 240, 0.25) !important;
+}
+/* libellés français des VRAIS boutons du post au focus, tirés de l'état AFFICHÉ par X (data-testid courant) : rien
+ * n'est mémorisé par OpenTV ; « … · OK retire » quand X montre l'état déjà activé */
+html.otvx-tv article.otvx-focus [role="group"] [data-testid="like"]::after,
+html.otvx-tv article.otvx-focus [role="group"] [data-testid="unlike"]::after,
+html.otvx-tv article.otvx-focus [role="group"] [data-testid="bookmark"]::after,
+html.otvx-tv article.otvx-focus [role="group"] [data-testid="removeBookmark"]::after {
+  margin-left: 10px;
+  font: 600 22px/1.2 system-ui, "Noto Sans", sans-serif;
+  color: #e9edf1;
+  white-space: nowrap;
+}
+html.otvx-tv article.otvx-focus [role="group"] [data-testid="like"]::after { content: "J'aime"; }
+html.otvx-tv article.otvx-focus [role="group"] [data-testid="unlike"]::after { content: "Aimé · OK retire"; color: #f91880; }
+html.otvx-tv article.otvx-focus [role="group"] [data-testid="bookmark"]::after { content: "Enregistrer"; }
+html.otvx-tv article.otvx-focus [role="group"] [data-testid="removeBookmark"]::after { content: "Enregistré · OK retire"; color: #1d9bf0; }
 
-/* bandeau d'aide (bas) et message (haut) : textes français, aucune interaction */
+/* bandeau d'aide (bas) et message (haut) : textes français, aucune interaction ; x.js fait défiler le fil pour que
+ * le post et ses boutons au focus ne passent JAMAIS sous le bandeau */
 html.otvx-tv .otvx-help {
   position: fixed !important;
   left: 50% !important;
-  bottom: 28px !important;
+  bottom: 20px !important;
   transform: translateX(-50%) !important;
   z-index: 2147483646 !important;
-  padding: 14px 30px !important;
+  padding: 10px 26px !important;
   border-radius: 999px !important;
   background: rgba(10, 12, 16, 0.92) !important;
   border: 2px solid rgba(255, 255, 255, 0.25) !important;
   color: #e9edf1 !important;
-  font: 500 24px/1.3 system-ui, "Noto Sans", sans-serif !important;
+  font: 500 22px/1.3 system-ui, "Noto Sans", sans-serif !important;
   white-space: nowrap !important;
   pointer-events: none !important;
 }

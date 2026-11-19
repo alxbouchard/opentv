@@ -1,21 +1,32 @@
 /* OpenTV X TV Mode — script de contenu de x.com (cadre principal seulement).
  *
  * Fil X lisible à la télécommande, sans API X ni action automatique :
- *  ↑ ↓      post précédent / suivant (anneau très visible, post centré) ; en fin de liste, défilement pour que X
- *           charge la suite (aucun clic) ;
- *  OK       ouvre le post au focus (son permalien x.com) ; un bouton, un lien ou un champ au focus garde son
- *           action native ;
- *  ←        partage le post au focus à « Hermit ou Muse » : SEULEMENT son texte visible (≤ 2400) et son auteur visible
- *           (≤ 120) — jamais une URL, un lien, un média, un cookie ni du HTML ; geste humain uniquement ;
+ *  ↑ ↓      post précédent / suivant (anneau jaune, post placé dans la zone libre au-dessus du bandeau d'aide) ;
+ *           post plus haut que l'écran : ↑ ↓ le font d'abord défiler (lecture), puis passent au post voisin ; en fin
+ *           de liste, défilement pour que X charge la suite (aucun clic) ;
+ *  →        (0.7.14) mode « actions » : le focus NATIF du navigateur passe au VRAI bouton J'aime de X du post au focus
+ *           (sinon Enregistrer) ; → suivant circule entre J'aime et Enregistrer (signet) de CE post seulement (jamais
+ *           un post cité/imbriqué, jamais un bouton masqué) ; anneau blanc/bleu distinct, libellé français tiré de
+ *           l'état affiché par X (« Aimé · OK retire », « Enregistré · OK retire ») ;
+ *  OK       post : ouvre son permalien x.com ; bouton d'action au focus : RIEN ici — Chromium active lui-même le
+ *           bouton au focus (geste humain réel). Jamais de click(), d'événement forgé, de raccourci X simulé ni
+ *           d'API. Touche OK tenue (répétition) : bloquée (une activation par appui) ; bouton qui n'appartient plus au
+ *           post choisi (DOM réutilisé par X) : bloqué, mode actions quitté ;
+ *  ←        post : partage à « Hermit ou Muse » SEULEMENT son texte visible (≤ 2400) et son auteur visible (≤ 120) —
+ *           jamais une URL, un lien, un média, un cookie ni du HTML ; geste humain uniquement. En mode actions : revient
+ *           au post SANS partager (répétition et second ← immédiat absorbés pendant LEFT_GUARD_MS) ;
  *  Retour / Accueil : nav.js (script autonome, toute page x.com dès document_start, connexion comprise) — jamais
  *           ici, pour qu'aucune page ne dépende du fil.
  * Fenêtre modale VISIBLE de X au-dessus du fil (0.7.8) : elle gagne — nav.js la parcourt (mode « contrôles »), ce
  * script n'agit plus (jamais de fil caché déplacé ni de post ouvert derrière) et masque son bandeau d'aide.
  * Champ autofocusé par X dans le fil (0.7.8) : ↑ ↓ en sortent (champ d'une ligne, ou zone où Alex n'a rien tapé) ;
  * ← → OK y restent natifs. Toute touche traitée ici est signalée à la sonde canari de nav.js (jamais sa valeur).
- * Mode fil seulement (colonne principale présente) : classe html.otvx-tv (CSS TV, x.css) + bandeau d'aide. Page de
- * connexion ou sans fil : rien n'est stylé ni rempli (Alex se connecte lui-même). DOM dynamique de X : MutationObserver regroupé (une passe au plus toutes les REFRESH_MS). Jamais de clic,
- * de « J'aime », de repartage, de réponse ni de publication.
+ * Mode fil seulement (colonne principale présente) : classe html.otvx-tv (CSS TV, x.css) + bandeau d'aide + largeur
+ * réelle (0.7.14 : chaque ancêtre effectif main -> colonne -> post marqué data-otvx-lane, aucun plafond de X ne
+ * survit). Page de connexion ou sans fil : rien n'est stylé ni rempli (Alex se connecte lui-même). DOM dynamique de
+ * X : MutationObserver regroupé (une passe au plus toutes les REFRESH_MS). Aucun état de compte mémorisé : l'état
+ * J'aime/Enregistré affiché est toujours celui du DOM courant de X. Jamais de clic, de repartage, de réponse ni de
+ * publication par ce script.
  */
 (() => {
   "use strict";
@@ -23,10 +34,23 @@
   const TEXT_MAX = 2400;
   const AUTHOR_MAX = 120;
   const POSTS_MAX = 200;
+  const ACTIONS_MAX = 4;
+  const LANE_DEPTH_MAX = 24;
   const REFRESH_MS = 250;
   const TOAST_MS = 6000;
+  const LEFT_GUARD_MS = 700;   // ← juste après la sortie du mode actions : jamais un partage accidentel
+  const TOP_GAP = 96;          // en-tête collant de X au-dessus du fil
+  const HELP_GAP = 20;         // jamais un post/bouton au focus à moins de 20 px du bandeau d'aide
   const POST_SEL = 'article[data-testid="tweet"]';
   const COLUMN_SEL = '[data-testid="primaryColumn"]';
+  // VRAIS boutons de X restaurés : J'aime / Je n'aime plus / Enregistrer (signet) / Retirer des signets — focus seulement
+  const ACTION_TESTIDS = ["like", "unlike", "bookmark", "removeBookmark"];
+  const ACTION_SEL = ACTION_TESTIDS.map((t) => '[data-testid="' + t + '"]').join(", ");
+  // rangée d'actions = [role=group] du post qui contient un de ces boutons et AUCUN média (lecteur vidéo jamais visé)
+  const MEDIA_SEL = 'video, [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="tweetPhoto"]';
+  const LANE_ATTR = "data-otvx-lane";
+  const ACT_ATTR = "data-otvx-act";
+  const ACTING_ATTR = "data-otvx-acting";
   const KEYS = {
     ArrowUp: "up", Up: "up", ArrowDown: "down", Down: "down", ArrowLeft: "left", Left: "left",
     ArrowRight: "right", Right: "right", Enter: "ok", Accept: "ok", Select: "ok"
@@ -35,17 +59,27 @@
   const STRIP_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]/g;
   const HANDLE_RE = /@[A-Za-z0-9_]{1,15}/;
   const PERMALINK_RE = /^\/[A-Za-z0-9_]{1,15}\/status\/[0-9]{1,25}$/;
-  const HELP = [["↑ ↓", "Post précédent / suivant"], ["OK", "Ouvrir"], ["←", "Partager à Hermit ou Muse"],
-                ["Retour", "Revenir"], ["Accueil", "OpenTV"]];
+  const HELP_POST = [["↑ ↓", "Post précédent / suivant"], ["→", "J'aime / Enregistrer"], ["OK", "Ouvrir"],
+                     ["←", "Partager à Hermit ou Muse"], ["Retour", "Revenir"]];
+  const HELP_ACT = [["→", "Bouton suivant"], ["OK", "Activer"], ["←", "Revenir au post"], ["↑ ↓", "Post voisin"],
+                    ["Retour", "Revenir"]];
   const MSG_PICK = "Choisis d'abord un post avec ↑ ↓.";
   const MSG_FAIL = "Partage impossible pour l'instant. Rien n'a été envoyé.";
+  const MSG_NOACT = "Ce post n'a pas de bouton J'aime ou Enregistrer visible.";
+  const MSG_STALE = "Le fil a changé : choisis de nouveau le post avec ↑ ↓, puis →.";
 
   let focused = null;
   let help = null;
+  let helpMode = "";
   let toastEl = null;
   let toastTimer = 0;
   let refreshTimer = 0;
   let sharing = false;
+  // mode actions : bouton au focus, permalien du post au moment du choix (DOM réutilisé par X = refus), rang du bouton
+  let actEl = null;
+  let actKey = null;
+  let actIdx = 0;
+  let leftGuardUntil = 0;
   // nav.js (document_start, MÊME monde isolé de l'extension) : fenêtre modale, champs quittables, sonde
   const NAV = window.__otvxNav || null;
   function dialogOpen() { return !!NAV && NAV.dialog(); }
@@ -68,13 +102,39 @@
     const r = el.getBoundingClientRect();
     return r.width > 0 && r.height > 0;
   }
-  function posts() {
+  // post propriétaire d'un élément (le plus proche) ; post de premier niveau = jamais cité/imbriqué dans un autre
+  function ownerPost(el) { return el && el.closest ? el.closest(POST_SEL) : null; }
+  function topLevel(p) { return !p.parentElement || !p.parentElement.closest(POST_SEL); }
+  function own(post, sel) { return Array.from(post.querySelectorAll(sel)).filter((x) => ownerPost(x) === post); }
+  function allPosts() {
     const col = document.querySelector(COLUMN_SEL);
     if (!col) { return []; }
-    return Array.from(col.querySelectorAll(POST_SEL)).slice(0, POSTS_MAX).filter(shown);
+    return Array.from(col.querySelectorAll(POST_SEL)).filter(topLevel).slice(0, POSTS_MAX);
   }
+  function posts() { return allPosts().filter(shown); }
   function clean(s, cap) {
     return Array.from(String(s || "").replace(STRIP_RE, "")).slice(0, cap).join("").trim();
+  }
+
+  // ---- largeur réelle : ancêtres EFFECTIFS marqués (aucune supposition sur la profondeur ou les classes de X)
+  function markLanes(on) {
+    const want = new Map();
+    const col = on ? document.querySelector(COLUMN_SEL) : null;
+    if (col) {
+      let d = 0;
+      for (let e = col.parentElement; e && e !== document.body && e.tagName !== "MAIN" && d < LANE_DEPTH_MAX;
+           e = e.parentElement, d++) { want.set(e, "shell"); }
+      for (const p of allPosts()) {
+        d = 0;
+        for (let e = p.parentElement; e && e !== col && d < LANE_DEPTH_MAX; e = e.parentElement, d++) {
+          if (!want.has(e)) { want.set(e, "post"); }
+        }
+      }
+    }
+    for (const e of Array.from(document.querySelectorAll("[" + LANE_ATTR + "]"))) {
+      if (!want.has(e)) { e.removeAttribute(LANE_ATTR); }   // nœud réutilisé par X hors du chemin : rendu tel quel
+    }
+    for (const [e, v] of want) { if (e.getAttribute(LANE_ATTR) !== v) { e.setAttribute(LANE_ATTR, v); } }
   }
 
   // ---- bandeau d'aide et message (textContent seulement)
@@ -85,19 +145,24 @@
     return e;
   }
   function ensureHelp(on) {
+    const mode = on ? (actEl ? "act" : "post") : "";
     if (on && (!help || !help.isConnected)) {
       help = el("div", "otvx-help");
       help.setAttribute("aria-hidden", "true");
-      HELP.forEach((h, i) => {
-        if (i) { help.appendChild(document.createTextNode(" · ")); }
-        help.appendChild(el("b", null, h[0]));
-        help.appendChild(document.createTextNode(" " + h[1]));
-      });
       document.documentElement.appendChild(help);
+      helpMode = "";
     } else if (!on && help) {
       help.remove();
       help = null;
     }
+    if (!help || helpMode === mode) { return; }
+    helpMode = mode;
+    help.textContent = "";
+    (mode === "act" ? HELP_ACT : HELP_POST).forEach((h, i) => {
+      if (i) { help.appendChild(document.createTextNode(" · ")); }
+      help.appendChild(el("b", null, h[0]));
+      help.appendChild(document.createTextNode(" " + h[1]));
+    });
   }
   function toast(text) {
     if (!toastEl || !toastEl.isConnected) {
@@ -111,32 +176,134 @@
     toastTimer = setTimeout(() => { if (toastEl) { toastEl.hidden = true; } }, TOAST_MS);
   }
 
+  // ---- placement : zone libre = sous l'en-tête de X, au-dessus du bandeau d'aide (jamais un focus caché dessous)
+  function bottomLimit() {
+    const h = help && help.isConnected ? help.getBoundingClientRect() : null;
+    return h && h.height > 0 ? h.top - HELP_GAP : window.innerHeight - HELP_GAP;
+  }
+  function place(post) {
+    const r = post.getBoundingClientRect();
+    const room = bottomLimit() - TOP_GAP;
+    const target = r.height <= room ? TOP_GAP + (room - r.height) / 2 : TOP_GAP;   // trop haut : son début visible
+    window.scrollBy(0, Math.round(r.top - target));
+  }
+  function reveal(node) {   // bouton d'un post long hors champ : ramené dans la zone libre
+    const r = node.getBoundingClientRect();
+    const lim = bottomLimit();
+    if (r.bottom > lim) { window.scrollBy(0, Math.ceil(r.bottom - lim)); }
+    else if (r.top < TOP_GAP) { window.scrollBy(0, Math.floor(r.top - TOP_GAP)); }
+  }
+
   // ---- focus des posts
   function setFocus(post) {
+    exitActions();
     if (focused && focused !== post) { focused.classList.remove("otvx-focus"); }
     focused = post;
     if (post) {
       post.classList.add("otvx-focus");
-      post.scrollIntoView({ block: "center", inline: "nearest" });
+      place(post);
     }
   }
   function firstInView(list) {
     return list.find((p) => p.getBoundingClientRect().bottom > 80) || list[0] || null;
+  }
+  // post long : la touche fait d'abord défiler sa partie cachée (au plus 60 % de la zone libre), puis change de post
+  function scrollInside(post, dir) {
+    const r = post.getBoundingClientRect();
+    const lim = bottomLimit();
+    const step = Math.round((lim - TOP_GAP) * 0.6);
+    if (dir > 0 && r.bottom > lim + 4) { window.scrollBy(0, Math.min(step, Math.ceil(r.bottom - lim))); return true; }
+    if (dir < 0 && r.top < TOP_GAP - 4) { window.scrollBy(0, -Math.min(step, Math.ceil(TOP_GAP - r.top))); return true; }
+    return false;
   }
   function move(dir) {
     const list = posts();
     if (!list.length) { return; }
     const i = focused && focused.isConnected ? list.indexOf(focused) : -1;
     if (i < 0) { setFocus(firstInView(list)); return; }
+    if (scrollInside(focused, dir)) { return; }
     const j = i + dir;
     if (j >= 0 && j < list.length) { setFocus(list[j]); }
     else if (dir > 0) { window.scrollBy({ top: Math.round(window.innerHeight * 0.6) }); }   // X charge la suite
   }
 
+  // ---- mode actions (→) : focus NATIF sur les vrais boutons J'aime / Enregistrer du post au focus
+  function usable(b) {
+    if (b.disabled || b.getAttribute("aria-disabled") === "true" || b.closest("[hidden], [inert], [aria-hidden='true']")) {
+      return false;
+    }
+    if (!shown(b)) { return false; }
+    return typeof b.checkVisibility !== "function" || b.checkVisibility({ opacityProperty: true, visibilityProperty: true });
+  }
+  function actionBar(post) {
+    return own(post, '[role="group"]').find((g) => g.querySelector(ACTION_SEL) && !g.querySelector(MEDIA_SEL)) || null;
+  }
+  function actions(post) {
+    const bar = post && post.isConnected ? actionBar(post) : null;
+    if (!bar) { return []; }
+    return Array.from(bar.querySelectorAll(ACTION_SEL)).filter((b) => ownerPost(b) === post && usable(b))
+      .slice(0, ACTIONS_MAX);
+  }
+  function actionButton(node) {   // un bouton d'action du fil (quel que soit son post)
+    return !!node && node.nodeType === 1 && node.matches(ACTION_SEL) && !!node.closest(COLUMN_SEL);
+  }
+  function focusAction(btn, idx) {
+    if (actEl && actEl !== btn) { actEl.removeAttribute(ACT_ATTR); }
+    actEl = btn;
+    actIdx = idx;
+    btn.setAttribute(ACT_ATTR, "");
+    focused.setAttribute(ACTING_ATTR, "");
+    try { btn.focus({ preventScroll: true }); } catch (err) { /* retiré */ }
+    reveal(btn);
+    ensureHelp(true);
+  }
+  function exitActions() {
+    if (actEl) {
+      actEl.removeAttribute(ACT_ATTR);
+      if (document.activeElement === actEl) { actEl.blur(); }
+    }
+    if (focused) { focused.removeAttribute(ACTING_ATTR); }
+    const was = !!actEl;
+    actEl = null;
+    actKey = null;
+    actIdx = 0;
+    if (was) { ensureHelp(!!help); }
+  }
+  function leaveButton(node) {   // bouton d'action au focus (choisi ou non) : focus rendu au post, rien d'activé
+    if (node !== actEl) { try { node.blur(); } catch (err) { /* retiré */ } }
+    exitActions();
+  }
+  function enterActions() {
+    if (!focused || !focused.isConnected) {
+      const list = posts();
+      if (!list.length) { toast(MSG_PICK); return; }
+      setFocus(firstInView(list));
+    }
+    const key = permalink(focused);
+    const list = actions(focused);
+    if (!key || !list.length) { toast(MSG_NOACT); return; }   // aucun bouton (ou post sans permalien) : rien
+    actKey = key;
+    focusAction(list[0], 0);
+  }
+  function cycleAction() {
+    if (!focused || !focused.isConnected || permalink(focused) !== actKey) { exitActions(); toast(MSG_STALE); return; }
+    const list = actions(focused);
+    if (!list.length) { exitActions(); toast(MSG_NOACT); return; }
+    const i = list.indexOf(actEl);
+    const j = i < 0 ? 0 : (i + 1) % list.length;
+    focusAction(list[j], j);
+  }
+  // OK sur un bouton d'action : laissé à Chromium SEULEMENT si c'est le bouton choisi, au focus réel, du post choisi,
+  // toujours du même permalien et toujours dans sa rangée visible
+  function actionValid(node) {
+    return !!actEl && node === actEl && actEl.isConnected && !!focused && focused.isConnected &&
+           ownerPost(actEl) === focused && actKey !== null && permalink(focused) === actKey &&
+           actions(focused).indexOf(actEl) >= 0;
+  }
+
   // ---- OK : permalien du post au focus (même origine, format exact)
   function permalink(post) {
-    const links = Array.from(post.querySelectorAll('a[href*="/status/"]'));
-    const a = links.find((x) => x.querySelector("time")) || null;
+    const a = own(post, 'a[href*="/status/"]').find((x) => x.querySelector("time")) || null;
     if (!a) { return null; }
     let u = null;
     try { u = new URL(a.getAttribute("href"), location.origin); } catch (e) { return null; }
@@ -153,10 +320,10 @@
     return true;
   }
 
-  // ---- ← : partage du post au focus (texte et auteur VISIBLES, rien d'autre)
+  // ---- ← : partage du post au focus (texte et auteur VISIBLES du post lui-même, jamais du post cité)
   function extract(post) {
-    const t = post.querySelector('[data-testid="tweetText"]');
-    const u = post.querySelector('[data-testid="User-Name"]');
+    const t = own(post, '[data-testid="tweetText"]')[0] || null;
+    const u = own(post, '[data-testid="User-Name"]')[0] || null;
     const text = clean(t ? t.innerText : "", TEXT_MAX);
     let author = "";
     if (u) {
@@ -195,11 +362,32 @@
       if (!((a === "up" || a === "down") && NAV && NAV.leaveField(ae))) { return; }
       ae.blur();
     }
+    const acting = actionButton(ae);   // un bouton d'action du fil a le focus réel
     let used = false;
-    if (feed && a === "up") { move(-1); used = true; }
-    else if (feed && a === "down") { move(1); used = true; }
-    else if (feed && a === "left") { if (!e.repeat) { shareFocused(); } used = true; }
-    else if (feed && a === "ok") { used = !e.repeat && open(); }
+    if (a === "ok") {
+      if (acting) {
+        if (e.repeat || !actionValid(ae)) {   // OK tenu, ou bouton qui n'est plus celui du post choisi : bloqué
+          used = true;
+          if (!e.repeat) { leaveButton(ae); toast(MSG_STALE); }
+        }
+        // sinon : AUCUNE action ici — Chromium active lui-même le bouton au focus (geste humain réel, natif)
+      } else {
+        used = !e.repeat && open();
+      }
+    } else if (a === "right") {
+      used = true;
+      if (!e.repeat) { if (acting && actEl === ae) { cycleAction(); } else { enterActions(); } }
+    } else if (a === "left") {
+      used = true;
+      if (acting) {   // retour au post, JAMAIS un partage (répétitions et ← immédiat absorbés ensuite)
+        leaveButton(ae);
+        leftGuardUntil = performance.now() + LEFT_GUARD_MS;
+      } else if (!e.repeat && performance.now() >= leftGuardUntil) { shareFocused(); }
+    } else {   // ↑ ↓ : navigation normale entre posts (le mode actions est quitté)
+      used = true;
+      if (acting) { leaveButton(ae); }
+      move(a === "up" ? -1 : 1);
+    }
     if (used) {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -211,8 +399,20 @@
     refreshTimer = 0;
     const on = feedMode();
     document.documentElement.classList.toggle("otvx-tv", on);
-    ensureHelp(on && !dialogOpen());
+    markLanes(on);
     if (focused && !focused.isConnected) { focused = null; }   // post retiré par X : prochain ↑ ↓ repart de l'écran
+    if (actEl && document.activeElement !== actEl) {
+      // X a remplacé le bouton (J'aime -> Aimé) dans le MÊME post : focus remis au même rang ; sinon mode quitté
+      const keep = !actEl.isConnected && on && !dialogOpen() && focused && permalink(focused) === actKey &&
+                   (!document.activeElement || document.activeElement === document.body);
+      const list = keep ? actions(focused) : [];
+      if (keep && list[actIdx]) { focusAction(list[actIdx], actIdx); }
+      else { exitActions(); }
+    } else if (actEl && (!focused || permalink(focused) !== actKey)) {
+      exitActions();   // DOM réutilisé par X pour un autre post : jamais d'action sur un post non choisi
+      toast(MSG_STALE);
+    }
+    ensureHelp(on && !dialogOpen());
   }
   const observer = new MutationObserver(() => {
     if (!refreshTimer) { refreshTimer = setTimeout(refresh, REFRESH_MS); }

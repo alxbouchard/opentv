@@ -1419,8 +1419,9 @@ du lecteur. « Vivant » doit tenir le même budget, sinon il reste un choix du 
   des extensions est le lanceur ; `URLAllowlist` ajoute `https://x.com` et `https://twitter.com`.
   Permissions : `storage` (stockage de **session** seulement) + hôtes `x.com`, `twitter.com`, `127.0.0.1`. Sandbox,
   sécurité web et DevTools bloqués inchangés ; aucun débogage distant, aucune API cookies/webRequest/scripting.
-- **Fil** (colonne principale présente seulement) : une colonne centrale, colonnes/tiroirs/barre d'actions masqués,
-  gros texte, médias entiers, anneau jaune très visible, bandeau d'aide en français. DOM dynamique suivi par un
+- **Fil** (colonne principale présente seulement) : une colonne centrale, colonnes/tiroirs masqués, rangée d'actions
+  réduite aux vrais boutons J'aime / Enregistrer (0.7.14, voir §6 sexies-d), texte lisible, médias et lecteurs vidéo de
+  X intacts, anneau jaune très visible, bandeau d'aide en français. DOM dynamique suivi par un
   `MutationObserver` regroupé (une passe ≤ 250 ms), sélecteurs `data-testid` de X avec repli inerte.
 - **Télécommande sur X** : ↑ ↓ post précédent/suivant ; OK ouvre le post au focus (son permalien) ou l'action native
   du bouton/lien au focus ; **← partage le post au focus à « Hermit ou Muse »**. **Retour / Accueil** : script
@@ -1429,8 +1430,8 @@ du lecteur. « Vivant » doit tenir le même budget, sinon il reste un choix du 
   `Close`, Échap, BrowserBack/GoBack, Retour arrière hors champ, Alt+←). Racine (accueil, explorer…), connexion ou
   vérification : **retour direct** à `http://127.0.0.1:<port>/tv`, même depuis le champ au focus (Retour arrière y
   efface toujours un caractère) ; post/fil/modale routée : page précédente seulement si une entrée x.com précédente
-  existe (API Navigation), sinon `/tv` ; filet 1,2 s ⇒ `/tv`. Accueil (BrowserHome/GoHome ; Début hors champ) ⇒ `/tv`. Aucun clic automatique, aucun « J'aime », repartage, réponse ni publication (publication
-  hors MVP).
+  existe (API Navigation), sinon `/tv` ; filet 1,2 s ⇒ `/tv`. Accueil (BrowserHome/GoHome ; Début hors champ) ⇒ `/tv`. Aucun clic automatique, aucun « J'aime » ni signet automatique, aucun repartage, réponse ni
+  publication (publication hors MVP) ; J'aime / Enregistrer seulement par un OK humain sur le vrai bouton (0.7.14).
 - **Partage** (← seulement, geste humain) : l'extension lit SEULEMENT le texte visible (≤ 2400) et l'auteur visible
   (≤ 120) du post au focus — jamais une URL, un lien, un média, un cookie ni du HTML — puis appelle
   `POST /api/tv/x/context` sur la boucle locale avec la **clé TV** de ce démarrage, relue par l'extension à chaque
@@ -1554,6 +1555,61 @@ matériel ; `chrome://policy` reste bloqué (non contourné). *Relecture sur la 
 /etc/chromium/policies/managed/opentv-kiosk.json /etc/chromium-browser/policies/managed/opentv-kiosk.json` ⇒ `2`
 pour les deux, et `sha256sum` de ces fichiers = lignes du manifeste ; le flux passkey/QR reste le gate terrain
 ci-dessus.
+
+### 6 sexies-d. Fil X à la TV : largeur réelle, vidéos intactes, J'aime / Enregistrer à la télécommande (0.7.14)
+
+Photo terrain 0.7.13 : post cerné de jaune sur ~1/3 de la largeur, grosses marges, texte en bouts de lignes, aide en
+surimpression, aucune action ; Alex signale aussi des vidéos invisibles. Causes dans `x.css` 0.7.13 : `article
+[role="group"]` masqué en entier (la rangée d'actions, mais aussi tout lecteur/commandes vidéo de X portant
+`role="group"`), et `primaryColumn` forcée à 1180 px sans élargir ses ancêtres (plafonds 600/990 px de X).
+
+**Raccourcis du fil (télécommande Samsung ou clavier)** :
+
+| Touche | Sur un post (anneau jaune plein) | En mode actions (anneau jaune pointillé + bouton cerné blanc/bleu) |
+|---|---|---|
+| ↑ ↓ | post précédent / suivant (post plus haut que l'écran : défile d'abord dedans) | quitte le mode actions, post voisin |
+| → | entre en mode actions : focus sur **J'aime** du post (sinon Enregistrer) | bouton suivant (J'aime ⇄ Enregistrer) de CE post |
+| OK | ouvre le post | **active le bouton** (geste réel de Chromium) ; touche tenue = une seule activation |
+| ← | partage le post à Hermit ou Muse | **revient au post sans partager** (← tenu ou second ← dans les 0,7 s ignorés) |
+| Retour / Accueil | inchangés (`nav.js`, Retour Samsung par `opentv-x-escape`) | inchangés |
+
+Libellés à l'écran, tirés de l'état **affiché par X** (rien n'est mémorisé par OpenTV) : « J'aime », « Aimé · OK
+retire », « Enregistrer », « Enregistré · OK retire » (Enregistrer = signet X). Post sans bouton visible : message
+« Ce post n'a pas de bouton J'aime ou Enregistrer visible. », rien n'est focalisé.
+
+- **Mise en page** : `x.js` marque chaque ancêtre EFFECTIF main → colonne → post (`data-otvx-lane`, recalculé à chaque
+  passe, nettoyé hors fil) ; colonne `min(1440px, 100vw − 240px)` centrée (1080p : post de 1440 px, marges de 240 px),
+  texte 32 px (≈ 100 caractères par ligne), noms 24 px. Médias : aucune règle (ni `object-fit`, ni hauteur) ; les boîtes
+  de proportions de X s'agrandissent sans déformation. Le post et le bouton au focus sont placés dans la zone libre entre
+  l'en-tête de X et le bandeau d'aide (jamais dessous).
+- **Rangée d'actions** : seule la `[role="group"]` du post qui contient J'aime/Répondre/Repartager **et aucun média**
+  est visée ; tout y est masqué sauf `like`/`unlike`/`bookmark`/`removeBookmark`. Lecteur, commandes vidéo, galeries
+  et tout autre `[role="group"]` : jamais touchés. Post cité/imbriqué : sa rangée est masquée et jamais atteinte.
+- **Sécurité** : → ne fait que `focus()` sur le vrai bouton ; OK n'est **pas** traité par l'extension quand le bouton
+  choisi a le focus réel : Chromium l'active lui-même (geste humain natif). Aucun `click()`, aucun événement forgé,
+  aucun raccourci X simulé, aucune API, aucun port d'agent ; touches synthétiques ignorées. OK est bloqué (mode quitté,
+  message « Le fil a changé… ») si le bouton n'appartient plus au post choisi (permalien changé : DOM réutilisé par X),
+  n'est plus visible ou n'est plus celui choisi ; OK tenu : répétitions bloquées. Si X remplace le bouton après le
+  changement d'état, le focus revient au même rang du même post. Connexion, vérifications et fenêtres modales : non
+  restylées, `nav.js` inchangé.
+- **Validation hors matériel** (`tests/test_x_feed.py` + `tests/e2e_x_feed.js`, Chrome for Testing complet, extension
+  installée par `install.sh --root`, fixtures LOCALES anonymes, aucun compte) : témoin 0.7.13 sur la même fixture
+  (post 600 px ≈ 1/3, 30 caractères/ligne, vidéo enveloppée invisible, commandes vidéo masquées, aucune action) puis
+  0.7.14 (géométrie colonne/post/lignes, photo 16:9, vidéos H.264 MSE + progressive et VP9 visibles, première image lue
+  sur la capture et décodée, commandes vidéo visibles, aucune lecture lancée), parcours → / OK / ← / ↑ ↓, répétitions,
+  DOM réutilisé, posts cités, bouton absent, post long, ouvrir/retour, partage, fenêtre modale, connexion ; mutants
+  (garde de répétition, garde du post choisi, garde de ←) détectés. Vidéos de test : `tests/fixtures/x-video/`
+  (640×360, 3 s, synthétiques, sha256 figés).
+- **Limites** : la fixture imite la chaîne react-native-web de X ; un plafond de 600 px sous la colonne y est une
+  HYPOTHÈSE qui reproduit la photo (le DOM réel de x.com n'a pas pu être mesuré : refus du navigateur sans tête
+  déconnecté). Le lien « vidéos invisibles » ⇔ `[role=group]` est plausible mais non prouvé sur le vrai X ; codecs,
+  politique réseau et GPU de la Pi ne sont pas modifiés ni couverts ici. Session X réelle sur la Pi (Wayland/HDMI, CEC,
+  vrai DOM, vraies vidéos) : **gate terrain**, non testée.
+
+**Gate terrain (0.7.14)** : fil X réel sur la TV : post ≈ pleine largeur utile, lignes pleines, aide sans recouvrir
+le post au focus ; une vidéo réelle visible avec ses commandes ; → J'aime au focus (anneau blanc/bleu), OK une fois ⇒
+« Aimé · OK retire » sur l'app X du téléphone aussi ; OK de nouveau ⇒ retrait ; → Enregistrer, OK ⇒ signet, OK ⇒
+retrait ; ← ⇒ retour au post sans message de partage ; ← de nouveau (après 1 s) ⇒ partage ; photo d'Alex.
 
 **Gates terrain (hotfix)** : sur la Pi, `journalctl -u opentv-x-escape` montre `x_escape_armed` à l'ouverture de X et
 `x_escape_disarmed` au retour ; Retour Samsung sur la connexion X sombre ET sur le fil ⇒ `/tv` (≤ 10 s) ; Retour sur

@@ -533,6 +533,11 @@ class TestXExtensionStatic(unittest.TestCase):
     def test_no_sensitive_api_no_click_no_write_action(self):
         for f in ("background.js", "nav.js", "x.js", "tvkey.js", "xentry.js"):
             src = code_only(read(os.path.join(EXT, f)))
+            if f == "x.js":   # 0.7.14 : identifiants des VRAIS boutons J'aime/Enregistrer (focus seulement) sur UNE
+                # ligne exacte, retirée avant les interdictions ci-dessous (test_x_feed : aucun clic, aucun événement)
+                action_line = 'const ACTION_TESTIDS = ["like", "unlike", "bookmark", "removeBookmark"];'
+                self.assertEqual(src.count(action_line), 1)
+                src = src.replace(action_line, "")
             for bad in ("chrome.cookies", "document.cookie", "webRequest", "chrome.debugger", "chrome.scripting",
                         "eval(", "new Function", ".click(", "dispatchEvent", "innerHTML", "outerHTML",
                         "insertAdjacentHTML", "XMLHttpRequest", "localStorage", "storage.local", "storage.sync",
@@ -847,7 +852,15 @@ class TestXExtensionStatic(unittest.TestCase):
         self.assertNotIn("@import", body)
         self.assertNotIn("url(", body)
         for rule in re.findall(r"([^{}]+)\{", body):
-            for sel in rule.split(","):
+            sels, depth, cur = [], 0, ""
+            for ch in rule:   # virgules de PREMIER niveau seulement (jamais dans :is/:has/:not)
+                depth += (ch == "(") - (ch == ")")
+                if ch == "," and depth == 0:
+                    sels.append(cur)
+                    cur = ""
+                else:
+                    cur += ch
+            for sel in sels + [cur]:
                 sel = sel.strip()
                 if sel.startswith("@"):
                     continue
@@ -935,7 +948,7 @@ class TestKioskAndPolicy(unittest.TestCase):
         self.assertIn("#OPENTV_X_TV=1", read(os.path.join(PI4, "opentv-pi.env.example")))
 
     def test_version_and_docs(self):
-        self.assertEqual(VERSION, "0.7.13")
+        self.assertEqual(VERSION, "0.7.14")
         readme = read(os.path.join(PI4, "README.md"))
         for need in ("X TV Mode", "OPENTV_X_TV=0", "x_context", "non fiable", "connecte-toi", xcontext.EXTENSION_ID):
             self.assertTrue(need in readme, "README sans « %s »" % need)

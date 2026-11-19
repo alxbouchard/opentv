@@ -723,7 +723,9 @@ class TestExtensionProbeSource(unittest.TestCase):
         pm = self.nav[self.nav.index("function pageMode()"):self.nav.index("function loginMode()")]
         self.assertLess(pm.index("modalDialog()"), pm.index("COLUMN_SEL"))   # avant la colonne principale
         ok = self.x[self.x.index("function onKey(e)"):self.x.index("function refresh()")]
-        self.assertLess(ok.index("if (!feed || dialogOpen()) { return; }"), ok.index("move(-1)"))
+        # 0.7.14 : la fenêtre modale passe AVANT toute action du fil (post, mode actions, partage, ouverture)
+        for act in ('move(a === "up" ? -1 : 1)', "enterActions()", "cycleAction()", "shareFocused()", "open()"):
+            self.assertLess(ok.index("if (!feed || dialogOpen()) { return; }"), ok.index(act), act)
         self.assertLess(ok.index("if (!e.isTrusted) { return; }"), ok.index("dialogOpen()"))
         self.assertIn("ensureHelp(on && !dialogOpen());", self.x)
         self.assertIn('Object.defineProperty(window, "__otvxNav"', self.nav)

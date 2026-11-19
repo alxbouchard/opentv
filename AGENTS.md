@@ -401,6 +401,11 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   **0.7.13** : politique du KIOSQUE `DefaultWebBluetoothGuardSetting: 2` (Web Bluetooth des pages bloqué ; WebAuthn/hybride
   natif, groupes, D-Bus, profil et JS de l'extension inchangés ; `version` du manifeste = appliance). Test
   `TestKioskWebBluetoothPolicy` (JSON effectif livré aux deux chemins). Effet réel = gate terrain.
+  **0.7.14** : fil X TV — largeur réelle (ancêtres effectifs marqués `data-otvx-lane`, colonne `min(1440px, 100vw−240px)`,
+  texte 32 px), aucun `[role=group]` masqué hors de la rangée d'actions (vidéos/commandes de X intactes, aucun média
+  restylé), → focus NATIF sur les vrais J'aime/Enregistrer du post choisi (jamais un post cité), OK = activation par
+  Chromium (jamais `click()`/événement forgé/API), OK tenu et bouton d'un post recyclé bloqués, ← sort sans partager.
+  Tests `test_x_feed.py` + `e2e_x_feed.js` (témoin 0.7.13, vidéos H.264/VP9 locales, mutants). Vrai X = gate terrain.
 - **X TV — « Saisir avec le téléphone » (0.7.10, `OPENTV_X_PHONE_ENTRY`, défaut 0)** : sans clavier physique, UN
   identifiant X (nom d'utilisateur/courriel/téléphone) saisi sur le téléphone DÉJÀ appairé remplit le champ de connexion
   éligible au focus ; Alex continue avec la passkey native. Jamais mot de passe, code, NIP, passkey, paiement ; aucun
