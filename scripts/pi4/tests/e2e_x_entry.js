@@ -628,17 +628,81 @@ function ctl(method, p, body) {
       const J = {};
       st.jf = J;
       const JFID = "jf-input-username_or_email";
+      // DISPONIBILITÉ OBSERVABLE (stabilisation du test, produit inchangé) : xentry.js n'arme sa pastille qu'après la
+      // réponse « enabled » du service worker, aller-retour ASYNCHRONE refait à chaque document ; une lecture unique à
+      // +300 ms pouvait précéder cette réponse (témoin positif manqué, fenêtre négative vide de sens). Journal PASSIF du
+      // service worker (écouteur qui ne répond jamais : la réponse reste celle de background.js) : chaque « enabled » du
+      // cadre principal (URL, documentId), puis « answered » quand un storage.session.get émis APRÈS celui de
+      // background.js est résolu (même file : sa réponse est alors déjà partie). Toute observation attend l'entrée du
+      // document COURANT (même URL, postérieure à la navigation) ; service worker relancé (journal perdu) : échec franc.
+      await sw.evaluate(() => {
+        if (globalThis.__otvxJournal) { return; }
+        const j = globalThis.__otvxJournal = [];
+        chrome.runtime.onMessage.addListener((msg, sender) => {
+          if (!msg || msg.type !== "xentry" || msg.op !== "enabled" || !sender || sender.frameId !== 0) { return undefined; }
+          const e = { url: sender.url, doc: sender.documentId || null, answered: false };
+          j.push(e);
+          chrome.storage.session.get(["xentry"]).then(() => { e.answered = true; }, () => undefined);
+          return undefined;
+        });
+      });
+      const mark = () => sw.evaluate(() => globalThis.__otvxJournal ? globalThis.__otvxJournal.length : -1);
+      const READY_MS = 8000;
+      const POS_MS = 3000;     // témoin positif : pastille attendue au plus POS_MS après la preuve de disponibilité
+      const NEG_MIN = 1000;    // fenêtre négative : au moins NEG_MIN et 4 × la pire latence positive mesurée
+      J.timing = { ready: [], pos: [], neg: [] };
+      const ready = async (n0, what) => {
+        const href = await tv.evaluate(() => location.href);
+        const t0 = Date.now();
+        for (;;) {
+          const j = await sw.evaluate((n) => globalThis.__otvxJournal ? globalThis.__otvxJournal.slice(n) : null, n0);
+          if (n0 < 0 || !j) { throw new Error("journal du service worker absent (relancé ?) : " + what); }
+          const e = j.find((x) => x.url === href && x.answered);
+          if (e) { J.timing.ready.push([what, Date.now() - t0]); return e.doc; }
+          if (Date.now() - t0 > READY_MS) { throw new Error("document non prêt (« enabled » sans réponse) : " + what); }
+          await sleep(25);
+        }
+      };
+      // témoin POSITIF : focus APRÈS la preuve de disponibilité, puis pastille attendue (bornée, latence consignée) ;
+      // délai dépassé = pastille absente rapportée telle quelle (aucune reprise)
+      const positive = async (n0, fid, what) => {
+        await ready(n0, what);
+        await tv.evaluate((i) => { window.__ev = { input: 0, change: 0, click: 0, submit: 0 }; document.getElementById(i).focus(); }, fid);
+        const t0 = Date.now();
+        let s = await tvState();
+        while (!s.pill && Date.now() - t0 < POS_MS) { await sleep(25); s = await tvState(); }
+        J.timing.pos.push([what, s.pill ? Date.now() - t0 : null]);
+        return s;
+      };
+      // fenêtre NÉGATIVE : focus APRÈS la preuve de disponibilité, puis échantillons continus pendant toute la fenêtre ;
+      // pastille vue UNE fois = pastille (jamais une lecture unique)
+      const negative = async (n0, fid, what) => {
+        await ready(n0, what);
+        await tv.evaluate((i) => document.getElementById(i).focus(), fid);
+        const ms = Math.max(NEG_MIN, 4 * Math.max(0, ...J.timing.pos.map((x) => x[1] || 0)));
+        const t0 = Date.now();
+        let s = await tvState();
+        let seen = s.pill;
+        let n = 1;
+        while (!seen && Date.now() - t0 < ms) { await sleep(25); s = await tvState(); seen = s.pill; n++; }
+        J.timing.neg.push([what, ms, n, seen]);
+        return Object.assign(s, { pill: seen });
+      };
       const openJf = async (lay, sel) => {
         rootLayout = lay;
+        const n0 = await mark();
         await openX("/", sel || "#" + JFID);
-        await sleep(300);
+        return n0;
       };
-      await openJf("jf");
+      const openRoute = async (q) => {
+        const n0 = await mark();
+        await openX(q, "#" + JFID);
+        return n0;
+      };
+      const n0j = await openJf("jf");
       J.swapped = await tv.evaluate(() => ({ landing: !!document.getElementById("landing-identifier"),
         modes: document.querySelectorAll('input[name="mode"]').length, action: document.querySelector("form").getAttribute("action") }));
-      await tv.evaluate((i) => { window.__ev = { input: 0, change: 0, click: 0, submit: 0 }; document.getElementById(i).focus(); }, JFID);
-      await sleep(300);
-      J.initial = await tvState();
+      J.initial = await positive(n0j, JFID, "root");
       J.geo_pill = await geo();
       if (J.initial.pill) {   // (mutant sans la branche jf : aucune pastille — défaut terrain 0.7.11 reproduit)
       const sj = await startSession(JFID);
@@ -656,10 +720,7 @@ function ctl(method, p, body) {
       // routes de connexion : même champ jf dans la fenêtre de X
       J.routes = {};
       for (const [name, q] of [["flow", "/i/flow/login?case=jf"], ["onboarding", "/i/jf/onboarding/web?mode=login&case=jf"]]) {
-        await openX(q, "#" + JFID);
-        await tv.evaluate((i) => document.getElementById(i).focus(), JFID);
-        await sleep(300);
-        J.routes[name] = await tvState();
+        J.routes[name] = await positive(await openRoute(q), JFID, name);
       }
       await tv.evaluate(() => { window.__ev = { input: 0, change: 0, click: 0, submit: 0 }; });
       if (J.routes.onboarding.pill) {
@@ -677,10 +738,7 @@ function ctl(method, p, body) {
       for (const v of ["jf_noinert", "jf_pwstep", "jf_two", "jf_otp", "jf_nonsibling", "jf_signup", "jf_action", "jf_pattern",
                        "jf_rendered", "jf_mode_login", "jf_mode_signup"]) {
         const fid = v === "jf_signup" ? "jf-input-phone_number" : JFID;
-        await openJf(v, "#" + fid);
-        await tv.evaluate((i) => document.getElementById(i).focus(), fid);
-        await sleep(300);
-        const before = await tvState();
+        const before = await negative(await openJf(v, "#" + fid), fid, v);
         await tv.keyboard.press("ArrowDown");
         await tv.keyboard.press("Enter");
         await sleep(500);
@@ -690,10 +748,7 @@ function ctl(method, p, body) {
       // revue 0.7.12 : mêmes refus sur les routes de connexion (fenêtre jf) — leurre inert RENDU, « mode » caché
       J.routeNeg = {};
       for (const v of ["jf_rendered", "jf_mode_login", "jf_mode_signup"]) {
-        await openX("/i/flow/login?case=" + v, "#" + JFID);
-        await tv.evaluate((i) => document.getElementById(i).focus(), JFID);
-        await sleep(300);
-        const before = await tvState();
+        const before = await negative(await openRoute("/i/flow/login?case=" + v), JFID, "route_" + v);
         const shown = await tv.evaluate(() => {   // leurre réellement RENDU (boîte non nulle, opacité 1) mais inert
           const pw = document.querySelector('input[name="password"]');
           const r = pw.getBoundingClientRect();
@@ -707,9 +762,10 @@ function ctl(method, p, body) {
                           qr: (await tvState()).qr, service: (await service()).active, shown: shown };
       }
       // étape mot de passe rendue SUR PLACE après le QR (leurre rendu actif et visible) : refus à la livraison
-      await openJf("jf");
+      const n0l = await openJf("jf");
       await tv.evaluate((i) => { window.__u = document.getElementById(i); }, JFID);
       if (J.initial.pill) {
+      await positive(n0l, JFID, "late");   // pastille observée avant ↓ + OK (startSession), même document
       const sl = await startSession(JFID);
       await A.p.goto(sl.url);
       await A.p.waitForSelector("#xform:not([hidden])");
