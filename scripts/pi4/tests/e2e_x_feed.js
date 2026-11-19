@@ -149,6 +149,7 @@ const POSTS = [
                extra: video("p7", VID + "vp9.webm", false, false), bar: ["reply", "retweet", "like", "views", "bookmark"] })
 ].join("");
 const SCRIPT = `<script>(function(){window.__acts=[];window.__focus=0;
+window.__kf=[];window.addEventListener("keydown",function(e){var x=document.activeElement;window.__kf.push(e.key+":"+(x&&x.getAttribute&&x.getAttribute("data-otv-btn")||(x?x.tagName:"null")));},true);
 var IDS=["like","unlike","bookmark","removeBookmark","reply","retweet"];var NEXT={like:"unlike",unlike:"like",bookmark:"removeBookmark",removeBookmark:"bookmark"};
 document.addEventListener("focusin",function(e){if(e.target.matches&&e.target.matches("[data-otv-btn]")){window.__focus++;}},true);
 document.addEventListener("click",function(e){var b=e.target.closest&&e.target.closest("[data-testid]");if(!b){return;}
@@ -375,6 +376,30 @@ const LOGIN = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title
     s.p2_ok = await key("Enter", 700);                   // removeBookmark -> bookmark (nouveau nœud), refocalisé
     s.p2_new_node = await page.evaluate(() => document.activeElement.__orig === undefined &&
       document.activeElement.getAttribute("data-otv-btn") === "p2-removeBookmark");
+    // fenêtre de remplacement : X remplace le bouton au OK et le focus retombe sur la page AVANT le refresh (250 ms) ;
+    // ← immédiat : sortie SANS partage ; OK immédiat : ni ouverture ni activation ; puis navigation normale
+    await clearToast();
+    const n0 = (await st()).acts.length;
+    await page.keyboard.press("Enter"); await page.keyboard.press("ArrowLeft");   // même tâche : aucun refresh entre
+    await sleep(100);
+    s.race_left = await st();
+    s.race_left_kf = await page.evaluate(() => window.__kf.slice(-2));
+    s.race_left_acts = s.race_left.acts.length - n0;
+    await sleep(900);
+    s.race_left_after = await st();
+    await page.keyboard.press("ArrowRight"); await sleep(150);                   // de nouveau en mode actions (rang 0)
+    const n1 = (await st()).acts.length;
+    await page.keyboard.press("Enter"); await page.keyboard.press("Enter");
+    await sleep(100);
+    s.race_ok = await st();
+    s.race_ok_kf = await page.evaluate(() => window.__kf.slice(-2));
+    s.race_ok_acts = s.race_ok.acts.length - n1;
+    await sleep(500);
+    s.race_ok_after = await st();
+    if (s.race_ok_after.url !== "/home") {   // (mutant seulement) post ouvert : retour au fil pour finir le parcours
+      await page.goto("https://x.com/home"); await waitFeed(); await sleep(400);
+      for (let i = 0; i < 3 && (await st()).post !== "p2"; i++) { await page.keyboard.press("ArrowDown"); await sleep(150); }
+    }
     // p3 : post LONG (plus haut que l'écran) avec vidéo : début visible, → amène son bouton au-dessus de l'aide
     s.p3 = await key("ArrowDown", 200);
     s.p3_right = await key("ArrowRight", 200);
@@ -396,6 +421,16 @@ const LOGIN = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title
     for (let i = 0; i < 4 && (await st()).post !== "p6"; i++) { await page.keyboard.press("ArrowDown"); await sleep(200); }
     s.p6 = await st();
     s.p6_right = await key("ArrowRight", 200);
+    // refresh qui ANNULE (restauration impossible : X retire toute la rangée du post choisi) : ← juste après absorbé
+    for (let i = 0; i < 6 && (await st()).post !== "p7"; i++) { await page.keyboard.press("ArrowDown"); await sleep(200); }
+    await key("ArrowRight", 150);
+    s.p7_act = (await st()).act;
+    await clearToast();
+    await page.evaluate(() => document.getElementById("bar-p7").remove());
+    await sleep(320);                                                           // refresh passé : mode annulé
+    s.cancel_left = await key("ArrowLeft", 300);
+    for (let i = 0; i < 4 && (await st()).post === "p7"; i++) { await page.keyboard.press("ArrowUp"); await sleep(200); }
+    s.cancel_up = await st();                                                   // navigation normale ensuite
     // DOM réutilisé : J'aime de p1 choisi, puis X recycle l'article pour un AUTRE post : OK immédiat bloqué
     await page.evaluate(() => window.scrollTo(0, 0)); await sleep(150);
     for (let i = 0; i < 8 && (await st()).post !== "p1"; i++) { await page.keyboard.press("ArrowUp"); await sleep(150); }

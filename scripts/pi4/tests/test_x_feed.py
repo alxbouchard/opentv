@@ -268,6 +268,18 @@ class TestFeedEndToEnd(unittest.TestCase):
         want(s["p2_ok"]["act_testid"] == "bookmark" and s["p2_ok"]["act_is_active"] and s["p2_new_node"],
              "nœud remplacé : focus remis")
         want(s["p2_ok"]["acts"][-1] == {"post": "p2", "action": "removeBookmark", "trusted": True}, "retrait signet")
+        # fenêtre de remplacement (focus retombé sur la page AVANT le refresh) : ← et OK immédiats sans effet
+        want(s["race_left_kf"] == ["Enter:p2-removeBookmark", "ArrowLeft:BODY"], "fenêtre ← exercée")
+        want(s["race_left_acts"] == 1 and s["race_left"]["toast"] == "" and s["race_left"]["url"] == "/home" and
+             s["race_left_after"]["toast"] == "" and s["race_left_after"]["act"] is None,
+             "remplacement + ← immédiat : aucun partage")
+        want(s["race_ok_kf"] == ["Enter:p2-unlike", "Enter:BODY"], "fenêtre OK exercée")
+        want(s["race_ok_acts"] == 1 and s["race_ok"]["url"] == "/home" and s["race_ok_after"]["url"] == "/home" and
+             len(s["race_ok_after"]["acts"]) == len(s["race_ok"]["acts"]),
+             "remplacement + OK immédiat : ni ouverture ni activation")
+        want(s["cancel_left"]["toast"] == "" and s["cancel_left"]["act"] is None and s["p7_act"] == "p7-like",
+             "refresh annulé + ← : aucun partage")
+        want(s["cancel_up"]["post"] == "p6", "navigation normale après annulation")
         p3, p3r = s["p3"], s["p3_right"]
         want(p3["post"] == "p3" and p3["post_rect"][1] == 96 and p3["post_rect"][3] > 1080, "post long : début visible")
         want(p3r["act"] == "p3-like" and p3r["act_in_view"] and not p3r["act_under_help"], "post long : bouton amené")
@@ -295,6 +307,10 @@ class TestFeedEndToEnd(unittest.TestCase):
                        "OK tenu : une activation par appui"),
             "reuse": ("if (e.repeat || !actionValid(ae)) {", "if (e.repeat) {", "DOM réutilisé : OK bloqué"),
             "left_guard": ("performance.now() >= leftGuardUntil", "true", "← tenu / immédiat : aucun partage"),
+            "race": ("if (actEl && ae !== actEl && !actionButton(ae)) {", "if (false) {",
+                     "remplacement + ← immédiat : aucun partage"),
+            "cancel_guard": ("if (!(keep && restoreAct())) { quitActions(); }",
+                             "if (!(keep && restoreAct())) { exitActions(); }", "refresh annulé + ← : aucun partage"),
         }
         for name, (old, new, expect) in mutants.items():
             with self.subTest(mutant=name):

@@ -1590,7 +1590,10 @@ retire », « Enregistrer », « Enregistré · OK retire » (Enregistrer = sign
   aucun raccourci X simulé, aucune API, aucun port d'agent ; touches synthétiques ignorées. OK est bloqué (mode quitté,
   message « Le fil a changé… ») si le bouton n'appartient plus au post choisi (permalien changé : DOM réutilisé par X),
   n'est plus visible ou n'est plus celui choisi ; OK tenu : répétitions bloquées. Si X remplace le bouton après le
-  changement d'état, le focus revient au même rang du même post. Connexion, vérifications et fenêtres modales : non
+  changement d'état, le focus revient au même rang du même post. Fenêtre de remplacement (focus retombé sur la page
+  avant la passe suivante) : tant que l'intention « actions » existe sans cible vérifiable, ← sort SANS partager et OK
+  n'ouvre ni n'active rien (focus remis au même rang si vérifiable) ; sortie forcée ou restauration impossible ⇒ même
+  garde de 0,7 s sur ← ; un champ ou une fenêtre modale distincte garde sa commande native. Connexion, vérifications et fenêtres modales : non
   restylées, `nav.js` inchangé.
 - **Validation hors matériel** (`tests/test_x_feed.py` + `tests/e2e_x_feed.js`, Chrome for Testing complet, extension
   installée par `install.sh --root`, fixtures LOCALES anonymes, aucun compte) : témoin 0.7.13 sur la même fixture
@@ -1598,7 +1601,7 @@ retire », « Enregistrer », « Enregistré · OK retire » (Enregistrer = sign
   0.7.14 (géométrie colonne/post/lignes, photo 16:9, vidéos H.264 MSE + progressive et VP9 visibles, première image lue
   sur la capture et décodée, commandes vidéo visibles, aucune lecture lancée), parcours → / OK / ← / ↑ ↓, répétitions,
   DOM réutilisé, posts cités, bouton absent, post long, ouvrir/retour, partage, fenêtre modale, connexion ; mutants
-  (garde de répétition, garde du post choisi, garde de ←) détectés. Vidéos de test : `tests/fixtures/x-video/`
+  (garde de répétition, garde du post choisi, garde de ←, fenêtre de remplacement, garde de sortie) détectés. Vidéos de test : `tests/fixtures/x-video/`
   (640×360, 3 s, synthétiques, sha256 figés).
 - **Limites** : la fixture imite la chaîne react-native-web de X ; un plafond de 600 px sous la colonne y est une
   HYPOTHÈSE qui reproduit la photo (le DOM réel de x.com n'a pas pu être mesuré : refus du navigateur sans tête

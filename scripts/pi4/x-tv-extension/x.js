@@ -247,8 +247,13 @@
   function actionButton(node) {   // un bouton d'action du fil (quel que soit son post)
     return !!node && node.nodeType === 1 && node.matches(ACTION_SEL) && !!node.closest(COLUMN_SEL);
   }
+  function clearActMarks(keep) {   // anneau d'action : jamais sur un autre nœud (copie ou remplaçant posé par X)
+    for (const n of Array.from(document.querySelectorAll("[" + ACT_ATTR + "]"))) {
+      if (n !== keep) { n.removeAttribute(ACT_ATTR); }
+    }
+  }
   function focusAction(btn, idx) {
-    if (actEl && actEl !== btn) { actEl.removeAttribute(ACT_ATTR); }
+    clearActMarks(btn);
     actEl = btn;
     actIdx = idx;
     btn.setAttribute(ACT_ATTR, "");
@@ -258,10 +263,8 @@
     ensureHelp(true);
   }
   function exitActions() {
-    if (actEl) {
-      actEl.removeAttribute(ACT_ATTR);
-      if (document.activeElement === actEl) { actEl.blur(); }
-    }
+    if (actEl && document.activeElement === actEl) { actEl.blur(); }
+    if (actEl) { clearActMarks(null); }
     if (focused) { focused.removeAttribute(ACTING_ATTR); }
     const was = !!actEl;
     actEl = null;
@@ -272,6 +275,20 @@
   function leaveButton(node) {   // bouton d'action au focus (choisi ou non) : focus rendu au post, rien d'activé
     if (node !== actEl) { try { node.blur(); } catch (err) { /* retiré */ } }
     exitActions();
+  }
+  function quitActions() {   // sortie SANS cible vérifiable : ← immédiat absorbé (jamais un partage accidentel)
+    exitActions();
+    leftGuardUntil = performance.now() + LEFT_GUARD_MS;
+  }
+  // X a remplacé le bouton choisi (J'aime -> Aimé) : focus remis au MÊME rang du MÊME post (permalien inchangé) ;
+  // focus seulement, jamais une activation ; faux si la cible n'est plus vérifiable
+  function restoreAct() {
+    if (!actEl || actEl.isConnected || !focused || !focused.isConnected || actKey === null ||
+        permalink(focused) !== actKey) { return false; }
+    const list = actions(focused);
+    if (!list[actIdx]) { return false; }
+    focusAction(list[actIdx], actIdx);
+    return true;
   }
   function enterActions() {
     if (!focused || !focused.isConnected) {
@@ -362,6 +379,20 @@
       if (!((a === "up" || a === "down") && NAV && NAV.leaveField(ae))) { return; }
       ae.blur();
     }
+    // Intention « actions » sans cible vérifiable (X a remplacé le bouton juste après OK : focus retombé sur la page ou
+    // le post AVANT le prochain refresh) : ← sort SANS partager, OK n'ouvre ni n'active rien (focus remis au même rang
+    // s'il est vérifiable), → idem, ↑ ↓ normaux. Contrôle DISTINCT au focus : mode quitté, sa commande native reste.
+    if (actEl && ae !== actEl && !actionButton(ae)) {
+      const onPage = !ae || ae === document.body || ae === document.documentElement || (!!focused && focused.contains(ae));
+      if (onPage && a !== "up" && a !== "down") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (NAV) { NAV.markHandled(e); }
+        if (a === "left" || e.repeat || !restoreAct()) { quitActions(); }
+        return;
+      }
+      quitActions();
+    }
     const acting = actionButton(ae);   // un bouton d'action du fil a le focus réel
     let used = false;
     if (a === "ok") {
@@ -402,14 +433,13 @@
     markLanes(on);
     if (focused && !focused.isConnected) { focused = null; }   // post retiré par X : prochain ↑ ↓ repart de l'écran
     if (actEl && document.activeElement !== actEl) {
-      // X a remplacé le bouton (J'aime -> Aimé) dans le MÊME post : focus remis au même rang ; sinon mode quitté
-      const keep = !actEl.isConnected && on && !dialogOpen() && focused && permalink(focused) === actKey &&
-                   (!document.activeElement || document.activeElement === document.body);
-      const list = keep ? actions(focused) : [];
-      if (keep && list[actIdx]) { focusAction(list[actIdx], actIdx); }
-      else { exitActions(); }
+      // X a remplacé le bouton (J'aime -> Aimé) dans le MÊME post : focus remis au même rang ; sinon mode quitté,
+      // ← immédiat absorbé (garde de sortie)
+      const ae = document.activeElement;
+      const keep = on && !dialogOpen() && (!ae || ae === document.body || ae === document.documentElement);
+      if (!(keep && restoreAct())) { quitActions(); }
     } else if (actEl && (!focused || permalink(focused) !== actKey)) {
-      exitActions();   // DOM réutilisé par X pour un autre post : jamais d'action sur un post non choisi
+      quitActions();   // DOM réutilisé par X pour un autre post : jamais d'action sur un post non choisi
       toast(MSG_STALE);
     }
     ensureHelp(on && !dialogOpen());
