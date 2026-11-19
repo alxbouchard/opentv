@@ -38,9 +38,61 @@ def rd(path):
         return f.read()
 
 
-def open_fds():
+# Mesure des descripteurs dans un interpréteur NEUF (même exécutable, même paquet) : dans une suite complète, le
+# ramasse-miettes peut fermer pendant la mesure un descripteur abandonné par un test précédent, ce qui fausse un
+# comptage global du processus. L'enfant n'hérite que de 0/1/2 (close_fds), ne lance aucun sous-processus et compare
+# l'ENSEMBLE exact des numéros ouverts avant/après la même séquence. `fault` (tests de la sonde seulement) : « leak »
+# laisse un descripteur ouvert dans read_state, « steal » y ferme un descripteur ouvert AVANT la mesure (non possédé).
+_FD_PROBE = r"""
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+from opentv_pi import canvas as cv
+from opentv_pi import canvas_storage as st
+directory, fault = sys.argv[2], sys.argv[3]
+
+
+def fds():
     d = "/dev/fd" if os.path.isdir("/dev/fd") else "/proc/self/fd"
-    return len(os.listdir(d))
+    return sorted(int(n) for n in os.listdir(d))
+
+
+s = cv.CanvasStore(directory, wall=lambda: 1_800_000_000.0, mono=lambda: 5000.0, lock_timeout=0.3)
+p = s.agent_preview("hermit", {"preset": "mist"})
+s.owner_confirm(p["preview_id"], confirm=True)
+real, armed = st.read_state, [True]
+spare = os.open(directory, os.O_RDONLY) if fault == "steal" else None
+
+
+def faulty(dfd, owner):
+    if armed[0]:
+        armed[0] = False
+        if fault == "leak":
+            os.open(st.STATE_NAME, os.O_RDONLY, dir_fd=dfd)
+        else:
+            os.close(spare)
+    return real(dfd, owner)
+
+
+if fault != "none":
+    st.read_state = faulty
+before = fds()
+for i in range(30):
+    s.status()
+    s.owner_api().apply({"accent": ("ember", "jade")[i % 2]}, confirm=True)
+    s.owner_api().rollback(confirm=True)
+with open(os.path.join(directory, cv.STATE_NAME), "wb") as f:
+    f.write(b"[" * 100000)
+os.chmod(os.path.join(directory, cv.STATE_NAME), 0o600)
+for _ in range(10):
+    s.status()
+    try:
+        s.owner_api().rollback(confirm=True)
+    except cv.CanvasError:
+        pass
+    else:
+        sys.exit("rollback accepted a corrupt state")
+print(json.dumps({"before": before, "after": fds(), "armed": armed[0]}))
+"""
 
 
 class Base(unittest.TestCase):
@@ -573,22 +625,28 @@ class TestPersistence(Base):
             s.owner_api().rollback(confirm=True)
             s.owner_api().reset(confirm=True)
 
+    def fd_probe(self, fault="none"):
+        p = subprocess.run([sys.executable, "-I", "-c", _FD_PROBE, PI4, self.dir, fault], stdin=subprocess.DEVNULL,
+                           capture_output=True, timeout=120, env={"LANG": "C.UTF-8", "TMPDIR": self.root})
+        self.assertEqual(p.returncode, 0, p.stderr.decode(errors="replace")[-2000:])
+        r = json.loads(p.stdout.decode().strip().splitlines()[-1])
+        if fault != "none":
+            self.assertFalse(r["armed"], "faute non déclenchée")
+        return r["before"], r["after"]
+
     def test_no_descriptor_leak(self):
-        s = self.store()
-        self.publish(s, {"preset": "mist"})
-        n0 = open_fds()
-        for i in range(30):
-            s.status()
-            s.owner_api().apply({"accent": ("ember", "jade")[i % 2]}, confirm=True)
-            s.owner_api().rollback(confirm=True)
-        with open(self.file, "wb") as f:
-            f.write(b"[" * 100000)
-        os.chmod(self.file, 0o600)
-        for _ in range(10):
-            s.status()
-            with self.assertRaises(cv.CanvasError):
-                s.owner_api().rollback(confirm=True)
-        self.assertEqual(open_fds(), n0)
+        before, after = self.fd_probe()
+        self.assertGreaterEqual(len(before), 3)
+        self.assertEqual(after, before)
+
+    def test_descriptor_probe_detects_leak_and_foreign_close(self):
+        before, after = self.fd_probe("leak")
+        self.assertEqual(len(after), len(before) + 1)
+        self.assertNotEqual(after, before)
+        shutil.rmtree(self.dir)
+        before, after = self.fd_probe("steal")
+        self.assertEqual(len(after), len(before) - 1)
+        self.assertNotEqual(after, before)
 
     def test_root_requires_explicit_service_owner_and_fchowns(self):
         with mock.patch.object(cv.os, "geteuid", return_value=0):
