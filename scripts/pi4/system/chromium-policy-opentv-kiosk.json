@@ -9,6 +9,7 @@
   "DefaultGeolocationSetting": 2,
   "DefaultNotificationsSetting": 2,
   "DefaultPopupsSetting": 2,
+  "DefaultWebBluetoothGuardSetting": 2,
   "DeveloperToolsAvailability": 2,
   "DownloadRestrictions": 3,
   "EditBookmarksEnabled": false,

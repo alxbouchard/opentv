@@ -1528,12 +1528,32 @@ passkey » (focus OpenTV, OK humain ; aucune activation automatique) → Chromiu
 QR d'authentification** (dans une boîte du navigateur, distinct du QR « get the app ») → le téléphone le scanne,
 vérifie la proximité par Bluetooth puis valide. Vérifié hors matériel (`test_x_tv.TestXPasskeyPathAudit`) : le kiosque
 ne désactive ni WebAuthn ni l'interface d'authentification (aucun `--disable-features` WebAuthn, aucune politique
-WebAuthn/SecurityKey), `URLAllowlist` inchangée (x.com/twitter.com seulement, aucun domaine non observé ajouté).
+WebAuthn/SecurityKey ; 0.7.13 : seul Web Bluetooth des pages est bloqué, voir plus bas), `URLAllowlist` inchangée (x.com/twitter.com seulement, aucun domaine non observé ajouté).
 **Bloquant probable à confirmer sur la Pi** : l'hybride de Chromium Linux passe par BlueZ (D-Bus système) ; le compte
 `opentv-kiosk` n'a **pas** le groupe `bluetooth` (séparation des privilèges : seul `opentv-muse-pair.service` l'a). Si
 Chromium répond « Bluetooth indisponible », ne PAS ajouter le groupe sans décision explicite d'Alex (élargit la surface
 du kiosque) ; le tunnel caBLE utilise aussi un serveur de relais Google, non autorisé délibérément ici. Gate : passkey
 X active sur le téléphone, flux complet réussi sur la TV, photo — sinon connexion au clavier physique.
+
+**Durcissement 0.7.13 — Web Bluetooth bloqué pour les pages du kiosque.** Terrain 0.7.12 : le compte `opentv-kiosk`
+lit déjà `org.bluez` sur le D-Bus système (prérequis de l'hybride natif). Pour qu'une page (`/tv`, x.com, twitter.com)
+ne puisse pas s'en servir par l'API Web Bluetooth (`navigator.bluetooth`), la politique **du kiosque**
+(`system/chromium-policy-opentv-kiosk.json`, seule source de vérité, livrée à l'octet aux deux chemins
+`/etc/chromium/policies/managed/` et `/etc/chromium-browser/policies/managed/`) porte désormais
+`"DefaultWebBluetoothGuardSetting": 2` (entier, = refus sans demande), sans aucune exception par URL. Jusqu'ici la
+clé n'existait que dans la politique du **lecteur**, montée seulement dans le namespace d'`opentv-player` : elle ne
+s'appliquait pas au kiosque. Inchangés : WebAuthn et l'hybride natif (aucune clé WebAuthn/SecurityKey, aucun
+`--disable-features`/`--disable-bluetooth`), groupes et unités (`bluetooth` toujours au seul
+`opentv-muse-pair.service`), D-Bus, profil Chromium, extension (JS identique ; seul le champ `version` du manifeste
+suit la version de l'appliance), comptes et liste de médias ; aucune action requise sur le compte X.
+*Validation hors matériel* (`test_x_tv.TestKioskWebBluetoothPolicy`) : JSON effectif strict (objet, aucune clé en
+double, valeur entière `2`), `install.sh --root` ⇒ octets des deux chemins = source, mode 0644, hash du manifeste
+exact. *Limites* : l'effet réel (refus de `requestDevice`, hybride toujours proposé) n'est **pas** prouvé hors
+matériel ; `chrome://policy` reste bloqué (non contourné). *Relecture sur la Pi après installation* :
+`python3 -c 'import json,sys;[print(f, json.load(open(f))["DefaultWebBluetoothGuardSetting"]) for f in sys.argv[1:]]'
+/etc/chromium/policies/managed/opentv-kiosk.json /etc/chromium-browser/policies/managed/opentv-kiosk.json` ⇒ `2`
+pour les deux, et `sha256sum` de ces fichiers = lignes du manifeste ; le flux passkey/QR reste le gate terrain
+ci-dessus.
 
 **Gates terrain (hotfix)** : sur la Pi, `journalctl -u opentv-x-escape` montre `x_escape_armed` à l'ouverture de X et
 `x_escape_disarmed` au retour ; Retour Samsung sur la connexion X sombre ET sur le fil ⇒ `/tv` (≤ 10 s) ; Retour sur

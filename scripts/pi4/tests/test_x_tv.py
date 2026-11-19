@@ -935,7 +935,7 @@ class TestKioskAndPolicy(unittest.TestCase):
         self.assertIn("#OPENTV_X_TV=1", read(os.path.join(PI4, "opentv-pi.env.example")))
 
     def test_version_and_docs(self):
-        self.assertEqual(VERSION, "0.7.12")
+        self.assertEqual(VERSION, "0.7.13")
         readme = read(os.path.join(PI4, "README.md"))
         for need in ("X TV Mode", "OPENTV_X_TV=0", "x_context", "non fiable", "connecte-toi", xcontext.EXTENSION_ID):
             self.assertTrue(need in readme, "README sans « %s »" % need)
@@ -1113,7 +1113,10 @@ class TestXPasskeyPathAudit(unittest.TestCase):
             self.assertNotIn(bad, k, bad)
         pol = json.loads(read(POLICY))
         for key in pol:
-            self.assertNotRegex(key, r"(?i)webauthn|securitykey|passkey|bluetooth", key)
+            self.assertNotRegex(key, r"(?i)webauthn|securitykey|passkey", key)
+        # 0.7.13 : SEULE clé Bluetooth admise = le blocage de l'API Web Bluetooth des PAGES (navigator.bluetooth).
+        # Elle ne touche ni WebAuthn ni l'hybride natif de Chromium (Bluetooth du navigateur lui-même, via BlueZ).
+        self.assertEqual([k for k in pol if re.search(r"(?i)bluetooth", k)], ["DefaultWebBluetoothGuardSetting"])
 
     def test_url_allowlist_not_widened(self):
         pol = json.loads(read(POLICY))
@@ -1142,6 +1145,74 @@ class TestXPasskeyPathAudit(unittest.TestCase):
             src = src.replace('credentials: "omit"', "")   # fetch sans cookies (background.js) : permis
             for bad in ("password", "credential", "navigator.credentials", "one-time-code"):
                 self.assertNotIn(bad, src, (f, bad))
+
+
+def _strict_policy(text):
+    """JSON EFFECTIF tel que Chromium le lira : objet racine, aucune clé en double (la dernière gagnerait en silence)."""
+    def pairs(kv):
+        keys = [k for k, _ in kv]
+        if len(keys) != len(set(keys)):
+            raise ValueError("clé en double : %r" % sorted(k for k in keys if keys.count(k) > 1))
+        return dict(kv)
+    pol = json.loads(text, object_pairs_hook=pairs)
+    if not isinstance(pol, dict):
+        raise ValueError("politique : objet JSON attendu")
+    return pol
+
+
+class TestKioskWebBluetoothPolicy(unittest.TestCase):
+    """0.7.13 — durcissement : Web Bluetooth BLOQUÉ pour les pages du Chromium kiosque (/tv, x.com, twitter.com), par la
+    politique gérée du KIOSQUE (seule lue par opentv-kiosk ; celle du lecteur n'est montée que dans opentv-player).
+    Ni WebAuthn ni l'hybride natif désactivés, aucun droit Bluetooth ajouté (groupes/unités inchangés)."""
+
+    BT_URL_KEYS = ("WebBluetoothAllowedForUrls", "WebBluetoothBlockedForUrls", "WebBluetoothAskForUrls")
+
+    def check(self, pol, where):
+        v = pol.get("DefaultWebBluetoothGuardSetting")
+        self.assertIs(type(v), int, where)                  # entier 2 : jamais true/« 2 » (true vaudrait 1 = autoriser)
+        self.assertEqual(v, 2, where)                        # 2 = BlockWebBluetooth (aucune page ne peut demander)
+        for k in self.BT_URL_KEYS:
+            self.assertNotIn(k, pol, (where, k))             # aucune exception par URL
+        self.assertEqual(pol["DeveloperToolsAvailability"], 2, where)
+        self.assertIn("*", pol["URLBlocklist"], where)
+
+    def test_source_policy_effective_json(self):
+        pol = _strict_policy(read(POLICY))
+        self.check(pol, POLICY)
+        # 0.7.12 avait 25 clés : 0.7.13 n'ajoute QUE celle-ci (rien retiré ; listes d'URL inchangées, autres tests)
+        self.assertEqual(len(pol), 26)
+
+    def test_installed_policy_effective_json_both_paths(self):
+        r = tempfile.mkdtemp(prefix="otvxbt", dir="/tmp")
+        self.addCleanup(shutil.rmtree, r, True)
+        p = sh([INSTALL, "--root", r, "--skip-preflight"])
+        self.assertEqual(p.returncode, 0, p.stdout.decode()[-3000:] + p.stderr.decode()[-3000:])
+        src = open(POLICY, "rb").read()
+        digest = hashlib.sha256(src).hexdigest()
+        man = read(os.path.join(r, "opt/opentv/MANIFEST.sha256")).splitlines()
+        for dst in POLICY_DSTS:
+            full = os.path.join(r, dst.lstrip("/"))
+            with open(full, "rb") as f:
+                got = f.read()
+            self.assertEqual(got, src, dst)                                   # octets livrés = source de vérité
+            self.assertEqual(os.stat(full).st_mode & 0o777, 0o644, dst)
+            self.assertIn("%s  %s" % (digest, dst), man)                      # manifesté avec ce hash exact
+            self.check(_strict_policy(got.decode("utf-8")), dst)
+        # la politique du lecteur reste à part (jamais dans /etc), inchangée sur ce point
+        player = os.path.join(r, "opt/opentv/share/chromium-player-policy/opentv-player.json")
+        self.assertEqual(_strict_policy(read(player))["DefaultWebBluetoothGuardSetting"], 2)
+        for d in ("etc/chromium/policies/managed", "etc/chromium-browser/policies/managed"):
+            self.assertNotIn("opentv-player.json", os.listdir(os.path.join(r, d)))
+
+    def test_no_bluetooth_rights_widened(self):
+        units = os.path.join(PI4, "systemd")
+        kiosk = read(os.path.join(units, "opentv-kiosk.service"))
+        self.assertEqual(re.findall(r"^SupplementaryGroups=(.*)$", kiosk, re.M), ["input"])
+        holders = sorted(f for f in os.listdir(units)
+                         if re.search(r"^SupplementaryGroups=.*\bbluetooth\b", read(os.path.join(units, f)), re.M))
+        self.assertEqual(holders, ["opentv-muse-pair.service"])               # seul détenteur, comme en 0.7.11
+        self.assertNotRegex(read(os.path.join(PI4, "system", "sysusers-opentv.conf")), r"(?m)^m\s+opentv-kiosk\s+bluetooth")
+        self.assertNotIn("bluetooth", code_only(read(KIOSK), "#").lower())    # aucun flag Bluetooth au lanceur
 
 
 class TestInstallUninstallExtension(unittest.TestCase):
