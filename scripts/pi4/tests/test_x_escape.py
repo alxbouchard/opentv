@@ -690,7 +690,24 @@ class TestNavServer(unittest.TestCase):
     def test_client_requires_server_uid_keys_uid_before_reading(self):
         """L2 : read_nav vérifie l'UID du processus SERVEUR (SO_PEERCRED après connect) = compte de l'aide AVANT
         toute lecture ; autre compte (root compris) ou inconnu : refus `peer`, la vue n'est jamais lue."""
-        self.serve()
+        # Banc déterministe : le faux serveur (UN thread, listen(2) ; macOS refuse au-delà de 2 connexions en attente)
+        # signale chaque connexion servie ; le client attend que la précédente ait été servie avant d'en ouvrir une
+        # autre (sinon ECONNREFUSED ou délai -> `unavailable` selon l'ordonnancement des threads).
+        import threading
+        cv, served = threading.Condition(), []
+
+        def view():                                               # côté SERVEUR, après accept et contrôle du pair
+            out = dict(self.VIEW)
+            with cv:
+                served.append(1)
+                cv.notify_all()
+            return out
+        self.serve(view)
+
+        def drained(n):                                           # borne = échec, jamais une nouvelle tentative
+            with cv:
+                self.assertTrue(cv.wait_for(lambda: len(served) >= n, timeout=10.0), "connexion %d non servie" % n)
+                self.assertEqual(len(served), n)
         seen = []
 
         def peer(uid):
@@ -698,12 +715,14 @@ class TestNavServer(unittest.TestCase):
                 seen.append(uid)
                 return uid
             return f
-        for uid in (os.getuid() + 1, 0 if os.getuid() else 1, None):
+        for i, uid in enumerate((os.getuid() + 1, 0 if os.getuid() else 1, None), 1):
             with self.subTest(uid=uid):
                 self.assertEqual(xescape.read_nav(self.d, os.getuid(), peer_uid=peer(uid)),
                                  {"present": False, "error": "peer"})
+                drained(i)
         self.assertEqual(len(seen), 3)
         self.assertEqual(xescape.read_nav(self.d, os.getuid(), peer_uid=peer(os.getuid())), self.VIEW)
+        drained(4)
         with mock.patch.object(xescape.socket.socket, "recv", side_effect=AssertionError("lu avant contrôle")):
             self.assertEqual(xescape.read_nav(self.d, os.getuid(), peer_uid=lambda c: None),
                              {"present": False, "error": "peer"})
