@@ -771,6 +771,7 @@ class TestCanvasUiBrowser(unittest.TestCase):
     def test_sheet_choice_is_the_only_visible_focus_and_selection_survives(self):
         x = self.r("sheet")
         p = x["focusProbe"]
+        self.assertTrue(x["focusSettle"]["settled"], x["focusSettle"])     # sonde après la FIN réelle des transitions
         self.assertEqual(p["inside"], ["Non, garder l'ambiance actuelle"])
         self.assertEqual(p["outside"], [])                                # aucune carte/Réglages marqué dessous
         self.assertEqual(p["ringed"], [])                                 # ni anneau blanc ni agrandissement
@@ -783,6 +784,7 @@ class TestCanvasUiBrowser(unittest.TestCase):
         self.assertEqual(t["before"], "gear")
         self.assertTrue(t["shown"])
         self.assertNotIn("focused", t["gearCls"].split())
+        self.assertTrue(t["settle"]["settled"], t["settle"])
         self.assertEqual((t["probe"]["outside"], t["probe"]["ringed"]), ([], []))
         self.assertEqual(t["probe"]["inside"], ["Non, garder l'ambiance actuelle"])
         self.assertFalse(t["shownAfter"])

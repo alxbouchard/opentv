@@ -386,6 +386,25 @@ const SHEET_FOCUS = () => {
   out.hint = document.getElementById("hint").innerText;
   return out;
 };
+// fin RÉELLE des transitions de focus (anneau/agrandissement, .18 s) des éléments sondés par SHEET_FOCUS : attend
+// Animation.finished de chaque CSSTransition en cours (même instant que transitionend), délai max `ms`, sans rien
+// présumer de la valeur finale ; la sonde reste un échantillon séparé pris ensuite. Un délai écoulé est rapporté
+// (settled=false + transitions restantes), jamais masqué. Un sleep fixe mesurait parfois la dernière image du retour
+// 1,1 → 1 (images headless espacées jusqu'à ~130 ms, fin observée 320–390 ms après l'ouverture de la feuille).
+const focusSettled = (page, ms) => page.evaluate(async (ms) => {
+  const t0 = performance.now(), end = t0 + ms;
+  const pending = () => document.getAnimations().filter((a) => a.transitionProperty !== undefined && a.effect &&
+    a.effect.target && a.effect.target.matches(".card, #gear, #pbtns button") && a.playState !== "finished");
+  let left = pending();
+  while (left.length && performance.now() < end) {
+    await Promise.race([Promise.all(left.map((a) => a.finished.catch(() => null))),
+                        new Promise((r) => setTimeout(r, Math.max(0, end - performance.now())))]);
+    left = pending();
+  }
+  return { settled: left.length === 0, ms: Math.round(performance.now() - t0),
+           pending: left.map((a) => (a.effect.target.id || a.effect.target.className) + ":" + a.transitionProperty +
+                                    "@" + a.playState) };
+}, ms);
 // couches d'ambiance : mode, raisons de pause, animations CSS des quatre couches (état, temps courant, rendu)
 const MOTION = () => {
   const L = [".cv-l1", ".cv-l2", ".cv-l3", "#cvglow"].map((s) => document.querySelector("#cvwall " + s));
@@ -569,6 +588,7 @@ S.sheet = async (browser) => {
   out.shown = await until(() => sheetShown(page), 4000);
   await sleep(400);                       // transitions du focus terminées (anneau, agrandissement)
   out.motionA = await page.evaluate(MOTION);
+  out.focusSettle = await focusSettled(page, 3000);
   out.focusProbe = await page.evaluate(SHEET_FOCUS);
   out.sheetGeom = await page.evaluate(SHEET_GEOM);
   out.hintNo = await hintText(page);
@@ -627,7 +647,7 @@ S.sheetTop = async (browser) => {
   const out = { before: await focusOf(page) };
   setPreview(F.state, pid(8), P.cinema);
   out.shown = await until(() => sheetShown(page), 4000);
-  await sleep(400);
+  out.settle = await focusSettled(page, 3000);   // retour 1,1 → 1 du cercle Réglages terminé (événement, délai max)
   out.probe = await page.evaluate(SHEET_FOCUS);
   out.gearCls = await page.evaluate(() => document.getElementById("gear").className);
   out.motion = await page.evaluate(MOTION);
