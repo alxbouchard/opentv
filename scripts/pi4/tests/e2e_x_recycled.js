@@ -75,7 +75,12 @@ const retry = '<button id="retry">Retry</button>';
     // Hydrate the SAME article; media alone (no author, text, permalink or actions) counts.
     await p.evaluate(() => { const s=document.querySelector('#shell'); // aria-busy may outlive hydration
       s.innerHTML='<video width="200" height="120"></video>'; });
-    await p.waitForSelector('.otvx-help'); await key('ArrowDown'); out.media = await state();
+    // Feed help and recovery panel have separate observers. Require both transitions.
+    const hydratedFeed = async () => {
+      await p.waitForSelector('.otvx-help');
+      await p.locator('.otvx-empty button').waitFor({state:'hidden', timeout:3000});
+    };
+    await hydratedFeed(); await key('ArrowDown'); out.media = await state();
     out.autoLoads = navs - loads;
     // Keep the sized box AND aria-busy through hydration. Only the contents change.
     out.reserved = {};
@@ -91,7 +96,7 @@ const retry = '<button id="retry">Retry</button>';
       const before = navs;
       await key('ArrowUp'); const up = await state(); await key('ArrowUp'); const next = await state();
       await p.locator('#box').evaluate((box, html) => { box.innerHTML = html; }, hydrated);
-      await p.waitForSelector('.otvx-help'); await key('ArrowDown');
+      await hydratedFeed(); await key('ArrowDown');
       out.reserved[name] = {up, next, hydrated: await state(), extraLoads: navs - before};
     }
     await open(shell + post); await p.waitForSelector('.otvx-help'); await key('ArrowDown'); out.mixed = await state();
