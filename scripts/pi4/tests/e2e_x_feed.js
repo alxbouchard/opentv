@@ -440,12 +440,31 @@ const LOGIN = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title
     await page.evaluate(() => window.__reuse());
     s.reuse_ok = await key("Enter", 400);
     s.reuse_acts_delta = s.reuse_ok.acts.length - beforeReuse;
-    // OK sur le post : ouvre le permalien ; Retour (nav.js) : revient au fil
+    // OK sur le post : ouvre le permalien ; Retour (nav.js) : revient au fil. Chaque touche part seulement après le
+    // signal de l'état qu'elle suppose, jamais après un délai fixe : Échap seulement une fois le permalien CHARGÉ et
+    // l'extension initialisée (html.otvx-tv posé par x.js à document_idle, donc nav.js — document_start, même
+    // injection — écoute déjà) ; mesures seulement une fois le fil revenu, initialisé et ses vidéos prêtes. Retour sans
+    // effet, ou filet de nav.js (BACK_FAILSAFE_MS -> /tv) : échec EXPLICITE à cette étape, jamais rattrapé.
+    // Échec : URL courante, journal des navigations du cadre principal et capture, pour distinguer « Retour sans effet »
+    // (resté sur le permalien) de « filet vers /tv » ou d'une ouverture manquée.
+    const navs = [], t0 = Date.now();
+    page.on("framenavigated", (f) => { if (f === page.mainFrame()) { navs.push((Date.now() - t0) + "ms " + f.url()); } });
+    const reach = (fn, what, ms) => page.waitForFunction(fn, null, { timeout: ms }).catch(async (e) => {
+      const shot = cfg.shots ? path.join(cfg.shots, `x-feed-back-fail-${cfg.label}.png`) : "";
+      if (shot) { await page.screenshot({ path: shot }).catch(() => null); }
+      throw new Error(what + " — page : " + page.url() + " — navigations : " + JSON.stringify(navs.slice(-6)) +
+        (shot ? " — capture : " + shot : "") + " — " + String(e && e.message || e).split("\n")[0]); });
     await key("ArrowDown", 150); await key("ArrowUp", 150);
-    s.open = await key("Enter", 900);
+    await page.keyboard.press("Enter");
+    await reach(() => location.pathname === "/zoe/status/99" && document.readyState === "complete" &&
+      document.documentElement.classList.contains("otvx-tv"), "OK : permalien non ouvert ou non initialisé", 8000);
+    s.open = await st();
     await page.keyboard.press("Escape");
-    await page.waitForFunction(() => location.pathname === "/home", null, { timeout: 5000 }).catch(() => null);
-    await sleep(600);
+    await reach(() => location.pathname === "/home", "Retour : fil /home non atteint", 5000);
+    await reach(() => document.readyState === "complete" && document.documentElement.classList.contains("otvx-tv") &&
+      !!document.querySelector(".otvx-help") && ["p3", "p5", "p7"].every((id) => {
+        const v = document.getElementById("v-" + id); return !!v && (v.readyState >= 2 || v.getAttribute("data-mse-err") || v.error); }),
+      "Retour : fil revenu mais non initialisé (aide, vidéos)", 15000);
     s.back = await st();
     // vidéos : jamais lancées par l'extension (aucun autoplay), commandes natives intactes
     s.videos_after = await page.evaluate(() => ["p3", "p5", "p7"].map((id) => { const v = document.getElementById("v-" + id);
