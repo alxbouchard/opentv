@@ -19,7 +19,7 @@ REPO = Path(PI4).parents[1]
 
 class TestEmptyVersion(unittest.TestCase):
     def test_recovery_release_is_distinguishable(self):
-        self.assertEqual(VERSION, "0.7.17")
+        self.assertEqual(VERSION, "0.7.18")
         self.assertEqual(json.loads((Path(EXT) / "manifest.json").read_text())["version"], VERSION)
 
 
@@ -31,7 +31,8 @@ class TestEmptyEndToEnd(unittest.TestCase):
         assert NODE and chrome
         rejected = '689c9dd655ca30d9f06509a05e7ef5efca38e5f3'
         with tempfile.TemporaryDirectory(prefix='otvx-recycle-') as tmp:
-            for rev in (PROD, rejected, 'candidate'):
+            reviewed = '298e0c6c2fad7bb039e4f7950ffca0437eaa3a19'
+            for rev in (PROD, rejected, reviewed, 'candidate'):
                 with self.subTest(rev=rev):
                     work = Path(tmp) / rev
                     work.mkdir()
@@ -58,7 +59,7 @@ class TestEmptyEndToEnd(unittest.TestCase):
                         if rev == rejected:
                             expected.append(['action', True, '/fixture/status/2'])
                         self.assertEqual(clicks, expected, name)
-                    good = rev == 'candidate'
+                    good = rev in (reviewed, 'candidate')
                     self.assertEqual(result['lateNative'], [] if good else [['action', True, '/fixture/status/2']])
                     self.assertEqual(result['shellUp'], dict(selected='' if good else 'shell', focus='',
                                      reload=good, recovery=good, feed=not good))
@@ -69,6 +70,17 @@ class TestEmptyEndToEnd(unittest.TestCase):
                     self.assertEqual(result['autoLoads'], 0)
                     self.assertEqual(result['modal']['focus'], 'dismiss')
                     self.assertEqual(result['modalActs'], [['dismiss', True, '/fixture/status/1']])
+                    # Cumulative journal of synthetic fixture IDs. Every ← gets a fresh
+                    # outcome; neither a missing response nor a refusal toast proves zero sends.
+                    safe = rev == 'candidate'
+                    journal = []
+                    for field, label, deliberate in [('shareA', 'A', True), ('shareStale', 'B', False),
+                                                     ('shareReselected', 'B', True), ('shareOutside', 'B', False),
+                                                     ('shareNoKey', 'A', False)]:
+                        refused = safe and not deliberate
+                        if not refused:
+                            journal.append(label)
+                        self.assertEqual(result[field], dict(ids=journal, pick=refused), field)
 
     def test_disabled_prod_candidate_sequential(self):
         # Baseline ref is mandatory: never silently lose the negative control in an archive checkout.

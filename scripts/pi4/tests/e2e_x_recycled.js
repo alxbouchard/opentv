@@ -67,6 +67,42 @@ const retry = '<button id="retry">Retry</button>';
     await open(shell + post); await p.waitForSelector('.otvx-help'); await key('ArrowDown'); out.mixed = await state();
     await p.evaluate(() => document.body.insertAdjacentHTML('beforeend','<div role="dialog" aria-modal="true"><button id="dismiss">Dismiss</button></div>'));
     await key('ArrowDown'); out.modal = await state(); await key('Enter'); out.modalActs = await p.evaluate(() => window.acts);
+    // Observe the *sender* boundary. An unpaired worker's refusal toast alone says
+    // nothing about which message it received. Never return a reply or journal payloads.
+    const worker = ctx.serviceWorkers()[0];
+    await worker.evaluate(() => {
+      self.fixtureIds = [];
+      chrome.runtime.onMessage.addListener(m => {
+        if (m.type === 'share') self.fixtureIds.push(m.text === 'Fixture A' ? 'A' : m.text === 'Fixture B' ? 'B' : '?');
+      });
+    });
+    const ids = () => worker.evaluate(() => self.fixtureIds.slice());
+    const share = async () => {
+      // Only the extension reveals its toast: wait until the refusal or the real
+      // worker reply has been processed (and thus the passive listener ran).
+      await p.locator('.otvx-toast').evaluateAll(nodes => nodes.forEach(n => { n.hidden = true; }));
+      await key('ArrowLeft'); await p.waitForSelector('.otvx-toast:visible');
+      return {ids: await ids(), pick: (await p.locator('.otvx-toast').innerText()).includes('↑ ↓')};
+    };
+    const neighbor = '<article id="neighbor" data-testid="tweet"><a href="/fixture/status/3"><time>1h</time></a></article>';
+    await open(neighbor + post); await key('ArrowDown'); await key('ArrowDown');
+    assert.equal((await state()).selected, 'post');
+    out.shareA = await share();
+    await p.evaluate(() => {
+      document.querySelector('#link').href = '/fixture/status/2';
+      document.querySelector('#post [data-testid=tweetText]').textContent = 'Fixture B';
+    });
+    out.shareStale = await share();
+    await key('ArrowUp'); assert.equal((await state()).selected, 'neighbor');
+    await key('ArrowDown'); assert.equal((await state()).selected, 'post');
+    out.shareReselected = await share();
+    // Move the still visible, still identically keyed article outside the feed.
+    // The neighboring article keeps feed navigation active during the check.
+    await p.evaluate(() => document.body.appendChild(document.querySelector('#post')));
+    out.shareOutside = await share();
+    await open(neighbor + post.replace('/fixture/status/1', '/fixture/unknown'));
+    await key('ArrowDown'); await key('ArrowDown'); assert.equal((await state()).selected, 'post');
+    out.shareNoKey = await share();
     console.log(JSON.stringify(out));
   } finally { if (ctx) await ctx.close(); fs.rmSync(profile, {recursive:true, force:true}); }
 })().catch(e => { console.error(e); process.exitCode=1; });

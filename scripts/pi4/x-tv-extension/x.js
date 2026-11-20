@@ -368,8 +368,12 @@
     return { author: author, text: text };
   }
   function shareFocused() {
-    if (!focused || !focused.isConnected) { toast(MSG_PICK); return; }
     if (sharing) { return; }
+    // A connected cell can now represent a different post. Verify the selection
+    // against the current rendered feed BEFORE reading any author or message.
+    if (!focusedKey || !posts().includes(focused) || permalink(focused) !== focusedKey) {
+      setFocus(null); toast(MSG_PICK); return;
+    }
     const p = extract(focused);
     sharing = true;
     try {

@@ -1,4 +1,4 @@
-# X TV 0.7.17 — accueil vide et récupération à la télécommande
+# X TV 0.7.18 — accueil vide et récupération à la télécommande
 
 ## Constat établi, cause inconnue
 
@@ -91,11 +91,18 @@ matrice longue de release complète n'est revendiquée.
 ## Gate terrain et prochain geste
 
 Pour la contre-revue hors ligne : dans un clone local avec historique, lancer la commande de validation
-ci-dessus. `test_recycled_action_and_loading_article` installe successivement les trois extensions en
+ci-dessus. `test_recycled_action_and_loading_article` installe successivement les quatre extensions en
 rootfs temporaires. Comparer `recycled-*.json` : 0.7.15 bloque le OK sur B dans la transition avant/après
 rafraîchissement, `689c9dd` le laisse passer ; les deux sélectionnent le squelette. Le nouveau SHA doit
 laisser zéro activation de B, un OK initial valide sur A par appui tenu, et sélectionner Recharger puis
 Retry, le média apparu sur place, le vrai post voisin et le bouton de modale.
+
+Pour le partage manuel (←), lire dans les mêmes JSON `shareA`, `shareStale` et `shareReselected`.
+Sur `298e0c6`, la cellule A devient B sans changer de nœud : le journal passe de `[A]` à `[A,B]`
+sans nouvelle sélection. Sur le correctif, il doit rester `[A]`, puis devenir `[A,B]` seulement
+après resélection explicite. Hors colonne ou sans permalien vérifiable, aucun message supplémentaire.
+Le journal passif du service worker de test ne conserve que les identifiants de fixture ; il ne répond
+à aucun message. Le texte de la notification d’un récepteur non appairé ne prouve pas l’absence d’envoi.
 
 Ni push ni déploiement dans cette tâche. Après revue indépendante puis installation séparément autorisée
 du SHA exact : conserver la connexion du propriétaire, ouvrir X avec la Samsung. Si le spinner persiste,
