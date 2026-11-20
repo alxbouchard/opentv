@@ -12,7 +12,7 @@
  *           un champ de saisie (Retour arrière y efface toujours un caractère) ; autre page (post, fil de réponses,
  *           modale routée de X) : page précédente SEULEMENT si une entrée x.com précédente existe réellement
  *           (API Navigation), sinon OpenTV /tv ; filet : si rien ne change en BACK_FAILSAFE_MS, OpenTV /tv.
- *  Connexion (mode « contrôles », SEULEMENT hors fil : aucune colonne principale) : ↑ ↓ (et ← → hors champ) parcourent
+ *  Connexion / colonne sans article rendu (mode « contrôles ») : ↑ ↓ (et ← → hors champ) parcourent
  *           les contrôles VISIBLES et activables (boutons, liens, champs) dans l'ordre du document, limités à la
  *           fenêtre modale de X s'il y en a une ; anneau TV très visible ; au chargement, AVANT toute touche ou geste
  *           réel, le lien générique « Sign in » / « Se connecter » (href /i/jf/onboarding/web?mode=login analysé)
@@ -215,11 +215,21 @@
     for (let i = dialogs.length - 1; i >= 0; i--) { if (visible(dialogs[i])) { return dialogs[i]; } }
     return null;
   }
-  // « dialog » (fenêtre modale visible, même au-dessus du fil) > « feed » (colonne principale) > « controls »
+  // « dialog » (fenêtre modale visible) > « feed » (colonne + article rendu) > « controls »
   function pageMode() {
     if (!document.body) { return "loading"; }
     if (modalDialog()) { return "dialog"; }
-    return document.querySelector(COLUMN_SEL) ? "feed" : "controls";
+    return feedReady() ? "feed" : "controls";
+  }
+  // 0.7.16 : une colonne vide/spinner n'est pas un fil navigable. Les contrôles natifs (Retry, onglets)
+  // restent atteignables. Pas de diagnostic réseau déduit du DOM ; aucun délai ni rechargement automatique.
+  function feedReady() {
+    const col = document.querySelector(COLUMN_SEL);
+    return !!col && Array.from(col.querySelectorAll('article[data-testid="tweet"]')).some((p) => {
+      const r = p.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && !p.closest('[hidden], [inert], [aria-hidden="true"]') &&
+        (typeof p.checkVisibility !== "function" || p.checkVisibility({ opacityProperty: true, visibilityProperty: true }));
+    });
   }
   function loginMode() { const m = pageMode(); return m === "dialog" || m === "controls"; }
   function scope() { return modalDialog() || document.body; }
@@ -313,11 +323,15 @@
       if (loginHelp) { loginHelp.remove(); loginHelp = null; }
       return;
     }
-    if (loginHelp && loginHelp.isConnected) { return; }
+    const text = EMPTY && EMPTY.empty() ? EMPTY.hint() : HELP_TEXT;
+    if (loginHelp && loginHelp.isConnected) {
+      if (loginHelp.textContent !== text) { loginHelp.textContent = text; }
+      return;
+    }
     loginHelp = document.createElement("div");
     loginHelp.className = "otvx-login-help";
     loginHelp.setAttribute("aria-hidden", "true");
-    loginHelp.textContent = HELP_TEXT;
+    loginHelp.textContent = text;
     document.documentElement.appendChild(loginHelp);
     if (getComputedStyle(loginHelp).position !== "fixed") { applyInline(loginHelp, HELP_FALLBACK); }   // repli
   }
@@ -371,6 +385,9 @@
   function loginKey(e) {
     if (e.altKey || e.ctrlKey || e.metaKey || e.isComposing || !loginMode()) { return false; }
     const ae = document.activeElement;
+    if (EMPTY && EMPTY.button(ae) && okKey(e) && e.repeat) {
+      e.preventDefault(); e.stopImmediatePropagation(); markHandled(e); return true;
+    }
     const m = moveDir(e);
     if (m) {
       if (editable(ae) && !(m.vertical && leaveField(ae))) { return false; }   // ← →, zone où Alex tape : natifs
@@ -420,6 +437,7 @@
     refreshTimer = 0;
     const mode = pageMode();
     probeMode(mode);
+    if (EMPTY) { EMPTY.refresh(); }
     const on = mode === "dialog" || mode === "controls";
     ensureHelp(on);
     if (!on) {
@@ -520,10 +538,14 @@
     if (e.repeat) { return; }
     if (a === "home") { goHome(); } else { back(); }
   }
+  // Module de récupération borné (empty.js, même monde isolé), indépendant de l'identité/connexion.
+  const EMPTY = window.__otvxEmpty ? window.__otvxEmpty({ column: COLUMN_SEL, controls: CONTROL_SEL,
+    ready: feedReady, dialog: modalDialog, visible: visible }) : null;
   try {
     Object.defineProperty(window, "__otvxNav", {   // monde isolé de l'extension seulement (x.js) ; figé
       value: Object.freeze({
         dialog: () => !!modalDialog(),
+        feedReady: () => feedReady(),
         leaveField: (el) => leaveField(el),
         markHandled: (e) => markHandled(e)
       }),
@@ -535,7 +557,14 @@
   window.addEventListener("pointerdown", (e) => { if (e.isTrusted) { userActed = true; disarm(); } }, true);
   window.addEventListener("click", onActivate, true);   // clic de confiance seulement (OK réel ou pointeur) : arme
   window.addEventListener("focusin", schedule, true);   // focus posé par X (inscription comprise) : revérifié
-  new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });
+  new MutationObserver((records) => {
+    if (records.length && records.every((r) => r.target.nodeType === 1 &&
+        r.target.closest('.otvx-empty, .otvx-login-help, .otvx-help, .otvx-toast'))) { return; }
+    schedule();
+  }).observe(document.documentElement, { childList: true, subtree: true, attributes: true,
+    attributeFilter: ["hidden", "inert", "aria-hidden", "style", "class"] });
+  window.addEventListener("resize", schedule);
+  window.addEventListener("scroll", schedule, true);
   if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule); } else { schedule(); }
   window.addEventListener("load", schedule);
   window.addEventListener("pagehide", probeLeave, true);

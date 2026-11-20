@@ -21,7 +21,8 @@
  * script n'agit plus (jamais de fil caché déplacé ni de post ouvert derrière) et masque son bandeau d'aide.
  * Champ autofocusé par X dans le fil (0.7.8) : ↑ ↓ en sortent (champ d'une ligne, ou zone où Alex n'a rien tapé) ;
  * ← → OK y restent natifs. Toute touche traitée ici est signalée à la sonde canari de nav.js (jamais sa valeur).
- * Mode fil seulement (colonne principale présente) : classe html.otvx-tv (CSS TV, x.css) + bandeau d'aide + largeur
+ * Colonne principale présente : classe html.otvx-tv (CSS TV, x.css) + largeur ; aide/touches seulement avec article rendu.
+ * Largeur
  * réelle (0.7.14 : chaque ancêtre effectif main -> colonne -> post marqué data-otvx-lane, aucun plafond de X ne
  * survit). Page de connexion ou sans fil : rien n'est stylé ni rempli (Alex se connecte lui-même). DOM dynamique de
  * X : MutationObserver regroupé (une passe au plus toutes les REFRESH_MS). Aucun état de compte mémorisé : l'état
@@ -385,7 +386,7 @@
     const a = keyAction(e);
     if (!a) { return; }
     const feed = feedMode();
-    if (!feed || dialogOpen()) { return; }   // fenêtre modale visible : nav.js la gère, jamais le fil caché
+    if (!feed || dialogOpen() || (NAV && !NAV.feedReady())) { return; }   // vide : contrôles natifs, nav.js
     const ae = document.activeElement;
     if (editable(ae)) {   // saisie : touches natives, sauf ↑ ↓ qui quittent un champ autofocusé / d'une ligne
       if (!((a === "up" || a === "down") && NAV && NAV.leaveField(ae))) { return; }
@@ -454,12 +455,15 @@
       quitActions();   // DOM réutilisé par X pour un autre post : jamais d'action sur un post non choisi
       toast(MSG_STALE);
     }
-    ensureHelp(on && !dialogOpen());
+    ensureHelp(on && !dialogOpen() && (!NAV || NAV.feedReady()));
   }
-  const observer = new MutationObserver(() => {
+  const observer = new MutationObserver((records) => {
+    if (records.length && records.every((r) => r.target.nodeType === 1 &&
+        r.target.closest('.otvx-empty, .otvx-login-help, .otvx-help, .otvx-toast'))) { return; }
     if (!refreshTimer) { refreshTimer = setTimeout(refresh, REFRESH_MS); }
   });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
+  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true,
+    attributeFilter: ["hidden", "inert", "aria-hidden", "style", "class"] });
   window.addEventListener("keydown", onKey, true);
   refresh();
 })();

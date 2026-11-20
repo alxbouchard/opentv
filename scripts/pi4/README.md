@@ -1,5 +1,8 @@
 # OpenTV Raspberry Pi 4 — prototype (« Pi neuve → HDMI → QR → config → OpenTV → agent »)
 
+**X TV 0.7.16 — fil vide** : [constat, récupération explicite à la télécommande, tests et gate terrain](../../docs/opentv-x-empty-feed.md).
+Corrige le mode D-pad avant le premier article ; ne prétend pas résoudre la cause distante du spinner.
+
 Statut : **MVP vérifié hors matériel seulement** (tests unitaires/intégration, rootfs temporaire, Chromium headless
 sur macOS). Aucune Raspberry Pi n'a encore exécuté ce code : **rien n'est déclaré plug-and-play** tant que la
 checklist terrain ci-dessous n'est pas entièrement cochée sur une vraie Pi 4.

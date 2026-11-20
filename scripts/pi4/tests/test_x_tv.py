@@ -34,7 +34,7 @@ from tests.test_service import make_app, Servers, find_chromium
 from opentv_pi import VERSION, agentport, agents, config, mcp, musebridge, tools, web, xcontext, xprobe
 
 EXT = os.path.join(PI4, "x-tv-extension")
-EXT_FILES = ("manifest.json", "background.js", "nav.js", "nav.css", "x.js", "x.css", "tvkey.js", "qrcode.js", "xentry.js")
+EXT_FILES = ("manifest.json", "background.js", "empty.js", "nav.js", "nav.css", "x.js", "x.css", "tvkey.js", "qrcode.js", "xentry.js")
 EXT_DST = "/opt/opentv/share/x-tv-extension"
 INSTALL = os.path.join(PI4, "install.sh")
 UNINSTALL = os.path.join(PI4, "uninstall.sh")
@@ -510,9 +510,9 @@ class TestXExtensionStatic(unittest.TestCase):
         self.assertEqual(len(cs), 4)
         nv = [c for c in cs if "nav.js" in c["js"]][0]                  # Retour/Accueil : autonome, dès le début
         self.assertEqual(sorted(nv["matches"]), ["https://twitter.com/*", "https://x.com/*"])
-        self.assertEqual((nv["js"], nv["run_at"], nv.get("all_frames", False)), (["nav.js"], "document_start", False))
+        self.assertEqual((nv["js"], nv["run_at"], nv.get("all_frames", False)), (["empty.js", "nav.js"], "document_start", False))
         self.assertEqual(nv["css"], ["nav.css"])                           # anneau/consigne : feuille de l'extension
-        self.assertEqual(cs[0]["js"], ["nav.js"])                         # écouteur posé avant celui du fil
+        self.assertEqual(cs[0]["js"], ["empty.js", "nav.js"])             # module vide + écouteur avant celui du fil
         xs = [c for c in cs if "x.js" in c["js"]][0]
         self.assertEqual(sorted(xs["matches"]), ["https://twitter.com/*", "https://x.com/*"])
         self.assertEqual((xs["js"], xs["css"], xs.get("all_frames", False)), (["x.js"], ["x.css"], False))
@@ -531,7 +531,7 @@ class TestXExtensionStatic(unittest.TestCase):
             self.assertEqual(a.read(), b.read())                                   # copie exacte, jamais modifiée
 
     def test_no_sensitive_api_no_click_no_write_action(self):
-        for f in ("background.js", "nav.js", "x.js", "tvkey.js", "xentry.js"):
+        for f in ("background.js", "empty.js", "nav.js", "x.js", "tvkey.js", "xentry.js"):
             src = code_only(read(os.path.join(EXT, f)))
             if f == "x.js":   # 0.7.14 : identifiants des VRAIS boutons J'aime/Enregistrer (focus seulement) sur UNE
                 # ligne exacte, retirée avant les interdictions ci-dessous (test_x_feed : aucun clic, aucun événement)
@@ -595,10 +595,10 @@ class TestXExtensionStatic(unittest.TestCase):
         self.assertIn('type: "home"', nav)
         self.assertNotIn("history.back", x)
         self.assertNotIn('type: "home"', x)
-        # Retour/Accueil : aucune dépendance au fil ; la colonne principale ne sert QU'À borner le mode « contrôles »
-        # de la connexion (loginMode), jamais à Retour/Accueil
-        self.assertEqual(nav.count("COLUMN_SEL"), 2)
-        self.assertIn('return document.querySelector(COLUMN_SEL) ? "feed" : "controls";', nav)
+        # Retour/Accueil reste indépendant du fil. 0.7.16 : colonne + article rendu pour le mode fil ;
+        # la récupération /home vide vérifie aussi la colonne, jamais Retour/Accueil.
+        self.assertEqual(nav.count("COLUMN_SEL"), 3)
+        self.assertIn('return feedReady() ? "feed" : "controls";', nav)
         self.assertIn('if (modalDialog()) { return "dialog"; }', nav)     # fenêtre modale visible : gagne sur le fil
         for fn in ("function back()", "function goHome()", "function keyAction(", "function direct()"):
             body = nav[nav.index(fn):nav.index("\n  }\n", nav.index(fn))]
@@ -948,7 +948,7 @@ class TestKioskAndPolicy(unittest.TestCase):
         self.assertIn("#OPENTV_X_TV=1", read(os.path.join(PI4, "opentv-pi.env.example")))
 
     def test_version_and_docs(self):
-        self.assertEqual(VERSION, "0.7.15")
+        self.assertEqual(VERSION, "0.7.16")
         readme = read(os.path.join(PI4, "README.md"))
         for need in ("X TV Mode", "OPENTV_X_TV=0", "x_context", "non fiable", "connecte-toi", xcontext.EXTENSION_ID):
             self.assertTrue(need in readme, "README sans « %s »" % need)

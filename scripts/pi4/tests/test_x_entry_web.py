@@ -150,7 +150,7 @@ class TestStatic(unittest.TestCase):
                          "`unknown`", "incertain"):
                 self.assertIn(need, doc)
             self.assertNotRegex(doc, r"(?i)wipe it immediately|tout est effacé")   # jamais d'effacement promis
-        self.assertEqual(VERSION, "0.7.15")
+        self.assertEqual(VERSION, "0.7.16")
         man = json.loads(read(os.path.join(EXT, "manifest.json")))
         self.assertEqual(man["version"], VERSION)
         # accueil « / » : xentry.js injecté sur x.com et twitter.com SEULEMENT (www./mobile. : porte oui, script non) ;
@@ -165,7 +165,7 @@ class TestStatic(unittest.TestCase):
     def test_line_caps(self):
         caps = {"opentv_pi/xentry.py": 400, "x-tv-extension/xentry.js": 600, "ui/xphone.js": 240,
                 "opentv_pi/web.py": 1538, "opentv_pi/app.py": 1400, "opentv_pi/xprobe.py": 280,
-                "x-tv-extension/nav.js": 560, "x-tv-extension/background.js": 320}
+                "x-tv-extension/nav.js": 580, "x-tv-extension/empty.js": 100, "x-tv-extension/background.js": 320}
         over = []
         for f, cap in caps.items():
             n = len(read(os.path.join(PI4, f)).splitlines())
