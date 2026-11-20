@@ -515,6 +515,23 @@ def cmd_x_escape_action(a):
     return _out(rep, 0)
 
 
+def cmd_poweroff_action(a):
+    """(root, opentv-poweroff.service, sans capacité) Réglages « Éteindre la boîte » : demande du service réclamée,
+    vérifiée (dossier, propriétaire, schéma, MÊME démarrage, âge borné) et toujours retirée. Sortie 0 SEULEMENT pour
+    une demande valide : systemd lance alors poweroff.target (OnSuccess= de l'unité). Aucune commande exécutée ici.
+    Sorties : 0 arrêt, 1 rien à faire (aucune demande, retirée par le service), 2 refus."""
+    import pwd
+    from . import bootid, poweroff
+    cfg = config.Config.load(a.env)
+    try:
+        pw = pwd.getpwnam(cfg.service_user)
+    except KeyError:
+        return _out({"action": "refused", "reason": "accounts"}, 2)
+    rep = poweroff.run_action(cfg.poweroff_dir, pw.pw_uid, pw.pw_gid, bootid.read(a.proc_root), poweroff.boottime(),
+                              uninstalling=cfg.uninstalling_marker, enabled=cfg.poweroff, log=log)
+    return _out(rep, {"poweroff": 0, "none": 1, "withdrawn": 1}.get(rep["action"], 2))
+
+
 def cmd_x_probe(a, timeout=3.0):
     """Lecture opérateur de la sonde canari X (root, xstatus) : écoute TCP du service vérifiée (compte du service),
     GET xprobe.STATUS_PATH (le service vérifie lui-même l'UID du pair : root), réponse revalidée sur un schéma FERMÉ
@@ -829,6 +846,9 @@ def build_parser():
     sub.add_parser("x-escape-helper", help="(opentv-keys) X TV : touche Retour Samsung (KEY_EXIT) -> /tv quand X est "
                    "ouvert (systemd)")
     sub.add_parser("x-escape-action", help="(root) X TV : relance bornée du kiosque sur demande vérifiée (systemd)")
+    po = sub.add_parser("poweroff-action", help="(root, opentv-poweroff.service) Réglages « Éteindre la boîte » : "
+                                                "demande confirmée à la TV vérifiée ; sortie 0 => systemd éteint")
+    po.add_argument("--proc-root", default="/proc", help=argparse.SUPPRESS)   # racine de test (boot_id)
     sub.add_parser("x-probe", help="(root) X TV canari : dernière sonde de l'extension sur /tv et x.com (battement, "
                                    "mode, compteurs de touches par classe ; mémoire du service, TTL court)")
     pb = sub.add_parser("playback", help="porte de production de « Regarder » : status | promote | demote")
@@ -883,6 +903,7 @@ def main(argv):
         return _out({"ok": False, "error": "id_required"}, 2)
     return {"serve": cmd_serve, "player-daemon": cmd_player_daemon, "player-keys": cmd_player_keys,
             "x-escape-helper": cmd_x_escape_helper, "x-escape-action": cmd_x_escape_action, "x-probe": cmd_x_probe,
+            "poweroff-action": cmd_poweroff_action,
             "playback": cmd_playback, "preflight": cmd_preflight, "health": cmd_health, "net-helper": cmd_net_helper,
             "ap-guard": cmd_ap_guard, "agent": cmd_agent, "setup": cmd_setup, "cec": cmd_cec,
             "cec-bootstrap": cmd_cec_bootstrap, "cec-return-monitor": cmd_cec_return_monitor,

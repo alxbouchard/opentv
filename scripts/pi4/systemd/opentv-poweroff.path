@@ -1,0 +1,12 @@
+[Unit]
+Description=OpenTV Pi - surveille la demande « Eteindre la boite » confirmee sur la TV (Reglages)
+
+[Path]
+# /run (tmpfs) : aucune demande ne survit a un demarrage ; dossier tmpfiles root:opentv 0730
+PathExists=/run/opentv-poweroff/request
+Unit=opentv-poweroff.service
+TriggerLimitIntervalSec=10
+TriggerLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

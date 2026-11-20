@@ -65,6 +65,10 @@ DEFAULTS = {
     # X TV — saisie de l'IDENTIFIANT X depuis le téléphone appairé (0.7.10, xentry) : 0 par défaut (aucune route,
     # aucune UI, aucune séance) ; 1 = canari explicite seulement
     "OPENTV_X_PHONE_ENTRY": "0",
+    # Réglages → « Éteindre la boîte » (0.7.23, poweroff.py) : arrêt propre confirmé à la TV (télécommande ou pavé du
+    # téléphone appairé), exécuté par systemd (opentv-poweroff.service, OnSuccess=poweroff.target). 0 = entrée absente,
+    # routes refusées, action root refusée (retour arrière sans désinstaller)
+    "OPENTV_POWEROFF": "1",
     # « Regarder » : source approuvée hors Git (root:opentv 0640, voir source.py) et contrôleur du lecteur
     # (opentv-player.service, compte opentv-kiosk) joint par socket Unix authentifié
     "OPENTV_SOURCE_FILE": "/etc/opentv/source.env",
@@ -192,6 +196,12 @@ class Config:
         self.remote_mdns = _bool(e["OPENTV_REMOTE_MDNS"], "OPENTV_REMOTE_MDNS")
         self.x_tv = _bool(e["OPENTV_X_TV"], "OPENTV_X_TV")
         self.x_phone_entry = _bool(e["OPENTV_X_PHONE_ENTRY"], "OPENTV_X_PHONE_ENTRY")
+        self.poweroff = _bool(e["OPENTV_POWEROFF"], "OPENTV_POWEROFF")
+        # demande d'arrêt : tmpfs SEULEMENT (/run/opentv-poweroff, tmpfiles root:opentv 0730 ; jamais créé par le
+        # service) ; témoin de désinstallation lu par l'action root (même parent que OPENTV_RUN_DIR)
+        run_parent = os.path.dirname(self.run_dir.rstrip("/"))
+        self.poweroff_dir = self.run_dir.rstrip("/") + "-poweroff"
+        self.uninstalling_marker = os.path.join(run_parent, "opentv-uninstalling")
         self.source_file = e["OPENTV_SOURCE_FILE"]
         self.player_socket = e["OPENTV_PLAYER_SOCKET"]
         self.playback_marker = e["OPENTV_PLAYBACK_MARKER"]

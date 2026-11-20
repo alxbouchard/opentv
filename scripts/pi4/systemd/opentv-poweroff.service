@@ -1,0 +1,49 @@
+[Unit]
+Description=OpenTV Pi - Reglages « Eteindre la boite » : arret propre sur demande confirmee a la TV (root, sans capacite)
+Documentation=file:///opt/opentv/README.md
+# Tiree par opentv-poweroff.path seulement (jamais activee : pas de section Install ; jamais lancee a la main).
+# opentv-pi poweroff-action reclame la demande (/run/opentv-poweroff/request), la verifie (dossier root:opentv 0730,
+# fichier regulier a lien unique du compte opentv, schema ferme, MEME boot_id, age <= 30 s), la retire toujours et
+# sort 0 SEULEMENT si elle est valide (1 = rien, 2 = refus). L'arret lui-meme est fait par systemd : poweroff.target,
+# job « replace-irreversibly » (comme systemctl poweroff). Aucune commande ni aucun argument ne vient de la demande ;
+# aucun processus OpenTV n'execute de programme ; aucune trame CEC, aucun ordre au televiseur.
+RefuseManualStart=yes
+OnSuccess=poweroff.target
+OnSuccessJobMode=replace-irreversibly
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/opentv/opentv.env
+ExecStart=/usr/bin/python3 -I /opt/opentv/bin/opentv-pi poweroff-action
+TimeoutStartSec=20
+UMask=0077
+NoNewPrivileges=yes
+# aucune capacite : root proprietaire du dossier (0730) lit la demande 0644, retire le nom, ecrit l'issue 0644
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ReadWritePaths=-/run/opentv-poweroff
+InaccessiblePaths=-/etc/opentv/tmdb
+InaccessiblePaths=-/var/lib/opentv/canvas
+InaccessiblePaths=-/var/lib/opentv -/var/lib/opentv-kiosk -/etc/NetworkManager/system-connections -/etc/opentv/source.env
+InaccessiblePaths=-/run/opentv-musejobs -/run/opentv-player -/run/opentv-player-keys -/run/opentv-cec
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM

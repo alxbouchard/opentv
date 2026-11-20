@@ -28,7 +28,7 @@ import threading
 import time
 import urllib.parse
 
-from . import VERSION, agents, bounded, musesetup, museweb, phoneremote, validate, wifiscan, xentry, xprobe
+from . import VERSION, agents, bounded, musesetup, museweb, phoneremote, poweroff, validate, wifiscan, xentry, xprobe
 from . import app as appmod   # constantes d'erreur du formulaire (app n'importe pas web : pas de cycle)
 
 TV_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; "
@@ -330,8 +330,8 @@ class TVHandler(_Base):
             return self.send_json(403, {"ok": False, "error": "forbidden"})
         if not self._key_ok():
             return self.send_json(403, {"ok": False, "error": TV_KEY_ERROR})
-        if path in xprobe.POSTS:   # X TV (partage, sonde, témoin « X ouvert ») : portes propres dans xprobe/xcontext
-            return self.send_json(*xprobe.POSTS[path](self, self.app))
+        if path in xprobe.POSTS or path in poweroff.POSTS:   # X TV (xprobe/xcontext), arrêt (poweroff) : portes propres
+            return self.send_json(*(xprobe.POSTS.get(path) or poweroff.POSTS[path])(self, self.app))
         if (self.headers.get("Content-Type") or "").split(";")[0].strip() != "application/json":
             return self.send_json(415, {"ok": False, "error": "content_type"})
         raw = self.read_body(MAX_JSON)

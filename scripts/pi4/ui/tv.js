@@ -65,6 +65,17 @@
   var MSG_OFFLINE = "Reconnexion à OpenTV…";
   var MSG_RELOAD = "OpenTV a redémarré : rechargement de l'écran…";
   var MSG_STUCK = "L'écran OpenTV ne se reconnecte pas. Redémarre la boîte OpenTV si cela dure.";
+  // Réglages « Éteindre la boîte » (0.7.23) : feuille « Annuler » au focus ; OK sur « Éteindre » compté seulement après
+  // POWER_ARM_MS passées sur ce choix et avec le défi du service (OK tenu, double OK : jamais une confirmation). Puis
+  // écran d'arrêt honnête, jamais remplacé par « Reconnexion… » ; s'il est encore servi après POWER_STUCK_MS, l'arrêt
+  // n'a pas eu lieu : message clair, Retour revient à OpenTV.
+  var pw = null, powerSeq = null, POWER_ARM_MS = 500, POWER_STUCK_MS = 120000;
+  var MSG_POWER_HINT = "Pour confirmer, appuie de nouveau sur OK.";
+  var MSG_POWER_REQ = "Arrêt demandé…\nNe débranche pas encore la boîte.";
+  var MSG_POWER_ON = "Arrêt en cours. Ne débranche pas encore :\nattends que l'image disparaisse, puis encore 30 secondes.\n" +
+                     "Pour la rallumer : débranche puis rebranche son alimentation.";
+  var MSG_POWER_KO = "L'arrêt n'a pas démarré : la boîte reste allumée.\nRéessaie : Réglages → Éteindre la boîte.";
+  var MSG_POWER_STUCK = "L'arrêt n'a pas abouti : la boîte est encore allumée.\nRetour pour revenir à OpenTV, puis réessaie.";
 
   function api(method, path, body) {
     var h = { "X-OpenTV-TV": KEY };
@@ -89,6 +100,7 @@
   // Sans « Oui » en vol, elle est refusée tout de suite (chemin sûr « Non », annulation bornée) ; avec un « Oui » en
   // vol, ses touches restent bloquées (sheetKey) jusqu'à la réponse ou l'échéance CV_ROUTE_MS.
   function showOffline(text) {
+    if (pw) { return; }   // arrêt demandé : le service s'arrête aussi, l'écran d'arrêt reste (jamais « Reconnexion… »)
     $("offline").textContent = text; $("offline").hidden = false;
     if (cvSheet && !cvSheet.busy) { sheetChoose("no", "offline"); }
     cvPaint();
@@ -445,6 +457,7 @@
     agents: [["Téléphone", "Scanne le QR"], ["OK ou Retour", "Annuler"]],
     musesetup: [["Téléphone", "Suis les étapes"], ["OK ou Retour", "Annuler"]],
     panel: [["↑ ↓", "Choisir"], ["OK", "Valider"], ["Retour", "Revenir"]],
+    power: [["↑ ↓", "Choisir"], ["OK", "Valider"], ["Retour", "Annuler"]],
     // feuille Canvas : boutons empilés (↑ = « Non » en haut, ↓ = « Oui » ; ← → identiques), OK = choix au focus
     sheetNo: [["↑ ↓", "Choisir"], ["OK", "Non, garder l'ambiance"], ["Retour", "Non"]],
     sheetYes: [["↑ ↓", "Choisir"], ["OK", "Oui, appliquer"], ["Retour", "Non"]]
@@ -452,7 +465,7 @@
   function help() {
     var k = cvSheet ? (cvSheet.btn === 1 ? "sheetYes" : "sheetNo") :
             panel ? (panel.kind === "item" ? "item" : panel.kind === "agents" ? "agents" :
-                     panel.kind === "musesetup" ? "musesetup" : "panel") : (focus.zone === "top" ? (ROWS.length ? "top" : "topEmpty") :
+                     panel.kind === "musesetup" ? "musesetup" : panel.kind === "power" ? "power" : "panel") : (focus.zone === "top" ? (ROWS.length ? "top" : "topEmpty") :
                                                                        (focus.row > 0 ? "rows" : "rows0"));
     if (k === helpKey) { return; }
     helpKey = k;
@@ -684,6 +697,9 @@
     if (state && state.remote && state.remote.enabled && state.remote.phones > 0) {
       list.push(["remote-forget", "▣", "Oublier les téléphones", "Ils devront rescanner le QR"]);
     }
+    if (state && state.power && state.power.available) {
+      list.push(["power", "○", "Éteindre la boîte", "Arrêt propre, avant de la débrancher"]);
+    }
     list.push(["close", "✕", "Fermer", "Revenir à l'accueil"]);
     var idx = 0;
     showPanel("settings", (state && state.device) || "OpenTV", "Réglages",
@@ -720,8 +736,67 @@
                button("Non", "lrow")], 1,
               { what: what, actions: [what, "no"] });
   }
+  // ---- « Éteindre la boîte » : défi demandé au service à l'ouverture ; « Annuler » (haut) au focus
+  function openPower() {
+    showPanel("power", "Réglages", "Éteindre la boîte ?",
+              "OpenTV s'arrête proprement. Pour la rallumer, débranche puis rebranche son alimentation. " +
+              "La télé reste allumée.", [button("Annuler", "lrow"), button("Éteindre la boîte", "lrow danger")], 0,
+              { actions: ["no", "yes"], ch: null, yesAt: 0 });
+    var p = panel;
+    api("POST", "/api/tv/power/arm", {}).then(function (j) {
+      if (panel !== p) { if (j && j.challenge) { cancelPower(); } return; }   // feuille déjà fermée : défi oublié
+      if (j && j.ok && j.challenge) { p.ch = j.challenge; return; }
+      openSettings("power"); toast((j && j.message) || MSG_POWER_KO, true);
+    }).catch(function (e) { if (!onApiError(e) && panel === p) { openSettings("power"); toast(MSG_POWER_KO, true); } });
+  }
+  function cancelPower() { api("POST", "/api/tv/power/cancel", {}).catch(onApiError); }
+  function powerAct(a) {
+    if (a !== "yes") { cancelPower(); openSettings("power"); return; }
+    if (!panel.ch || !panel.yesAt || Date.now() - panel.yesAt < POWER_ARM_MS) { $("pmeta").textContent = MSG_POWER_HINT; return; }
+    var p = panel;
+    p.pending = true;
+    api("POST", "/api/tv/power/confirm", { challenge: p.ch, confirm: true }).then(function (j) {
+      p.pending = false;
+      if (j && j.ok && j.power) { closePanel(); pw = { seq: j.power.seq, at: Date.now() }; paintPower("requested"); return; }
+      if (j && j.error === "too_soon" && panel === p) { $("pmeta").textContent = MSG_POWER_HINT; return; }
+      if (panel === p) { openSettings("power"); }
+      toast((j && j.message) || MSG_POWER_KO, true);
+    }).catch(function (e) {
+      p.pending = false;
+      if (!onApiError(e)) { if (panel === p) { openSettings("power"); } toast(MSG_POWER_KO, true); }
+    });
+  }
+  function paintPower(st) {
+    $("powertitle").textContent = "Extinction de la boîte";
+    $("powermsg").textContent = pw && pw.stuck ? MSG_POWER_STUCK : st === "accepted" ? MSG_POWER_ON : MSG_POWER_REQ;
+    $("offline").hidden = true;
+    $("powerov").hidden = false;
+    cvPaint();
+  }
+  function endPower(msg) {   // échec récupérable : la boîte est allumée, retour aux Réglages sur « Éteindre la boîte »
+    pw = null;
+    $("powerov").hidden = true;
+    openSettings("power");
+    if (msg) { toast(msg, true); }
+  }
+  function renderPower(p) {   // état servi = le service répond encore
+    if (!p || typeof p.seq !== "number") { return; }
+    if (powerSeq === null) {   // page (re)chargée : un arrêt déjà en cours reprend son écran, jamais un échec ancien
+      powerSeq = p.seq;
+      if (!pw && (p.state === "requested" || p.state === "accepted")) { pw = { seq: p.seq, at: Date.now() }; }
+    }
+    if (!pw || p.seq !== pw.seq) { return; }
+    if (p.state === "failed") { endPower(MSG_POWER_KO); return; }
+    if (!pw.stuck && Date.now() - pw.at > POWER_STUCK_MS) { pw.stuck = true; }
+    paintPower(p.state);
+  }
+  function powerKey(a) {   // écran d'arrêt : rien n'agit, sauf Retour/OK quand l'arrêt n'a manifestement pas eu lieu
+    lastHumanAt = Date.now();
+    if (pw.stuck && (a === "back" || a === "ok")) { endPower(null); }
+  }
   function paintPanel() {
     var b = $("pbtns").children;
+    if (panel.kind === "power") { panel.yesAt = panel.btn === 1 ? (panel.yesAt || Date.now()) : 0; }
     for (var i = 0; i < b.length; i++) {
       var base = b[i].getAttribute("data-base") || "";
       b[i].className = base + (i === panel.btn ? (base ? " " : "") + "focused" : "");
@@ -744,6 +819,7 @@
     else if (panel.kind === "assistants") { openSettings("agents"); }
     else if (panel.kind === "muse") { openAssistants("muse"); }
     else if (panel.kind === "museconfirm") { openMuse(); }
+    else if (panel.kind === "power") { cancelPower(); openSettings("power"); }   // Retour = Annuler
     else { closePanel(); }
   }
   // ---- « Gérer les assistants » : Muse (connexion guidée) ou droits des assistants (QR existant)
@@ -1041,9 +1117,10 @@
     if (a === "watch") { startPlay(it); return; }
     if (panel.kind === "settings") {
       if (a === "close") { closePanel(); } else if (a === "agents") { openAssistants(); }
-      else if (a === "ambiance") { openAmbiance(); } else { openConfirm(a); }
+      else if (a === "ambiance") { openAmbiance(); } else if (a === "power") { openPower(); } else { openConfirm(a); }
       return;
     }
+    if (panel.kind === "power") { powerAct(a); return; }
     if (ambianceAct(a)) { return; }
     if (panel.kind === "agents") { cancelAgents(); return; }
     if (panel.kind === "assistants") {
@@ -1109,7 +1186,7 @@
   // ---- pilotage par assistant : une action à la fois, réclamée puis appliquée une seule fois, résultat rendu
   function runActions(s) {
     // feuille Canvas affichée : seul le propriétaire décide, aucune action d'assistant n'est même réclamée
-    if (actBusy || !s || s.setup.active || cvSheet) { return; }
+    if (actBusy || !s || s.setup.active || cvSheet || pw) { return; }   // écran d'arrêt : aucune action d'assistant
     var l = (s.actions && s.actions.pending) || [], next = null, i;
     for (i = 0; i < l.length; i++) { if (l[i] && typeof l[i].seq === "number" && l[i].seq > actSeq) { next = l[i]; break; } }
     if (!next) { return; }
@@ -1193,7 +1270,7 @@
     if (humanRecent(queuedAt)) { return "human_active"; }
     if (panel && panel.kind !== "item") {
       // QR d'assistants, connexion de Muse (consentement, QR, confirmation) : jamais une touche d'assistant
-      if ({ agents: 1, assistants: 1, muse: 1, museconfirm: 1, musesetup: 1, museresult: 1 }[panel.kind]) { return "tv_busy"; }
+      if ({ agents: 1, assistants: 1, muse: 1, museconfirm: 1, musesetup: 1, museresult: 1, power: 1 }[panel.kind]) { return "tv_busy"; }
       if (a !== "back" && a !== "home") { return "settings_forbidden"; }
     } else if (!panel && focus.zone === "top" && a === "ok") { return "settings_forbidden"; }
     else if (!panel && a === "ok" && isApp(current())) { return "app_human_only"; }   // ouvrir X : Alex seulement
@@ -1401,6 +1478,7 @@
     return true;
   }
   function remoteKey(a) {   // téléphone appairé : même règle, événement « remote » (le service ne le voit pas)
+    if (pw) { powerKey(a); return; }
     if (offlineShown()) { lastHumanAt = Date.now(); return; }   // voile « Reconnexion… » : rien d'invisible
     if (cvSheet) { lastHumanAt = Date.now(); sheetKey(a); return; }
     // X TV Mode : sur x.com, la boucle téléphone de /tv n'existe plus (ni Retour ni Accueil depuis le téléphone).
@@ -1466,7 +1544,7 @@
   }
   // ---- feuille de confirmation du propriétaire (aperçu proposé par un assistant)
   function sheetBlocked() {
-    return !!(panel || play || cvGate || (state && state.setup && state.setup.active) || !$("offline").hidden ||
+    return !!(panel || play || cvGate || pw || (state && state.setup && state.setup.active) || !$("offline").hidden ||
               document.hidden || { loading: 1, playing: 1, closing: 1, closed: 1, unavailable: 1 }[pbState()] === 1);
   }
   function cvState(c, gen) {
@@ -1705,6 +1783,7 @@
       else if (a === "back") { panelBack(); }
       else if (a === "home") {
         if (panel.kind === "agents") { cancelAgents(); } else if (panel.kind === "musesetup") { cancelMuse(); }
+        else if (panel.kind === "power") { cancelPower(); closePanel(); }
         else { closePanel(); }
         goStart();
       }
@@ -1742,6 +1821,7 @@
     if (KEYS.isBrowserNav(e) || a === "back" || a === "home") { e.preventDefault(); }
     if (!a) { return; }
     lastHumanAt = Date.now();   // télécommande d'Alex : prioritaire sur toute touche d'assistant
+    if (pw) { e.preventDefault(); if (!e.repeat) { powerKey(a); } return; }   // écran d'arrêt : aucune action
     // voile plein écran « Reconnexion… » : l'écran dessous n'est plus vu, aucune touche n'y agit (ni titre, ni
     // « Regarder », ni avis, ni feuille) ; la reprise automatique (poll, rechargement) n'en dépend pas
     if (offlineShown()) { e.preventDefault(); return; }
@@ -1758,7 +1838,7 @@
   document.addEventListener("mouseup", function (e) {
     if (e.button === 3 || e.button === 4) {
       e.preventDefault();
-      if (offlineShown()) { return; }   // voile hors-ligne : rien d'invisible
+      if (offlineShown() || pw) { return; }   // voile hors-ligne : rien d'invisible
       if (e.button === 3 && cvSheet) { sheetKey("back"); }
       else if (e.button === 3 && (play || !guarded("back"))) { humanKey("pointer", "back", false); }
     }
@@ -1843,6 +1923,7 @@
       loadForYou(false);
     }
     renderRemote();
+    renderPower(s.power);
     if (!fresh) { renderCanvas(); }   // vue Canvas périmée : celle déjà adoptée reste peinte, aucune feuille décidée
     else if (s.canvas) { cvAdopt(s.canvas); cvState(s.canvas, gen); }
     else { cvPub = null; cvState(null); renderCanvas(); }

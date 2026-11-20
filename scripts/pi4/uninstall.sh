@@ -510,6 +510,14 @@ host systemctl stop opentv-catalogue-ratings.service opentv-catalogue-ratings-re
 # un job encore en file peut porter un jeton SDK : retiré (fichiers réguliers seulement, jamais un lien suivi) — file
 # et brouillons sur tmpfs (/run/opentv-musejobs) et ancien emplacement sur la carte SD (versions précédentes)
 host systemctl stop opentv-muse-setup.path opentv-muse-setup.service
+# Réglages « Éteindre la boîte » : surveillance arrêtée AVANT tout retrait (aucun arrêt pendant la désinstallation ;
+# l'action root refuse aussi tant que /run/opentv-uninstalling existe) ; demande/issue en attente retirées
+host systemctl stop opentv-poweroff.path opentv-poweroff.service
+POWER_RUN="$(dest /run/opentv-poweroff)"
+if [ -d "$POWER_RUN" ] && [ ! -L "$POWER_RUN" ]; then
+  act find "$POWER_RUN" -mindepth 1 -maxdepth 1 -type f -delete
+  act rmdir -- "$POWER_RUN" 2>/dev/null || true
+fi
 for d in /run/opentv-musejobs/queue /run/opentv-musejobs/tmp /var/lib/opentv/musejobs /var/lib/opentv/musejobs-tmp; do
   dd="$(dest "$d")"
   if [ -d "$dd" ] && [ ! -L "$dd" ]; then act find "$dd" -mindepth 1 -maxdepth 1 -type f -delete; fi
@@ -526,6 +534,7 @@ host systemctl disable --now opentv-player.service opentv-player-keys.service op
   opentv-plymouth-failsafe.service opentv-plymouth-deactivate.service opentv-plymouth-quit.service \
   opentv-muse.service opentv-muse-pair.service opentv-muse-setup.path opentv-muse-setup.service \
   opentv-x-escape.path opentv-x-escape.service opentv-x-escape-action.service
+host systemctl disable opentv-poweroff.path opentv-poweroff.service
 # service arrêté : plus aucun écrivain de jobs Muse — dernier passage (job déposé entre-temps), puis dossiers tmpfs
 # retirés (vides seulement ; tmpfiles ne les recrée plus une fois sa configuration retirée)
 for d in /run/opentv-musejobs/queue /run/opentv-musejobs/tmp; do

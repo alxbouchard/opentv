@@ -16,7 +16,7 @@ import time
 from . import (VERSION, agents, bootid, canvas_tools, canvas_tv, cec, config, fsutil, musesetup, netjobs, netstate,
                nethelper, peeruid, phoneremote, tools, tvcontrol, validate, wifiscan)
 from .foryou import ForYou, EngineError
-from . import promotion, xcontext, xentry, xescape, xprobe
+from . import poweroff, promotion, xcontext, xentry, xescape, xprobe
 from . import source as sourcemod
 from .playback import Playback
 from .playerclient import PlayerClient
@@ -255,6 +255,7 @@ class App:
         if self.remote is not None:
             self.remote.interceptor = self._remote_intercept
         self.boot_id = _boot_id(proc_root)
+        self.power = poweroff.PowerOff(cfg.poweroff_dir, cfg.poweroff, boot_id=self.boot_id, log=log)   # Réglages
         self.hs = self._hs_load()
         self.device = None
         self.setup_mode = True
@@ -1142,7 +1143,7 @@ class App:
                     **agents_out)
 
     def tv_state(self):
-        canvas = self.canvas_view()   # hors du verrou du service (lecture disque du magasin Canvas)
+        canvas, power = self.canvas_view(), self.power.view()   # hors du verrou du service (lecture disque)
         with self.lock:
             m = self.message
             if m and self.mono() >= m["until"]:
@@ -1160,7 +1161,7 @@ class App:
                     "assistants": dict(assistants, manage=self._agents_view()),
                     "muse": self._muse_tv(assistants),
                     "foryou": self.foryou is not None, "remote": self._remote_view(),
-                    "playback": self.playback.view(), "canvas": canvas,
+                    "playback": self.playback.view(), "canvas": canvas, "power": power,
                     # applications de l'accueil (rangée « Applications », jamais un film) : X TV Mode seulement
                     "apps": [{"id": "x", "title": "X"}] if self.cfg.x_tv else [],
                     # pilotage par assistant : actions en attente (fiche, film lancé, touche), à réclamer une fois

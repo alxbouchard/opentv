@@ -271,6 +271,10 @@ footer { flex: 0 0 auto; display: flex; align-items: center; gap: 36px; padding-
 @keyframes pspin { to { transform: rotate(360deg); } }
 .pmsg { margin-top: 22px; font-size: 30px; opacity: .7; }
 .pbtns button.play { background: #fff; color: #0b0f18; font-weight: 700; }
+/* Réglages « Éteindre la boîte » : écran d'arrêt (même coque que « Regarder », sans animation), toujours au-dessus */
+.powerov { z-index: 70; }
+.powerov .pmsg { max-width: 1400px; font-size: 40px; line-height: 1.45; text-align: center; white-space: pre-line;
+  opacity: .92; }
 
 /* ==== OpenTV Canvas (canvas.js) : ambiance de l'accueil, classes fermées « cv-* » posées sur <body>.
    Peint le FOND (#cvwall dans #bg, sous le voile) et le contenu de l'accueil (cartes, titres de rangée, pastille,

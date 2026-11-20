@@ -207,6 +207,8 @@ for u in opentv.service opentv-kiosk.service opentv-net-helper.service opentv-ne
          opentv-x-escape.service opentv-x-escape.path opentv-x-escape-action.service; do
   add "$HERE/systemd/$u" "/etc/systemd/system/$u" 644
 done
+# Réglages « Éteindre la boîte » (0.7.23) : surveillance de la demande + action root sans capacité (systemd éteint)
+for u in opentv-poweroff.path opentv-poweroff.service; do add "$HERE/systemd/$u" "/etc/systemd/system/$u" 644; done
 # aucune invite de connexion sur tty1 tant que opentv-kiosk.service est activé (condition seule, rien de masqué)
 add "$HERE/system/getty-tty1-opentv-kiosk.conf" /etc/systemd/system/getty@tty1.service.d/opentv-kiosk.conf 644
 add "$HERE/system/sysusers-opentv.conf" /etc/sysusers.d/opentv.conf 644
@@ -1021,18 +1023,21 @@ if [ "$ENABLE" = 1 ]; then
   # opentv-x-escape.service + .path (X TV) : la touche Retour Samsung (KEY_EXIT, jamais délivrée à la page par
   # Chromium/Wayland) ramène à /tv quand X est ouvert ; evdev vc4-hdmi lu SEULEMENT pendant le témoin « X ouvert ».
   # opentv-x-escape-action.service (root, relance bornée du kiosque) n'a pas de section [Install].
+  # opentv-poweroff.path (Réglages « Éteindre la boîte ») : rien sans demande confirmée sur la TV ;
+  # opentv-poweroff.service (root, sans capacité, OnSuccess=poweroff.target) n'a pas de section [Install].
   post systemctl enable opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
     opentv-cec.timer opentv-cec-return.service opentv-cec-follower.service opentv-splash.service \
     opentv-player-keys.service opentv-player.service opentv-catalogue-refresh.timer \
     opentv-catalogue-ratings-retry.timer opentv-plymouth-failsafe.timer opentv-muse-setup.path \
-    opentv-x-escape.service opentv-x-escape.path
+    opentv-x-escape.service opentv-x-escape.path opentv-poweroff.path
   # mise à jour : un échec véridique précédent (78, jamais relancé) est effacé avant le redémarrage
   # opentv-display-mode.service : même effacement (un 0.7.5 antérieur pouvait rester « start-limit-hit »)
   post systemctl reset-failed opentv-cec-return.service opentv-cec-follower.service opentv-display-mode.service
   post systemctl restart opentv-net-helper.path opentv-ap-guard.timer opentv.service opentv-kiosk.service \
     opentv-display-mode.service opentv-cec.timer opentv-cec-return.service opentv-cec-follower.service \
     opentv-player-keys.service opentv-player.service opentv-catalogue-refresh.timer \
-    opentv-catalogue-ratings-retry.timer opentv-muse-setup.path opentv-x-escape.path opentv-x-escape.service
+    opentv-catalogue-ratings-retry.timer opentv-muse-setup.path opentv-x-escape.path opentv-x-escape.service \
+    opentv-poweroff.path
 fi
 # ---------------------------------------------------------------- pont Muse : jamais activé par l'installation
 # opentv-muse.service n'est activé que par un appariement humain réussi (sudo opentv-pi muse pair) ; une mise à jour
