@@ -1,4 +1,4 @@
-# X TV 0.7.19 — accueil vide et récupération à la télécommande
+# X TV 0.7.20 — accueil vide et récupération à la télécommande
 
 ## Constat établi, cause inconnue
 
@@ -91,7 +91,7 @@ matrice longue de release complète n'est revendiquée.
 ## Gate terrain et prochain geste
 
 Pour la contre-revue hors ligne : dans un clone local avec historique, lancer la commande de validation
-ci-dessus. `test_recycled_action_and_loading_article` installe successivement les cinq extensions en
+ci-dessus. `test_recycled_action_and_loading_article` installe successivement les six extensions en
 rootfs temporaires. Comparer `recycled-*.json` : 0.7.15 bloque le OK sur B dans la transition avant/après
 rafraîchissement, `689c9dd` le laisse passer ; les deux sélectionnent le squelette. Le nouveau SHA doit
 laisser zéro activation de B, un OK initial valide sur A par appui tenu, et sélectionner Recharger puis
@@ -102,6 +102,13 @@ Après rafraîchissement, la fixture attend le retrait de l’anneau, redonne le
 et vérifie qu’il l’a repris. Sur `2601777`, OK active B ; OK tenu active A puis B. Sur le candidat,
 attendre `[]` pour l’appui simple et seulement A pour l’appui tenu, avant **et** après rafraîchissement.
 Le marqueur du bouton suffit pour reconnaître l’action à contrôler, pas pour l’autoriser.
+
+`buttonUnmarked` teste l’inverse : l’article reste marqué, le bouton choisi perd son propre marqueur.
+Après retrait de l’anneau et reprise du focus, `2fea923` active B en plus du premier OK éventuel sur A.
+Le candidat doit laisser `[]` / `[A]` avant comme après rafraîchissement. `staleEnter` compte les OK
+arrivés au gestionnaire du bouton B (attendu : zéro). `unmarkedKeyboardClick` vérifie séparément le clic
+clavier natif via Espace, hors du gestionnaire OK (attendu : zéro clic). La référence faible au bouton
+sert à réappliquer les contrôles, jamais à accorder une autorisation ou à conserver le post.
 
 Pour le partage manuel (←), lire dans les mêmes JSON `shareA`, `shareStale` et `shareReselected`.
 Sur `298e0c6`, la cellule A devient B sans changer de nœud : le journal passe de `[A]` à `[A,B]`

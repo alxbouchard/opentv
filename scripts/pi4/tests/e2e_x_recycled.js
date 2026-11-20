@@ -16,7 +16,7 @@ const retry = '<button id="retry">Retry</button>';
       viewport: {width: 1920, height: 1080}, ignoreDefaultArgs: ['--disable-extensions'],
       args: ['--disable-extensions-except=' + ext, '--load-extension=' + ext]});
     if (!ctx.serviceWorkers().length) await ctx.waitForEvent('serviceworker');
-    const p = ctx.pages()[0], out = {recycle: {}, unmarked: {}, errors: []};
+    const p = ctx.pages()[0], out = {recycle: {}, unmarked: {}, buttonUnmarked: {}, staleEnter: {}, errors: []};
     p.on('pageerror', e => out.errors.push(e.message));
     let column, navs = 0;
     await ctx.route('**/*', r => {
@@ -24,7 +24,7 @@ const retry = '<button id="retry">Retry</button>';
       navs++;
       return r.fulfill({contentType: 'text/html', body: '<!doctype html><style>article{min-height:180px}button{padding:20px}</style>' +
         '<main><div data-testid="primaryColumn">' + column + '</div></main><script>window.acts=[];' +
-        'window.recycle=()=>{post.style.opacity="0";link.href="/fixture/status/2";if(window.unmark)post.removeAttribute("data-testid")};' +
+        'window.recycle=()=>{post.style.opacity="0";link.href="/fixture/status/2";if(window.unmark)document.getElementById(window.unmark).removeAttribute("data-testid")};' +
         'window.addEventListener("keydown",e=>{if(window.armed && e.key==="Enter"){window.armed=false;recycle()}},true);' +
         'document.onclick=e=>acts.push([e.target.id,e.isTrusted,document.querySelector("#link")?.pathname])</script>'});
     });
@@ -35,7 +35,7 @@ const retry = '<button id="retry">Retry</button>';
       recovery: !!document.querySelector('.otvx-empty button')?.checkVisibility(), feed: !!document.querySelector('.otvx-help')}));
     // The page registers capture before document_idle (x.js). Recycle synchronously there so
     // no scheduled refresh can run between the identity change and the feed's key handler.
-    async function recycled(phase, held, unmark) {
+    async function recycled(phase, held, unmark, finalKey = 'Enter') {
       await open(post); await key('ArrowDown'); await key('ArrowRight');
       assert.equal((await state()).focus, 'action');
       await p.evaluate(value => { window.unmark=value; }, unmark);
@@ -46,17 +46,25 @@ const retry = '<button id="retry">Retry</button>';
         await p.evaluate(() => document.querySelector('#action').focus()); // site restores native focus, not consent
         assert.equal((await state()).focus, 'action');
       } else await p.evaluate(() => { window.armed=true; });
-      await p.keyboard.down('Enter'); await p.keyboard.up('Enter');
+      await p.evaluate(() => { window.staleEnter = 0; document.querySelector('#action').onkeydown = e => {
+        if (e.key === 'Enter' && link.pathname === '/fixture/status/2') window.staleEnter++;
+      }; });
+      await p.keyboard.down(finalKey); await p.keyboard.up(finalKey);
       assert.equal(await p.locator('#link').getAttribute('href'), '/fixture/status/2');
-      assert.equal(await p.locator('#post').getAttribute('data-testid'), unmark ? null : 'tweet');
+      assert.equal(await p.locator('#post').getAttribute('data-testid'), unmark === 'post' ? null : 'tweet');
+      assert.equal(await p.locator('#action').getAttribute('data-testid'), unmark === 'action' ? null : 'like');
       assert.equal(p.url(), home);
       return p.evaluate(() => window.acts);
     }
     for (const phase of ['before','after']) for (const held of [false,true]) {
       const name = phase + (held ? '-repeat' : '-single');
-      out.recycle[name] = await recycled(phase, held, false);
-      out.unmarked[name] = await recycled(phase, held, true);
+      out.recycle[name] = await recycled(phase, held, null);
+      out.unmarked[name] = await recycled(phase, held, 'post');
+      out.buttonUnmarked[name] = await recycled(phase, held, 'action');
+      out.staleEnter[name] = await p.evaluate(() => window.staleEnter);
     }
+    // Space is not an OpenTV key: isolate Chromium's trusted keyboard click from the OK guard.
+    out.unmarkedKeyboardClick = await recycled('after', false, 'action', 'Space');
     await open(post); await key('ArrowDown'); await key('ArrowRight');
     await p.evaluate(() => { document.querySelector('#action').onkeydown = () => window.recycle(); });
     await key('Enter'); out.lateNative = await p.evaluate(() => window.acts);

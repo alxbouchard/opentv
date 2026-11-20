@@ -83,6 +83,9 @@
   let sharing = false;
   // mode actions : bouton au focus, permalien du post au moment du choix (DOM réutilisé par X = refus), rang du bouton
   let actEl = null;
+  // Reconnaissance pour le refus uniquement : X peut réutiliser un bouton après exitActions(),
+  // sans son data-testid ni son anneau. Ne retient ni le nœud retiré, ni l'identité du post.
+  const chosenButtons = new WeakSet();
   let actKey = null;
   let actIdx = 0;
   let leftGuardUntil = 0;
@@ -260,7 +263,7 @@
       .slice(0, ACTIONS_MAX);
   }
   function actionButton(node) {   // reconnaître le bouton même si sa cellule perd son marqueur ; actionValid vérifie le post
-    return !!node && node.nodeType === 1 && node.matches(ACTION_SEL);
+    return !!node && node.nodeType === 1 && (chosenButtons.has(node) || node.matches(ACTION_SEL));
   }
   function clearActMarks(keep) {   // anneau d'action : jamais sur un autre nœud (copie ou remplaçant posé par X)
     for (const n of Array.from(document.querySelectorAll("[" + ACT_ATTR + "]"))) {
@@ -269,6 +272,7 @@
   }
   function focusAction(btn, idx) {
     clearActMarks(btn);
+    chosenButtons.add(btn);
     actEl = btn;
     actIdx = idx;
     btn.setAttribute(ACT_ATTR, "");
