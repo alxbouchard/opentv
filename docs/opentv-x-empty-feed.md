@@ -1,4 +1,4 @@
-# X TV 0.7.21 — accueil vide et récupération à la télécommande
+# X TV 0.7.22 — accueil vide et récupération à la télécommande
 
 ## Constat établi, cause inconnue
 
@@ -103,6 +103,11 @@ Dans `reserved`, comparer `f8db71d` au candidat : avant hydratation, ↑ puis �
 Recharger puis Retry, sans sélectionner la coquille. Après insertion du texte, de l’image seule ou
 de la vidéo seule **dans la même boîte encore occupée**, ↓ sélectionne l’article et Recharger disparaît.
 `extraLoads` doit rester à zéro ; la présence de l’élément vidéo ne prouve ni décodage ni lecture.
+
+`candidate.json`, `cases.sameTextNode` : sur le même nœud texte, espace → texte → espace,
+sans remplacer d’enfant. Vérifier **avant toute touche** que l’aide du fil apparaît et que
+Recharger disparaît, puis l’inverse. Ensuite ↑ atteint Recharger, ↑ atteint Retry, sans recharge.
+Les deux observateurs réutilisent les rafraîchissements existants, sans lire la valeur du nœud.
 
 Comparer aussi `unmarked` : même transition, mais la cellule perd `data-testid="tweet"`.
 Après rafraîchissement, la fixture attend le retrait de l’anneau, redonne le focus au bouton J’aime

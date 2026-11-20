@@ -563,10 +563,11 @@
   window.addEventListener("click", onActivate, true);   // clic de confiance seulement (OK réel ou pointeur) : arme
   window.addEventListener("focusin", schedule, true);   // focus posé par X (inscription comprise) : revérifié
   new MutationObserver((records) => {
-    if (records.length && records.every((r) => r.target.nodeType === 1 &&
+    if (records.length && records.every((r) => r.type === "characterData"
+        ? !r.target.parentElement?.closest(POST_SEL) : r.target.nodeType === 1 &&
         r.target.closest('.otvx-empty, .otvx-login-help, .otvx-help, .otvx-toast'))) { return; }
     schedule();
-  }).observe(document.documentElement, { childList: true, subtree: true, attributes: true,
+  }).observe(document.documentElement, { childList: true, characterData: true, subtree: true, attributes: true,
     attributeFilter: ["hidden", "inert", "aria-hidden", "aria-busy", "data-testid", "role", "style", "class"] });
   window.addEventListener("resize", schedule);
   window.addEventListener("scroll", schedule, true);

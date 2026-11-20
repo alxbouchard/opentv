@@ -19,7 +19,7 @@ REPO = Path(PI4).parents[1]
 
 class TestEmptyVersion(unittest.TestCase):
     def test_recovery_release_is_distinguishable(self):
-        self.assertEqual(VERSION, "0.7.21")
+        self.assertEqual(VERSION, "0.7.22")
         self.assertEqual(json.loads((Path(EXT) / "manifest.json").read_text())["version"], VERSION)
 
 

@@ -56,6 +56,32 @@ window.dialogue=()=>{document.body.insertAdjacentHTML('beforeend','<div role="di
    await page.evaluate(()=>document.getElementById('full-error').remove());await settle();
   }
   if(cfg.expect){
+   await open();
+   await page.evaluate(()=>{
+    document.getElementById('pending').outerHTML='<article data-testid="tweet" aria-busy="true"><div data-testid="tweetText" id="box" style="height:80px"> </div><div role="progressbar">…</div></article><button id="retry">Retry</button>';
+   });
+   // Keep the same Text, box and busy article. Let pending layout work drain before
+   // each mutation: no child replacement, focus, key or scroll can wake either view.
+   const textNode=await page.evaluateHandle(()=>document.getElementById('box').firstChild);
+   const waitViews=async feed=>{
+    const views=await page.waitForFunction(expected=>{
+     const visible=s=>!!document.querySelector(s)?.checkVisibility({opacityProperty:true,visibilityProperty:true});
+     const feed=visible('.otvx-help'), reload=visible('.otvx-empty button');
+     return feed===expected && reload!==expected && {feed,reload};
+    },feed,{timeout:3000});
+    return views.jsonValue();
+   };
+   const n=loads;
+   await waitViews(false);await settle();
+   await textNode.evaluate(node=>{node.nodeValue='Fixture';});
+   const filled=await waitViews(true);await settle();
+   await textNode.evaluate(node=>{node.nodeValue=' ';});
+   const empty=await waitViews(false);await textNode.dispose();
+   await page.keyboard.press('ArrowUp');
+   const reloadFocus=await page.evaluate(()=>document.activeElement.matches('.otvx-empty button'));
+   await page.keyboard.press('ArrowUp');const retryFocus=await page.evaluate(()=>document.activeElement.id==='retry');
+   out.cases.sameTextNode={filled,empty,reloadFocus,retryFocus,extraLoads:loads-n};
+   assert(reloadFocus && retryFocus && loads===n,'same Text → empty: ↑ Reload, ↑ Retry, no reload');
    // Recovery is focus-only: ARIA roles do not acquire a synthetic click fallback.
    out.cases.roleOk=[];
    for(const variant of ['plain','site-handler','modal-during-key','post-during-key']){

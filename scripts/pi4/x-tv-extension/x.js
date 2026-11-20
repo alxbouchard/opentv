@@ -473,11 +473,12 @@
     ensureHelp(on && !dialogOpen() && (!NAV || NAV.feedReady()));
   }
   const observer = new MutationObserver((records) => {
-    if (records.length && records.every((r) => r.target.nodeType === 1 &&
+    if (records.length && records.every((r) => r.type === "characterData"
+        ? !r.target.parentElement?.closest(POST_SEL) : r.target.nodeType === 1 &&
         r.target.closest('.otvx-empty, .otvx-login-help, .otvx-help, .otvx-toast'))) { return; }
     if (!refreshTimer) { refreshTimer = setTimeout(refresh, REFRESH_MS); }
   });
-  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true,
+  observer.observe(document.documentElement, { childList: true, characterData: true, subtree: true, attributes: true,
     attributeFilter: ["hidden", "inert", "aria-hidden", "aria-busy", "data-testid", "role", "style", "class"] });
   window.addEventListener("keydown", onKey, true);
   // A site keydown handler can recycle the cell AFTER our capture and BEFORE Chromium's
