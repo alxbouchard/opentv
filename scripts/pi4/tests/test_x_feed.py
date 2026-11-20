@@ -174,7 +174,7 @@ class TestFeedStatic(unittest.TestCase):
         readme = read(os.path.join(PI4, "README.md"))
         for need in ("0.7.14", "0.7.15", "J'aime", "Enregistrer", "→", "Aimé · OK retire"):
             self.assertIn(need, readme)
-        self.assertEqual(VERSION, "0.7.18")
+        self.assertEqual(VERSION, "0.7.19")
         self.assertEqual(json.loads(read(os.path.join(EXT, "manifest.json")))["version"], VERSION)
 
 

@@ -1,5 +1,5 @@
 /* Offline Chromium counterexamples. argv: Playwright module, Chrome, installed extension.
- * Identical observations for both historical builds and the candidate; assertions in test_x_empty.py. */
+ * Identical observations for historical builds and the candidate; assertions in test_x_empty.py. */
 'use strict';
 const fs = require('fs'), os = require('os'), path = require('path'), assert = require('node:assert/strict');
 const [pw, chrome, ext] = process.argv.slice(2);
@@ -16,7 +16,7 @@ const retry = '<button id="retry">Retry</button>';
       viewport: {width: 1920, height: 1080}, ignoreDefaultArgs: ['--disable-extensions'],
       args: ['--disable-extensions-except=' + ext, '--load-extension=' + ext]});
     if (!ctx.serviceWorkers().length) await ctx.waitForEvent('serviceworker');
-    const p = ctx.pages()[0], out = {recycle: {}, errors: []};
+    const p = ctx.pages()[0], out = {recycle: {}, unmarked: {}, errors: []};
     p.on('pageerror', e => out.errors.push(e.message));
     let column, navs = 0;
     await ctx.route('**/*', r => {
@@ -24,7 +24,7 @@ const retry = '<button id="retry">Retry</button>';
       navs++;
       return r.fulfill({contentType: 'text/html', body: '<!doctype html><style>article{min-height:180px}button{padding:20px}</style>' +
         '<main><div data-testid="primaryColumn">' + column + '</div></main><script>window.acts=[];' +
-        'window.recycle=()=>{document.querySelector("article").style.opacity="0";link.href="/fixture/status/2"};' +
+        'window.recycle=()=>{post.style.opacity="0";link.href="/fixture/status/2";if(window.unmark)post.removeAttribute("data-testid")};' +
         'window.addEventListener("keydown",e=>{if(window.armed && e.key==="Enter"){window.armed=false;recycle()}},true);' +
         'document.onclick=e=>acts.push([e.target.id,e.isTrusted,document.querySelector("#link")?.pathname])</script>'});
     });
@@ -35,22 +35,27 @@ const retry = '<button id="retry">Retry</button>';
       recovery: !!document.querySelector('.otvx-empty button')?.checkVisibility(), feed: !!document.querySelector('.otvx-help')}));
     // The page registers capture before document_idle (x.js). Recycle synchronously there so
     // no scheduled refresh can run between the identity change and the feed's key handler.
-    for (const phase of ['before','after']) {
-      for (const held of [false, true]) {
-        await open(post); await key('ArrowDown'); await key('ArrowRight');
+    async function recycled(phase, held, unmark) {
+      await open(post); await key('ArrowDown'); await key('ArrowRight');
+      assert.equal((await state()).focus, 'action');
+      await p.evaluate(value => { window.unmark=value; }, unmark);
+      if (held) await p.keyboard.down('Enter'); // first valid OK on A
+      if (phase === 'after') {
+        await p.evaluate(() => window.recycle());
+        await p.waitForFunction(() => !document.querySelector('[data-otvx-act]'));
+        await p.evaluate(() => document.querySelector('#action').focus()); // site restores native focus, not consent
         assert.equal((await state()).focus, 'action');
-        if (held) await p.keyboard.down('Enter'); // first valid OK on A
-        if (phase === 'after') {
-          await p.evaluate(() => window.recycle());
-          await p.waitForFunction(() => !document.querySelector('[data-otvx-act]'));
-          await p.evaluate(() => document.querySelector('#action').focus()); // site restores native focus, not consent
-        } else await p.evaluate(() => { window.armed=true; });
-        await p.keyboard.down('Enter'); await p.keyboard.up('Enter');
-        assert.equal(await p.locator('#link').getAttribute('href'), '/fixture/status/2');
-        const acts = await p.evaluate(() => window.acts);
-        assert.equal(p.url(), home);
-        out.recycle[phase + (held ? '-repeat' : '-single')] = acts;
-      }
+      } else await p.evaluate(() => { window.armed=true; });
+      await p.keyboard.down('Enter'); await p.keyboard.up('Enter');
+      assert.equal(await p.locator('#link').getAttribute('href'), '/fixture/status/2');
+      assert.equal(await p.locator('#post').getAttribute('data-testid'), unmark ? null : 'tweet');
+      assert.equal(p.url(), home);
+      return p.evaluate(() => window.acts);
+    }
+    for (const phase of ['before','after']) for (const held of [false,true]) {
+      const name = phase + (held ? '-repeat' : '-single');
+      out.recycle[name] = await recycled(phase, held, false);
+      out.unmarked[name] = await recycled(phase, held, true);
     }
     await open(post); await key('ArrowDown'); await key('ArrowRight');
     await p.evaluate(() => { document.querySelector('#action').onkeydown = () => window.recycle(); });

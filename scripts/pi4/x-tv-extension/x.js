@@ -259,8 +259,8 @@
     return Array.from(bar.querySelectorAll(ACTION_SEL)).filter((b) => ownerPost(b) === post && usable(b))
       .slice(0, ACTIONS_MAX);
   }
-  function actionButton(node) {   // un bouton d'action du fil (quel que soit son post)
-    return !!node && node.nodeType === 1 && node.matches(ACTION_SEL) && !!ownerPost(node);
+  function actionButton(node) {   // reconnaître le bouton même si sa cellule perd son marqueur ; actionValid vérifie le post
+    return !!node && node.nodeType === 1 && node.matches(ACTION_SEL);
   }
   function clearActMarks(keep) {   // anneau d'action : jamais sur un autre nœud (copie ou remplaçant posé par X)
     for (const n of Array.from(document.querySelectorAll("[" + ACT_ATTR + "]"))) {
