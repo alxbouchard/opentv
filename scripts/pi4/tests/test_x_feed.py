@@ -317,7 +317,7 @@ class TestFeedEndToEnd(unittest.TestCase):
         want(s["p4_seq"] == ["p4-like", "p4-bookmark", "p4-like", "p4-bookmark"], "post cité jamais visé")
         want(s["p5_seq"] == ["p5-like", "p5-like"], "bouton absent")
         want(s["p6"]["post"] == "p6" and s["p6_right"]["act"] is None and s["p6_right"]["toast"] == NOACT, "aucune action")
-        want(s["reuse_acts_delta"] == 0 and s["reuse_ok"]["toast"] == STALE and s["reuse_ok"]["act"] is None,
+        want(s["reuse_site_keys"] == 0 and s["reuse_acts_delta"] == 0 and s["reuse_ok"]["toast"] == STALE and s["reuse_ok"]["act"] is None,
              "DOM réutilisé : OK bloqué")
         want(s["open"]["url"] == "/zoe/status/99" and s["back"]["url"] == "/home", "ouvrir / retour")
         want(all(v["paused"] and v["t"] == 0 for v in s["videos_after"]), "vidéos jamais lancées")

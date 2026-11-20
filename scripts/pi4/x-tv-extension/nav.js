@@ -13,20 +13,9 @@
  *           modale routée de X) : page précédente SEULEMENT si une entrée x.com précédente existe réellement
  *           (API Navigation), sinon OpenTV /tv ; filet : si rien ne change en BACK_FAILSAFE_MS, OpenTV /tv.
  *  Connexion / colonne sans article rendu (mode « contrôles ») : ↑ ↓ (et ← → hors champ) parcourent
- *           les contrôles VISIBLES et activables (boutons, liens, champs) dans l'ordre du document, limités à la
- *           fenêtre modale de X s'il y en a une ; anneau TV très visible ; au chargement, AVANT toute touche ou geste
- *           réel, le lien générique « Sign in » / « Se connecter » (href /i/jf/onboarding/web?mode=login analysé)
- *           reçoit le focus UNE fois, même si X a autofocusé le champ identifiant ; à défaut la passkey native de X
- *           (« Continue with passkey ») ; JAMAIS Google/Apple ; JAMAIS « Continue with phone » (inscription, mode=signup :
- *           retirée de ↑ ↓ ; href d'inscription strict ou libellé exact connu, jamais « Use your phone » d'une
- *           vérification) ; jamais un sens négatif (« without / instead / different / other passkey », « sans », « au
- *           lieu de », « autre », mot de passe) ; hôtes de href acceptés EXACTEMENT : x.com, www.x.com, mobile.x.com,
- *           twitter.com, www.twitter.com, mobile.twitter.com (https, sans port ni identifiants) ; rien de reconnu :
- *           rien n'est déplacé. Ensuite le focus n'est jamais déplacé seul (sinon ↓ : même préférence, ou premier
- *           contrôle permis), sauf UN réarmement : après un clic de confiance sur ce « Sign in », la MEILLEURE passkey
- *           sûre, visible et ABSENTE du document au clic, de la fenêtre que X ouvre dans la page, reçoit le focus une
- *           fois (15 s monotones, minuterie explicite, annulé par toute touche/geste réel). Inscription au focus posée
- *           par X : focus vers l'entrée préférée, sinon retiré (blur) ; jamais un clic.
+ *           les contrôles visibles et activables dans l'ordre du document, bornés à la modale si présente.
+ *           En connexion : préférence de focus générique/passkey, jamais fournisseur ou inscription ; après un
+ *           clic réel sur la connexion générique, un seul réarmement borné (voir onActivate et refresh).
  *           OK/Entrée RÉELLE : activation native du bouton/lien au focus (geste humain) ; repli pour un rôle
  *           non natif en CONNEXION seulement, jamais dans une colonne vide (gestionnaire clavier du site seul).
  *           Champ au focus : saisie au clavier physique 100 % native (← → Entrée Retour arrière natifs) ; aucune valeur n'est lue,
@@ -42,13 +31,8 @@
  *           AUCUN plafond par document : le battement ne meurt jamais sur une page ouverte longtemps — débit tenu
  *           par l'intervalle puis par background.js et le service) au service de l'extension : mode, document au
  *           focus, page visible, compteurs
- *           d'APPUIS par classe move/ok/other (répétitions d'une touche tenue à part dans « repeat », jamais
- *           envoyées seules : move/ok se comparent 1:1 aux appuis evdev), compteur de touches synthétiques, et
- *           booléens du dernier appui réel (fiable, champ au focus, document au focus, traitée par OpenTV). Champ
- *           éditable au focus : une touche de saisie (« other ») n'est NI comptée NI envoyée (longueur et rythme d'un
- *           mot de passe jamais observables). Jamais une valeur ni un code de touche, un texte, une URL ni la valeur
- *           d'un champ. Départ de la page (pagehide) : l'instantané DÉJÀ en attente part tout de suite (au mieux),
- *           sans rien capturer de plus (aucun événement, aucune touche, aucun compteur nouveaux).
+ *           d'appuis move/ok/other, répétitions séparées. La saisie dans un champ n'est ni comptée ni envoyée.
+ *           Jamais de valeur, texte, URL ni code de touche. pagehide n'envoie que l'instantané déjà en attente.
  * Touches synthétiques (non fiables) : jamais d'action. Aucune lecture de contenu hors libellés des contrôles.
  */
 (() => {

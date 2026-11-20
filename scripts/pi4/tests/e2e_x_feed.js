@@ -151,6 +151,7 @@ const POSTS = [
 const SCRIPT = `<script>(function(){window.__acts=[];window.__focus=0;
 window.__kf=[];window.addEventListener("keydown",function(e){var x=document.activeElement;window.__kf.push(e.key+":"+(x&&x.getAttribute&&x.getAttribute("data-otv-btn")||(x?x.tagName:"null")));},true);
 var IDS=["like","unlike","bookmark","removeBookmark","reply","retweet"];var NEXT={like:"unlike",unlike:"like",bookmark:"removeBookmark",removeBookmark:"bookmark"};
+window.addEventListener('keydown',function(e){if(e.key==='Enter' && window.__recycleAtOK){window.__recycleAtOK=false;window.__reuse();}},true);
 document.addEventListener("focusin",function(e){if(e.target.matches&&e.target.matches("[data-otv-btn]")){window.__focus++;}},true);
 document.addEventListener("click",function(e){var b=e.target.closest&&e.target.closest("[data-testid]");if(!b){return;}
 var t=b.getAttribute("data-testid");if(IDS.indexOf(t)<0){return;}var art=b.closest("article");
@@ -428,7 +429,7 @@ const LOGIN = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title
     s.p7_act = (await st()).act;
     await clearToast();
     await page.evaluate(() => document.getElementById("bar-p7").remove());
-    await sleep(320);                                                           // refresh passé : mode annulé
+    await page.waitForFunction(() => !document.querySelector('[data-otvx-acting]')); // refresh a bien annulé
     s.cancel_left = await key("ArrowLeft", 300);
     for (let i = 0; i < 4 && (await st()).post === "p7"; i++) { await page.keyboard.press("ArrowUp"); await sleep(200); }
     s.cancel_up = await st();                                                   // navigation normale ensuite
@@ -437,9 +438,15 @@ const LOGIN = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title
     for (let i = 0; i < 8 && (await st()).post !== "p1"; i++) { await page.keyboard.press("ArrowUp"); await sleep(150); }
     await key("ArrowRight");
     const beforeReuse = (await st()).acts.length;
-    await page.evaluate(() => window.__reuse());
+    await page.evaluate(() => {
+      window.__reuseKeys = 0;
+      document.activeElement.addEventListener('keydown', () => window.__reuseKeys++, {once:true});
+      // Recycle at capture, synchronously before x.js, not one timer tick before Enter.
+      window.__recycleAtOK = true;
+    });
     s.reuse_ok = await key("Enter", 400);
     s.reuse_acts_delta = s.reuse_ok.acts.length - beforeReuse;
+    s.reuse_site_keys = await page.evaluate(() => window.__reuseKeys);
     // OK sur le post : ouvre le permalien ; Retour (nav.js) : revient au fil. Chaque touche part seulement après le
     // signal de l'état qu'elle suppose, jamais après un délai fixe : Échap seulement une fois le permalien CHARGÉ et
     // l'extension initialisée (html.otvx-tv posé par x.js à document_idle, donc nav.js — document_start, même
