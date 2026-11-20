@@ -44,6 +44,9 @@ function baseContext(clock) {
   const column = el("DIV");
   const tweet = el("ARTICLE");
   tweet.getBoundingClientRect = () => ({ width: 600, height: 200 });
+  tweet.parentElement = column;
+  tweet.checkVisibility = () => true;
+  tweet.querySelector = () => null;
   column.querySelectorAll = (sel) => sel === 'article[data-testid="tweet"]' ? [tweet] : [];
   const doc = {
     readyState: "complete", body, documentElement: el("HTML"), activeElement: body, visibilityState: "visible",

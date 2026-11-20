@@ -19,13 +19,57 @@ REPO = Path(PI4).parents[1]
 
 class TestEmptyVersion(unittest.TestCase):
     def test_recovery_release_is_distinguishable(self):
-        self.assertEqual(VERSION, "0.7.16")
+        self.assertEqual(VERSION, "0.7.17")
         self.assertEqual(json.loads((Path(EXT) / "manifest.json").read_text())["version"], VERSION)
 
 
 @unittest.skipUnless(NODE and os.environ.get("OPENTV_TEST_PLAYWRIGHT") and full_chrome(),
                      "requires full Chromium, node and OPENTV_TEST_PLAYWRIGHT")
 class TestEmptyEndToEnd(unittest.TestCase):
+    def test_recycled_action_and_loading_article(self):
+        chrome = full_chrome()
+        assert NODE and chrome
+        rejected = '689c9dd655ca30d9f06509a05e7ef5efca38e5f3'
+        with tempfile.TemporaryDirectory(prefix='otvx-recycle-') as tmp:
+            for rev in (PROD, rejected, 'candidate'):
+                with self.subTest(rev=rev):
+                    work = Path(tmp) / rev
+                    work.mkdir()
+                    installer = INSTALL
+                    if rev != 'candidate':
+                        archive = subprocess.check_output(['git', '-C', str(REPO), 'archive', rev])
+                        subprocess.run(['tar', '-x', '-C', str(work)], input=archive, check=True)
+                        installer = str(work / 'scripts/pi4/install.sh')
+                    root = work / 'rootfs'
+                    installed = sh([installer, '--root', str(root), '--skip-preflight'])
+                    self.assertEqual(installed.returncode, 0, installed.stderr.decode()[-2000:])
+                    r = subprocess.run([NODE, str(Path(PI4) / 'tests/e2e_x_recycled.js'),
+                                        os.environ['OPENTV_TEST_PLAYWRIGHT'], chrome, str(root / EXT_DST.lstrip('/'))],
+                                       capture_output=True, timeout=90)
+                    self.assertEqual(r.returncode, 0, r.stderr.decode())
+                    result = json.loads(r.stdout)
+                    if os.environ.get('OPENTV_TEST_SHOTS'):
+                        dest = Path(os.environ['OPENTV_TEST_SHOTS'])
+                        dest.mkdir(parents=True, exist_ok=True)
+                        (dest / ('recycled-' + rev + '.json')).write_bytes(r.stdout)
+                    self.assertEqual(result['errors'], [])
+                    for name, clicks in result['recycle'].items():
+                        expected = [['action', True, '/fixture/status/1']] if name.endswith('repeat') else []
+                        if rev == rejected:
+                            expected.append(['action', True, '/fixture/status/2'])
+                        self.assertEqual(clicks, expected, name)
+                    good = rev == 'candidate'
+                    self.assertEqual(result['lateNative'], [] if good else [['action', True, '/fixture/status/2']])
+                    self.assertEqual(result['shellUp'], dict(selected='' if good else 'shell', focus='',
+                                     reload=good, recovery=good, feed=not good))
+                    self.assertEqual(result['shellRetry']['focus'], 'retry' if good else '')
+                    self.assertEqual(result['mixed']['selected'], 'post' if good else 'shell')
+                    self.assertEqual(result['media']['selected'], 'shell')  # same node, now a rendered video
+                    self.assertFalse(result['media']['recovery'])
+                    self.assertEqual(result['autoLoads'], 0)
+                    self.assertEqual(result['modal']['focus'], 'dismiss')
+                    self.assertEqual(result['modalActs'], [['dismiss', True, '/fixture/status/1']])
+
     def test_disabled_prod_candidate_sequential(self):
         # Baseline ref is mandatory: never silently lose the negative control in an archive checkout.
         subprocess.run(["git", "-C", str(REPO), "cat-file", "-e", PROD + "^{commit}"], check=True, capture_output=True)

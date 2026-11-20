@@ -150,7 +150,7 @@ class TestStatic(unittest.TestCase):
                          "`unknown`", "incertain"):
                 self.assertIn(need, doc)
             self.assertNotRegex(doc, r"(?i)wipe it immediately|tout est effacé")   # jamais d'effacement promis
-        self.assertEqual(VERSION, "0.7.16")
+        self.assertEqual(VERSION, "0.7.17")
         man = json.loads(read(os.path.join(EXT, "manifest.json")))
         self.assertEqual(man["version"], VERSION)
         # accueil « / » : xentry.js injecté sur x.com et twitter.com SEULEMENT (www./mobile. : porte oui, script non) ;

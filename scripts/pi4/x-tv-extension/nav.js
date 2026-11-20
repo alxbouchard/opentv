@@ -224,13 +224,25 @@
   }
   // 0.7.16 : une colonne vide/spinner n'est pas un fil navigable. Les contrôles natifs (Retry, onglets)
   // restent atteignables. Pas de diagnostic réseau déduit du DOM ; aucun délai ni rechargement automatique.
+  const POST_SEL = 'article[data-testid="tweet"]';
+  // Content markers only: no message, URL or field value is read. A sized spinner, an avatar
+  // or an action row is not a publication. Text is optional (photo, player, preview card).
+  const CONTENT_SEL = '[data-testid="tweetText"], [data-testid="tweetPhoto"], video, ' +
+    '[data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="card.wrapper"]';
+  function rendered(el) {
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && !el.closest('[hidden], [inert], [aria-hidden="true"]') &&
+      el.checkVisibility({ opacityProperty: true, visibilityProperty: true });
+  }
+  function renderedPost(p) {
+    if (p.parentElement.closest(POST_SEL) || !rendered(p)) { return false; }
+    // Don't impose a content allowlist on ordinary posts (unmarked cards, deferred media).
+    if (p.getAttribute("aria-busy") !== "true" && !p.querySelector('[role="progressbar"]')) { return true; }
+    return Array.from(p.querySelectorAll(CONTENT_SEL)).some((el) => el.closest(POST_SEL) === p && rendered(el));
+  }
   function feedReady() {
     const col = document.querySelector(COLUMN_SEL);
-    return !!col && Array.from(col.querySelectorAll('article[data-testid="tweet"]')).some((p) => {
-      const r = p.getBoundingClientRect();
-      return r.width > 0 && r.height > 0 && !p.closest('[hidden], [inert], [aria-hidden="true"]') &&
-        (typeof p.checkVisibility !== "function" || p.checkVisibility({ opacityProperty: true, visibilityProperty: true }));
-    });
+    return !!col && Array.from(col.querySelectorAll(POST_SEL)).some(renderedPost);
   }
   function loginMode() { const m = pageMode(); return m === "dialog" || m === "controls"; }
   function scope() { return modalDialog() || document.body; }
@@ -553,6 +565,7 @@
     Object.defineProperty(window, "__otvxNav", {   // monde isolé de l'extension seulement (x.js) ; figé
       value: Object.freeze({
         dialog: () => !!modalDialog(),
+        renderedPost: renderedPost,
         feedReady: () => feedReady(),
         leaveField: (el) => leaveField(el),
         markHandled: (e) => markHandled(e)
@@ -570,7 +583,7 @@
         r.target.closest('.otvx-empty, .otvx-login-help, .otvx-help, .otvx-toast'))) { return; }
     schedule();
   }).observe(document.documentElement, { childList: true, subtree: true, attributes: true,
-    attributeFilter: ["hidden", "inert", "aria-hidden", "style", "class"] });
+    attributeFilter: ["hidden", "inert", "aria-hidden", "aria-busy", "data-testid", "role", "style", "class"] });
   window.addEventListener("resize", schedule);
   window.addEventListener("scroll", schedule, true);
   if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule); } else { schedule(); }

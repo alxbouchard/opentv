@@ -1,4 +1,4 @@
-# X TV 0.7.16 — accueil vide et récupération à la télécommande
+# X TV 0.7.17 — accueil vide et récupération à la télécommande
 
 ## Constat établi, cause inconnue
 
@@ -44,7 +44,13 @@ sur des racines CDN n'établissent ni l'un ni l'autre.
 - Articles tardifs, rendu révélé sur place, retrait/remplacement virtualisé : aide et récupération mises
   à jour. Le style TV reste lié à la colonne pour conserver la géométrie des placeholders lazy ; aucun
   changement de largeur présenté comme réparation réseau.
-- Identité, cibles et activation J'aime/Enregistrer inchangées. **`x.css` inchangé** : sa liste exacte de
+- Un article en chargement (`aria-busy` ou indicateur de progression), même haut de 180 px, ne compte
+  que si un marqueur de publication propre à cet article est rendu : texte, photo, vidéo ou carte.
+  Pas de lecture de message ni de texte obligatoire. Un autre post prêt reste navigable.
+- Le OK sur J’aime/Enregistrer est vérifié **avant** de céder les touches au mode récupération.
+  Le clic clavier natif est aussi revérifié si la page a recyclé le post pendant la touche. Le focus
+  seul, même rétabli par le site, ne vaut pas sélection d’un nouveau post.
+- **`x.css` inchangé** : sa liste exacte de
   display:none masque l'interface de page et des contrôles secondaires identifiés individuellement, pas
   d'enveloppe générique du fil/lazy. Alert/progression/retry de la fixture restent visibles. Cela ne prouve
   pas tous les futurs DOM X sûrs : une vraie erreur placée sous une toolbar spécifiquement masquée demanderait
@@ -83,6 +89,13 @@ pas déduit de ce document. Ajouter les tests existants ciblés fil/actions et s
 matrice longue de release complète n'est revendiquée.
 
 ## Gate terrain et prochain geste
+
+Pour la contre-revue hors ligne : dans un clone local avec historique, lancer la commande de validation
+ci-dessus. `test_recycled_action_and_loading_article` installe successivement les trois extensions en
+rootfs temporaires. Comparer `recycled-*.json` : 0.7.15 bloque le OK sur B dans la transition avant/après
+rafraîchissement, `689c9dd` le laisse passer ; les deux sélectionnent le squelette. Le nouveau SHA doit
+laisser zéro activation de B, un OK initial valide sur A par appui tenu, et sélectionner Recharger puis
+Retry, le média apparu sur place, le vrai post voisin et le bouton de modale.
 
 Ni push ni déploiement dans cette tâche. Après revue indépendante puis installation séparément autorisée
 du SHA exact : conserver la connexion du propriétaire, ouvrir X avec la Samsung. Si le spinner persiste,

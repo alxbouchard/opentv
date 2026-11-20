@@ -74,6 +74,7 @@
   const MSG_STALE = "Le fil a changé : choisis de nouveau le post avec ↑ ↓, puis →.";
 
   let focused = null;
+  let focusedKey = null;   // snapshot on selection, not on OK after a recycled cell has lost action focus
   let help = null;
   let helpMode = "";
   let toastEl = null;
@@ -116,7 +117,7 @@
     if (!col) { return []; }
     return Array.from(col.querySelectorAll(POST_SEL)).filter(topLevel).slice(0, POSTS_MAX);
   }
-  function posts() { return allPosts().filter(shown); }
+  function posts() { return NAV ? allPosts().filter(NAV.renderedPost) : []; }
   function clean(s, cap) {
     return Array.from(String(s || "").replace(STRIP_RE, "")).slice(0, cap).join("").trim();
   }
@@ -212,6 +213,7 @@
     exitActions();
     if (focused && focused !== post) { focused.classList.remove("otvx-focus"); }
     focused = post;
+    focusedKey = post ? permalink(post) : null;
     if (post) {
       post.classList.add("otvx-focus");
       place(post);
@@ -258,7 +260,7 @@
       .slice(0, ACTIONS_MAX);
   }
   function actionButton(node) {   // un bouton d'action du fil (quel que soit son post)
-    return !!node && node.nodeType === 1 && node.matches(ACTION_SEL) && !!node.closest(COLUMN_SEL);
+    return !!node && node.nodeType === 1 && node.matches(ACTION_SEL) && !!ownerPost(node);
   }
   function clearActMarks(keep) {   // anneau d'action : jamais sur un autre nœud (copie ou remplaçant posé par X)
     for (const n of Array.from(document.querySelectorAll("[" + ACT_ATTR + "]"))) {
@@ -311,7 +313,7 @@
     }
     const key = permalink(focused);
     const list = actions(focused);
-    if (!key || !list.length) { toast(MSG_NOACT); return; }   // aucun bouton (ou post sans permalien) : rien
+    if (!key || key !== focusedKey || !list.length) { toast(MSG_NOACT); return; }
     actKey = key;
     focusAction(list[0], 0);
   }
@@ -327,6 +329,7 @@
   // toujours du même permalien et toujours dans sa rangée visible
   function actionValid(node) {
     return !!actEl && node === actEl && actEl.isConnected && !!focused && focused.isConnected &&
+           !!NAV && !!focused.closest(COLUMN_SEL) && NAV.renderedPost(focused) &&
            ownerPost(actEl) === focused && actKey !== null && permalink(focused) === actKey &&
            actions(focused).indexOf(actEl) >= 0;
   }
@@ -345,7 +348,7 @@
                    (focused && focused.contains(ae) && !control(ae));
     if (!focused || !focused.isConnected || !onPost) { return false; }   // bouton/lien/champ au focus : natif
     const p = permalink(focused);
-    if (!p) { return false; }
+    if (!p || p !== focusedKey || !NAV || !NAV.renderedPost(focused)) { return true; }   // consume stale OK
     location.assign(p);
     return true;
   }
@@ -385,9 +388,22 @@
     if (!e.isTrusted) { return; }   // touche synthétique d'une page (script de X ou injecté) : jamais d'action OpenTV
     const a = keyAction(e);
     if (!a) { return; }
+    const ae = document.activeElement;
+    const acting = actionButton(ae) || (!!actEl && ae === actEl);
+    // Chromium retains native focus through recycling, even at opacity:0. Validate OK before
+    // yielding to recovery (including a focus restored by the site AFTER refresh). Controls
+    // inside the current modal keep their own navigation; the feed behind it cannot activate.
+    if (a === "ok" && acting) {
+      if (e.repeat || !actionValid(ae) || dialogOpen()) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (NAV) { NAV.markHandled(e); }
+        if (!e.repeat) { leaveButton(ae); toast(MSG_STALE); }
+      }
+      return;   // verified native button: no substitute action
+    }
     const feed = feedMode();
     if (!feed || dialogOpen() || (NAV && !NAV.feedReady())) { return; }   // vide : contrôles natifs, nav.js
-    const ae = document.activeElement;
     if (editable(ae)) {   // saisie : touches natives, sauf ↑ ↓ qui quittent un champ autofocusé / d'une ligne
       if (!((a === "up" || a === "down") && NAV && NAV.leaveField(ae))) { return; }
       ae.blur();
@@ -406,18 +422,9 @@
       }
       quitActions();
     }
-    const acting = actionButton(ae);   // un bouton d'action du fil a le focus réel
     let used = false;
     if (a === "ok") {
-      if (acting) {
-        if (e.repeat || !actionValid(ae)) {   // OK tenu, ou bouton qui n'est plus celui du post choisi : bloqué
-          used = true;
-          if (!e.repeat) { leaveButton(ae); toast(MSG_STALE); }
-        }
-        // sinon : AUCUNE action ici — Chromium active lui-même le bouton au focus (geste humain réel, natif)
-      } else {
-        used = !e.repeat && open();
-      }
+      used = !e.repeat && open();
     } else if (a === "right") {
       used = true;
       if (!e.repeat) { if (acting && actEl === ae) { cycleAction(); } else { enterActions(); } }
@@ -444,7 +451,7 @@
     const on = feedMode();
     document.documentElement.classList.toggle("otvx-tv", on);
     markLanes(on);
-    if (focused && !focused.isConnected) { focused = null; }   // post retiré par X : prochain ↑ ↓ repart de l'écran
+    if (focused && !focused.isConnected) { focused = null; focusedKey = null; }
     if (actEl && document.activeElement !== actEl) {
       // X a remplacé le bouton (J'aime -> Aimé) dans le MÊME post : focus remis au même rang ; sinon mode quitté,
       // ← immédiat absorbé (garde de sortie)
@@ -463,7 +470,16 @@
     if (!refreshTimer) { refreshTimer = setTimeout(refresh, REFRESH_MS); }
   });
   observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true,
-    attributeFilter: ["hidden", "inert", "aria-hidden", "style", "class"] });
+    attributeFilter: ["hidden", "inert", "aria-hidden", "aria-busy", "data-testid", "role", "style", "class"] });
   window.addEventListener("keydown", onKey, true);
+  // A site keydown handler can recycle the cell AFTER our capture and BEFORE Chromium's
+  // native keyboard click. Veto that default action too; never dispatch or replace it.
+  window.addEventListener("click", (e) => {
+    if (!e.isTrusted || e.detail !== 0 || !(actionButton(e.target) || e.target === actEl)) { return; }
+    if (e.target !== document.activeElement || !actionValid(e.target) || dialogOpen()) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
+  }, true);
   refresh();
 })();

@@ -147,10 +147,12 @@ class TestFeedStatic(unittest.TestCase):
         self.assertEqual(src.count("sendMessage("), 1)                    # partage seulement (←)
         self.assertEqual(src.count(".focus("), 1)                        # focusAction : focus natif seulement
         self.assertIn("btn.focus({ preventScroll: true });", src)
-        ok = src[src.index('if (a === "ok") {'):src.index('} else if (a === "right") {')]
-        self.assertIn("if (e.repeat || !actionValid(ae)) {", ok)
+        ok = src[src.index('if (a === "ok" && acting) {'):src.index('const feed = feedMode();')]
+        self.assertLess(src.index(ok), src.index('if (!feed || dialogOpen()'))
+        self.assertIn("if (e.repeat || !actionValid(ae) || dialogOpen()) {", ok)
         calls = set(re.findall(r"([A-Za-z_.]+)\(", ok))
-        self.assertEqual(calls, {"actionValid", "leaveButton", "toast", "open"}, calls)
+        self.assertEqual(calls, {"actionValid", "leaveButton", "toast", "dialogOpen",
+                                 "e.preventDefault", "e.stopImmediatePropagation", "NAV.markHandled"}, calls)
         av = src[src.index("function actionValid(node)"):src.index("function permalink(post)")]
         for need in ("node === actEl", "actEl.isConnected", "ownerPost(actEl) === focused", "actKey !== null",
                      "permalink(focused) === actKey", "actions(focused).indexOf(actEl) >= 0"):
@@ -172,7 +174,7 @@ class TestFeedStatic(unittest.TestCase):
         readme = read(os.path.join(PI4, "README.md"))
         for need in ("0.7.14", "0.7.15", "J'aime", "Enregistrer", "→", "Aimé · OK retire"):
             self.assertIn(need, readme)
-        self.assertEqual(VERSION, "0.7.16")
+        self.assertEqual(VERSION, "0.7.17")
         self.assertEqual(json.loads(read(os.path.join(EXT, "manifest.json")))["version"], VERSION)
 
 
@@ -331,9 +333,9 @@ class TestFeedEndToEnd(unittest.TestCase):
     def test_mutants_detected(self):
         """Chaque garde est porteuse : la retirer fait échouer le contrat de bout en bout."""
         mutants = {
-            "repeat": ("if (e.repeat || !actionValid(ae)) {", "if (!actionValid(ae)) {",
+            "repeat": ("if (e.repeat || !actionValid(ae) || dialogOpen()) {", "if (!actionValid(ae) || dialogOpen()) {",
                        "OK tenu : une activation par appui"),
-            "reuse": ("if (e.repeat || !actionValid(ae)) {", "if (e.repeat) {", "DOM réutilisé : OK bloqué"),
+            "reuse": ("if (e.repeat || !actionValid(ae) || dialogOpen()) {", "if (e.repeat || dialogOpen()) {", "DOM réutilisé : OK bloqué"),
             "left_guard": ("performance.now() >= leftGuardUntil", "true", "← tenu / immédiat : aucun partage"),
             "race": ("if (actEl && ae !== actEl && !actionButton(ae)) {", "if (false) {",
                      "remplacement + ← immédiat : aucun partage"),
