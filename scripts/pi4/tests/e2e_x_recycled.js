@@ -77,6 +77,23 @@ const retry = '<button id="retry">Retry</button>';
       s.innerHTML='<video width="200" height="120"></video>'; });
     await p.waitForSelector('.otvx-help'); await key('ArrowDown'); out.media = await state();
     out.autoLoads = navs - loads;
+    // Keep the sized box AND aria-busy through hydration. Only the contents change.
+    out.reserved = {};
+    const progress = '<div role="progressbar">…</div>';
+    for (const [name, marker, initial, hydrated] of [
+      ['emptyText', 'tweetText', '', '<span>Fixture</span>'],
+      ['photoSpinner', 'tweetPhoto', progress, '<img width="100" height="60" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">'],
+      ['hiddenText', 'tweetText', '<span hidden>Fixture</span>' + progress, '<span>Fixture</span>'],
+      ['videoShell', 'videoPlayer', progress, '<video width="200" height="120"></video>']
+    ]) {
+      await open(shell.replace(progress, `<div id="box" style="height:80px" data-testid="${marker}">${initial}</div>` + progress) + retry);
+      await p.waitForSelector('.otvx-empty button, .otvx-help');
+      const before = navs;
+      await key('ArrowUp'); const up = await state(); await key('ArrowUp'); const next = await state();
+      await p.locator('#box').evaluate((box, html) => { box.innerHTML = html; }, hydrated);
+      await p.waitForSelector('.otvx-help'); await key('ArrowDown');
+      out.reserved[name] = {up, next, hydrated: await state(), extraLoads: navs - before};
+    }
     await open(shell + post); await p.waitForSelector('.otvx-help'); await key('ArrowDown'); out.mixed = await state();
     await p.evaluate(() => document.body.insertAdjacentHTML('beforeend','<div role="dialog" aria-modal="true"><button id="dismiss">Dismiss</button></div>'));
     await key('ArrowDown'); out.modal = await state(); await key('Enter'); out.modalActs = await p.evaluate(() => window.acts);

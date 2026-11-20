@@ -1,4 +1,4 @@
-# X TV 0.7.20 — accueil vide et récupération à la télécommande
+# X TV 0.7.21 — accueil vide et récupération à la télécommande
 
 ## Constat établi, cause inconnue
 
@@ -45,7 +45,9 @@ sur des racines CDN n'établissent ni l'un ni l'autre.
   à jour. Le style TV reste lié à la colonne pour conserver la géométrie des placeholders lazy ; aucun
   changement de largeur présenté comme réparation réseau.
 - Un article en chargement (`aria-busy` ou indicateur de progression), même haut de 180 px, ne compte
-  que si un marqueur de publication propre à cet article est rendu : texte, photo, vidéo ou carte.
+  que si l’article contient un fragment de texte de taille positive dans sa zone de texte ou sa carte,
+  une image dans sa zone de contenu, ou un élément vidéo rendu. Une boîte dimensionnée, même marquée
+  `tweetText` ou `tweetPhoto`, et les descendants d’un indicateur de progression ne suffisent pas.
   Pas de lecture de message ni de texte obligatoire. Un autre post prêt reste navigable.
 - Le OK sur J’aime/Enregistrer est vérifié **avant** de céder les touches au mode récupération.
   Le clic clavier natif est aussi revérifié si la page a recyclé le post pendant la touche. Le focus
@@ -91,11 +93,16 @@ matrice longue de release complète n'est revendiquée.
 ## Gate terrain et prochain geste
 
 Pour la contre-revue hors ligne : dans un clone local avec historique, lancer la commande de validation
-ci-dessus. `test_recycled_action_and_loading_article` installe successivement les six extensions en
+ci-dessus. `test_recycled_action_and_loading_article` installe successivement les sept extensions en
 rootfs temporaires. Comparer `recycled-*.json` : 0.7.15 bloque le OK sur B dans la transition avant/après
 rafraîchissement, `689c9dd` le laisse passer ; les deux sélectionnent le squelette. Le nouveau SHA doit
 laisser zéro activation de B, un OK initial valide sur A par appui tenu, et sélectionner Recharger puis
 Retry, le média apparu sur place, le vrai post voisin et le bouton de modale.
+
+Dans `reserved`, comparer `f8db71d` au candidat : avant hydratation, ↑ puis ↑ doivent focaliser
+Recharger puis Retry, sans sélectionner la coquille. Après insertion du texte, de l’image seule ou
+de la vidéo seule **dans la même boîte encore occupée**, ↓ sélectionne l’article et Recharger disparaît.
+`extraLoads` doit rester à zéro ; la présence de l’élément vidéo ne prouve ni décodage ni lecture.
 
 Comparer aussi `unmarked` : même transition, mais la cellule perd `data-testid="tweet"`.
 Après rafraîchissement, la fixture attend le retrait de l’anneau, redonne le focus au bouton J’aime

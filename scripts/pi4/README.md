@@ -1,6 +1,6 @@
 # OpenTV Raspberry Pi 4 — prototype (« Pi neuve → HDMI → QR → config → OpenTV → agent »)
 
-**X TV 0.7.20 — fil vide et publications recyclées** : [récupération à la télécommande, vérification du post avant OK et partage, tests et gate terrain](../../docs/opentv-x-empty-feed.md).
+**X TV 0.7.21 — fil vide et publications recyclées** : [récupération à la télécommande, vérification du post avant OK et partage, tests et gate terrain](../../docs/opentv-x-empty-feed.md).
 Corrige le mode D-pad avant le premier article ; ne prétend pas résoudre la cause distante du spinner.
 
 Statut : **MVP vérifié hors matériel seulement** (tests unitaires/intégration, rootfs temporaire, Chromium headless

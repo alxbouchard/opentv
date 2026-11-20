@@ -19,7 +19,7 @@ REPO = Path(PI4).parents[1]
 
 class TestEmptyVersion(unittest.TestCase):
     def test_recovery_release_is_distinguishable(self):
-        self.assertEqual(VERSION, "0.7.20")
+        self.assertEqual(VERSION, "0.7.21")
         self.assertEqual(json.loads((Path(EXT) / "manifest.json").read_text())["version"], VERSION)
 
 
@@ -34,7 +34,8 @@ class TestEmptyEndToEnd(unittest.TestCase):
             reviewed = '298e0c6c2fad7bb039e4f7950ffca0437eaa3a19'
             share_fix = '260177730326af97e6e8942d1fa4e6231be46439'
             article_fix = '2fea923c803200e0bd9ec12eafe8d49ca6342f6b'
-            for rev in (PROD, rejected, reviewed, share_fix, article_fix, 'candidate'):
+            button_fix = 'f8db71d9a268c37df2221e965484ab2111e7d429'
+            for rev in (PROD, rejected, reviewed, share_fix, article_fix, button_fix, 'candidate'):
                 with self.subTest(rev=rev):
                     work = Path(tmp) / rev
                     work.mkdir()
@@ -62,11 +63,11 @@ class TestEmptyEndToEnd(unittest.TestCase):
                         self.assertEqual(result['recycle'][name], first + (wrong if rev == rejected else []), name)
                         leaked = rev == rejected or (rev in (reviewed, share_fix) and name.startswith('after'))
                         self.assertEqual(result['unmarked'][name], first + (wrong if leaked else []), name)
-                        lost_button = rev in (PROD, rejected) or (rev != 'candidate' and name.startswith('after'))
+                        lost_button = rev in (PROD, rejected) or (rev not in (button_fix, 'candidate') and name.startswith('after'))
                         self.assertEqual(result['buttonUnmarked'][name], first + (wrong if lost_button else []), name)
-                        if rev in (article_fix, 'candidate'):
+                        if rev in (article_fix, button_fix, 'candidate'):
                             self.assertEqual(result['staleEnter'][name], int(lost_button), name)
-                    self.assertEqual(result['unmarkedKeyboardClick'], [] if rev == 'candidate' else wrong)
+                    self.assertEqual(result['unmarkedKeyboardClick'], [] if rev in (button_fix, 'candidate') else wrong)
                     good = rev not in (PROD, rejected)
                     self.assertEqual(result['lateNative'], [] if good else [['action', True, '/fixture/status/2']])
                     self.assertEqual(result['shellUp'], dict(selected='' if good else 'shell', focus='',
@@ -76,11 +77,20 @@ class TestEmptyEndToEnd(unittest.TestCase):
                     self.assertEqual(result['media']['selected'], 'shell')  # same node, now a rendered video
                     self.assertFalse(result['media']['recovery'])
                     self.assertEqual(result['autoLoads'], 0)
+                    for name in ('emptyText', 'photoSpinner', 'hiddenText', 'videoShell'):
+                        box = result['reserved'][name]
+                        fixed = rev == 'candidate'
+                        self.assertEqual(box['up']['reload'], fixed, name)
+                        self.assertEqual(box['up']['selected'], '' if fixed else 'shell', name)
+                        self.assertEqual(box['next']['focus'], 'retry' if fixed else '', name)
+                        self.assertEqual(box['hydrated']['selected'], 'shell', name)
+                        self.assertFalse(box['hydrated']['recovery'], name)
+                        self.assertEqual(box['extraLoads'], 0, name)
                     self.assertEqual(result['modal']['focus'], 'dismiss')
                     self.assertEqual(result['modalActs'], [['dismiss', True, '/fixture/status/1']])
                     # Cumulative journal of synthetic fixture IDs. Every ← gets a fresh
                     # outcome; neither a missing response nor a refusal toast proves zero sends.
-                    safe = rev in (share_fix, article_fix, 'candidate')
+                    safe = rev in (share_fix, article_fix, button_fix, 'candidate')
                     journal = []
                     for field, label, deliberate in [('shareA', 'A', True), ('shareStale', 'B', False),
                                                      ('shareReselected', 'B', True), ('shareOutside', 'B', False),

@@ -211,8 +211,9 @@
   const POST_SEL = 'article[data-testid="tweet"]';
   // Content markers only: no message, URL or field value is read. A sized spinner, an avatar
   // or an action row is not a publication. Text is optional (photo, player, preview card).
-  const CONTENT_SEL = '[data-testid="tweetText"], [data-testid="tweetPhoto"], video, ' +
-    '[data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="card.wrapper"]';
+  const POST_TEXT = '[data-testid="tweetText"], [data-testid="card.wrapper"]';
+  const POST_MEDIA = 'video, :is([data-testid="tweetPhoto"], [data-testid="videoPlayer"], ' +
+    '[data-testid="videoComponent"], [data-testid="card.wrapper"], [data-testid="tweetText"]) img';
   function rendered(el) {
     const r = el.getBoundingClientRect();
     return r.width > 0 && r.height > 0 && !el.closest('[hidden], [inert], [aria-hidden="true"]') &&
@@ -222,7 +223,20 @@
     if (p.parentElement.closest(POST_SEL) || !rendered(p)) { return false; }
     // Don't impose a content allowlist on ordinary posts (unmarked cards, deferred media).
     if (p.getAttribute("aria-busy") !== "true" && !p.querySelector('[role="progressbar"]')) { return true; }
-    return Array.from(p.querySelectorAll(CONTENT_SEL)).some((el) => el.closest(POST_SEL) === p && rendered(el));
+    const ownContent = el => el.closest(POST_SEL) === p && !el.closest('[role="progressbar"]') && rendered(el);
+    // A photo/player wrapper can be a reserved rectangle containing only a spinner.
+    if (Array.from(p.querySelectorAll(POST_MEDIA)).some(ownContent)) { return true; }
+    // Measure text fragments, never their strings or the surrounding box (which can be empty).
+    for (const box of p.querySelectorAll(POST_TEXT)) {
+      const nodes = document.createTreeWalker(box, NodeFilter.SHOW_TEXT);
+      const range = document.createRange();
+      for (let n = nodes.nextNode(); n; n = nodes.nextNode()) {
+        if (!ownContent(n.parentElement)) { continue; }
+        range.selectNodeContents(n);
+        if (Array.from(range.getClientRects()).some(r => r.width > 0 && r.height > 0)) { return true; }
+      }
+    }
+    return false;
   }
   function feedReady() {
     const col = document.querySelector(COLUMN_SEL);
