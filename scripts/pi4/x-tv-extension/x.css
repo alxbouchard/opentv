@@ -8,16 +8,21 @@
  * jamais un conteneur, une rangée, un groupe mixte ni un post cité entier : tout aperçu (poster, carte, texte, image ou
  * lecteur différé, div sans marqueur) reste natif ; aide en bande opaque pleine largeur. */
 
-/* une seule colonne centrale : navigation de gauche, colonne de droite, tiroirs et bandeaux masqués */
-html.otvx-tv header[role="banner"],
-html.otvx-tv [data-testid="sidebarColumn"],
-html.otvx-tv [data-testid="DMDrawer"],
-html.otvx-tv [data-testid="GrokDrawer"],
-html.otvx-tv [data-testid="BottomBar"],
-html.otvx-tv [data-testid="sheetDialog"] ~ [data-testid="mask"],
-html.otvx-tv [data-testid="primaryColumn"] [data-testid="toolBar"],
-html.otvx-tv [data-testid="primaryColumn"] [data-testid="tweetTextarea_0_label"],
-html.otvx-tv [data-testid="primaryColumn"] [data-testid="placementTracking"] {
+/* une seule colonne centrale : navigation de gauche, colonne de droite, tiroirs et bandeaux masqués.
+ * Revue de 2f4c74d : la règle [data-testid="placementTracking"] de la colonne principale est RETIRÉE (enveloppe
+ * générique, ancêtre possible d'un lecteur vidéo, y compris avant son initialisation — display:none bloquait aussi
+ * l'IntersectionObserver de X). Aucune heuristique publicitaire ne la remplace. Chacun des masquages restants vise un
+ * élément d'interface de la PAGE (navigation, colonne de droite, tiroirs, barre du bas, voile de fenêtre, barre
+ * d'outils et champ du rédacteur), jamais un ancêtre du fil ; « :not(article *) » garantit qu'aucun ne s'applique à
+ * l'intérieur d'un post. */
+html.otvx-tv header[role="banner"]:not(article *),
+html.otvx-tv [data-testid="sidebarColumn"]:not(article *),
+html.otvx-tv [data-testid="DMDrawer"]:not(article *),
+html.otvx-tv [data-testid="GrokDrawer"]:not(article *),
+html.otvx-tv [data-testid="BottomBar"]:not(article *),
+html.otvx-tv [data-testid="sheetDialog"] ~ [data-testid="mask"]:not(article *),
+html.otvx-tv [data-testid="primaryColumn"] [data-testid="toolBar"]:not(article *),
+html.otvx-tv [data-testid="primaryColumn"] [data-testid="tweetTextarea_0_label"]:not(article *) {
   display: none !important;
 }
 

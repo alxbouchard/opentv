@@ -412,7 +412,10 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   Partager (sans marqueur) reste natif ; D-pad = vrais
   J'aime/Enregistrer de CE post même en groupe mixte ; aide en bande opaque pleine largeur (aucun texte à côté/au
   travers, aucun défilement ajouté). Tests `test_x_media.py` + `e2e_x_media.js` (fil + détail, pixel de capture,
-  chargement réel, témoin sans extension, négatifs 0.7.14 et c31a0c7, mutants). Vrai X = gate terrain.
+  chargement réel, témoin sans extension, négatifs 0.7.14 et c31a0c7, mutants). Revue de 2f4c74d : masquage de
+  l'enveloppe `placementTracking` retiré (ancêtre possible d'un lecteur), sans heuristique ; seuls des éléments
+  d'interface de page restent masqués, exclus des posts (`:not(article *)`), liste exacte de TOUS les `display:none` ;
+  négatif 2f4c74d (cadre vide, lecteur différé bloqué). Vrai X = gate terrain.
 - **X TV — « Saisir avec le téléphone » (0.7.10, `OPENTV_X_PHONE_ENTRY`, défaut 0)** : sans clavier physique, UN
   identifiant X (nom d'utilisateur/courriel/téléphone) saisi sur le téléphone DÉJÀ appairé remplit le champ de connexion
   éligible au focus ; Alex continue avec la passkey native. Jamais mot de passe, code, NIP, passkey, paiement ; aucun

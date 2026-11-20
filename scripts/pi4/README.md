@@ -1656,6 +1656,16 @@ permanent). Témoin sans extension : tout s'affiche.
   texte visible sous l'aide ; **contrôle négatif `c31a0c7`** (fil et détail) : div nu, texte libre et fond différé
   masqués (parent à plat et post cité), différés jamais chargés ; mutants (masquage d'enveloppe, groupe cité masqué,
   boutons cités ou secondaires non masqués, exclusion média 0.7.14, pastille translucide) détectés.
+- **Revue de `2f4c74d` — enveloppe `placementTracking`** : la vieille règle `x.css` qui masquait tout
+  `[data-testid="placementTracking"]` de la colonne principale (enveloppe générique, ancêtre possible d'un lecteur
+  vidéo, y compris avant son initialisation) est **retirée**, sans heuristique publicitaire de remplacement. Audit de
+  tous les autres `display:none` : seule l'interface de la PAGE reste masquée (navigation, colonne de droite, tiroirs
+  DM/Grok, barre du bas, voile de fenêtre, barre d'outils et champ du rédacteur), chacun exclu de l'intérieur d'un post
+  par `:not(article *)` ; l'assertion statique fige la liste EXACTE de tous les masquages, qu'ils nomment `article` ou
+  non. Fixture : espaceur portrait + `placementTracking > videoPlayer > videoComponent > video` et la même enveloppe
+  sans `video` (lecteur différé), fil + détail : pixel, chargement, dimensions du cadre, aucun ancêtre masqué, OK sur
+  le bon bouton ; **contrôle négatif `2f4c74d`** : cadre aux bonnes dimensions mais vide, lecteur différé jamais
+  initialisé. Structure supposée : **non attestée** sur le vrai post d'Alex.
 - **Limites** : le groupe ancêtre mixte est une hypothèse de pire cas, non attestée sur le vrai DOM de X ; un contrôle
   secondaire que X ne marque pas (Partager, Grok…) reste visible ; si X renomme ses `data-testid`, Répondre /
   Republier réapparaissent (jamais l'inverse). Portrait très haut : ▶ peut rester hors écran (aucun redimensionnement, par choix). Vrai X sur la Pi :

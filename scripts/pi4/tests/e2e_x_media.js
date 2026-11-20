@@ -15,6 +15,10 @@
    IntersectionObserver), text (texte libre seul), bgl (fond posé tardivement par IntersectionObserver) — dans les
    quatre structures et dans un post CITÉ (qbare, qtext, qbgl ; parents pqbare, pqtext, pqbgl).
    Le groupe ancêtre mixte est une HYPOTHÈSE de pire cas (non attestée pour le DOM réel de X).
+   Revue de 2f4c74d : enveloppe [data-testid=placementTracking] autour du lecteur, dans le cadre à espaceur portrait —
+   ptinit (placementTracking > videoPlayer > videoComponent > video poster + ▶) et ptdefer (placementTracking > bouton
+   vide SANS video, remplacé par le lecteur via IntersectionObserver). Structure SUPPOSÉE, non relevée sur le vrai X.
+   Mesures ajoutées pour tout cadre : dimensions (aspect portrait conservé), ancêtres masqués, lecteur initialisé.
 
    Preuves : pixel au cœur du cadre lu sur la CAPTURE (PNG décodé ici) ; chargement réel (img chargée, lecteur différé
    initialisé) ; contrôles natifs du média visibles ; puis D-pad réel (↓ → OK ←) : J'aime / Enregistrer de CE post,
@@ -107,6 +111,14 @@ function media(id, st) {
     inner = `<div></div>`;   // AUCUN attribut : lecteur (bare) ou fond (bgl) posé plus tard par IntersectionObserver
   } else if (st === "text") {
     inner = `<div>Titre de carte fictive, texte libre sans marqueur</div>`;   // AUCUN attribut, aucune image
+  } else if (st === "ptinit") {   // enveloppe placementTracking autour d'un lecteur initialisé
+    inner = `<div data-testid="placementTracking" class="fill" id="pt-${id}"><div data-testid="videoPlayer" class="fill" id="hit-${id}">` +
+      `<div data-testid="videoComponent" class="fill"><video id="img-${id}" preload="none" muted playsinline poster="${POSTER}" ` +
+      `style="width:100%;height:100%;object-fit:cover"></video><div role="button" tabindex="0" aria-label="Lire" class="play" ` +
+      `id="play-${id}">▶</div></div></div></div>`;
+  } else if (st === "ptdefer") {   // même enveloppe, AUCUN video : lecteur posé plus tard (IntersectionObserver)
+    inner = `<div data-testid="placementTracking" class="fill" id="pt-${id}"><div class="fill" role="button" tabindex="0" ` +
+      `aria-label="Lire" id="hit-${id}" data-defer="1"></div></div>`;
   } else if (st === "defer") {
     inner = `<div class="fill" role="button" tabindex="0" aria-label="Lire" id="hit-${id}" data-defer="1"></div>`;
   } else {
@@ -141,6 +153,9 @@ let POSTS = "";
 for (const st of STATES) {
   for (const s of STRUCTS) { const id = st + "_" + s; MEDIA_IDS.push(id); POSTS += article(id, head(id) + text(id, TEXT) + body(id, st, s)); }
 }
+// revue de 2f4c74d : lecteur dans une enveloppe placementTracking (initialisé / différé), rangée sœur comme sur X
+const PT_IDS = ["ptinit_sib", "ptdefer_sib"];
+for (const id of PT_IDS) { MEDIA_IDS.push(id); POSTS += article(id, head(id) + text(id, TEXT) + body(id, id.split("_")[0], "sib")); }
 // post cité à média + rangée dans un groupe mixte (qm) ; post cité à rangée pure (qp)
 const quoted = (q, inner) => `<div class="quote" role="link" tabindex="0"><article data-testid="tweet" data-otv-id="${q}" tabindex="-1">` +
   `<div class="row"><div class="cnt">${head(q)}<div data-testid="tweetText" lang="fr">Post cité.</div>${inner}</div></div></article></div>`;
@@ -163,7 +178,7 @@ POSTS += article("tail", head("tail") + text("tail", "Dernier post.") + bar("tai
 
 const SCRIPT = `<script>(function(){var P=${JSON.stringify(POSTER)};window.__acts=[];
 var io=new IntersectionObserver(function(es){es.forEach(function(e){if(!e.isIntersecting){return;}io.unobserve(e.target);var t=e.target;
-if(t.tagName==="IMG"){t.src=P;return;}var fr=t.parentElement,id=fr.id.slice(6);
+if(t.tagName==="IMG"){t.src=P;return;}var fr=t.closest(".frame"),id=fr.id.slice(6);
 if(fr.classList.contains("st-bgl")){t.style.backgroundImage='url("'+P+'")';t.style.backgroundSize="cover";return;}var d=document.createElement("div");d.setAttribute("data-testid","videoPlayer");
 d.className="fill";d.id="hit-"+id;var c=document.createElement("div");c.setAttribute("data-testid","videoComponent");c.className="fill";
 var v=document.createElement("video");v.id="img-"+id;v.preload="none";v.muted=true;v.poster=P;v.style.cssText="width:100%;height:100%;object-fit:cover";
@@ -232,6 +247,9 @@ const URLS = { home: "https://x.com/home", status: "https://x.com/fix_poster_sib
           const art = fr.closest("article");
           const hidden = []; for (const e of [fr].concat(Array.from(fr.querySelectorAll("*")))) {
             if (getComputedStyle(e).display === "none") { hidden.push(e.id || e.tagName); } }
+          const anc = []; for (let e = fr.parentElement; e; e = e.parentElement) {   // ancêtres du cadre jusqu'à <html>
+            if (getComputedStyle(e).display === "none") { anc.push(e.id || e.getAttribute("data-testid") || e.tagName); } }
+          const pt = fr.querySelector('[data-testid="placementTracking"]');
           let loaded = false;
           if (img && img.tagName === "IMG") { loaded = img.complete && img.naturalWidth > 0 && !!img.currentSrc; }
           else if (img && img.tagName === "VIDEO") { loaded = !!img.poster; }
@@ -244,7 +262,10 @@ const URLS = { home: "https://x.com/home", status: "https://x.com/fix_poster_sib
           }
           const btn = (k) => document.querySelector('[data-otv-btn="' + id + "-" + k + '"]');
           const grp = (e) => e ? e.getAttribute("data-otvx-bar") : null;
-          return { frame: R(fr), frame_vis: vis(fr), hidden_in_frame: hidden, hit_vis: vis(hit), play_vis: play ? vis(play) : null,
+          return { frame: R(fr), frame_vis: vis(fr), hidden_in_frame: hidden, hidden_ancestors: anc,
+            player: !!fr.querySelector('[data-testid="videoPlayer"] > [data-testid="videoComponent"] > video'),
+            pt: pt ? { display: getComputedStyle(pt).display, rect: R(pt), vis: vis(pt) } : null,
+            hit_vis: vis(hit), play_vis: play ? vis(play) : null,
             media_tag: img ? img.tagName : null, loaded: loaded, media_vis: vis(img),
             more_vis: vis(art.querySelector('[data-testid="tweet-text-show-more-link"]')),
             bar: grp(document.getElementById("bar-" + id)), outer: grp(document.getElementById("outer-" + id)),
@@ -286,7 +307,7 @@ const URLS = { home: "https://x.com/home", status: "https://x.com/fix_poster_sib
       res.dpad = {};
       if (cfg.ext) {
         const order = MEDIA_IDS.filter((i) => !/^q/.test(i) && i !== "rp").concat(["pqm", "pqbare", "pqtext", "pqbgl", "pqp", "rp"]);   // ordre du DOM (↓ seulement)
-        const OK_ON = new Set(["poster_grp", "defer_deep", "init_flat", "card_flat", "rp", "pqm"]);
+        const OK_ON = new Set(["poster_grp", "defer_deep", "init_flat", "card_flat", "rp", "pqm", "ptinit_sib", "ptdefer_sib"]);
         for (const id of order) {
           let s = await st();
           for (let i = 0; i < 16 && s.post !== id; i++) { s = await key("ArrowDown", 110); }

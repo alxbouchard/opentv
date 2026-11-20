@@ -17,6 +17,11 @@ eux-mêmes (Répondre, Republier, statistiques ; boutons d'un post cité). Parta
   boutons à plat dans le groupe mixte, post parent et post cité, bouton remplacé par X ; « Show more » et liens natifs.
   Preuves par pixel de la CAPTURE (PNG décodé) et chargement réel ; témoin SANS extension ; contrôles NÉGATIFS 0.7.14
   (205b883) et 0.7.15 initiale (c31a0c7) qui doivent échouer ; mutants.
+Revue de 2f4c74d : la vieille règle x.css « [data-testid=placementTracking] » de la colonne principale (enveloppe
+générique, ancêtre possible d'un lecteur, même avant son initialisation) est RETIRÉE sans heuristique de remplacement ;
+l'assertion statique couvre TOUS les display:none (liste exacte, avec ou sans « article »). Fixture : espaceur portrait +
+placementTracking > videoPlayer > videoComponent > video (ptinit) et la même enveloppe SANS video, lecteur différé
+(ptdefer) ; fil + détail ; pixel, chargement, dimensions du cadre, ancêtres jamais masqués ; contrôle négatif 2f4c74d.
 Limite : le groupe ancêtre mixte est une hypothèse de pire cas, non attestée sur le DOM réel de X ; la session X réelle
 sur la Pi (Wayland/HDMI, vrai DOM) n'est PAS couverte ici (gate terrain).
 """
@@ -29,7 +34,7 @@ import tempfile
 import unittest
 
 from tests._common import PI4
-from tests.test_x_feed import HIDDEN_CONTROLS, css_rules, no_comments
+from tests.test_x_feed import ALL_HIDDEN, HIDDEN_CONTROLS, NEVER_HIDDEN_TOKENS, PAGE_CHROME, css_rules, no_comments
 from tests.test_x_tv import EXT, EXT_DST, INSTALL, NODE, full_chrome, read, sh
 from opentv_pi import VERSION, xcontext
 
@@ -39,12 +44,14 @@ E2E = os.path.join(PI4, "tests", "e2e_x_media.js")
 REPO = os.path.dirname(os.path.dirname(PI4))
 NEGATIVE = "205b883"   # 0.7.14 déployée : contrôle négatif (doit reproduire les cadres vides)
 REJECTED = "c31a0c7"   # 0.7.15 initiale, refusée en revue : div nu / texte libre / fond différé masqués
+PT_NEG = "2f4c74d"     # 0.7.15 révisée, refusée en revue : enveloppe placementTracking masquée (lecteur caché/bloqué)
+PT = ("ptinit_sib", "ptdefer_sib")                   # lecteur dans une enveloppe placementTracking (initialisé, différé)
 STATES = ("poster", "card", "lazy", "defer", "init", "bare", "text", "bgl")
 UNMARKED = ("bare", "text", "bgl")                    # aperçus SANS attribut (revue de c31a0c7)
 QUOTES = ("qm", "qbare", "qtext", "qbgl")             # posts cités dont l'aperçu partage le groupe des boutons
 NESTED = ("sib", "grp", "deep")   # rangée [role=group] propre : nettoyée
 FLAT = ("flat",)                  # boutons à plat dans le groupe mixte : rendu natif intact
-OK_ON = ("poster_grp", "defer_deep", "init_flat", "card_flat", "rp", "pqm")
+OK_ON = ("poster_grp", "defer_deep", "init_flat", "card_flat", "rp", "pqm") + PT
 PARENTS = ("pqm", "pqbare", "pqtext", "pqbgl", "pqp", "rp")
 URLS = {"home": "/home", "status": "/fix_poster_sib/status/1"}   # OK sur un bouton : jamais une navigation
 NOACT = "Ce post n'a pas de bouton J'aime ou Enregistrer visible."
@@ -53,17 +60,26 @@ NOACT = "Ce post n'a pas de bouton J'aime ou Enregistrer visible."
 class TestMediaStatic(unittest.TestCase):
     def test_css_hides_only_individual_controls(self):
         """Chaque display:none dans un post vise UN contrôle identifié par lui-même ; jamais un [role=group], une
-        enveloppe, un enfant « sans J'aime », un :has() ni une rangée marquée. Aucun média ciblé, nulle part."""
+        enveloppe, un enfant « sans J'aime », un :has() ni une rangée marquée. Aucun média ciblé, nulle part.
+        Revue de 2f4c74d : vérifié pour TOUS les sélecteurs de masquage, qu'ils nomment « article » ou non ; les autres
+        (interface de page) sont une liste exacte, exclue de l'intérieur d'un post ; aucune enveloppe générique."""
         hides = []
         for sels, body in css_rules(read(XCSS)):
             for s in sels:
                 self.assertTrue(s.startswith("html.otvx-tv"), s)
                 self.assertNotIn("data-otvx-bar", s)
-                if "display: none" in body and "article" in s:
+                if re.search(r"display\s*:\s*none", body):
                     hides.append(s)
-                    for bad in ('role="group"', ":has(", ":not(", ">", "div", "~", "+"):
-                        self.assertNotIn(bad, s.replace("html.otvx-tv ", ""), (bad, s))
-        self.assertEqual(tuple(hides), HIDDEN_CONTROLS)
+                    for tok in NEVER_HIDDEN_TOKENS:
+                        self.assertNotIn(tok, s.replace('[data-testid="primaryColumn"] ', ""), (tok, s))
+                    if s in HIDDEN_CONTROLS:
+                        for bad in ('role="group"', ":has(", ":not(", ">", "div", "~", "+"):
+                            self.assertNotIn(bad, s.replace("html.otvx-tv ", ""), (bad, s))
+                    elif s in PAGE_CHROME:
+                        self.assertTrue(s.endswith(":not(article *)"), s)   # jamais dans un post
+                        self.assertEqual(s.count("article"), 1, s)
+        self.assertEqual(tuple(hides), ALL_HIDDEN)
+        self.assertNotIn("placementTracking", no_comments(read(XCSS)))
         body = re.sub(r"/\*.*?\*/", "", read(XCSS), flags=re.S)
         for bad in ("object-fit", "max-height", "aspect-ratio", "url(", "@import", "data-otvx-bar"):
             self.assertNotIn(bad, body)
@@ -133,7 +149,7 @@ class TestMediaEndToEnd(unittest.TestCase):
 
     @staticmethod
     def media_ids():
-        return ["%s_%s" % (st, s) for st in STATES for s in NESTED + FLAT] + list(QUOTES) + ["rp"]
+        return ["%s_%s" % (st, s) for st in STATES for s in NESTED + FLAT] + list(PT) + list(QUOTES) + ["rp"]
 
     def check_media(self, r):
         """Aperçus : renvoie les écarts (vide = conforme), pour 0.7.15, le témoin sans extension et le négatif."""
@@ -148,13 +164,22 @@ class TestMediaEndToEnd(unittest.TestCase):
                     bad.append("chargement " + tag)                           # image/lecteur différé jamais chargé
                 if m["hidden_in_frame"]:
                     bad.append("masqué " + tag)
+                if m["hidden_ancestors"]:
+                    bad.append("ancêtre masqué " + tag)                       # aucun masquage générique au-dessus
+                f = m["frame"]                                                # cadre portrait 9:16 à sa vraie taille
+                if not (m["frame_vis"] and f and f[2] >= 300 and abs((f[3] - 2) - (f[2] - 2) * 16 / 9) <= 3):
+                    bad.append("dimensions " + tag)
+                if mid in PT and not (m["player"] and m["media_tag"] == "VIDEO" and m["media_vis"]
+                                      and m["pt"] and m["pt"]["display"] != "none" and m["pt"]["vis"]):
+                    bad.append("lecteur " + tag)                              # lecteur initialisé ET affiché
                 native = ("hit-", "img-", "in-frame") if (mid.split("_")[0] in ("text", "bgl") or mid in ("qtext", "qbgl")) \
                     else ("hit-", "img-")                                     # aperçu sans attribut : son propre nœud
                 if not (m["points"] and all(p["hit"] and p["hit"].startswith(native) for p in m["points"])):
                     bad.append("lien natif " + tag)                           # zone native du média atteignable
                 if mid not in QUOTES and not m["more_vis"]:
                     bad.append("show more " + tag)
-                if (mid.split("_")[0] in ("poster", "init", "defer", "bare") or mid in ("rp", "qm", "qbare")) \
+                if (mid.split("_")[0] in ("poster", "init", "defer", "bare", "ptinit", "ptdefer")
+                        or mid in ("rp", "qm", "qbare")) \
                         and not m["play_vis"]:
                     bad.append("▶ " + tag)
         return bad
@@ -277,6 +302,33 @@ class TestMediaEndToEnd(unittest.TestCase):
                     self.assertNotIn("pixel %s:%s_%s" % (kind, st, s), media)  # témoin discriminant
             for mid in ("bare_flat", "bgl_flat", "qbare", "qbgl"):
                 self.assertIn("chargement %s:%s" % (kind, mid), media)         # IntersectionObserver bloqué
+
+    def test_negative_2f4c74d_hides_placement_tracking(self):
+        """Témoin de la revue : 2f4c74d masque l'enveloppe placementTracking -> lecteur initialisé caché (cadre aux
+        bonnes dimensions mais vide) et lecteur différé jamais initialisé, fil ET détail ; le même lecteur sans
+        enveloppe (init_sib, defer_sib) reste visible (témoin discriminant)."""
+        if not shutil.which("git") or subprocess.run(["git", "-C", REPO, "cat-file", "-e", PT_NEG + "^{commit}"],
+                                                     capture_output=True).returncode:
+            self.skipTest("historique git %s absent" % PT_NEG)
+        d = tempfile.mkdtemp(prefix="otvxpt", dir="/tmp")
+        self.addCleanup(shutil.rmtree, d, True)
+        arc = subprocess.run(["git", "-C", REPO, "archive", PT_NEG, "scripts/pi4/x-tv-extension"],
+                             capture_output=True, check=True).stdout
+        subprocess.run(["tar", "-x", "-C", d], input=arc, check=True)
+        ext = os.path.join(d, "scripts", "pi4", "x-tv-extension")
+        self.assertIn('[data-testid="placementTracking"]', read(os.path.join(ext, "x.css")))
+        r = self.run_e2e(ext, "negpt", shots=False)
+        media = self.check_media(r)
+        for kind in ("home", "status"):
+            for mid in PT:
+                self.assertIn("pixel %s:%s" % (kind, mid), media)                # cadre vide à l'écran
+                self.assertIn("lecteur %s:%s" % (kind, mid), media)
+                self.assertNotIn("dimensions %s:%s" % (kind, mid), media)        # même cadre, bonne taille
+                self.assertEqual(r["pages"][kind]["posts"][mid]["pt"]["display"], "none")
+            self.assertIn("chargement %s:ptdefer_sib" % kind, media)              # IntersectionObserver bloqué
+            self.assertFalse(r["pages"][kind]["posts"]["ptdefer_sib"]["player"])
+            for mid in ("init_sib", "defer_sib", "poster_sib"):
+                self.assertFalse([b for b in media if b.endswith(" %s:%s" % (kind, mid))], (mid, media))   # discriminant
 
     def test_mutants_detected(self):
         """Chaque garde porte : la retirer fait échouer le contrat (page du fil seulement)."""

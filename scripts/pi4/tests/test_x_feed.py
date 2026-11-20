@@ -45,6 +45,20 @@ HIDDEN_CONTROLS = (
     COL + 'article article :is(button, [role="button"]):is([data-testid="like"], [data-testid="unlike"], '
     '[data-testid="bookmark"], [data-testid="removeBookmark"])',
 )
+# revue de 2f4c74d : TOUS les autres masquages (display:none), indépendamment du mot « article » — interface de la PAGE
+# seulement (jamais un ancêtre du fil), chacun exclu de l'intérieur d'un post par :not(article *) ; plus le message
+# de l'extension caché. AUCUNE enveloppe générique (placementTracking retiré, sans heuristique de remplacement).
+PAGE_CHROME = tuple("html.otvx-tv " + s + ":not(article *)" for s in (
+    'header[role="banner"]', '[data-testid="sidebarColumn"]', '[data-testid="DMDrawer"]',
+    '[data-testid="GrokDrawer"]', '[data-testid="BottomBar"]', '[data-testid="sheetDialog"] ~ [data-testid="mask"]',
+    '[data-testid="primaryColumn"] [data-testid="toolBar"]',
+    '[data-testid="primaryColumn"] [data-testid="tweetTextarea_0_label"]'))
+OWN_UI_HIDDEN = ("html.otvx-tv .otvx-toast[hidden]",)
+ALL_HIDDEN = PAGE_CHROME + HIDDEN_CONTROLS + OWN_UI_HIDDEN
+# enveloppes et ancêtres possibles d'un média ou du fil : jamais nommés par un masquage, nulle part
+NEVER_HIDDEN_TOKENS = ("placementTracking", "cellInnerDiv", "tweetPhoto", "videoPlayer", "videoComponent", "card.",
+                       "role=\"group\"", "role=\"link\"", "role=\"region\"", ":has(", "main", "section", "div", "span",
+                       "[aria-label", "[class", "[style", "data-otvx")
 STALE = "Le fil a changé : choisis de nouveau le post avec ↑ ↓, puis →."
 NOACT = "Ce post n'a pas de bouton J'aime ou Enregistrer visible."
 NOKEY = "Reviens une fois à l'accueil OpenTV (touche Accueil), puis réessaie."
@@ -84,7 +98,8 @@ class TestFeedStatic(unittest.TestCase):
     def test_css_never_hides_media_or_generic_groups(self):
         """0.7.15 : dans un post, seuls des contrôles identifiés PAR EUX-MÊMES sont masqués (Répondre, Republier,
         statistiques ; boutons d'un post cité) : aucun [role=group], aucune enveloppe ni élément sans marqueur visé,
-        aucun data-otvx-bar. Aucun média restylé (ni object-fit ni hauteur)."""
+        aucun data-otvx-bar. Aucun média restylé (ni object-fit ni hauteur). Revue de 2f4c74d : la liste exacte couvre
+        TOUS les display:none (avec ou sans « article ») ; aucune enveloppe générique (placementTracking…)."""
         rules = css_rules(read(XCSS))
         self.assertTrue(rules)
         hides = []
@@ -92,16 +107,23 @@ class TestFeedStatic(unittest.TestCase):
             for s in sels:
                 self.assertTrue(s.startswith("html.otvx-tv"), s)   # inerte hors du fil
                 self.assertNotIn("data-otvx-bar", s)
-                if "display: none" in body:
+                self.assertNotIn("placementTracking", s)
+                if re.search(r"display\s*:\s*none", body):
+                    hides.append(s)
                     self.assertNotIn('role="group"', s)
                     self.assertNotIn(":has(", s)
-                    if "article" in s:
-                        hides.append(s)
+                    for tok in NEVER_HIDDEN_TOKENS:
+                        self.assertNotIn(tok, s.replace('[data-testid="primaryColumn"] ', ""), (tok, s))
                 elif 'role="group"' in s:   # autre règle : seulement les vrais boutons d'action (icônes, taille)
                     self.assertRegex(s, r'\[role="group"\] (:is\()?\[data-testid="(like|unlike|bookmark|removeBookmark)"\]')
                 for media in ("video", "videoPlayer", "videoComponent", "tweetPhoto", "img", "card"):
                     self.assertNotRegex(s, r"\b%s\b" % media, s)   # aucun média ciblé, nulle part
-        self.assertEqual(tuple(hides), HIDDEN_CONTROLS)
+                for kw in ("visibility", "opacity: 0", "height: 0", "max-height", "clip", "content-visibility"):
+                    self.assertNotIn(kw, body.replace("visibility: visible", ""), (kw, s))   # aucun autre masquage
+        self.assertEqual(tuple(hides), ALL_HIDDEN)                   # liste EXACTE de tous les masquages
+        for s in PAGE_CHROME:                                         # interface de page : jamais dans un post
+            self.assertTrue(s.endswith(":not(article *)"), s)
+            self.assertEqual(s.count("article"), 1, s)
         css = read(XCSS)
         for bad in ("object-fit", "max-height", "autoplay", "@import", "url("):
             self.assertNotIn(bad, re.sub(r"/\*.*?\*/", "", css, flags=re.S), bad)
