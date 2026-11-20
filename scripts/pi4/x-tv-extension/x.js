@@ -27,6 +27,13 @@
  * X : MutationObserver regroupé (une passe au plus toutes les REFRESH_MS). Aucun état de compte mémorisé : l'état
  * J'aime/Enregistré affiché est toujours celui du DOM courant de X. Jamais de clic, de repartage, de réponse ni de
  * publication par ce script.
+ * 0.7.15 : rangée d'actions marquée data-otvx-bar par CE script, jamais devinée en CSS. « row » = [role=group] le
+ * plus interne du post qui porte SES boutons et qui ne contient QUE des contrôles de rangée (vrais boutons, lien de
+ * statistiques du post, icônes) : x.css y masque les contrôles non demandés. Groupe mixte ou douteux (média, poster,
+ * carte, image ou lecteur différé, lien natif, post cité…) : « mixed », rien n'y est masqué ni restylé (affichage
+ * natif intact) ; → / OK y visent quand même les vrais J'aime / Enregistrer de CE post (jamais un post cité).
+ * Bandeau d'aide (0.7.15) : bande opaque pleine largeur en bas (x.css) — aucun texte de post ne passe à côté ou
+ * au travers ; la zone de lecture reste au-dessus (bottomLimit), aucun défilement ajouté.
  */
 (() => {
   "use strict";
@@ -46,9 +53,18 @@
   // VRAIS boutons de X restaurés : J'aime / Je n'aime plus / Enregistrer (signet) / Retirer des signets — focus seulement
   const ACTION_TESTIDS = ["like", "unlike", "bookmark", "removeBookmark"];
   const ACTION_SEL = ACTION_TESTIDS.map((t) => '[data-testid="' + t + '"]').join(", ");
-  // rangée d'actions = [role=group] du post qui contient un de ces boutons et AUCUN média (lecteur vidéo jamais visé)
+  // médias déjà initialisés de X (un poster, une carte ou un lecteur différé n'en porte aucun : voir GRAPHIC_SEL)
   const MEDIA_SEL = 'video, [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="tweetPhoto"]';
   const LANE_ATTR = "data-otvx-lane";
+  const BAR_ATTR = "data-otvx-bar";
+  // contenu qui interdit l'identification positive d'une rangée (média, carte, texte, post cité…) : rien n'y est masqué
+  const GRAPHIC_SEL = MEDIA_SEL + ', img, audio, picture, canvas, iframe, object, embed, image, article, ' +
+    '[data-testid="card.wrapper"], [data-testid="tweetText"], [data-testid="User-Name"]';
+  const CTRL_SEL = 'a, button, input, select, textarea, summary, [tabindex], [contenteditable], [role="button"], ' +
+    '[role="link"], [role="slider"], [role="menuitem"], [role="checkbox"], [role="switch"], [role="tab"], [role="option"]';
+  const ANALYTICS_RE = /^\/[A-Za-z0-9_]{1,15}\/status\/[0-9]{1,25}\/analytics$/;
+  const BAR_NODES_MAX = 300;
+  const SVG_NS = "http://www.w3.org/2000/svg";
   const ACT_ATTR = "data-otvx-act";
   const ACTING_ATTR = "data-otvx-acting";
   const KEYS = {
@@ -135,6 +151,51 @@
       if (!want.has(e)) { e.removeAttribute(LANE_ATTR); }   // nœud réutilisé par X hors du chemin : rendu tel quel
     }
     for (const [e, v] of want) { if (e.getAttribute(LANE_ATTR) !== v) { e.setAttribute(LANE_ATTR, v); } }
+  }
+
+  // ---- rangée d'actions (0.7.15) : [role=group] LE PLUS INTERNE de ce post qui porte un de SES boutons (jamais ceux
+  // d'un post cité) ; « pure » seulement si identifiée positivement, sinon rien n'y est masqué
+  function rowOf(post) {
+    const gs = own(post, '[role="group"]').filter((g) =>
+      Array.from(g.querySelectorAll(ACTION_SEL)).some((b) => ownerPost(b) === post));
+    return gs.find((g) => !gs.some((h) => h !== g && g.contains(h))) || null;
+  }
+  function rowControl(n, post) {   // contrôle admis dans une rangée pure
+    if (n.matches(ACTION_SEL)) { return ownerPost(n) === post; }
+    if (n.tagName === "BUTTON") { return !!n.querySelector("svg"); }   // Répondre, Repartager, Partager… (icône)
+    if (n.tagName === "A") {   // statistiques du post lui-même, même origine
+      let u = null;
+      try { u = new URL(n.getAttribute("href") || "", location.origin); } catch (e) { return false; }
+      return u.origin === location.origin && ANALYTICS_RE.test(u.pathname) && !u.search && !u.hash;
+    }
+    return false;
+  }
+  function pureRow(g, post) {
+    const nodes = g.querySelectorAll("*");
+    if (nodes.length > BAR_NODES_MAX || g.querySelector(GRAPHIC_SEL)) { return false; }
+    for (const n of [g].concat(Array.from(nodes))) {
+      if (n.namespaceURI === SVG_NS) { continue; }   // icônes (une <image> SVG est refusée plus haut)
+      if (getComputedStyle(n).backgroundImage !== "none") { return false; }   // poster, vignette en fond
+      if (n !== g && n.matches(CTRL_SEL) && !n.closest(ACTION_SEL) && !rowControl(n, post)) { return false; }
+    }
+    return true;
+  }
+  function markBars(on) {
+    const want = new Map();
+    if (on) {
+      for (const p of allPosts()) {
+        const r = rowOf(p);
+        if (r) { want.set(r, pureRow(r, p) ? "row" : "mixed"); }
+        for (const q of Array.from(p.querySelectorAll(POST_SEL))) {   // post cité : rangée masquée si PURE seulement
+          const qr = rowOf(q);
+          if (qr && !want.has(qr) && pureRow(qr, q)) { want.set(qr, "quoted"); }
+        }
+      }
+    }
+    for (const e of Array.from(document.querySelectorAll("[" + BAR_ATTR + "]"))) {
+      if (!want.has(e)) { e.removeAttribute(BAR_ATTR); }   // nœud réutilisé par X : rendu natif
+    }
+    for (const [e, v] of want) { if (e.getAttribute(BAR_ATTR) !== v) { e.setAttribute(BAR_ATTR, v); } }
   }
 
   // ---- bandeau d'aide et message (textContent seulement)
@@ -236,7 +297,7 @@
     return typeof b.checkVisibility !== "function" || b.checkVisibility({ opacityProperty: true, visibilityProperty: true });
   }
   function actionBar(post) {
-    return own(post, '[role="group"]').find((g) => g.querySelector(ACTION_SEL) && !g.querySelector(MEDIA_SEL)) || null;
+    return rowOf(post);   // même mixte : seuls les boutons de CE post sont retenus (actions)
   }
   function actions(post) {
     const bar = post && post.isConnected ? actionBar(post) : null;
@@ -431,6 +492,7 @@
     const on = feedMode();
     document.documentElement.classList.toggle("otvx-tv", on);
     markLanes(on);
+    markBars(on);
     if (focused && !focused.isConnected) { focused = null; }   // post retiré par X : prochain ↑ ↓ repart de l'écran
     if (actEl && document.activeElement !== actEl) {
       // X a remplacé le bouton (J'aime -> Aimé) dans le MÊME post : focus remis au même rang ; sinon mode quitté,

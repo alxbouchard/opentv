@@ -3,8 +3,10 @@
  * Page de connexion ou sans fil : aucune règle ne s'applique (rien n'est masqué ni restylé). Fenêtre modale de X :
  * jamais visée (aucune règle hors colonne principale, bandeaux et aide). Aucune ressource externe.
  * 0.7.14 : largeur RÉELLE (chaque ancêtre effectif main -> colonne -> post marqué data-otvx-lane par x.js), texte
- * lisible sans sur-zoom, médias et lecteurs vidéo de X JAMAIS restylés ni masqués (aucun [role=group] hors de la
- * rangée d'actions), rangée d'actions réduite aux VRAIS boutons J'aime / Enregistrer (signet), focus d'action distinct. */
+ * lisible sans sur-zoom, médias et lecteurs vidéo de X JAMAIS restylés ni masqués, focus d'action distinct.
+ * 0.7.15 : rangée d'actions réduite aux VRAIS boutons J'aime / Enregistrer SEULEMENT si x.js l'a identifiée
+ * positivement (data-otvx-bar="row") ; groupe mixte ou douteux : rien masqué (poster, carte, image ou lecteur différé
+ * intacts) ; aide en bande opaque pleine largeur. */
 
 /* une seule colonne centrale : navigation de gauche, colonne de droite, tiroirs et bandeaux masqués */
 html.otvx-tv header[role="banner"],
@@ -19,15 +21,18 @@ html.otvx-tv [data-testid="primaryColumn"] [data-testid="placementTracking"] {
   display: none !important;
 }
 
-/* rangée d'actions de X = la [role=group] du post qui porte J'aime/Répondre/Repartager et AUCUN média. Tout y est
- * masqué sauf les vrais boutons J'aime / Je n'aime plus / Enregistrer / Retirer des signets. Lecteur et commandes
- * vidéo, galeries, tout autre [role=group] : jamais visés. Rangée d'un post cité/imbriqué : masquée (BON post). */
-html.otvx-tv [data-testid="primaryColumn"] article [role="group"]:has([data-testid="like"], [data-testid="unlike"], [data-testid="reply"], [data-testid="retweet"], [data-testid="unretweet"]):not(:has(video, [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="tweetPhoto"])) > :not(:has([data-testid="like"], [data-testid="unlike"], [data-testid="bookmark"], [data-testid="removeBookmark"])),
-html.otvx-tv [data-testid="primaryColumn"] article [role="group"]:has([data-testid="like"], [data-testid="unlike"], [data-testid="reply"], [data-testid="retweet"], [data-testid="unretweet"]):not(:has(video, [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="tweetPhoto"])) :is(a, button, [role="button"], [role="link"]):not([data-testid="like"], [data-testid="unlike"], [data-testid="bookmark"], [data-testid="removeBookmark"]),
-html.otvx-tv [data-testid="primaryColumn"] article article [role="group"]:has([data-testid="like"], [data-testid="unlike"], [data-testid="bookmark"], [data-testid="removeBookmark"]):not(:has(video, [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="tweetPhoto"])) {
+/* rangée d'actions (0.7.15) : SEULEMENT la rangée marquée data-otvx-bar par x.js après identification POSITIVE
+ * (« row » : [role=group] le plus interne du post, rien que des contrôles de rangée). Tout y est masqué sauf les vrais
+ * boutons J'aime / Je n'aime plus / Enregistrer / Retirer des signets. Rangée « mixed » (média, poster, carte, image ou
+ * lecteur différé, lien natif…) : AUCUNE règle, rendu natif intact. Aucun [role=group] deviné ici. Garde redondante :
+ * jamais une rangée qui contiendrait un média, une carte, un texte ou un post cité. Rangée PURE d'un post cité :
+ * masquée (jamais atteinte au D-pad). */
+html.otvx-tv [data-testid="primaryColumn"] article [data-otvx-bar="row"]:not(:has(img, video, audio, picture, canvas, iframe, object, embed, article, [data-testid="tweetPhoto"], [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="card.wrapper"], [data-testid="tweetText"])) > :not([data-testid="like"], [data-testid="unlike"], [data-testid="bookmark"], [data-testid="removeBookmark"], :has([data-testid="like"], [data-testid="unlike"], [data-testid="bookmark"], [data-testid="removeBookmark"])),
+html.otvx-tv [data-testid="primaryColumn"] article [data-otvx-bar="row"]:not(:has(img, video, audio, picture, canvas, iframe, object, embed, article, [data-testid="tweetPhoto"], [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="card.wrapper"], [data-testid="tweetText"])) :is(a, button, [role="button"], [role="link"]):not([data-testid="like"], [data-testid="unlike"], [data-testid="bookmark"], [data-testid="removeBookmark"]),
+html.otvx-tv [data-testid="primaryColumn"] article article [data-otvx-bar="quoted"]:not(:has(img, video, audio, picture, canvas, iframe, object, embed, article, [data-testid="tweetPhoto"], [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="card.wrapper"], [data-testid="tweetText"])) {
   display: none !important;
 }
-html.otvx-tv [data-testid="primaryColumn"] article [role="group"]:has([data-testid="like"], [data-testid="unlike"]):not(:has(video, [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="tweetPhoto"])) {
+html.otvx-tv [data-testid="primaryColumn"] article [data-otvx-bar="row"]:not(:has(img, video, audio, picture, canvas, iframe, object, embed, article, [data-testid="tweetPhoto"], [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="card.wrapper"], [data-testid="tweetText"])) {
   justify-content: flex-start !important;
   gap: 28px !important;
   max-width: none !important;
@@ -113,34 +118,40 @@ html.otvx-tv [data-otvx-act] {
 }
 /* libellés français des VRAIS boutons du post au focus, tirés de l'état AFFICHÉ par X (data-testid courant) : rien
  * n'est mémorisé par OpenTV ; « … · OK retire » quand X montre l'état déjà activé */
-html.otvx-tv article.otvx-focus [role="group"] [data-testid="like"]::after,
-html.otvx-tv article.otvx-focus [role="group"] [data-testid="unlike"]::after,
-html.otvx-tv article.otvx-focus [role="group"] [data-testid="bookmark"]::after,
-html.otvx-tv article.otvx-focus [role="group"] [data-testid="removeBookmark"]::after {
+html.otvx-tv article.otvx-focus [data-otvx-bar] [data-testid="like"]:not(article article *)::after,
+html.otvx-tv article.otvx-focus [data-otvx-bar] [data-testid="unlike"]:not(article article *)::after,
+html.otvx-tv article.otvx-focus [data-otvx-bar] [data-testid="bookmark"]:not(article article *)::after,
+html.otvx-tv article.otvx-focus [data-otvx-bar] [data-testid="removeBookmark"]:not(article article *)::after {
   margin-left: 10px;
   font: 600 22px/1.2 system-ui, "Noto Sans", sans-serif;
   color: #e9edf1;
   white-space: nowrap;
 }
-html.otvx-tv article.otvx-focus [role="group"] [data-testid="like"]::after { content: "J'aime"; }
-html.otvx-tv article.otvx-focus [role="group"] [data-testid="unlike"]::after { content: "Aimé · OK retire"; color: #f91880; }
-html.otvx-tv article.otvx-focus [role="group"] [data-testid="bookmark"]::after { content: "Enregistrer"; }
-html.otvx-tv article.otvx-focus [role="group"] [data-testid="removeBookmark"]::after { content: "Enregistré · OK retire"; color: #1d9bf0; }
+html.otvx-tv article.otvx-focus [data-otvx-bar] [data-testid="like"]:not(article article *)::after { content: "J'aime"; }
+html.otvx-tv article.otvx-focus [data-otvx-bar] [data-testid="unlike"]:not(article article *)::after { content: "Aimé · OK retire"; color: #f91880; }
+html.otvx-tv article.otvx-focus [data-otvx-bar] [data-testid="bookmark"]:not(article article *)::after { content: "Enregistrer"; }
+html.otvx-tv article.otvx-focus [data-otvx-bar] [data-testid="removeBookmark"]:not(article article *)::after { content: "Enregistré · OK retire"; color: #1d9bf0; }
 
-/* bandeau d'aide (bas) et message (haut) : textes français, aucune interaction ; x.js fait défiler le fil pour que
- * le post et ses boutons au focus ne passent JAMAIS sous le bandeau */
+/* bandeau d'aide (bas) et message (haut) : textes français, aucune interaction. 0.7.15 : l'aide est une BANDE OPAQUE
+ * pleine largeur collée au bas de l'écran (plus une pastille translucide) : aucun texte de post long ne se lit à côté
+ * ni au travers ; x.js garde le post et le bouton au focus au-dessus (bottomLimit) et ↓ fait défiler la suite du post
+ * long. Aucun défilement ajouté, aucun média redimensionné. */
 html.otvx-tv .otvx-help {
   position: fixed !important;
-  left: 50% !important;
-  bottom: 20px !important;
-  transform: translateX(-50%) !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  transform: none !important;
   z-index: 2147483646 !important;
-  padding: 10px 26px !important;
-  border-radius: 999px !important;
-  background: rgba(10, 12, 16, 0.92) !important;
-  border: 2px solid rgba(255, 255, 255, 0.25) !important;
+  box-sizing: border-box !important;
+  padding: 12px 26px 18px !important;
+  border-radius: 0 !important;
+  background: #0a0c10 !important;
+  border: 0 !important;
+  border-top: 2px solid rgba(255, 255, 255, 0.25) !important;
   color: #e9edf1 !important;
   font: 500 22px/1.3 system-ui, "Noto Sans", sans-serif !important;
+  text-align: center !important;
   white-space: nowrap !important;
   pointer-events: none !important;
 }

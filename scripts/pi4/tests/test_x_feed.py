@@ -36,8 +36,9 @@ VIDEO_SHA = {"h264_prog.mp4": "4ded146a108249fea98cc40b108b1015cccd17948845601c9
 BASELINE = "746cd87"   # 0.7.13 déployée : témoin « avant »
 REPO = os.path.dirname(os.path.dirname(PI4))
 ACTION_LINE = 'const ACTION_TESTIDS = ["like", "unlike", "bookmark", "removeBookmark"];'
-MEDIA_GUARD = (':not(:has(video, [data-testid="videoPlayer"], [data-testid="videoComponent"], '
-               '[data-testid="tweetPhoto"]))')
+MEDIA_GUARD = (':not(:has(img, video, audio, picture, canvas, iframe, object, embed, article, '
+               '[data-testid="tweetPhoto"], [data-testid="videoPlayer"], [data-testid="videoComponent"], '
+               '[data-testid="card.wrapper"], [data-testid="tweetText"]))')
 STALE = "Le fil a changé : choisis de nouveau le post avec ↑ ↓, puis →."
 NOACT = "Ce post n'a pas de bouton J'aime ou Enregistrer visible."
 NOKEY = "Reviens une fois à l'accueil OpenTV (touche Accueil), puis réessaie."
@@ -75,21 +76,21 @@ class TestFeedStatic(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(f.read()).hexdigest(), sha, name)
 
     def test_css_never_hides_media_or_generic_groups(self):
-        """Seule la rangée d'actions (J'aime/Répondre/Repartager, AUCUN média) est visée ; lecteur, commandes vidéo,
-        galeries et tout autre [role=group] restent ceux de X. Aucun média restylé (ni object-fit ni hauteur)."""
+        """0.7.15 : aucune règle ne masque ni ne restyle un [role=group] deviné ; seule la rangée marquée par x.js
+        (data-otvx-bar, garde média) est visée (détail : test_x_media). Aucun média restylé (ni object-fit ni hauteur)."""
         rules = css_rules(read(XCSS))
         self.assertTrue(rules)
         hides = 0
         for sels, body in rules:
             for s in sels:
                 self.assertTrue(s.startswith("html.otvx-tv"), s)   # inerte hors du fil
-                if 'role="group"' in s and "display: none" in body:
-                    hides += 1
-                    self.assertIn(MEDIA_GUARD, s)                 # jamais un groupe qui contient un média
-                    self.assertRegex(s, r'\[role="group"\]:has\(\[data-testid="(like|unlike)"\]')
-                elif 'role="group"' in s:   # autre règle : seulement les vrais boutons d'action (libellés, icônes)
-                    self.assertTrue(MEDIA_GUARD in s or re.search(
-                        r'\[role="group"\] (:is\()?\[data-testid="(like|unlike|bookmark|removeBookmark)"\]', s), s)
+                if "display: none" in body:
+                    self.assertNotIn('role="group"', s)
+                    if "data-otvx-bar" in s:
+                        hides += 1
+                        self.assertIn(MEDIA_GUARD, s)                 # jamais une rangée qui contient un média
+                elif 'role="group"' in s:   # autre règle : seulement les vrais boutons d'action (icônes, taille)
+                    self.assertRegex(s, r'\[role="group"\] (:is\()?\[data-testid="(like|unlike|bookmark|removeBookmark)"\]')
                 rest = s.replace(MEDIA_GUARD, "")
                 for media in ("video", "videoPlayer", "videoComponent", "tweetPhoto", "img"):
                     self.assertNotRegex(rest, r"\b%s\b" % media, s)   # aucun média ciblé, nulle part
@@ -133,7 +134,7 @@ class TestFeedStatic(unittest.TestCase):
         self.assertIn("else if (!e.repeat && performance.now() >= leftGuardUntil) { shareFocused(); }", lf)
         self.assertEqual(int(re.search(r"const LEFT_GUARD_MS = (\d+);", src).group(1)), 700)
         # rangée d'actions : jamais un groupe qui contient un média ; boutons du post lui-même seulement
-        self.assertIn("g.querySelector(ACTION_SEL) && !g.querySelector(MEDIA_SEL)", src)
+        self.assertIn("return rowOf(post);", src)   # 0.7.15 : rangée la plus interne de CE post, même mixte
         self.assertIn("ownerPost(b) === post && usable(b)", src)
         self.assertIn("if (!e.isTrusted) { return; }", src)
 
@@ -143,9 +144,9 @@ class TestFeedStatic(unittest.TestCase):
                      "Aimé · OK retire", "Enregistré · OK retire"):
             self.assertTrue(need in src or need in read(XCSS), need)
         readme = read(os.path.join(PI4, "README.md"))
-        for need in ("0.7.14", "J'aime", "Enregistrer", "→", "Aimé · OK retire"):
+        for need in ("0.7.14", "0.7.15", "J'aime", "Enregistrer", "→", "Aimé · OK retire"):
             self.assertIn(need, readme)
-        self.assertEqual(VERSION, "0.7.14")
+        self.assertEqual(VERSION, "0.7.15")
         self.assertEqual(json.loads(read(os.path.join(EXT, "manifest.json")))["version"], VERSION)
 
 

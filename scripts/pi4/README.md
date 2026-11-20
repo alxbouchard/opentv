@@ -1420,7 +1420,7 @@ du lecteur. « Vivant » doit tenir le même budget, sinon il reste un choix du 
   Permissions : `storage` (stockage de **session** seulement) + hôtes `x.com`, `twitter.com`, `127.0.0.1`. Sandbox,
   sécurité web et DevTools bloqués inchangés ; aucun débogage distant, aucune API cookies/webRequest/scripting.
 - **Fil** (colonne principale présente seulement) : une colonne centrale, colonnes/tiroirs masqués, rangée d'actions
-  réduite aux vrais boutons J'aime / Enregistrer (0.7.14, voir §6 sexies-d), texte lisible, médias et lecteurs vidéo de
+  réduite aux vrais boutons J'aime / Enregistrer (0.7.14, voir §6 sexies-d ; rangée marquée, groupe mixte natif et aide en bande opaque : 0.7.15, §6 sexies-e), texte lisible, médias et lecteurs vidéo de
   X intacts, anneau jaune très visible, bandeau d'aide en français. DOM dynamique suivi par un
   `MutationObserver` regroupé (une passe ≤ 250 ms), sélecteurs `data-testid` de X avec repli inerte.
 - **Télécommande sur X** : ↑ ↓ post précédent/suivant ; OK ouvre le post au focus (son permalien) ou l'action native
@@ -1619,6 +1619,47 @@ retrait ; ← ⇒ retour au post sans message de partage ; ← de nouveau (aprè
 `/tv` : comportement inchangé, aucun `x_escape_kiosk_restart` ; TV éteinte/rallumée puis X ⇒ Retour fonctionne encore
 (nouveau périphérique vc4-hdmi) ; OK sur « Sign in » du VRAI DOM de X puis passkey au focus dans la fenêtre
 ouverte par X (0.7.9 : jamais « Continue with phone », inscription) ; photo d'Alex.
+
+### 6 sexies-e. Aperçus de médias jamais masqués, aide en bande opaque (0.7.15)
+
+Terrain 0.7.14 (Alex) : même cadre vide dans le fil et dans le détail d'un post ; la cause sur son post n'est **pas
+prouvée** (vrai DOM de X non mesuré). Diagnostic local : si X place le média et la rangée d'actions dans un **groupe
+ancêtre mixte** (`[role="group"]` qui contient aussi J'aime), les règles CSS 0.7.14 masquaient les descendants
+interactifs d'un poster, d'une carte, d'une image ou d'un lecteur **différés** avant l'apparition d'un `video` ou d'un
+`data-testid` média ; `display:none` empêche en plus l'IntersectionObserver de X de les initialiser (blocage
+permanent). Témoin sans extension : tout s'affiche.
+
+- **Rangée marquée par `x.js`, jamais devinée en CSS** : `data-otvx-bar` sur le `[role="group"]` LE PLUS INTERNE du post
+  qui porte SES boutons (`row` si identifiée positivement : seulement de vrais boutons à icône, J'aime/Enregistrer du
+  post, lien de statistiques du post ; aucun média, image, carte, fond, texte ni post cité). `x.css` ne masque que dans
+  une rangée `row` (garde média redondante) et la rangée **pure** d'un post cité (`quoted`). Groupe **mixte** ou
+  douteux (`mixed`) : **aucune règle**, rendu natif intact (Répondre/Repartager restent visibles, mieux qu'un média
+  masqué). `Show more` et liens natifs (carte, photo) jamais visés.
+- **D-pad inchangé et plus robuste** : → / OK visent les vrais J'aime / Enregistrer de CE post même dans un groupe
+  mixte (0.7.14 refusait un groupe contenant une vidéo initialisée) ; jamais un bouton d'un post cité ; OK = activation
+  native de Chromium ; bouton remplacé par X : focus remis au même rang.
+- **Aide en bande opaque** : la pastille translucide centrée laissait voir le texte d'un post long à côté et au travers.
+  L'aide devient une **bande opaque pleine largeur** collée au bas (≈ 61 px) ; la zone de lecture reste au-dessus
+  (`bottomLimit`), ↓ fait défiler la suite du post long. Aucun défilement ajouté, aucun recalage automatique, aucun
+  média redimensionné.
+- **Validation hors matériel** (`tests/test_x_media.py` + `tests/e2e_x_media.js`, Chrome for Testing complet, extension
+  installée par `install.sh --root`, fixtures LOCALES anonymes, toute autre requête annulée) : fil ET détail ; poster,
+  carte, image différée, lecteur différé, média initialisé, portrait 9:16 ; rangée sœur, imbriquée dans un groupe mixte
+  (deux profondeurs), boutons à plat dans le groupe mixte, post cité à média, bouton remplacé. Preuves : pixel rouge du
+  poster lu sur la CAPTURE (PNG décodé), chargement réel (image chargée, lecteur différé initialisé), point natif du
+  média atteignable, D-pad réel (→ → OK ←) ; aide : aucun glyphe sous la bande (luminance), ↓ révèle la ligne cachée,
+  aucun saut après une passe de rafraîchissement. Témoin SANS extension conforme ; **contrôle négatif 0.7.14**
+  (commit `205b883`) : cadres vides, image/lecteur différés jamais chargés, aucun bouton dans un groupe mixte vidéo,
+  texte visible sous l'aide ; mutants (rangée toujours pure, groupe le plus externe, exclusion média 0.7.14, pastille
+  translucide) détectés.
+- **Limites** : le groupe ancêtre mixte est une hypothèse de pire cas, non attestée sur le vrai DOM de X ; la rangée
+  est marquée après la première passe (≤ 250 ms : rangée native visible un instant) ; si X utilise des contrôles non
+  reconnus dans sa rangée (autre qu'un bouton à icône, J'aime/Enregistrer, statistiques), elle reste native (rien
+  masqué). Portrait très haut : ▶ peut rester hors écran (aucun redimensionnement, par choix). Vrai X sur la Pi :
+  **gate terrain**.
+
+**Gate terrain (0.7.15)** : sur la TV, le post d'Alex qui montrait un cadre vide (fil ET détail) affiche son aperçu ;
+→ J'aime / Enregistrer de ce post, OK une fois ; post long : aucune ligne lisible à côté de l'aide, ↓ montre la suite.
 
 ### 6 sexies-c. « Saisir avec le téléphone » : identifiant X sans clavier physique (0.7.10, drapeau, défaut désactivé ; placement et accueil 0.7.11 ; champ « jf » 0.7.12)
 
