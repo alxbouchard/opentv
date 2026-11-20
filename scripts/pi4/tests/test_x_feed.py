@@ -36,9 +36,15 @@ VIDEO_SHA = {"h264_prog.mp4": "4ded146a108249fea98cc40b108b1015cccd17948845601c9
 BASELINE = "746cd87"   # 0.7.13 déployée : témoin « avant »
 REPO = os.path.dirname(os.path.dirname(PI4))
 ACTION_LINE = 'const ACTION_TESTIDS = ["like", "unlike", "bookmark", "removeBookmark"];'
-MEDIA_GUARD = (':not(:has(img, video, audio, picture, canvas, iframe, object, embed, article, '
-               '[data-testid="tweetPhoto"], [data-testid="videoPlayer"], [data-testid="videoComponent"], '
-               '[data-testid="card.wrapper"], [data-testid="tweetText"]))')
+# 0.7.15 : les SEULS masquages du fil dans un post : contrôles identifiés un par un, jamais un conteneur
+COL = 'html.otvx-tv [data-testid="primaryColumn"] '
+HIDDEN_CONTROLS = (
+    COL + 'article :is(button, [role="button"]):is([data-testid="reply"], [data-testid="retweet"], '
+    '[data-testid="unretweet"])',
+    COL + 'article a[href*="/status/"][href$="/analytics"]',
+    COL + 'article article :is(button, [role="button"]):is([data-testid="like"], [data-testid="unlike"], '
+    '[data-testid="bookmark"], [data-testid="removeBookmark"])',
+)
 STALE = "Le fil a changé : choisis de nouveau le post avec ↑ ↓, puis →."
 NOACT = "Ce post n'a pas de bouton J'aime ou Enregistrer visible."
 NOKEY = "Reviens une fois à l'accueil OpenTV (touche Accueil), puis réessaie."
@@ -76,28 +82,26 @@ class TestFeedStatic(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(f.read()).hexdigest(), sha, name)
 
     def test_css_never_hides_media_or_generic_groups(self):
-        """0.7.15 : aucune règle ne masque ni ne restyle un [role=group] deviné ; seule la rangée marquée par x.js
-        (data-otvx-bar, garde média) est visée (détail : test_x_media). Aucun média restylé (ni object-fit ni hauteur)."""
+        """0.7.15 : dans un post, seuls des contrôles identifiés PAR EUX-MÊMES sont masqués (Répondre, Republier,
+        statistiques ; boutons d'un post cité) : aucun [role=group], aucune enveloppe ni élément sans marqueur visé,
+        aucun data-otvx-bar. Aucun média restylé (ni object-fit ni hauteur)."""
         rules = css_rules(read(XCSS))
         self.assertTrue(rules)
-        hides = 0
+        hides = []
         for sels, body in rules:
             for s in sels:
                 self.assertTrue(s.startswith("html.otvx-tv"), s)   # inerte hors du fil
+                self.assertNotIn("data-otvx-bar", s)
                 if "display: none" in body:
                     self.assertNotIn('role="group"', s)
-                    if "data-otvx-bar" in s:
-                        hides += 1
-                        self.assertIn(MEDIA_GUARD, s)                 # jamais une rangée qui contient un média
+                    self.assertNotIn(":has(", s)
+                    if "article" in s:
+                        hides.append(s)
                 elif 'role="group"' in s:   # autre règle : seulement les vrais boutons d'action (icônes, taille)
                     self.assertRegex(s, r'\[role="group"\] (:is\()?\[data-testid="(like|unlike|bookmark|removeBookmark)"\]')
-                rest = s.replace(MEDIA_GUARD, "")
-                for media in ("video", "videoPlayer", "videoComponent", "tweetPhoto", "img"):
-                    self.assertNotRegex(rest, r"\b%s\b" % media, s)   # aucun média ciblé, nulle part
-            if "display: none" in body:
-                for s in sels:
-                    self.assertNotRegex(s, r'article \[role="group"\]$', s)   # l'ancien masquage global (0.7.13)
-        self.assertEqual(hides, 3)   # autres contrôles de la rangée, enveloppes vides, rangée du post cité
+                for media in ("video", "videoPlayer", "videoComponent", "tweetPhoto", "img", "card"):
+                    self.assertNotRegex(s, r"\b%s\b" % media, s)   # aucun média ciblé, nulle part
+        self.assertEqual(tuple(hides), HIDDEN_CONTROLS)
         css = read(XCSS)
         for bad in ("object-fit", "max-height", "autoplay", "@import", "url("):
             self.assertNotIn(bad, re.sub(r"/\*.*?\*/", "", css, flags=re.S), bad)
@@ -230,9 +234,10 @@ class TestFeedEndToEnd(unittest.TestCase):
             self.assert_red(sh_["point"]["screen"], (vid, "capture"))     # première image à l'ÉCRAN
             self.assert_red(sh_["point"]["frame"], (vid, "image décodée"))
         a = g["actions"]
-        self.assertEqual(a, {"like": True, "bookmark": True, "reply": False, "retweet": False, "share": False,
+        # 0.7.15 : Partager (aucun marqueur propre) reste natif ; rangée citée jamais masquée en bloc
+        self.assertEqual(a, {"like": True, "bookmark": True, "reply": False, "retweet": False, "share": True,
                              "views": False, "unlike_p2": True, "remove_p2": True, "quote_like": False,
-                             "quote_bar": False})
+                             "quote_reply": False, "quote_bookmark": False, "quote_bar": True})
         self.assertEqual(g["sidebar"], "none")
         self.assertGreater(g["lanes"], 0)
         self.assertIn("J'aime / Enregistrer", g["help"]["text"])

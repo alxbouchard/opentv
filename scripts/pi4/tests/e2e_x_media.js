@@ -4,13 +4,16 @@
    requête annulée (aucun réseau, aucun compte, aucune session). Rien n'est lu d'un vrai X.
 
    Médias portrait 9:16 (boîte d'aspect proportionnelle à la LARGEUR, comme X), poster ROUGE plein (pixel discriminant),
-   dans cinq états : poster (lecteur non initialisé : fond + ▶, AUCUN data-testid média), card (card.wrapper > a > img),
+   dans huit états : poster (lecteur non initialisé : fond + ▶, AUCUN data-testid média), card (card.wrapper > a > img),
    lazy (img dont src est posée par IntersectionObserver), defer (bouton vide remplacé par le lecteur quand il devient
    visible : IntersectionObserver), init (videoPlayer/videoComponent/video poster + ▶). Quatre structures : sib (rangée
    d'actions sœur du média), grp (rangée [role=group] DANS un groupe ancêtre mixte qui contient aussi le média), deep
    (idem, un niveau plus bas), flat (boutons directement dans le groupe mixte, sans groupe de rangée propre). Plus :
    post citant un post dont média + rangée sont dans un groupe mixte (qm), post citant un post à rangée pure (qp), post
    LONG texte seul (aide), post plat dont X REMPLACE le bouton au clic (rp). Chaque post a « Show more ».
+   Revue 0.7.15 : trois aperçus SANS AUCUN marqueur (élément sans attribut) — bare (div nu remplacé par le lecteur via
+   IntersectionObserver), text (texte libre seul), bgl (fond posé tardivement par IntersectionObserver) — dans les
+   quatre structures et dans un post CITÉ (qbare, qtext, qbgl ; parents pqbare, pqtext, pqbgl).
    Le groupe ancêtre mixte est une HYPOTHÈSE de pire cas (non attestée pour le DOM réel de X).
 
    Preuves : pixel au cœur du cadre lu sur la CAPTURE (PNG décodé ici) ; chargement réel (img chargée, lecteur différé
@@ -76,7 +79,8 @@ article{display:flex;flex-direction:column;flex-shrink:0;min-width:0;padding:12p
 .frame{margin-top:12px;border-radius:16px;overflow:hidden;border:1px solid #8b98a5}
 .fill{position:absolute;top:0;left:0;right:0;bottom:0}
 .play{position:absolute;left:50%;top:50%;width:60px;height:60px;margin:-30px;border-radius:50%;background:#1d9bf0;color:#fff;align-items:center;justify-content:center}
-.quote{margin-top:12px;border:1px solid #2f3336;border-radius:16px}</style>`;
+.quote{margin-top:12px;border:1px solid #2f3336;border-radius:16px}
+.frame>div+div{position:absolute;top:0;left:0;right:0;bottom:0}.frame.st-text>div+div{background:#e01010;color:#ff2a2a;font-size:30px}</style>`;
 
 function slots(id) {
   const b = (t, label, n) => `<div><button data-testid="${t}" type="button" aria-label="${label}" data-otv-btn="${id}-${t}">` +
@@ -99,6 +103,10 @@ function media(id, st) {
   } else if (st === "lazy") {
     inner = `<a href="/fix_${id}/status/1/photo/1" role="link" class="fill" id="hit-${id}"><div class="fill">` +
       `<img id="img-${id}" alt="Image" data-lazy="1" style="width:100%;height:100%;object-fit:cover"></div></a>`;
+  } else if (st === "bare" || st === "bgl") {
+    inner = `<div></div>`;   // AUCUN attribut : lecteur (bare) ou fond (bgl) posé plus tard par IntersectionObserver
+  } else if (st === "text") {
+    inner = `<div>Titre de carte fictive, texte libre sans marqueur</div>`;   // AUCUN attribut, aucune image
   } else if (st === "defer") {
     inner = `<div class="fill" role="button" tabindex="0" aria-label="Lire" id="hit-${id}" data-defer="1"></div>`;
   } else {
@@ -106,7 +114,7 @@ function media(id, st) {
       `<video id="img-${id}" preload="none" muted playsinline poster="${POSTER}" style="width:100%;height:100%;object-fit:cover"></video>` +
       `<div role="button" tabindex="0" aria-label="Lire" class="play" id="play-${id}">▶</div></div></div>`;
   }
-  return `<div class="frame" id="frame-${id}">${SP}${inner}</div>`;
+  return `<div class="frame st-${st}" id="frame-${id}">${SP}${inner}</div>`;
 }
 function head(id) {
   return `<div data-testid="User-Name" class="row"><span>Fixture</span>&nbsp;<a href="/fix_${id}"><span>@fix_${id}</span></a>` +
@@ -126,7 +134,7 @@ function article(id, inner, attrs) {
   return `<div data-testid="cellInnerDiv"><div><div><article data-testid="tweet" role="article" tabindex="0" data-otv-id="${id}" ` +
     `${attrs || ""}><div class="row"><div class="av"></div><div class="cnt">${inner}</div></div></article></div></div></div>`;
 }
-const STATES = ["poster", "card", "lazy", "defer", "init"];
+const STATES = ["poster", "card", "lazy", "defer", "init", "bare", "text", "bgl"];
 const STRUCTS = ["sib", "grp", "deep", "flat"];
 const MEDIA_IDS = [];
 let POSTS = "";
@@ -139,6 +147,14 @@ const quoted = (q, inner) => `<div class="quote" role="link" tabindex="0"><artic
 POSTS += article("pqm", head("pqm") + text("pqm", "Je cite un post avec média.") +
   quoted("qm", `<div role="group" id="outer-qm">${media("qm", "poster")}${bar("qm")}</div>`) + bar("pqm"));
 MEDIA_IDS.push("qm");
+// 0.7.15 (revue) : post cité dont l'aperçu SANS marqueur (div nu, texte libre, fond différé) partage le groupe mixte où
+// ses boutons sont à plat (c31a0c7 y jugeait la rangée « pure » et masquait tout le groupe cité)
+const QUOTES = { qbare: "bare", qtext: "text", qbgl: "bgl" };
+for (const [q, st] of Object.entries(QUOTES)) {
+  POSTS += article("p" + q, head("p" + q) + text("p" + q, "Je cite un post à aperçu sans marqueur.") +
+    quoted(q, body(q, st, "flat")) + bar("p" + q));   // boutons du cité À PLAT dans le groupe mixte
+  MEDIA_IDS.push(q);
+}
 POSTS += article("pqp", head("pqp") + text("pqp", "Je cite un post sans média.") + quoted("qp", bar("qp")) + bar("pqp"));
 POSTS += article("rp", head("rp") + text("rp", "Post plat : X remplace le bouton au clic.") + body("rp", "poster", "flat"), 'data-replace="1"');
 MEDIA_IDS.push("rp");
@@ -147,12 +163,13 @@ POSTS += article("tail", head("tail") + text("tail", "Dernier post.") + bar("tai
 
 const SCRIPT = `<script>(function(){var P=${JSON.stringify(POSTER)};window.__acts=[];
 var io=new IntersectionObserver(function(es){es.forEach(function(e){if(!e.isIntersecting){return;}io.unobserve(e.target);var t=e.target;
-if(t.tagName==="IMG"){t.src=P;return;}var id=t.id.slice(4);var d=document.createElement("div");d.setAttribute("data-testid","videoPlayer");
+if(t.tagName==="IMG"){t.src=P;return;}var fr=t.parentElement,id=fr.id.slice(6);
+if(fr.classList.contains("st-bgl")){t.style.backgroundImage='url("'+P+'")';t.style.backgroundSize="cover";return;}var d=document.createElement("div");d.setAttribute("data-testid","videoPlayer");
 d.className="fill";d.id="hit-"+id;var c=document.createElement("div");c.setAttribute("data-testid","videoComponent");c.className="fill";
 var v=document.createElement("video");v.id="img-"+id;v.preload="none";v.muted=true;v.poster=P;v.style.cssText="width:100%;height:100%;object-fit:cover";
 var b=document.createElement("div");b.setAttribute("role","button");b.tabIndex=0;b.className="play";b.id="play-"+id;b.textContent="\\u25b6";
 c.appendChild(v);c.appendChild(b);d.appendChild(c);t.replaceWith(d);});});
-document.querySelectorAll("img[data-lazy],[data-defer]").forEach(function(e){io.observe(e);});
+document.querySelectorAll("img[data-lazy],[data-defer],.frame.st-bare>div+div,.frame.st-bgl>div+div").forEach(function(e){io.observe(e);});
 var NEXT={like:"unlike",unlike:"like",bookmark:"removeBookmark",removeBookmark:"bookmark"};
 document.addEventListener("click",function(e){var b=e.target.closest&&e.target.closest("[data-otv-btn]");if(!b){return;}
 var art=b.closest("article");window.__acts.push({post:art.getAttribute("data-otv-id"),btn:b.getAttribute("data-otv-btn"),
@@ -219,6 +236,12 @@ const URLS = { home: "https://x.com/home", status: "https://x.com/fix_poster_sib
           if (img && img.tagName === "IMG") { loaded = img.complete && img.naturalWidth > 0 && !!img.currentSrc; }
           else if (img && img.tagName === "VIDEO") { loaded = !!img.poster; }
           else if (img) { loaded = getComputedStyle(img).backgroundImage.indexOf("data:image") >= 0 && vis(img); }
+          else if (fr.classList.contains("st-bgl")) {   // fond posé tardivement sur un div sans attribut
+            loaded = getComputedStyle(fr.lastElementChild).backgroundImage.indexOf("data:image") >= 0 && vis(fr.lastElementChild);
+          } else if (fr.classList.contains("st-text")) {   // texte libre réellement rendu
+            const rg = document.createRange(); rg.selectNodeContents(fr.lastElementChild);
+            loaded = vis(fr.lastElementChild) && Array.from(rg.getClientRects()).some((r) => r.width > 20);
+          }
           const btn = (k) => document.querySelector('[data-otv-btn="' + id + "-" + k + '"]');
           const grp = (e) => e ? e.getAttribute("data-otvx-bar") : null;
           return { frame: R(fr), frame_vis: vis(fr), hidden_in_frame: hidden, hit_vis: vis(hit), play_vis: play ? vis(play) : null,
@@ -239,8 +262,9 @@ const URLS = { home: "https://x.com/home", status: "https://x.com/fix_poster_sib
             pts.push({ xy: [x, y], rgb: img.px(x, y), hit: null });
           } }
           for (const p of pts) {
-            p.hit = await pg.evaluate(([x, y]) => { const e = document.elementFromPoint(x, y);
-              const h = e && e.closest('[id^="hit-"], [id^="img-"]'); return h ? h.id : (e ? e.tagName : null); }, p.xy);
+            p.hit = await pg.evaluate(([x, y, id]) => { const e = document.elementFromPoint(x, y);
+              const h = e && e.closest('[id^="hit-"], [id^="img-"]'); const fr = document.getElementById("frame-" + id);
+              return h ? h.id : (e && fr.contains(e) ? "in-frame" : (e ? e.tagName : null)); }, [p.xy[0], p.xy[1], id]);
           }
         }
         m.points = pts;
@@ -261,7 +285,7 @@ const URLS = { home: "https://x.com/home", status: "https://x.com/fix_poster_sib
       const key = async (k, ms) => { await pg.keyboard.press(k); await sleep(ms || 130); return st(); };
       res.dpad = {};
       if (cfg.ext) {
-        const order = MEDIA_IDS.filter((i) => i !== "qm" && i !== "rp").concat(["pqm", "pqp", "rp"]);
+        const order = MEDIA_IDS.filter((i) => !/^q/.test(i) && i !== "rp").concat(["pqm", "pqbare", "pqtext", "pqbgl", "pqp", "rp"]);   // ordre du DOM (↓ seulement)
         const OK_ON = new Set(["poster_grp", "defer_deep", "init_flat", "card_flat", "rp", "pqm"]);
         for (const id of order) {
           let s = await st();

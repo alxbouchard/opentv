@@ -4,16 +4,19 @@ qui ne laisse plus voir de texte de post long à côté ou au travers.
 Terrain 0.7.14 (Alex) : même cadre vide dans le fil et le détail ; cause non prouvée sur son post. Diagnostic local :
 dans un groupe ancêtre MIXTE contenant J'aime, les règles CSS de 0.7.14 masquaient les descendants interactifs d'un
 poster, d'une carte, d'une image ou d'un lecteur différés AVANT qu'un video/data-testid média n'apparaisse (et
-display:none bloque l'IntersectionObserver qui les initialiserait). 0.7.15 : x.js marque la rangée (data-otvx-bar) ;
-x.css ne masque QUE dans une rangée positivement identifiée (« row ») ; groupe mixte ou douteux : rien masqué.
+display:none bloque l'IntersectionObserver qui les initialiserait). Revue de c31a0c7 : une « rangée pure » jugée par
+x.js acceptait encore un div nu, un texte libre ou un fond différé, puis x.css masquait l'enfant ou tout le groupe cité.
+0.7.15 (corrigée) : AUCUN conteneur jugé ni masqué — x.css masque seulement, un par un, des contrôles identifiés par
+eux-mêmes (Répondre, Republier, statistiques ; boutons d'un post cité). Partager (sans marqueur propre) reste natif.
 
-- statique : aucune règle de masquage ne devine un [role=group] ; chaque masquage vise data-otvx-bar avec garde média ;
-  x.js identifie la rangée la plus interne et ne retient que les boutons de CE post ; aide en bande opaque ;
+- statique : la liste exacte des masquages (test_x_feed.HIDDEN_CONTROLS), aucun data-otvx-bar, x.js lecture seule pour
+  la rangée (la plus interne, boutons de CE post) ; aide en bande opaque ;
 - bout en bout (Chromium complet réel, extension installée par install.sh, fixtures LOCALES anonymes, toute autre
   requête annulée) : fil ET détail ; poster, carte, image différée, lecteur différé, média initialisé, portrait 9:16 ;
-  rangée sœur, imbriquée dans un groupe mixte (2 profondeurs), boutons à plat dans le groupe mixte, post cité à média,
-  bouton remplacé par X ; « Show more » et liens natifs. Preuves par pixel de la CAPTURE (PNG décodé) et chargement
-  réel ; témoin SANS extension ; contrôle NÉGATIF 0.7.14 (commit 205b883) qui doit échouer ; mutants.
+  div nu, texte libre et fond différé SANS attribut ; rangée sœur, imbriquée dans un groupe mixte (2 profondeurs),
+  boutons à plat dans le groupe mixte, post parent et post cité, bouton remplacé par X ; « Show more » et liens natifs.
+  Preuves par pixel de la CAPTURE (PNG décodé) et chargement réel ; témoin SANS extension ; contrôles NÉGATIFS 0.7.14
+  (205b883) et 0.7.15 initiale (c31a0c7) qui doivent échouer ; mutants.
 Limite : le groupe ancêtre mixte est une hypothèse de pire cas, non attestée sur le DOM réel de X ; la session X réelle
 sur la Pi (Wayland/HDMI, vrai DOM) n'est PAS couverte ici (gate terrain).
 """
@@ -26,7 +29,7 @@ import tempfile
 import unittest
 
 from tests._common import PI4
-from tests.test_x_feed import css_rules, no_comments
+from tests.test_x_feed import HIDDEN_CONTROLS, css_rules, no_comments
 from tests.test_x_tv import EXT, EXT_DST, INSTALL, NODE, full_chrome, read, sh
 from opentv_pi import VERSION, xcontext
 
@@ -35,57 +38,48 @@ XCSS = os.path.join(EXT, "x.css")
 E2E = os.path.join(PI4, "tests", "e2e_x_media.js")
 REPO = os.path.dirname(os.path.dirname(PI4))
 NEGATIVE = "205b883"   # 0.7.14 déployée : contrôle négatif (doit reproduire les cadres vides)
-GUARD = (':not(:has(img, video, audio, picture, canvas, iframe, object, embed, article, [data-testid="tweetPhoto"], '
-         '[data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="card.wrapper"], '
-         '[data-testid="tweetText"]))')
-STATES = ("poster", "card", "lazy", "defer", "init")
+REJECTED = "c31a0c7"   # 0.7.15 initiale, refusée en revue : div nu / texte libre / fond différé masqués
+STATES = ("poster", "card", "lazy", "defer", "init", "bare", "text", "bgl")
+UNMARKED = ("bare", "text", "bgl")                    # aperçus SANS attribut (revue de c31a0c7)
+QUOTES = ("qm", "qbare", "qtext", "qbgl")             # posts cités dont l'aperçu partage le groupe des boutons
 NESTED = ("sib", "grp", "deep")   # rangée [role=group] propre : nettoyée
 FLAT = ("flat",)                  # boutons à plat dans le groupe mixte : rendu natif intact
 OK_ON = ("poster_grp", "defer_deep", "init_flat", "card_flat", "rp", "pqm")
+PARENTS = ("pqm", "pqbare", "pqtext", "pqbgl", "pqp", "rp")
 URLS = {"home": "/home", "status": "/fix_poster_sib/status/1"}   # OK sur un bouton : jamais une navigation
 NOACT = "Ce post n'a pas de bouton J'aime ou Enregistrer visible."
 
 
 class TestMediaStatic(unittest.TestCase):
-    def test_css_hides_only_positively_marked_row(self):
-        """Aucun masquage ne devine un [role=group] : chaque règle display:none du fil vise la rangée marquée par x.js
-        (row, ou rangée pure d'un post cité), toujours avec la garde média. Aucun média ciblé, nulle part."""
-        n = 0
+    def test_css_hides_only_individual_controls(self):
+        """Chaque display:none dans un post vise UN contrôle identifié par lui-même ; jamais un [role=group], une
+        enveloppe, un enfant « sans J'aime », un :has() ni une rangée marquée. Aucun média ciblé, nulle part."""
+        hides = []
         for sels, body in css_rules(read(XCSS)):
             for s in sels:
                 self.assertTrue(s.startswith("html.otvx-tv"), s)
-                if "display: none" in body:
-                    self.assertNotIn('role="group"', s, s)
-                    if "article" in s:
-                        n += 1
-                        self.assertRegex(s, r'\[data-otvx-bar="(row|quoted)"\]' + re.escape(GUARD), s)
-                elif "data-otvx-bar" in s and "::after" not in s:
-                    self.assertIn('[data-otvx-bar="row"]' + GUARD, s)    # mise en page : rangée pure seulement
-                rest = s.replace(GUARD, "")
-                for media in ("video", "videoPlayer", "videoComponent", "tweetPhoto", "img", "card"):
-                    self.assertNotRegex(rest, r"\b%s\b" % media, s)
-        self.assertEqual(n, 3)   # autres contrôles de la rangée, enveloppes sans J'aime/Enregistrer, rangée citée
+                self.assertNotIn("data-otvx-bar", s)
+                if "display: none" in body and "article" in s:
+                    hides.append(s)
+                    for bad in ('role="group"', ":has(", ":not(", ">", "div", "~", "+"):
+                        self.assertNotIn(bad, s.replace("html.otvx-tv ", ""), (bad, s))
+        self.assertEqual(tuple(hides), HIDDEN_CONTROLS)
         body = re.sub(r"/\*.*?\*/", "", read(XCSS), flags=re.S)
-        self.assertNotIn('[data-otvx-bar="mixed"]', body)                    # groupe mixte : aucune règle
-        for bad in ("object-fit", "max-height", "aspect-ratio", "url(", "@import"):
+        for bad in ("object-fit", "max-height", "aspect-ratio", "url(", "@import", "data-otvx-bar"):
             self.assertNotIn(bad, body)
 
-    def test_xjs_row_marking_and_actions(self):
+    def test_xjs_row_is_read_only(self):
+        """x.js ne juge ni ne marque aucune rangée : rowOf (la plus interne, boutons de CE post) sert au D-pad seul."""
         src = no_comments(read(XJS))
-        ma = src[src.index("function markBars(on)"):src.index("function el(tag, cls, text)")]
-        self.assertIn('want.set(r, pureRow(r, p) ? "row" : "mixed");', ma)
-        self.assertIn('if (qr && !want.has(qr) && pureRow(qr, q)) { want.set(qr, "quoted"); }', ma)
-        self.assertIn("if (!want.has(e)) { e.removeAttribute(BAR_ATTR); }", ma)
-        ro = src[src.index("function rowOf(post)"):src.index("function rowControl(")]
+        for gone in ("markBars", "pureRow", "rowControl", "BAR_ATTR", "data-otvx-bar", "GRAPHIC_SEL", "backgroundImage"):
+            self.assertNotIn(gone, src)
+        ro = src[src.index("function rowOf(post)"):src.index("function el(tag, cls, text)")]
         self.assertIn("ownerPost(b) === post", ro)                             # jamais un bouton d'un post cité
         self.assertIn("!gs.some((h) => h !== g && g.contains(h))", ro)         # le plus interne
-        pr = src[src.index("function pureRow(g, post)"):src.index("function markBars(on)")]
-        for need in ("g.querySelector(GRAPHIC_SEL)", 'getComputedStyle(n).backgroundImage !== "none"',
-                     "!rowControl(n, post)", "nodes.length > BAR_NODES_MAX"):
-            self.assertIn(need, pr)
+        self.assertNotIn("setAttribute", ro)
+        self.assertEqual(set(re.findall(r'setAttribute\(([A-Z_]+)', src)), {"LANE_ATTR", "ACT_ATTR", "ACTING_ATTR"})
         self.assertIn("return rowOf(post);", src[src.index("function actionBar(post)"):src.index("function actions(post)")])
         self.assertIn("ownerPost(b) === post && usable(b)", src)
-        self.assertIn("markBars(on);", src[src.index("function refresh()"):])
         for bad in (".click(", "dispatchEvent", "fetch(", "sendBeacon", "innerHTML", "localStorage"):
             self.assertNotIn(bad, src.replace('const ACTION_TESTIDS = ["like", "unlike", "bookmark", "removeBookmark"];', ""))
         self.assertEqual(src.count("sendMessage("), 1)                         # partage (←) seulement : aucune télémétrie
@@ -107,7 +101,7 @@ class TestMediaStatic(unittest.TestCase):
         readme = read(os.path.join(PI4, "README.md"))
         agents = read(os.path.join(REPO, "AGENTS.md"))
         for doc in (readme, agents):
-            for need in ("0.7.15", "data-otvx-bar", "mixte", "bande opaque"):
+            for need in ("0.7.15", "un par un", "c31a0c7", "bande opaque"):
                 self.assertIn(need, doc)
 
 
@@ -139,7 +133,7 @@ class TestMediaEndToEnd(unittest.TestCase):
 
     @staticmethod
     def media_ids():
-        return ["%s_%s" % (st, s) for st in STATES for s in NESTED + FLAT] + ["qm", "rp"]
+        return ["%s_%s" % (st, s) for st in STATES for s in NESTED + FLAT] + list(QUOTES) + ["rp"]
 
     def check_media(self, r):
         """Aperçus : renvoie les écarts (vide = conforme), pour 0.7.15, le témoin sans extension et le négatif."""
@@ -154,37 +148,39 @@ class TestMediaEndToEnd(unittest.TestCase):
                     bad.append("chargement " + tag)                           # image/lecteur différé jamais chargé
                 if m["hidden_in_frame"]:
                     bad.append("masqué " + tag)
-                if not all(p["hit"] and (p["hit"].startswith("hit-") or p["hit"].startswith("img-")) for p in m["points"]):
+                native = ("hit-", "img-", "in-frame") if (mid.split("_")[0] in ("text", "bgl") or mid in ("qtext", "qbgl")) \
+                    else ("hit-", "img-")                                     # aperçu sans attribut : son propre nœud
+                if not (m["points"] and all(p["hit"] and p["hit"].startswith(native) for p in m["points"])):
                     bad.append("lien natif " + tag)                           # zone native du média atteignable
-                if mid != "qm" and not m["more_vis"]:
+                if mid not in QUOTES and not m["more_vis"]:
                     bad.append("show more " + tag)
-                if (mid.startswith("poster") or mid.startswith("init") or mid.startswith("defer") or mid == "rp") \
+                if (mid.split("_")[0] in ("poster", "init", "defer", "bare") or mid in ("rp", "qm", "qbare")) \
                         and not m["play_vis"]:
                     bad.append("▶ " + tag)
         return bad
 
     def check_rows(self, r):
+        """Contrôles : J'aime / Enregistrer du post visibles ; Répondre / statistiques masqués UN PAR UN ; Partager
+        (aucun marqueur propre) natif ; post cité : ses boutons masqués un par un, son groupe jamais ; aucun marquage."""
         bad = []
         for kind, pg in r["pages"].items():
             for mid in self.media_ids():
                 m, tag = pg["posts"][mid], "%s:%s" % (kind, mid)
-                if mid == "qm":
-                    if m["bar"] != "quoted" or m["like_vis"]:
-                        bad.append("rangée citée " + tag)                     # rangée pure du post cité : masquée
-                elif mid.split("_")[-1] in NESTED:
-                    if not (m["bar"] == "row" and m["like_vis"] and m["bookmark_vis"] and not m["reply_vis"]
-                            and not m["share_vis"] and not m["views_vis"]):
-                        bad.append("rangée pure " + tag)                      # 0.7.14 conservé : J'aime/Enregistrer
-                else:
-                    if not (m["outer"] == "mixed" and m["bar"] is None and m["reply_vis"] and m["like_vis"]
-                            and m["bookmark_vis"]):
-                        bad.append("mixte natif " + tag)                      # groupe mixte : rien masqué
+                if m["bar"] is not None or m["outer"] is not None:
+                    bad.append("marquage " + tag)                             # aucune rangée jugée ni marquée
+                if mid in QUOTES:
+                    if m["like_vis"] or m["bookmark_vis"] or m["reply_vis"] or m["views_vis"] or not m["share_vis"]:
+                        bad.append("rangée citée " + tag)                     # boutons du cité un par un, groupe intact
+                elif not (m["like_vis"] and m["bookmark_vis"]):
+                    bad.append("J'aime/Enregistrer " + tag)
+                elif m["reply_vis"] or m["views_vis"] or not m["share_vis"]:
+                    bad.append("secondaire " + tag)
         return bad
 
     def check_dpad(self, r):
         bad = []
         for kind, pg in r["pages"].items():
-            ids = [m for m in self.media_ids() if m not in ("qm", "rp")] + ["pqm", "pqp", "rp"]
+            ids = [m for m in self.media_ids() if m not in QUOTES and m != "rp"] + list(PARENTS)
             for pid in ids:
                 d, tag = pg["dpad"].get(pid), "%s:%s" % (kind, pid)
                 if not d or not d["reached"]:
@@ -258,17 +254,47 @@ class TestMediaEndToEnd(unittest.TestCase):
         self.assertEqual(r["pages"]["home"]["dpad"]["init_flat"]["toast"], NOACT)
         self.assertIn("aide: texte sous l'aide home", self.check_help(r))
 
+    def test_negative_c31a0c7_hides_unmarked_previews(self):
+        """Témoin de la revue : la 0.7.15 initiale (c31a0c7) masque div nu, texte libre et fond différé (post parent à
+        plat et post cité), fil ET détail ; les mêmes aperçus dans une rangée sœur/imbriquée restent visibles."""
+        if not shutil.which("git") or subprocess.run(["git", "-C", REPO, "cat-file", "-e", REJECTED + "^{commit}"],
+                                                     capture_output=True).returncode:
+            self.skipTest("historique git %s absent" % REJECTED)
+        d = tempfile.mkdtemp(prefix="otvxc31", dir="/tmp")
+        self.addCleanup(shutil.rmtree, d, True)
+        arc = subprocess.run(["git", "-C", REPO, "archive", REJECTED, "scripts/pi4/x-tv-extension"],
+                             capture_output=True, check=True).stdout
+        subprocess.run(["tar", "-x", "-C", d], input=arc, check=True)
+        ext = os.path.join(d, "scripts", "pi4", "x-tv-extension")
+        self.assertIn("function pureRow(g, post)", read(os.path.join(ext, "x.js")))
+        r = self.run_e2e(ext, "negc31", shots=False)
+        media = self.check_media(r)
+        for kind in ("home", "status"):
+            for st in UNMARKED:
+                self.assertIn("pixel %s:%s_flat" % (kind, st), media)          # aperçu masqué (enfant du groupe)
+                self.assertIn("pixel %s:q%s" % (kind, st), media)              # groupe cité masqué en bloc
+                for s in NESTED:
+                    self.assertNotIn("pixel %s:%s_%s" % (kind, st, s), media)  # témoin discriminant
+            for mid in ("bare_flat", "bgl_flat", "qbare", "qbgl"):
+                self.assertIn("chargement %s:%s" % (kind, mid), media)         # IntersectionObserver bloqué
+
     def test_mutants_detected(self):
         """Chaque garde porte : la retirer fait échouer le contrat (page du fil seulement)."""
+        col = 'html.otvx-tv [data-testid="primaryColumn"] '
         mutants = {
-            "pure_always": ("x.js", "function pureRow(g, post) {", "function pureRow(g, post) { return true;",
-                            "pixel home:poster_flat"),
-            "outermost": ("x.js", "return gs.find((g) => !gs.some((h) => h !== g && g.contains(h))) || null;",
-                          "return gs.find((g) => !gs.some((h) => h !== g && h.contains(g))) || null;",
-                          "rangée pure home:poster_grp"),
+            "container_hide": ("x.css", col + 'article a[href*="/status/"][href$="/analytics"],',
+                               col + 'article [role="group"] > :not(:has([data-testid="like"], '
+                               '[data-testid="bookmark"])),', "pixel home:text_flat"),
+            "quoted_group": ("x.css", col + 'article article :is(button, [role="button"]):is(',
+                             col + 'article article [role="group"]:has([data-testid="like"]), ' + col +
+                             'article article :is(button, [role="button"]):is(', "chargement home:qbgl"),
+            "quoted_buttons": ("x.css", 'article article :is(button, [role="button"]):is(',
+                               'article article :is(nothing):is(', "rangée citée home:qm"),
+            "secondary": ("x.css", '[data-testid="reply"], [data-testid="retweet"]',
+                          '[data-testid="none"], [data-testid="retweet"]', "secondaire home:poster_sib"),
             "media_exclusion": ("x.js", "return rowOf(post);   //",
                                 "return own(post, '[role=\"group\"]').find((g) => g.querySelector(ACTION_SEL) && "
-                                "!g.querySelector(MEDIA_SEL)) || null;   //", "→ home:init_flat"),
+                                "!g.querySelector('video')) || null;   //", "→ home:init_flat"),
             "pill_help": ("x.css", "background: #0a0c10 !important;", "background: rgba(10, 12, 16, 0.5) !important;",
                           "aide: texte sous l'aide home"),
         }

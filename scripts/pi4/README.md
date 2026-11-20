@@ -1420,7 +1420,7 @@ du lecteur. « Vivant » doit tenir le même budget, sinon il reste un choix du 
   Permissions : `storage` (stockage de **session** seulement) + hôtes `x.com`, `twitter.com`, `127.0.0.1`. Sandbox,
   sécurité web et DevTools bloqués inchangés ; aucun débogage distant, aucune API cookies/webRequest/scripting.
 - **Fil** (colonne principale présente seulement) : une colonne centrale, colonnes/tiroirs masqués, rangée d'actions
-  réduite aux vrais boutons J'aime / Enregistrer (0.7.14, voir §6 sexies-d ; rangée marquée, groupe mixte natif et aide en bande opaque : 0.7.15, §6 sexies-e), texte lisible, médias et lecteurs vidéo de
+  réduite aux vrais boutons J'aime / Enregistrer (0.7.14, voir §6 sexies-d ; contrôles masqués un par un, aucun conteneur, et aide en bande opaque : 0.7.15, §6 sexies-e), texte lisible, médias et lecteurs vidéo de
   X intacts, anneau jaune très visible, bandeau d'aide en français. DOM dynamique suivi par un
   `MutationObserver` regroupé (une passe ≤ 250 ms), sélecteurs `data-testid` de X avec repli inerte.
 - **Télécommande sur X** : ↑ ↓ post précédent/suivant ; OK ouvre le post au focus (son permalien) ou l'action native
@@ -1629,12 +1629,14 @@ interactifs d'un poster, d'une carte, d'une image ou d'un lecteur **différés**
 `data-testid` média ; `display:none` empêche en plus l'IntersectionObserver de X de les initialiser (blocage
 permanent). Témoin sans extension : tout s'affiche.
 
-- **Rangée marquée par `x.js`, jamais devinée en CSS** : `data-otvx-bar` sur le `[role="group"]` LE PLUS INTERNE du post
-  qui porte SES boutons (`row` si identifiée positivement : seulement de vrais boutons à icône, J'aime/Enregistrer du
-  post, lien de statistiques du post ; aucun média, image, carte, fond, texte ni post cité). `x.css` ne masque que dans
-  une rangée `row` (garde média redondante) et la rangée **pure** d'un post cité (`quoted`). Groupe **mixte** ou
-  douteux (`mixed`) : **aucune règle**, rendu natif intact (Répondre/Repartager restent visibles, mieux qu'un média
-  masqué). `Show more` et liens natifs (carte, photo) jamais visés.
+- **Contrôles masqués un par un, jamais un conteneur** (correction de revue : `c31a0c7` faisait juger par `x.js` une
+  « rangée pure » qui acceptait encore un div nu, un texte libre ou un fond posé tardivement, puis `x.css` masquait
+  l'enfant du groupe ou tout le groupe cité, bloquant le chargement différé). `x.js` ne juge et ne marque plus aucune
+  rangée (plus de `data-otvx-bar`). `x.css` ne masque que des contrôles identifiés **par eux-mêmes** : Répondre /
+  Republier / Annuler (`data-testid`), lien de statistiques du post (`/status/…/analytics`) et, dans un post cité,
+  ses propres boutons J'aime / Enregistrer, un par un. Aucun `[role=group]`, aucune enveloppe, aucun élément sans
+  marqueur : un aperçu, quelle que soit sa forme, ne peut plus être masqué. **Partager** (sans marqueur propre) reste
+  visible, natif ; les emplacements vides gardent la mise en page native de X. `Show more` et liens natifs jamais visés.
 - **D-pad inchangé et plus robuste** : → / OK visent les vrais J'aime / Enregistrer de CE post même dans un groupe
   mixte (0.7.14 refusait un groupe contenant une vidéo initialisée) ; jamais un bouton d'un post cité ; OK = activation
   native de Chromium ; bouton remplacé par X : focus remis au même rang.
@@ -1645,17 +1647,18 @@ permanent). Témoin sans extension : tout s'affiche.
 - **Validation hors matériel** (`tests/test_x_media.py` + `tests/e2e_x_media.js`, Chrome for Testing complet, extension
   installée par `install.sh --root`, fixtures LOCALES anonymes, toute autre requête annulée) : fil ET détail ; poster,
   carte, image différée, lecteur différé, média initialisé, portrait 9:16 ; rangée sœur, imbriquée dans un groupe mixte
-  (deux profondeurs), boutons à plat dans le groupe mixte, post cité à média, bouton remplacé. Preuves : pixel rouge du
+  (deux profondeurs), boutons à plat dans le groupe mixte, post parent et post cité ; div nu, texte libre et fond
+  différé SANS attribut (mêmes structures, post cité compris) ; bouton remplacé. Preuves : pixel rouge du
   poster lu sur la CAPTURE (PNG décodé), chargement réel (image chargée, lecteur différé initialisé), point natif du
   média atteignable, D-pad réel (→ → OK ←) ; aide : aucun glyphe sous la bande (luminance), ↓ révèle la ligne cachée,
   aucun saut après une passe de rafraîchissement. Témoin SANS extension conforme ; **contrôle négatif 0.7.14**
   (commit `205b883`) : cadres vides, image/lecteur différés jamais chargés, aucun bouton dans un groupe mixte vidéo,
-  texte visible sous l'aide ; mutants (rangée toujours pure, groupe le plus externe, exclusion média 0.7.14, pastille
-  translucide) détectés.
-- **Limites** : le groupe ancêtre mixte est une hypothèse de pire cas, non attestée sur le vrai DOM de X ; la rangée
-  est marquée après la première passe (≤ 250 ms : rangée native visible un instant) ; si X utilise des contrôles non
-  reconnus dans sa rangée (autre qu'un bouton à icône, J'aime/Enregistrer, statistiques), elle reste native (rien
-  masqué). Portrait très haut : ▶ peut rester hors écran (aucun redimensionnement, par choix). Vrai X sur la Pi :
+  texte visible sous l'aide ; **contrôle négatif `c31a0c7`** (fil et détail) : div nu, texte libre et fond différé
+  masqués (parent à plat et post cité), différés jamais chargés ; mutants (masquage d'enveloppe, groupe cité masqué,
+  boutons cités ou secondaires non masqués, exclusion média 0.7.14, pastille translucide) détectés.
+- **Limites** : le groupe ancêtre mixte est une hypothèse de pire cas, non attestée sur le vrai DOM de X ; un contrôle
+  secondaire que X ne marque pas (Partager, Grok…) reste visible ; si X renomme ses `data-testid`, Répondre /
+  Republier réapparaissent (jamais l'inverse). Portrait très haut : ▶ peut rester hors écran (aucun redimensionnement, par choix). Vrai X sur la Pi :
   **gate terrain**.
 
 **Gate terrain (0.7.15)** : sur la TV, le post d'Alex qui montrait un cadre vide (fil ET détail) affiche son aperçu ;

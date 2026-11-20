@@ -406,12 +406,13 @@ terrain de `scripts/pi4/README.md` (critères séparés : configuré / UI visibl
   restylé), → focus NATIF sur les vrais J'aime/Enregistrer du post choisi (jamais un post cité), OK = activation par
   Chromium (jamais `click()`/événement forgé/API), OK tenu et bouton d'un post recyclé bloqués, ← sort sans partager.
   Tests `test_x_feed.py` + `e2e_x_feed.js` (témoin 0.7.13, vidéos H.264/VP9 locales, mutants). Vrai X = gate terrain.
-  **0.7.15** : aperçus jamais masqués — `x.js` marque `data-otvx-bar` sur le `[role=group]` le plus interne du post
-  (`row` si positivement identifiée, sinon `mixed` = groupe mixte/douteux, AUCUNE règle, rendu natif) ; `x.css` ne
-  masque plus rien d'un `[role=group]` deviné (poster, carte, image/lecteur différés intacts) ; D-pad = vrais
+  **0.7.15** : aperçus jamais masqués — `x.css` masque seulement des contrôles identifiés un par un (Répondre,
+  Republier, statistiques ; boutons d'un post cité), jamais un conteneur, un groupe mixte ni un post cité entier ; plus
+  aucun jugement de rangée par `x.js` (`c31a0c7`, refusé en revue, masquait div nu / texte libre / fond différé) ;
+  Partager (sans marqueur) reste natif ; D-pad = vrais
   J'aime/Enregistrer de CE post même en groupe mixte ; aide en bande opaque pleine largeur (aucun texte à côté/au
   travers, aucun défilement ajouté). Tests `test_x_media.py` + `e2e_x_media.js` (fil + détail, pixel de capture,
-  chargement réel, témoin sans extension, négatif 0.7.14, mutants). Vrai X = gate terrain.
+  chargement réel, témoin sans extension, négatifs 0.7.14 et c31a0c7, mutants). Vrai X = gate terrain.
 - **X TV — « Saisir avec le téléphone » (0.7.10, `OPENTV_X_PHONE_ENTRY`, défaut 0)** : sans clavier physique, UN
   identifiant X (nom d'utilisateur/courriel/téléphone) saisi sur le téléphone DÉJÀ appairé remplit le champ de connexion
   éligible au focus ; Alex continue avec la passkey native. Jamais mot de passe, code, NIP, passkey, paiement ; aucun

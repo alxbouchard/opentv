@@ -253,7 +253,8 @@ const LOGIN = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title
                    retweet: vis(btn("p1-retweet")), share: vis(btn("p1-share")),
                    views: vis(document.querySelector('#bar-p1 a[aria-label="40 vues"]')),
                    unlike_p2: vis(btn("p2-unlike")), remove_p2: vis(btn("p2-removeBookmark")),
-                   quote_like: vis(btn("q4-like")), quote_bar: vis(document.getElementById("bar-q4")) },
+                   quote_like: vis(btn("q4-like")), quote_reply: vis(btn("q4-reply")), quote_bookmark: vis(btn("q4-bookmark")),
+                   quote_bar: vis(document.getElementById("bar-q4")) },
         help: help ? { rect: R(help), text: help.textContent } : null,
         lanes: document.querySelectorAll("[data-otvx-lane]").length,
         sidebar: getComputedStyle(document.querySelector('[data-testid="sidebarColumn"]')).display
