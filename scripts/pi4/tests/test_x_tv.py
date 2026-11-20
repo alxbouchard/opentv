@@ -597,8 +597,9 @@ class TestXExtensionStatic(unittest.TestCase):
         self.assertNotIn('type: "home"', x)
         # Retour/Accueil reste indépendant du fil. 0.7.16 : colonne + article rendu pour le mode fil ;
         # la récupération /home vide vérifie aussi la colonne, jamais Retour/Accueil.
-        self.assertEqual(nav.count("COLUMN_SEL"), 3)
-        self.assertIn('return feedReady() ? "feed" : "controls";', nav)
+        self.assertEqual(nav.count("COLUMN_SEL"), 4)
+        self.assertIn('if (feedReady()) { return "feed"; }', nav)
+        self.assertIn('return document.querySelector(COLUMN_SEL) ? "recovery" : "controls";', nav)
         self.assertIn('if (modalDialog()) { return "dialog"; }', nav)     # fenêtre modale visible : gagne sur le fil
         for fn in ("function back()", "function goHome()", "function keyAction(", "function direct()"):
             body = nav[nav.index(fn):nav.index("\n  }\n", nav.index(fn))]
@@ -621,10 +622,12 @@ class TestXExtensionStatic(unittest.TestCase):
         self.assertIn("!e.isTrusted", late)
         self.assertIn("e.defaultPrevented", late)                          # X a traité l'Entrée : jamais de repli
         self.assertIn("document.activeElement !== p.el", late)
+        self.assertIn("pageMode() !== p.mode", late)                       # no fallback across a mode transition
         lk = nav[nav.index("function loginKey(e)"):nav.index("function refresh()")]
         self.assertIn("NATIVE_RE.test(ae.tagName)) { return false; }", lk)   # bouton/lien natif : activation native
         self.assertIn("editable(ae)", lk)                                  # champ : Entrée native
         self.assertIn("!e.repeat", lk)
+        self.assertIn('mode !== "recovery" && okKey(e)', lk)               # blank feed: native OK ONLY
         self.assertIn('window.addEventListener("keydown", onKeyLate, false);', nav)
         self.assertIn("function preferRank(text, href)", nav)              # priorité : test_login_entry_*
         self.assertIn("if (editable(el)) { return \"\"; }", nav)         # libellé : jamais celui d'un champ

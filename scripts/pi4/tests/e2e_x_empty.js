@@ -55,7 +55,56 @@ window.dialogue=()=>{document.body.insertAdjacentHTML('beforeend','<div role="di
    assert.equal(await page.evaluate(()=>document.querySelector('.otvx-login-help').textContent.includes('Recharger')),false,'hidden recovery must not be advertised');
    await page.evaluate(()=>document.getElementById('full-error').remove());await settle();
   }
-  await page.evaluate(()=>window.fail());await settle();
+  if(cfg.expect){
+   // Recovery is focus-only: ARIA roles do not acquire a synthetic click fallback.
+   out.cases.roleOk=[];
+   for(const variant of ['plain','site-handler','modal-during-key','post-during-key']){
+    await open();
+    await page.evaluate(({variant,post})=>{
+     const b=document.createElement('div');b.id='role-retry';b.role='button';b.tabIndex=0;b.textContent='Retry';
+     document.getElementById('pending').replaceChildren(b);
+     b.addEventListener('click',e=>window.acts.push({kind:'click',trusted:e.isTrusted}));
+     b.addEventListener('keydown',e=>{
+      if(e.key!=='Enter')return;
+      window.acts.push({kind:'key',trusted:e.isTrusted});
+      if(variant==='site-handler'){window.acts.push({kind:'site-action',trusted:e.isTrusted});}
+      if(variant==='modal-during-key'){window.dialogue();}
+      if(variant==='post-during-key'){document.getElementById('result').innerHTML=post;}
+     });
+    },{variant,post});await settle();
+    await page.keyboard.press('ArrowDown');await page.keyboard.press('ArrowDown');
+    assert.equal(await page.evaluate(()=>document.activeElement.id),'role-retry');
+    await page.keyboard.press('Enter');await settle();
+    const acts=await page.evaluate(()=>window.acts);out.cases.roleOk.push({variant,acts});
+    assert.deepEqual(acts,variant==='site-handler'?[{kind:'key',trusted:true},{kind:'site-action',trusted:true}]:
+     [{kind:'key',trusted:true}],variant+': one native Enter, no synthetic click');
+    if(variant==='post-during-key')assert.equal((await snap()).recovery,false);
+    if(variant==='modal-during-key'){
+     assert.equal((await snap()).recovery,false);await page.keyboard.press('ArrowDown');
+     assert.equal(await page.evaluate(()=>document.activeElement.id),'dismiss');
+    }
+   }
+   // Login/modal capture must not leave a pending synthetic activation when the same key reveals a blank feed.
+   await open();await page.evaluate(()=>{
+    window.dialogue();const dlg=document.getElementById('dlg');
+    dlg.innerHTML='<div role="button" tabindex="0" id="modal-role">Retry</div>';
+    const b=document.getElementById('modal-role');
+    b.onclick=e=>window.acts.push({kind:'click',trusted:e.isTrusted});
+    b.onkeydown=e=>{if(e.key==='Enter'){window.acts.push({kind:'key',trusted:e.isTrusted});dlg.removeAttribute('aria-modal')}};
+   });await settle();await page.keyboard.press('ArrowDown');await page.keyboard.press('Enter');await settle();
+   out.cases.modalToRecovery=await page.evaluate(()=>window.acts);
+   assert.deepEqual(out.cases.modalToRecovery,[{kind:'key',trusted:true}],'no pending login click after mode transition');
+   // The advertised upward gesture must still reach Reload beyond both control-list caps.
+   await open();await page.evaluate(()=>{
+    const col=document.querySelector('[data-testid=primaryColumn]');
+    for(let i=0;i<405;i++){const b=document.createElement('button');b.textContent='X control '+i;b.style.cssText='position:absolute;left:20px;top:100px';col.appendChild(b)}
+   });await settle();
+   assert(await page.locator('.otvx-login-help').textContent().then(t=>t.includes('Recharger X')));
+   await page.keyboard.press('ArrowUp');
+   out.cases.cappedRecoveryFocus=await page.evaluate(()=>document.activeElement.textContent);
+   assert.equal(out.cases.cappedRecoveryFocus,'Recharger X','advertised Reload remains reachable after capped native controls');
+  }
+  await open();await page.evaluate(()=>window.fail());await settle();
   const focuses=[];for(let i=0;i<4;i++){await page.keyboard.press('ArrowDown');focuses.push(await page.evaluate(()=>document.activeElement.id));if(focuses.at(-1)==='retry')break;}
   out.cases.retry={focuses,before:await snap()};
   if(focuses.includes('retry')){await page.keyboard.press('Enter');await page.waitForSelector('article');out.cases.retry.acts=await page.evaluate(()=>window.acts);}

@@ -24,14 +24,20 @@ sur des racines CDN n'établissent ni l'un ni l'autre.
 
 ## Changement
 
-- Mode contrôles jusqu'à un tweet **rendu** (pas seulement un article placeholder). Retry/onglets natifs
-  atteignables aux flèches ; Entrée native sur un bouton natif.
+- Mode **récupération**, séparé de la connexion, tant que la colonne n'a pas de tweet **rendu**
+  (pas seulement un article placeholder). Retry/onglets natifs atteignables aux flèches ; OK laissé à
+  Chromium ou au gestionnaire clavier du site. Un simple rôle ARIA sans gestionnaire reste inactif :
+  aucun repli `.click()`, même si un article ou une modale apparaît pendant la touche. Le repli historique
+  de connexion ne peut pas traverser un changement de mode ; aucune préférence de connexion automatique
+  ni réarmement dans le fil vide. La sonde conserve son schéma existant (`controls`).
 - Sur `/home` avec colonne mais sans post rendu ni modale : message honnête **« Aucune publication
   affichée pour l'instant. Le chargement peut encore aboutir. »**, bouton natif **Recharger X**.
   Aucun diagnostic par timeout, recharge automatique, clic simulé, touche forgée, API X, faux fil ou action de compte.
 - Depuis la page sans contrôle focalisé : **↑ puis OK** sélectionne/active Recharger X ; sinon ↑/↓ pour
   l'atteindre. Activation humaine fiable, répétition refusée ; état et focus relus au clic. Article/modale
   apparu entre-temps ⇒ pas de recharge. Profil conservé, aucune promesse de réparer la source distante.
+  Le dernier emplacement de focus est réservé au bouton, même si les contrôles X atteignent le plafond
+  de parcours ; aucune consigne Recharger lorsque le panneau est caché faute d'espace.
 - Panneau mesuré contre contrôles, progression, erreurs et états natifs : espace libre vertical ou rien
   si aucun emplacement n'est disponible. Pas de focus automatique ni de défilement à l'insertion.
   Dialogues/connexion séparés et prioritaires.
@@ -65,6 +71,11 @@ libre ; retrait virtualisé ; article masqué/révélé sur place ; insertion di
 connexion générique ; réouverture depuis la destination `/tv` de Retour ; rejet du clic/touche synthétique
 avec bouton déjà focalisé ; recharge humaine unique qui peut toujours échouer honnêtement ; succès tardif
 puis navigation des posts. **Retour physique Samsung n'est pas testé par la modélisation de sa destination.**
+
+Revue de la première candidate : RED sur `fffd9a3` (div rôle button : Entrée réelle puis clic synthétique),
+puis GREEN en mode récupération distinct : rôle sans activation, rôle avec gestionnaire clavier du site
+(une seule Entrée), arrivée d'une modale/post pendant la touche, disparition de modale vers fil vide
+(aucun clic en attente), Retry natif, Recharger et plafond de 405 contrôles.
 
 RED observé sur production : Retry inaccessible. RED supplémentaires : panneau couvrant Retry, récupération
 périmée après révélation sur place, bouton masqué encore annoncé. GREEN à lire dans les journaux du run réel,

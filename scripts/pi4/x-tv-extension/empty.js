@@ -56,6 +56,9 @@
       place();
     }
     return Object.freeze({ empty: empty, refresh: refresh, button: (el) => !!button && el === button,
+      // Reserve the last focus slot: ↑ from the page must match the hint, even after 400+ site controls.
+      augment: (list, max) => button && empty() && nav.visible(button) ?
+        list.filter((el) => el !== button).slice(0, max - 1).concat(button) : list,
       hint: () => panel && !panel.hidden ?
         "↑ ↓ choisir (↑ depuis la page : Recharger X) · OK valider · Retour : OpenTV" :
         "↑ ↓ contrôles de X · OK valider · Retour : OpenTV" });

@@ -40,11 +40,16 @@ function baseContext(clock) {
   const times = [];
   const listeners = {};
   const body = el("BODY");
+  // Telemetry fixtures model a rendered feed, not merely the primary-column shell.
+  const column = el("DIV");
+  const tweet = el("ARTICLE");
+  tweet.getBoundingClientRect = () => ({ width: 600, height: 200 });
+  column.querySelectorAll = (sel) => sel === 'article[data-testid="tweet"]' ? [tweet] : [];
   const doc = {
     readyState: "complete", body, documentElement: el("HTML"), activeElement: body, visibilityState: "visible",
     focused: true, metas: {},
     hasFocus() { return this.focused; },
-    querySelector(sel) { return sel.indexOf("primaryColumn") >= 0 ? el("DIV") : (this.metas[sel] || null); },
+    querySelector(sel) { return sel.indexOf("primaryColumn") >= 0 ? column : (this.metas[sel] || null); },
     querySelectorAll() { return []; },
     addEventListener() {},
     createElement: (t) => el(t.toUpperCase())

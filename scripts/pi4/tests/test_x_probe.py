@@ -711,7 +711,7 @@ class TestExtensionProbeSource(unittest.TestCase):
         self.assertNotIn("url(", css)
         for rule in re.findall(r"([^{}]+)\{", css):
             for sel in rule.split(","):
-                self.assertTrue("[data-otvx-focus]" in sel or ".otvx-login-help" in sel, sel)
+                self.assertTrue("[data-otvx-focus]" in sel or ".otvx-login-help" in sel or ".otvx-empty" in sel, sel)
         self.assertIn("outline: 6px solid #ffd400 !important", css)
         self.assertIn("position: fixed !important", css)
         # repli CSSOM (jamais bloqué par la CSP) seulement si la feuille manque ; valeurs d'origine rétablies
@@ -725,9 +725,9 @@ class TestExtensionProbeSource(unittest.TestCase):
         ok = self.x[self.x.index("function onKey(e)"):self.x.index("function refresh()")]
         # 0.7.14 : la fenêtre modale passe AVANT toute action du fil (post, mode actions, partage, ouverture)
         for act in ('move(a === "up" ? -1 : 1)', "enterActions()", "cycleAction()", "shareFocused()", "open()"):
-            self.assertLess(ok.index("if (!feed || dialogOpen()) { return; }"), ok.index(act), act)
+            self.assertLess(ok.index("if (!feed || dialogOpen() || (NAV && !NAV.feedReady())) { return; }"), ok.index(act), act)
         self.assertLess(ok.index("if (!e.isTrusted) { return; }"), ok.index("dialogOpen()"))
-        self.assertIn("ensureHelp(on && !dialogOpen());", self.x)
+        self.assertIn("ensureHelp(on && !dialogOpen() && (!NAV || NAV.feedReady()));", self.x)
         self.assertIn('Object.defineProperty(window, "__otvxNav"', self.nav)
         self.assertIn("writable: false, configurable: false", self.nav)
 

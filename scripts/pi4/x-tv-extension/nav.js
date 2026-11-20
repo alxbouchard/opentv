@@ -28,8 +28,8 @@
  *           fois (15 s monotones, minuterie explicite, annulé par toute touche/geste réel). Inscription au focus posée
  *           par X : focus vers l'entrée préférée, sinon retiré (blur) ; jamais un clic.
  *           OK/Entrée RÉELLE : activation native du bouton/lien au focus (geste humain) ; repli pour un rôle
- *           « button » non natif seulement. Champ au focus :
- *           saisie au clavier physique 100 % native (← → Entrée Retour arrière natifs) ; aucune valeur n'est lue,
+ *           non natif en CONNEXION seulement, jamais dans une colonne vide (gestionnaire clavier du site seul).
+ *           Champ au focus : saisie au clavier physique 100 % native (← → Entrée Retour arrière natifs) ; aucune valeur n'est lue,
  *           copiée ni transmise ; ↑ ↓ quittent un champ d'une ligne. Aucun clic automatique, aucun relais d'identifiants.
  *  Fenêtre modale VISIBLE de X (0.7.8) : elle gagne TOUJOURS, même au-dessus du fil (colonne principale présente) —
  *           mode « contrôles » limité à la fenêtre ; x.js ne déplace jamais le fil caché derrière.
@@ -215,11 +215,12 @@
     for (let i = dialogs.length - 1; i >= 0; i--) { if (visible(dialogs[i])) { return dialogs[i]; } }
     return null;
   }
-  // « dialog » (fenêtre modale visible) > « feed » (colonne + article rendu) > « controls »
+  // « dialog » > « feed » (article rendu) > « recovery » (colonne vide) ; sinon « controls » (connexion).
   function pageMode() {
     if (!document.body) { return "loading"; }
     if (modalDialog()) { return "dialog"; }
-    return feedReady() ? "feed" : "controls";
+    if (feedReady()) { return "feed"; }
+    return document.querySelector(COLUMN_SEL) ? "recovery" : "controls";
   }
   // 0.7.16 : une colonne vide/spinner n'est pas un fil navigable. Les contrôles natifs (Retry, onglets)
   // restent atteignables. Pas de diagnostic réseau déduit du DOM ; aucun délai ni rechargement automatique.
@@ -259,13 +260,15 @@
     const dropped = [];
     for (const el of all) {
       if (out.length >= CONTROLS_MAX) { break; }
+      if (EMPTY && EMPTY.button(el)) { continue; }   // appended independently of the site's traversal cap
       if (!usable(el)) { continue; }
       if (out.some((o) => o.contains(el)) || dropped.some((o) => o.contains(el))) { continue; }   // le plus externe
       if (signupLike(label(el), hrefOf(el))) { dropped.push(el); continue; }   // inscription : jamais atteinte par ↑ ↓
       out.push(el);
     }
     const h = entryHook();
-    return h ? h.augment(out) : out;   // pastille « Saisir avec le téléphone » juste après son champ (xentry.js)
+    const list = h ? h.augment(out) : out;   // pastille « Saisir avec le téléphone » juste après son champ (xentry.js)
+    return EMPTY ? EMPTY.augment(list, CONTROLS_MAX) : list;
   }
   // saisie de l'identifiant par téléphone (0.7.10, xentry.js, MÊME monde isolé ; absent si désactivée)
   function entryHook() {
@@ -371,19 +374,21 @@
     const k = typeof e.key === "string" && e.key !== "Unidentified" ? e.key : "";
     return k ? OK_KEYS.has(k) : e.keyCode === 13;
   }
-  // OK sur un contrôle non natif (div role=button de X) : si la page n'a pas traité l'Entrée réelle, UN clic sur CE
+  // CONNEXION seulement, jamais recovery : sur un contrôle non natif, si X n'a pas traité l'Entrée réelle, UN clic sur CE
   // contrôle au focus, dans le même geste humain. Bouton/lien natif : activation native de Chromium, jamais ce repli.
   let pendingOk = null;
   function onKeyLate(e) {
     const p = pendingOk;
     pendingOk = null;
     if (!p || p.ev !== e || e.defaultPrevented || !e.isTrusted) { return; }   // même touche réelle seulement
-    if (document.activeElement !== p.el || !p.el.isConnected) { return; }
+    if (document.activeElement !== p.el || !p.el.isConnected || pageMode() !== p.mode) { return; }
     markHandled(e);
     p.el.click();
   }
   function loginKey(e) {
-    if (e.altKey || e.ctrlKey || e.metaKey || e.isComposing || !loginMode()) { return false; }
+    if (e.altKey || e.ctrlKey || e.metaKey || e.isComposing) { return false; }
+    const mode = pageMode();
+    if (mode !== "recovery" && !loginMode()) { return false; }
     const ae = document.activeElement;
     if (EMPTY && EMPTY.button(ae) && okKey(e) && e.repeat) {
       e.preventDefault(); e.stopImmediatePropagation(); markHandled(e); return true;
@@ -399,10 +404,12 @@
       if (h) { h.navFocus(document.activeElement); }   // focus posé par une flèche RÉELLE (seule voie d'armement)
       return true;
     }
-    if (okKey(e) && !e.repeat) {
+    // A blank timeline is NOT login: only the site's keyboard handler or Chromium may activate.
+    // Snapshot the mode too: a login fallback cannot leak across a synchronous DOM transition.
+    if (mode !== "recovery" && okKey(e) && !e.repeat) {
       if (!ae || editable(ae) || NATIVE_RE.test(ae.tagName)) { return false; }   // natif : Chromium active (humain)
       const role = ae.getAttribute("role") || "";
-      if (/^(button|link|checkbox|radio|switch|tab|menuitem|option)$/.test(role)) { pendingOk = { el: ae, ev: e }; }
+      if (/^(button|link|checkbox|radio|switch|tab|menuitem|option)$/.test(role)) { pendingOk = { el: ae, ev: e, mode: mode }; }
     }
     return false;
   }
@@ -436,15 +443,16 @@
   function refresh() {
     refreshTimer = 0;
     const mode = pageMode();
-    probeMode(mode);
+    probeMode(mode === "recovery" ? "controls" : mode);   // existing telemetry schema, no new probe
     if (EMPTY) { EMPTY.refresh(); }
-    const on = mode === "dialog" || mode === "controls";
+    const on = mode === "dialog" || mode === "controls" || mode === "recovery";
     ensureHelp(on);
     if (!on) {
       if (tvFocus) { dropRing(tvFocus); tvFocus = null; }
       return;
     }
     if (tvFocus && !tvFocus.isConnected) { tvFocus = null; }
+    if (mode === "recovery") { disarm(); return; }   // no login preference/re-arm in a blank timeline
     const ae = document.activeElement;
     const none = !ae || ae === document.body || ae === document.documentElement;
     if (loginArm && performance.now() >= loginArm.until) { disarm(); }
