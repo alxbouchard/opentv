@@ -12,27 +12,13 @@
  *           un champ de saisie (Retour arrière y efface toujours un caractère) ; autre page (post, fil de réponses,
  *           modale routée de X) : page précédente SEULEMENT si une entrée x.com précédente existe réellement
  *           (API Navigation), sinon OpenTV /tv ; filet : si rien ne change en BACK_FAILSAFE_MS, OpenTV /tv.
- *  Connexion / colonne sans article rendu (mode « contrôles ») : ↑ ↓ (et ← → hors champ) parcourent
- *           les contrôles visibles et activables dans l'ordre du document, bornés à la modale si présente.
- *           En connexion : préférence de focus générique/passkey, jamais fournisseur ou inscription ; après un
- *           clic réel sur la connexion générique, un seul réarmement borné (voir onActivate et refresh).
- *           OK/Entrée RÉELLE : activation native du bouton/lien au focus (geste humain) ; repli pour un rôle
- *           non natif en CONNEXION seulement, jamais dans une colonne vide (gestionnaire clavier du site seul).
- *           Champ au focus : saisie au clavier physique 100 % native (← → Entrée Retour arrière natifs) ; aucune valeur n'est lue,
- *           copiée ni transmise ; ↑ ↓ quittent un champ d'une ligne. Aucun clic automatique, aucun relais d'identifiants.
- *  Fenêtre modale VISIBLE de X (0.7.8) : elle gagne TOUJOURS, même au-dessus du fil (colonne principale présente) —
- *           mode « contrôles » limité à la fenêtre ; x.js ne déplace jamais le fil caché derrière.
- *  Champ autofocusé par X (0.7.8) : ↑ ↓ en sortent tant qu'Alex n'y a rien tapé (zone multiligne ou éditable
- *           comprise) ; champ d'une ligne : ↑ ↓ en sortent toujours ; après une saisie réelle, zone multiligne native.
- *  Anneau et consigne : feuille de l'extension nav.css (hors CSP de la page) ; repli CSSOM en ligne (jamais bloqué
- *           par la CSP) seulement si la feuille manquait ; jamais de <style> injecté.
- *  Sonde canari (0.7.8) : au chargement, à chaque changement de mode, à chaque APPUI réel et toutes les BEAT_MS
- *           (page visible ou non : l'état est dans l'instantané), instantané borné (≥ PROBE_MIN_MS entre deux envois ;
- *           AUCUN plafond par document : le battement ne meurt jamais sur une page ouverte longtemps — débit tenu
- *           par l'intervalle puis par background.js et le service) au service de l'extension : mode, document au
- *           focus, page visible, compteurs
- *           d'appuis move/ok/other, répétitions séparées. La saisie dans un champ n'est ni comptée ni envoyée.
- *           Jamais de valeur, texte, URL ni code de touche. pagehide n'envoie que l'instantané déjà en attente.
+ *  Connexion ou colonne sans publication : flèches entre contrôles visibles ; la modale a priorité sur le fil.
+ *  Connexion : focus générique/passkey, jamais fournisseur ou inscription ; réarmement borné après geste réel.
+ *  OK natif sur le contrôle choisi ; repli ARIA en connexion seulement, jamais en récupération.
+ *  Les champs conservent l’édition native. ↑ ↓ quittent un champ simple, ou multiligne avant saisie réelle.
+ *  Anneau et consigne : nav.css avec repli CSSOM. Voir docs/opentv-x-empty-feed.md pour la récupération.
+ *  Sonde : mode, visibilité, focus et compteurs d’appuis hors saisie ; jamais de texte, URL ni code de touche.
+ *  Débit borné par PROBE_MIN_MS, battement BEAT_MS sans plafond par document ; pagehide vide l’envoi en attente.
  * Touches synthétiques (non fiables) : jamais d'action. Aucune lecture de contenu hors libellés des contrôles.
  */
 (() => {
